@@ -76,13 +76,11 @@ public:
     CRITICAL_SECTION trailMutex;
     std::deque<hduVector3Dd> trailPoints;
 
-    // ===== 交互与渲染状态 =====
+    // ===== 交互与渲染状态（UI 后续通过 open-design MCP 实现） =====
     double rotateX = 15.0, rotateY = 10.0;
     float camDistance = 1.0f;
     int lastMouseX = 0, lastMouseY = 0;
     bool isDragging = false;
-    GLuint logoTextureID = 0;
-    bool logoLoaded = false;
 
     // ===== 状态显示字符串 =====
     char connectionStatus[128] = "TCP: not connected";

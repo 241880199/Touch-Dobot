@@ -7,6 +7,7 @@
 #include "../config/Config.h"
 #include <iostream>
 #include <cstring>
+#include <cstdlib>
 #include <string>
 
 // ===== 核心：发送单条坐标指令（热路径，无阻塞） =====
