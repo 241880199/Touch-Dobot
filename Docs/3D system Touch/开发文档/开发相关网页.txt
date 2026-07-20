@@ -1,0 +1,21 @@
+官网主页
+https://www.3dsystems.com/haptics-devices/touch
+
+Openhaptic
+https://www.3dsystems.com/haptics-devices/openhaptics
+
+Haptic Device Guides
+https://support.3dsystems.com/s/article/Haptic-Device-Guides?language=en_US&_gl=1*1idgixd*_gcl_au*Mzk0NDczNjc4LjE3NDg5MTU0NjI.*_ga*MTkwODAzMTA2OC4xNzQ4OTE1NDc5*_ga_9G6ZBH6DZM*czE3NTE5MzU4NTYkbzEzJGcxJHQxNzUxOTM2MTY4JGo2MCRsMCRoODYyMjUxMDAz
+
+搜索栏搜索“OpenHaptics Toolkit”，可以选相关的
+https://support.3dsystems.com/s/article/How-do-I-install-the-OpenHaptics-Toolkit-for-Windows?language=en_US
+https://support.3dsystems.com/s/article/What-is-the-OpenHaptics-toolkit?language=en_US
+
+OpenHaptics for Windows Developer Edition v3.5
+https://support.3dsystems.com/s/article/OpenHaptics-for-Windows-Developer-Edition-v35?language=en_US
+
+Haptics Direct for Unity V1
+https://assetstore.unity.com/packages/tools/integration/haptics-direct-for-unity-v1-197034#description
+
+
+

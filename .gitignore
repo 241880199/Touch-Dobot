@@ -1,0 +1,26 @@
+# Build artifacts
+Codes/Debug/
+Codes/.vs/
+*.exe
+*.ilk
+*.pdb
+*.obj
+*.tlog/
+*.lastbuildstate
+*.suo
+*.vcxproj.user
+Browse.VC.db
+Solution.VC.db
+DocumentLayout.json
+DocumentLayout.backup.json
+fileList.bin
+
+# IPCH
+*.ipch
+
+# Superpowers scratch
+.superpowers/
+
+# OS
+Thumbs.db
+Desktop.ini
