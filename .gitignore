@@ -1,12 +1,16 @@
+# OpenHaptics SDK (separate install)
+OpenHaptics/
+
 # Build artifacts
-Codes/Debug/
-Codes/.vs/
+Codes/Touch_Client/x64/
 *.exe
+*.dll
 *.ilk
 *.pdb
 *.obj
 *.tlog/
 *.lastbuildstate
+*.recipe
 *.suo
 *.vcxproj.user
 Browse.VC.db
@@ -17,6 +21,9 @@ fileList.bin
 
 # IPCH
 *.ipch
+
+# MATLAB temp
+Relay_Station/logs/
 
 # Superpowers scratch
 .superpowers/

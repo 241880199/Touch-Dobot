@@ -1,0 +1,106 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+
+  <PropertyGroup Label="Globals">
+    <VCProjectVersion>17.0</VCProjectVersion>
+    <Keyword>Win32Proj</Keyword>
+    <ProjectGuid>{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}</ProjectGuid>
+    <RootNamespace>Touch_Client</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset>
+    <CharacterSet>MultiByte</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset>
+    <CharacterSet>MultiByte</CharacterSet>
+  </PropertyGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+
+  <PropertyGroup>
+    <!-- OpenHaptics SDK 路径（绝对路径） -->
+    <OH_SDK>D:\Projects\Touch\OpenHaptics\Developer\3.5.0</OH_SDK>
+  </PropertyGroup>
+
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <WarningLevel>Level3</WarningLevel>
+      <AdditionalIncludeDirectories>
+        $(OH_SDK)\include;
+        $(OH_SDK)\utilities\include;
+        %(AdditionalIncludeDirectories)
+      </AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>WIN32;WIN32_LEAN_AND_MEAN;_CRT_SECURE_NO_WARNINGS;_WINSOCK_DEPRECATED_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <AdditionalLibraryDirectories>
+        $(OH_SDK)\lib\x64\$(Configuration);
+        $(OH_SDK)\utilities\lib\x64\$(Configuration);
+        %(AdditionalLibraryDirectories)
+      </AdditionalLibraryDirectories>
+      <AdditionalDependencies>hd.lib;hdu.lib;ws2_32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+
+  <!-- Debug 覆盖 -->
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <Link>
+      <AdditionalDependencies>hd.lib;hdu.lib;ws2_32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+
+  <ItemGroup>
+    <!-- config -->
+    <ClInclude Include="config\Config.h" />
+    <!-- utils -->
+    <ClInclude Include="utils\MathUtils.h" />
+    <!-- core -->
+    <ClInclude Include="core\AppState.h" />
+    <ClCompile Include="core\AppState.cpp" />
+    <ClInclude Include="core\CoordinateTransform.h" />
+    <ClInclude Include="core\SenderQueue.h" />
+    <ClCompile Include="core\SenderQueue.cpp" />
+    <!-- network -->
+    <ClInclude Include="network\PongHandler.h" />
+    <ClCompile Include="network\PongHandler.cpp" />
+    <ClInclude Include="network\RelayProtocol.h" />
+    <ClCompile Include="network\RelayProtocol.cpp" />
+    <ClInclude Include="network\TcpClient.h" />
+    <ClCompile Include="network\TcpClient.cpp" />
+    <!-- robot -->
+    <ClInclude Include="robot\CommandBuilder.h" />
+    <ClInclude Include="robot\RobotController.h" />
+    <ClCompile Include="robot\RobotController.cpp" />
+    <ClInclude Include="robot\SafetyBoundary.h" />
+    <!-- haptic -->
+    <ClInclude Include="haptic\HapticDevice.h" />
+    <ClCompile Include="haptic\HapticDevice.cpp" />
+    <ClInclude Include="haptic\HapticCallback.h" />
+    <ClCompile Include="haptic\HapticCallback.cpp" />
+    <!-- main -->
+    <ClCompile Include="main.cpp" />
+  </ItemGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

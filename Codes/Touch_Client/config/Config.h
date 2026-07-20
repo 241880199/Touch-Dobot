@@ -22,7 +22,7 @@ namespace Config {
     const double SAFE_BOUNDARY_BUFFER_RATIO = 0.2; // 20%边界缓冲区，线速度衰减
 
     // ========== 网络参数 ==========
-    const char* TCP_RELAY_IP = "192.168.101.25";
+    constexpr const char* TCP_RELAY_IP = "127.0.0.1";  // 中继站本机运行
     const int RELAY_PORT = 8888;
     const int ENABLE_PORT = 29999;
     const int MOTION_PORT = 30003;
@@ -51,7 +51,7 @@ namespace Config {
     const int MAX_TRAIL = 300;
 
     // ========== Logo 参数 ==========
-    const char* LOGO_PATH = "pics/NINELAB.png";
+    constexpr const char* LOGO_PATH = "pics/NINELAB.png";
     const int LOGO_WIDTH = 150, LOGO_HEIGHT = 75;
 
     // ========== 颜色定义 ==========
@@ -87,7 +87,7 @@ namespace Config {
     const int TCP_STATUS_BAR_HEIGHT = 30;
 
     // ========== PING/PONG 参数 ==========
-    const char* PING_PREFIX = "PING|";
-    const char* PONG_PREFIX = "PONG|";
-    const char* ROBOT_CLOSED_MSG = "ROBOT_ARM_CLOSED";
+    constexpr const char* PING_PREFIX = "PING|";
+    constexpr const char* PONG_PREFIX = "PONG|";
+    constexpr const char* ROBOT_CLOSED_MSG = "ROBOT_ARM_CLOSED";
 }
