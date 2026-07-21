@@ -59,14 +59,14 @@
         $(OH_SDK)\utilities\lib\x64\$(Configuration);
         %(AdditionalLibraryDirectories)
       </AdditionalLibraryDirectories>
-      <AdditionalDependencies>hd.lib;hdu.lib;ws2_32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>hd.lib;hdu.lib;glut32.lib;OpenGL32.lib;glu32.lib;ws2_32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
 
   <!-- Debug 覆盖 -->
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <Link>
-      <AdditionalDependencies>hd.lib;hdu.lib;ws2_32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>hd.lib;hdu.lib;glut32.lib;OpenGL32.lib;glu32.lib;ws2_32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
 

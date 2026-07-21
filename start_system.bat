@@ -49,6 +49,7 @@ echo.
 
 copy /Y "%OH_SDK%\lib\x64\Release\hd.dll"  "%OUTDIR%\" >nul
 copy /Y "%OH_SDK%\utilities\lib\x64\Release\hdu.dll" "%OUTDIR%\" >nul
+copy /Y "%OH_SDK%\utilities\lib\x64\Release\glut32.dll" "%OUTDIR%\" >nul
 
 echo   Starting Touch_Client...
 echo   (Press Touch button 1 to control robot, type 'q' to quit)

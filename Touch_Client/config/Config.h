@@ -22,8 +22,7 @@ namespace Config {
     const double SAFE_BOUNDARY_BUFFER_RATIO = 0.2; // 20%边界缓冲区，线速度衰减
 
     // ========== 网络参数 ==========
-    constexpr const char* TCP_RELAY_IP = "127.0.0.1";  // 中继站本机运行
-    const int RELAY_PORT = 8888;
+    const char* ROBOT_IP = "192.168.101.11";
     const int ENABLE_PORT = 29999;
     const int MOTION_PORT = 30003;
     const int RECV_BUFFER_SIZE = 1024 * 64; // 64KB
@@ -38,6 +37,7 @@ namespace Config {
     const int TCP_SEND_INTERVAL = 10;        // 发送间隔 (ms)
     const int FEEDBACK_TIMEOUT = 2000;       // 反馈读取超时 (ms)
     const int ALARM_CHECK_INTERVAL = 300;    // 报警巡检间隔 (ms)
+    const int POSE_QUERY_INTERVAL = 100;    // 位姿查询间隔 (ms)，驱动 3D 模型更新
     const int IDLE_SLEEP_MS = 1;             // 发送线程空闲休眠 (ms)
 
     // ========== 3D 投影参数 ==========
@@ -85,9 +85,4 @@ namespace Config {
 
     // ========== 状态栏参数 ==========
     const int TCP_STATUS_BAR_HEIGHT = 30;
-
-    // ========== PING/PONG 参数 ==========
-    constexpr const char* PING_PREFIX = "PING|";
-    constexpr const char* PONG_PREFIX = "PONG|";
-    constexpr const char* ROBOT_CLOSED_MSG = "ROBOT_ARM_CLOSED";
 }
