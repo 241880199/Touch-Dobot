@@ -1,8 +1,8 @@
+#include <GL/glut.h>
 #include "SceneRenderer.h"
 #include "../core/AppState.h"
 #include "../config/Config.h"
 #include "../relay/CoordinateTransform.h"
-#include <GL/glut.h>
 
 namespace SceneRenderer {
 
