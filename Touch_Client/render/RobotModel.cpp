@@ -50,7 +50,15 @@ void RobotModel::drawFallbackBase() {
 void RobotModel::draw(const AppState::RobotPose& joints) {
     if (!m_loaded && !m_useFallback) return;
 
-    glColor3f(0.25f, 0.28f, 0.32f); // dark grey metallic
+    // 金属材质
+    GLfloat amb[]  = { 0.15f, 0.17f, 0.20f, 1.0f };
+    GLfloat diff[] = { 0.25f, 0.28f, 0.32f, 1.0f };
+    GLfloat spec[] = { 0.50f, 0.50f, 0.55f, 1.0f };
+    glMaterialfv(GL_FRONT, GL_AMBIENT, amb);
+    glMaterialfv(GL_FRONT, GL_DIFFUSE, diff);
+    glMaterialfv(GL_FRONT, GL_SPECULAR, spec);
+    glMaterialf(GL_FRONT, GL_SHININESS, 40.0f);
+    glColor3f(0.25f, 0.28f, 0.32f);
 
     glPushMatrix();
 

@@ -17,8 +17,20 @@ void init() {
     }
 }
 
+static void setMaterial(float r, float g, float b, float shininess = 30.0f) {
+    GLfloat amb[] = { r * 0.3f, g * 0.3f, b * 0.3f, 1.0f };
+    GLfloat diff[] = { r, g, b, 1.0f };
+    GLfloat spec[] = { 0.4f, 0.4f, 0.4f, 1.0f };
+    glMaterialfv(GL_FRONT, GL_AMBIENT, amb);
+    glMaterialfv(GL_FRONT, GL_DIFFUSE, diff);
+    glMaterialfv(GL_FRONT, GL_SPECULAR, spec);
+    glMaterialf(GL_FRONT, GL_SHININESS, shininess);
+    glColor3f(r, g, b);
+}
+
 void drawFloor() {
-    glColor4f(0.22f, 0.25f, 0.30f, 0.40f);
+    glDisable(GL_LIGHTING); // 网格不受光照影响
+    glColor4f(0.22f, 0.25f, 0.30f, 0.35f);
     glLineWidth(1.0f);
 
     float size = 300.0f;
@@ -157,6 +169,7 @@ void drawTouchPen(const Vec3& pos) {
 
 void draw3D() {
     drawFloor();
+    glEnable(GL_LIGHTING); // 后续元素使用光照
     drawBoundary();
     drawAxes();
 
