@@ -21,6 +21,8 @@ AppState::AppState() {
     // 大数组用 ZeroMemory 避免 in-class initializer 与 MSVC 的兼容问题
     ZeroMemory(commandLog, sizeof(commandLog));
     ZeroMemory(feedbackLog, sizeof(feedbackLog));
+    ZeroMemory(forceRaw, sizeof(forceRaw));
+    ZeroMemory(forceFiltered, sizeof(forceFiltered));
 }
 
 AppState::~AppState() {

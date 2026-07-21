@@ -98,8 +98,8 @@ public:
     CRITICAL_SECTION feedbackLogMutex;
 
     // ===== 力数据 (预留) =====
-    double forceRaw[3] = { 0, 0, 0 };
-    double forceFiltered[3] = { 0, 0, 0 };
+    double forceRaw[3];
+    double forceFiltered[3];
     CRITICAL_SECTION forceMutex;
 };
 
