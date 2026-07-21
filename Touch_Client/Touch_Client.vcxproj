@@ -73,6 +73,7 @@
   <ItemGroup>
     <!-- config -->
     <ClInclude Include="config\Config.h" />
+    <ClInclude Include="config\glut_fix.h" />
     <!-- core -->
     <ClInclude Include="core\AppState.h" />
     <ClCompile Include="core\AppState.cpp" />
