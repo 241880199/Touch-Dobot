@@ -1,0 +1,184 @@
+#include "RelayCore.h"
+#include "ProtocolAdapter.h"
+#include "FeedbackParser.h"
+#include "SafetyBoundary.h"
+#include "../robot/RobotConnection.h"
+#include "../core/AppState.h"
+#include "../config/Config.h"
+#include <iostream>
+#include <windows.h>
+
+RelayCore& RelayCore::instance() {
+    static RelayCore inst;
+    return inst;
+}
+
+bool RelayCore::init() {
+    if (!robotConnect(Config::ROBOT_IP)) {
+        std::cerr << "[Relay] 连接机械臂失败" << std::endl;
+        return false;
+    }
+
+    // 初始化序列：ClearError → EnableRobot → CP → GetPose
+    Sleep(200);
+    robotSendEnable(ProtocolAdapter::buildClearError().c_str());
+    Sleep(300);
+
+    if (!robotSendEnable(ProtocolAdapter::buildEnableRobot().c_str())) {
+        std::cerr << "[Relay] 使能失败" << std::endl;
+        return false;
+    }
+    std::cout << "[Relay] 机械臂使能成功" << std::endl;
+    Sleep(200);
+
+    robotSendEnable(ProtocolAdapter::buildCP(Config::CP_SMOOTH_RATIO).c_str());
+    Sleep(100);
+
+    // 获取基准位姿
+    robotSendEnable(ProtocolAdapter::buildGetPose().c_str());
+    Sleep(200);
+    char fb[1024];
+    if (robotRecvEnable(fb, sizeof(fb))) {
+        AppState::RobotPose pose;
+        if (FeedbackParser::parsePose(fb, pose)) {
+            auto& app = appState;
+            EnterCriticalSection(&app.robotPoseMutex);
+            app.robotBase.x = pose.x;
+            app.robotBase.y = pose.y;
+            app.robotBase.z = pose.z;
+            app.robotBaseRx = pose.rx;
+            app.robotBaseRy = pose.ry;
+            app.robotBaseRz = pose.rz;
+            app.robotActualPose = pose;
+            app.robotTargetPose = pose;
+            app.isRobotBaseSet = true;
+            LeaveCriticalSection(&app.robotPoseMutex);
+            std::cout << "[Relay] 基准位姿: (" << pose.x << "," << pose.y << "," << pose.z << ")" << std::endl;
+        }
+    }
+
+    return true;
+}
+
+void RelayCore::shutdown() {
+    robotSendEnable(ProtocolAdapter::buildDisableRobot().c_str());
+    Sleep(100);
+    robotDisconnect();
+}
+
+void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
+    if (!m_transmitting || !m_basePointSet || !isRobotConnected()) return;
+
+    // 坐标转换
+    Vec3 current = convertTouchToRobot(devicePos);
+    Vec3 delta = computeDelta(current, m_basePoint);
+
+    // 跳过微小移动
+    if (delta.length() < Config::MIN_DELTA_THRESHOLD) return;
+
+    auto& app = appState;
+    Vec3 base(app.robotBase.x, app.robotBase.y, app.robotBase.z);
+    Vec3 target = computeTarget(base, delta);
+
+    // 安全边界
+    target = SafetyBoundary::clampToBoundary(target);
+
+    // 构造指令
+    std::string cmd = ProtocolAdapter::buildServoP(
+        target, app.robotBaseRx, app.robotBaseRy, app.robotBaseRz);
+
+    // 给扩展插件修改指令的机会
+    RobotCommand robotCmd;
+    robotCmd.cmd = cmd;
+    robotCmd.targetPort = Config::MOTION_PORT;
+    for (auto* ext : m_extensions) {
+        ext->onBeforeSend(robotCmd);
+    }
+
+    // 发送
+    robotSendMotion(robotCmd.cmd.c_str());
+
+    // 记录
+    EnterCriticalSection(&app.lastCommandMutex);
+    strncpy_s(app.lastCommandSent, robotCmd.cmd.c_str(), sizeof(app.lastCommandSent) - 1);
+    LeaveCriticalSection(&app.lastCommandMutex);
+
+    // 更新目标位姿
+    EnterCriticalSection(&app.robotPoseMutex);
+    app.robotTargetPose.x = target.x;
+    app.robotTargetPose.y = target.y;
+    app.robotTargetPose.z = target.z;
+    LeaveCriticalSection(&app.robotPoseMutex);
+}
+
+void RelayCore::onButtonPress(const Vec3& robotPos) {
+    m_basePoint = robotPos;
+    m_basePointSet = true;
+    m_transmitting = true;
+}
+
+void RelayCore::onButtonRelease() {
+    m_transmitting = false;
+    m_basePointSet = false;
+}
+
+void RelayCore::pollFeedback() {
+    char buf[1024];
+    // 读取运动端口反馈
+    while (robotRecvMotion(buf, sizeof(buf))) {
+        RobotFeedback fb;
+        strncpy_s(fb.raw, buf, sizeof(fb.raw) - 1);
+        fb.fromPort = Config::MOTION_PORT;
+        fb.errorId = (buf[0] == '0') ? 0 : -1;
+        FeedbackParser::extractData(buf, fb.data, sizeof(fb.data));
+
+        for (auto* ext : m_extensions) {
+            ext->onAfterFeedback(fb);
+        }
+    }
+
+    // 读取使能端口反馈
+    while (robotRecvEnable(buf, sizeof(buf))) {
+        RobotFeedback fb;
+        strncpy_s(fb.raw, buf, sizeof(fb.raw) - 1);
+        fb.fromPort = Config::ENABLE_PORT;
+        fb.errorId = (buf[0] == '0') ? 0 : -1;
+
+        for (auto* ext : m_extensions) {
+            ext->onAfterFeedback(fb);
+        }
+    }
+}
+
+void RelayCore::queryPose() {
+    if (!isRobotConnected()) return;
+    robotSendEnable(ProtocolAdapter::buildGetPose().c_str());
+    Sleep(50);
+    char fb[1024];
+    if (robotRecvEnable(fb, sizeof(fb))) {
+        auto& app = appState;
+        EnterCriticalSection(&app.robotPoseMutex);
+        FeedbackParser::parsePose(fb, app.robotActualPose);
+        LeaveCriticalSection(&app.robotPoseMutex);
+    }
+}
+
+void RelayCore::checkAlarm() {
+    if (!isRobotConnected()) return;
+    robotSendEnable(ProtocolAdapter::buildRobotMode().c_str());
+    Sleep(50);
+    char fb[1024];
+    if (robotRecvEnable(fb, sizeof(fb))) {
+        int mode = -1;
+        FeedbackParser::parseMode(fb, mode);
+        auto& app = appState;
+        bool wasAlarm = app.isRobotInAlarm.exchange(mode == 9);
+        if (mode == 9 && !wasAlarm) {
+            std::cout << "[Relay] 检测到机械臂报警 (mode=9)" << std::endl;
+        }
+    }
+}
+
+void RelayCore::registerExtension(IExtension* ext) {
+    m_extensions.push_back(ext);
+}
