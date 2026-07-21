@@ -15,6 +15,7 @@
 
 // ===== 运行模式 =====
 static bool g_noRobot = false;
+static bool g_noTouch = false;
 
 // ===== GLUT 回调 =====
 float g_rotateX = 15.0f, g_rotateY = 10.0f;
@@ -120,8 +121,8 @@ void keyboard(unsigned char key, int, int) {
         std::cout << "\nShutting down..." << std::endl;
         // 注意: 原始 GLUT 3.2 不支持 glutLeaveMainLoop()
         // 在主循环中直接做清理然后 exit
-        RelayCore::instance().shutdown();
-        cleanupHapticDevice();
+        if (!g_noRobot) RelayCore::instance().shutdown();
+        if (!g_noTouch) cleanupHapticDevice();
         exit(0);
     }
 }
@@ -132,16 +133,19 @@ int main(int argc, char* argv[]) {
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--no-robot") == 0) {
             g_noRobot = true;
+        } else if (strcmp(argv[i], "--no-touch") == 0) {
+            g_noTouch = true;
         }
     }
 
     std::cout << "=== Touch-Dobot Digital Twin System v3.0 ===" << std::endl;
     std::cout << "Robot: " << Config::ROBOT_IP << (g_noRobot ? " (DISABLED)" : "") << std::endl;
+    std::cout << "Touch: " << (g_noTouch ? "DISABLED" : "enabled") << std::endl;
     std::cout << "Safety: X[" << Config::SAFE_X_MIN << "," << Config::SAFE_X_MAX
               << "] Y[" << Config::SAFE_Y_MIN << "," << Config::SAFE_Y_MAX
               << "] Z[" << Config::SAFE_Z_MIN << "," << Config::SAFE_Z_MAX << "]" << std::endl;
 
-    // 1. GLUT 初始化
+    // 1. GLUT 初始化 (始终执行)
     glutInit(&argc, argv);
     glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGB | GLUT_DEPTH);
     glutInitWindowSize(Config::WINDOW_W, Config::WINDOW_H);
@@ -159,28 +163,32 @@ int main(int argc, char* argv[]) {
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
-    // 2. 初始化 Touch 设备
-    std::cout << "Initializing Touch device..." << std::endl;
-    if (!initHapticDevice()) {
-        std::cerr << "ERROR: Touch device init failed" << std::endl;
-        std::cerr << "  Check: USB connected? OpenHaptics SDK installed?" << std::endl;
-        return -1;
+    // 2. 初始化 Touch 设备 (--no-touch 时跳过)
+    if (g_noTouch) {
+        std::cout << "Touch device: SKIPPED (--no-touch)" << std::endl;
+    } else {
+        std::cout << "Initializing Touch device..." << std::endl;
+        if (!initHapticDevice()) {
+            std::cerr << "ERROR: Touch device init failed" << std::endl;
+            std::cerr << "  Use --no-touch to start without Touch device." << std::endl;
+            return -1;
+        }
     }
 
     // 3. 连接机械臂 (--no-robot 时跳过)
     if (g_noRobot) {
-        std::cout << "Running in NO-ROBOT mode (3D view + Touch cursor only)" << std::endl;
+        std::cout << "Robot: SKIPPED (--no-robot)" << std::endl;
     } else {
         std::cout << "Initializing robot via Relay..." << std::endl;
         if (!RelayCore::instance().init()) {
             std::cerr << "ERROR: Robot init failed" << std::endl;
             std::cerr << "  Use --no-robot to start without robot connection." << std::endl;
-            cleanupHapticDevice();
+            if (!g_noTouch) cleanupHapticDevice();
             return -1;
         }
     }
 
-    // 4. 初始化 3D 场景 (无论是否有机械臂都要做)
+    // 4. 初始化 3D 场景 (始终执行)
     SceneRenderer::init();
 
     // 5. 启动定时器
@@ -189,10 +197,8 @@ int main(int argc, char* argv[]) {
 
     // 6. 进入主循环
     std::cout << "\nSystem ready." << std::endl;
-    std::cout << "  Mouse drag: rotate view" << std::endl;
-    std::cout << "  Mouse wheel: zoom" << std::endl;
-    std::cout << "  q/ESC: quit" << std::endl;
-    if (!g_noRobot) {
+    std::cout << "  Mouse drag: rotate view | Mouse wheel: zoom | q/ESC: quit" << std::endl;
+    if (!g_noTouch && !g_noRobot) {
         std::cout << "  Touch button 1: control robot" << std::endl;
     }
     std::cout << std::endl;
