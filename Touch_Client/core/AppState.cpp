@@ -17,6 +17,10 @@ AppState::AppState() {
     InitializeCriticalSection(&commandLogMutex);
     InitializeCriticalSection(&feedbackLogMutex);
     InitializeCriticalSection(&forceMutex);
+
+    // 大数组用 ZeroMemory 避免 in-class initializer 与 MSVC 的兼容问题
+    ZeroMemory(commandLog, sizeof(commandLog));
+    ZeroMemory(feedbackLog, sizeof(feedbackLog));
 }
 
 AppState::~AppState() {

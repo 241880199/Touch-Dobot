@@ -86,20 +86,20 @@ public:
 
     // ===== 指令日志 (环形缓冲区) =====
     static const int LOG_SIZE = 50;
-    char commandLog[50][256] = {};
+    char commandLog[50][256];
     int commandLogIdx = 0;
     int commandLogCount = 0;
     CRITICAL_SECTION commandLogMutex;
 
     // ===== 反馈日志 (环形缓冲区) =====
-    char feedbackLog[50][256] = {};
+    char feedbackLog[50][256];
     int feedbackLogIdx = 0;
     int feedbackLogCount = 0;
     CRITICAL_SECTION feedbackLogMutex;
 
     // ===== 力数据 (预留) =====
-    double forceRaw[3] = { 0, 0, 0 };       // 机械臂原始力数据
-    double forceFiltered[3] = { 0, 0, 0 };  // 滤波后力数据
+    double forceRaw[3] = { 0, 0, 0 };
+    double forceFiltered[3] = { 0, 0, 0 };
     CRITICAL_SECTION forceMutex;
 };
 
