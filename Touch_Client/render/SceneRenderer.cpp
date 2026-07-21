@@ -1,4 +1,4 @@
-#include <GL/glut.h>
+#include "../config/glut_fix.h"
 #include "SceneRenderer.h"
 #include "../core/AppState.h"
 #include "../config/Config.h"

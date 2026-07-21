@@ -1,5 +1,5 @@
 #pragma once
-#include <GL/glut.h>
+#include "../config/glut_fix.h"
 #include "StlMesh.h"
 #include "../core/AppState.h"
 

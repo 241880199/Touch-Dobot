@@ -3,7 +3,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <iostream>
-#include <GL/glut.h>
+#include "../config/glut_fix.h"
 
 // ===== BBox computation =====
 void StlMesh::computeBBox() {

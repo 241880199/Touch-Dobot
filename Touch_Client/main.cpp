@@ -1,4 +1,4 @@
-#include <GL/glut.h>
+#include "config/glut_fix.h"
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <HD/hd.h>

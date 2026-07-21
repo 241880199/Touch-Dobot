@@ -2,7 +2,7 @@
 #include "../core/AppState.h"
 #include "../config/Config.h"
 #include "../relay/RelayCore.h"
-#include <GL/glut.h>
+#include "../config/glut_fix.h"
 #include <cstdio>
 #include <cstring>
 
