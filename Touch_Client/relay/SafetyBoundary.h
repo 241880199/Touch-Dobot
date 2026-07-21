@@ -1,6 +1,6 @@
 #pragma once
 #include "../config/Config.h"
-#include "../core/CoordinateTransform.h"
+#include "CoordinateTransform.h"
 #include "../core/MathUtils.h"
 #include <algorithm>
 #include <iostream>

@@ -1,9 +1,9 @@
 #include "RobotController.h"
 #include "CommandBuilder.h"
-#include "SafetyBoundary.h"
+#include "../relay/SafetyBoundary.h"
 #include "../network/TcpClient.h"
 #include "../core/AppState.h"
-#include "../core/CoordinateTransform.h"
+#include "../relay/CoordinateTransform.h"
 #include "../config/Config.h"
 #include <iostream>
 #include <cstring>

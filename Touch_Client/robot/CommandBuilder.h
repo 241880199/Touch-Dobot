@@ -1,6 +1,6 @@
 #pragma once
 #include <string>
-#include "../core/CoordinateTransform.h"
+#include "../relay/CoordinateTransform.h"
 
 namespace CommandBuilder {
     inline std::string buildServoP(const Vec3& pos, double rx, double ry, double rz) {

@@ -78,7 +78,7 @@
     <!-- core -->
     <ClInclude Include="core\AppState.h" />
     <ClCompile Include="core\AppState.cpp" />
-    <ClInclude Include="core\CoordinateTransform.h" />
+    <ClInclude Include="relay\CoordinateTransform.h" />
     <ClInclude Include="core\SenderQueue.h" />
     <ClCompile Include="core\SenderQueue.cpp" />
     <!-- network -->
@@ -92,7 +92,7 @@
     <ClInclude Include="robot\CommandBuilder.h" />
     <ClInclude Include="robot\RobotController.h" />
     <ClCompile Include="robot\RobotController.cpp" />
-    <ClInclude Include="robot\SafetyBoundary.h" />
+    <ClInclude Include="relay\SafetyBoundary.h" />
     <!-- haptic -->
     <ClInclude Include="haptic\HapticDevice.h" />
     <ClCompile Include="haptic\HapticDevice.cpp" />

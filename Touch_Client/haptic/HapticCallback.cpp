@@ -1,6 +1,6 @@
 #include "HapticCallback.h"
 #include "../core/AppState.h"
-#include "../core/CoordinateTransform.h"
+#include "../relay/CoordinateTransform.h"
 #include "../core/SenderQueue.h"
 #include "../config/Config.h"
 #include "../core/MathUtils.h"

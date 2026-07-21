@@ -8,7 +8,7 @@
 #include <mutex>
 #include <condition_variable>
 #include <vector>
-#include "CoordinateTransform.h"
+#include "../relay/CoordinateTransform.h"
 
 struct SendData {
     double deltaX, deltaY, deltaZ;
