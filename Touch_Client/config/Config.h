@@ -27,6 +27,11 @@ namespace Config {
     const int MOTION_PORT = 30003;
     const int RECV_BUFFER_SIZE = 1024 * 64; // 64KB
 
+    // MATLAB 中继站 GUI 连接
+    constexpr const char* RELAY_IP = "127.0.0.1";
+    const int RELAY_PORT = 8888;
+    const int RELAY_UPDATE_INTERVAL = 33; // 更新间隔 (ms), ~30Hz
+
     // ========== 机械臂运动参数 ==========
     const float SpeedL = 100;                // 运动速度比例 (1~100)
     const float MIN_DELTA_THRESHOLD = 1.0f;  // 最小位移阈值 (mm)

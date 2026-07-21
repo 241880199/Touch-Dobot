@@ -19,4 +19,9 @@ function cfg = relay_config()
     % ===== 日志 =====
     cfg.log_dir = 'logs';             % 日志目录（相对于脚本目录）
     cfg.max_log_lines = 200;          % 控制台最大显示行数
+
+    % ===== 安全边界 (mm, 机械臂用户坐标系) =====
+    cfg.safe_x_min = 180; cfg.safe_x_max = 420;
+    cfg.safe_y_min = -200; cfg.safe_y_max = 200;
+    cfg.safe_z_min = 30;  cfg.safe_z_max = 300;
 end

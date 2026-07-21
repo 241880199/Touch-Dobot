@@ -14,10 +14,13 @@ RelayCore& RelayCore::instance() {
 
 RelayCore::RelayCore() {
     InitializeCriticalSection(&m_basePointLock);
+    InitializeCriticalSection(&m_relaySocketMutex);
 }
 
 RelayCore::~RelayCore() {
+    shutdownRelayReporting();
     DeleteCriticalSection(&m_basePointLock);
+    DeleteCriticalSection(&m_relaySocketMutex);
 }
 
 bool RelayCore::init() {
@@ -110,6 +113,9 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
 
     // 发送
     robotSendMotion(robotCmd.cmd.c_str());
+
+    // 上报到 MATLAB GUI
+    reportCommand(robotCmd.cmd.c_str());
 
     // 记录到最后指令
     EnterCriticalSection(&app.lastCommandMutex);
@@ -223,4 +229,73 @@ void RelayCore::checkAlarm() {
 
 void RelayCore::registerExtension(IExtension* ext) {
     m_extensions.push_back(ext);
+}
+
+// ===== MATLAB GUI 上报 =====
+
+void RelayCore::initRelayReporting() {
+    SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (sock == INVALID_SOCKET) return;
+
+    sockaddr_in addr;
+    addr.sin_family = AF_INET;
+    inet_pton(AF_INET, Config::RELAY_IP, &addr.sin_addr);
+    addr.sin_port = htons(Config::RELAY_PORT);
+
+    if (connect(sock, (SOCKADDR*)&addr, sizeof(addr)) == SOCKET_ERROR) {
+        closesocket(sock);
+        return;
+    }
+
+    int timeout = 100;
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (char*)&timeout, sizeof(timeout));
+
+    EnterCriticalSection(&m_relaySocketMutex);
+    m_relaySocket = sock;
+    LeaveCriticalSection(&m_relaySocketMutex);
+
+    std::cout << "[Relay] GUI reporting connected to " << Config::RELAY_IP
+              << ":" << Config::RELAY_PORT << std::endl;
+}
+
+void RelayCore::shutdownRelayReporting() {
+    EnterCriticalSection(&m_relaySocketMutex);
+    if (m_relaySocket != INVALID_SOCKET) {
+        closesocket(m_relaySocket);
+        m_relaySocket = INVALID_SOCKET;
+    }
+    LeaveCriticalSection(&m_relaySocketMutex);
+}
+
+void RelayCore::sendRelayUpdate(const char* msg) {
+    EnterCriticalSection(&m_relaySocketMutex);
+    SOCKET sock = m_relaySocket;
+    LeaveCriticalSection(&m_relaySocketMutex);
+    if (sock == INVALID_SOCKET) return;
+
+    send(sock, msg, (int)strlen(msg), 0);
+    send(sock, "\n", 1, 0);
+}
+
+void RelayCore::reportPosition() {
+    DWORD now = GetTickCount();
+    if (now - m_lastRelayUpdate < (DWORD)Config::RELAY_UPDATE_INTERVAL) return;
+    m_lastRelayUpdate = now;
+
+    auto& app = appState;
+    char buf[256];
+    hduVector3Dd pos;
+    EnterCriticalSection(&app.devicePosMutex);
+    pos = app.devicePos;
+    LeaveCriticalSection(&app.devicePosMutex);
+
+    snprintf(buf, sizeof(buf), "P|%.2f,%.2f,%.2f,%.2f,%.2f,%.2f",
+        pos[0], pos[1], pos[2], 0.0, 0.0, 0.0);
+    sendRelayUpdate(buf);
+}
+
+void RelayCore::reportCommand(const char* cmd) {
+    char buf[384];
+    snprintf(buf, sizeof(buf), "C|%s", cmd);
+    sendRelayUpdate(buf);
 }

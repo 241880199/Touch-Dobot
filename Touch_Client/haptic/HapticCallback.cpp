@@ -68,6 +68,9 @@ HDCallbackCode HDCALLBACK hapticCallback(void* pUserData) {
         relay.sendPosition(localDevicePos);
     }
 
+    // ===== 7. 向 MATLAB GUI 上报位置 =====
+    relay.reportPosition();
+
     hdEndFrame(app.hHD);
     return HD_CALLBACK_CONTINUE;
 }

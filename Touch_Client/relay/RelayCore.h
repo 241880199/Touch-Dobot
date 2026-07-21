@@ -27,6 +27,13 @@ public:
     // 扩展
     void registerExtension(IExtension* ext);
 
+    // MATLAB GUI 上报
+    void initRelayReporting();
+    void shutdownRelayReporting();
+    void sendRelayUpdate(const char* msg);
+    void reportPosition();
+    void reportCommand(const char* cmd);
+
     // 状态查询（供 Render 层读取）
     bool isTransmitting() const { return m_transmitting; }
 
@@ -41,4 +48,9 @@ private:
     Vec3 m_basePoint;
     CRITICAL_SECTION m_basePointLock;
     std::vector<IExtension*> m_extensions;
+
+    // MATLAB relay connection
+    SOCKET m_relaySocket = INVALID_SOCKET;
+    CRITICAL_SECTION m_relaySocketMutex;
+    DWORD m_lastRelayUpdate = 0;
 };

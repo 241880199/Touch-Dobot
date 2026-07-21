@@ -135,6 +135,7 @@ void keyboard(unsigned char key, int, int) {
         std::cout << "\nShutting down..." << std::endl;
         // 注意: 原始 GLUT 3.2 不支持 glutLeaveMainLoop()
         // 在主循环中直接做清理然后 exit
+        RelayCore::instance().shutdownRelayReporting();
         if (!g_noRobot) RelayCore::instance().shutdown();
         if (!g_noTouch) cleanupHapticDevice();
         exit(0);
@@ -161,7 +162,7 @@ int main(int argc, char* argv[]) {
 
     // 1. GLUT 初始化 (始终执行)
     glutInit(&argc, argv);
-    glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGB | GLUT_DEPTH | GLUT_MULTISAMPLE);
+    glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGB | GLUT_DEPTH);
     glutInitWindowSize(Config::WINDOW_W, Config::WINDOW_H);
     glutInitWindowPosition(100, 100);
     glutCreateWindow("Touch-Dobot Digital Twin");
@@ -173,25 +174,6 @@ int main(int argc, char* argv[]) {
     glutMotionFunc(motion);
     glutKeyboardFunc(keyboard);
 
-    // 光照系统
-    glEnable(GL_LIGHTING);
-    glEnable(GL_LIGHT0);
-    glEnable(GL_COLOR_MATERIAL);
-    glEnable(GL_NORMALIZE);
-
-    GLfloat lightPos[]  = { 400.0f, -200.0f, 600.0f, 1.0f };
-    GLfloat lightAmb[]  = { 0.25f, 0.25f, 0.30f, 1.0f };
-    GLfloat lightDiff[] = { 0.70f, 0.70f, 0.70f, 1.0f };
-    GLfloat lightSpec[] = { 0.30f, 0.30f, 0.30f, 1.0f };
-    glLightfv(GL_LIGHT0, GL_POSITION, lightPos);
-    glLightfv(GL_LIGHT0, GL_AMBIENT, lightAmb);
-    glLightfv(GL_LIGHT0, GL_DIFFUSE, lightDiff);
-    glLightfv(GL_LIGHT0, GL_SPECULAR, lightSpec);
-
-    GLfloat ambModel[] = { 0.15f, 0.15f, 0.18f, 1.0f };
-    glLightModelfv(GL_LIGHT_MODEL_AMBIENT, ambModel);
-
-    glShadeModel(GL_SMOOTH);
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -221,10 +203,13 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // 4. 初始化 3D 场景 (始终执行)
+    // 4. 连接 MATLAB GUI (localhost:8888)
+    RelayCore::instance().initRelayReporting();
+
+    // 5. 初始化 3D 场景 (始终执行)
     SceneRenderer::init();
 
-    // 5. 启动定时器
+    // 6. 启动定时器
     glutTimerFunc(Config::POSE_QUERY_INTERVAL, poseQueryTimer, 0);
     glutTimerFunc(Config::ALARM_CHECK_INTERVAL, alarmCheckTimer, 0);
 
