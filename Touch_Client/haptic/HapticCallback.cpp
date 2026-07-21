@@ -3,7 +3,7 @@
 #include "../core/CoordinateTransform.h"
 #include "../core/SenderQueue.h"
 #include "../config/Config.h"
-#include "../utils/MathUtils.h"
+#include "../core/MathUtils.h"
 #include <HDU/hduVector.h>
 #include <iostream>
 
