@@ -1,12 +1,11 @@
+#include <GL/glut.h>
 #define WIN32_LEAN_AND_MEAN
 #include <winsock2.h>
 #include <ws2tcpip.h>
-#include <GL/glut.h>
 #include <HD/hd.h>
 #include <HDU/hduVector.h>
 #include <iostream>
 #include <cmath>
-#include <windows.h>
 
 #include "config/Config.h"
 #include "core/AppState.h"
