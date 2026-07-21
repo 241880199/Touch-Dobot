@@ -16,6 +16,9 @@ struct SendData {
 
 class AppState {
 public:
+    AppState();
+    ~AppState();
+
     // ===== 触觉设备 =====
     HHD hHD = HD_INVALID_HANDLE;
     HDSchedulerHandle hapticCallbackHandle = HD_INVALID_HANDLE;
