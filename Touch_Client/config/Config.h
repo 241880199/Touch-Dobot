@@ -22,7 +22,7 @@ namespace Config {
     const double SAFE_BOUNDARY_BUFFER_RATIO = 0.2; // 20%边界缓冲区，线速度衰减
 
     // ========== 网络参数 ==========
-    const char* ROBOT_IP = "192.168.101.11";
+    constexpr const char* ROBOT_IP = "192.168.101.11";
     const int ENABLE_PORT = 29999;
     const int MOTION_PORT = 30003;
     const int RECV_BUFFER_SIZE = 1024 * 64; // 64KB
