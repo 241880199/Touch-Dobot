@@ -33,13 +33,23 @@ public:
     double targetRx = 0.0, targetRy = 0.0, targetRz = 0.0;
     double transformMatrix[16] = { 0 };  // HD_CURRENT_TRANSFORM 预留
 
-    // ===== TCP 网络 =====
-    SOCKET relaySocket = INVALID_SOCKET;
-    CRITICAL_SECTION relaySocketMutex;
-    std::atomic<bool> isTcpConnected{ false };
-    char recvBuffer[1024 * 64] = { 0 };
-    int recvBufferLen = 0;
-    CRITICAL_SECTION recvBufferMutex;
+    // ===== 机械臂 TCP 双端口 =====
+    SOCKET robotEnableSocket = INVALID_SOCKET;
+    SOCKET robotMotionSocket = INVALID_SOCKET;
+    CRITICAL_SECTION robotSocketMutex;
+    std::atomic<bool> isRobotConnected{ false };
+
+    // ===== 机械臂位姿（3D 模型驱动） =====
+    struct RobotPose {
+        double x = 0, y = 0, z = 0;
+        double rx = 0, ry = 0, rz = 0;
+    };
+    RobotPose robotActualPose;     // GetPose() 返回的实际位姿
+    RobotPose robotTargetPose;     // Touch 发送的目标位姿
+    CRITICAL_SECTION robotPoseMutex;
+    std::atomic<float> latencyMs{ 0.0f };      // 往返延迟 (ms)
+    char lastCommandSent[256] = "";            // 最后发送的指令文本
+    CRITICAL_SECTION lastCommandMutex;
 
     // ===== 机械臂基准位置 =====
     Vec3 robotBase = { 0.0, 0.0, 0.0 };
@@ -53,7 +63,6 @@ public:
     std::atomic<bool> isSenderThreadRunning{ false };
     HANDLE clientThread = NULL;
     HANDLE senderThread = NULL;
-    WSAEVENT stopEvent = WSA_INVALID_EVENT;
     CRITICAL_SECTION statusMutex;
 
     // ===== 发送队列 =====
@@ -82,8 +91,6 @@ public:
     bool isDragging = false;
 
     // ===== 状态显示字符串 =====
-    char connectionStatus[128] = "TCP: not connected";
-    char serverInfo[64] = "IP: -";
     char transmissionState[128] = "STATE: -";
     char lastTransmissionDetail[256] = "Waiting for transmission...";
 

@@ -5,33 +5,27 @@ AppState::AppState() {
     WSADATA wsaData;
     WSAStartup(MAKEWORD(2, 2), &wsaData);
 
-    stopEvent = WSACreateEvent();
-    if (stopEvent == WSA_INVALID_EVENT) {
-        std::cerr << "创建 stopEvent 失败: " << WSAGetLastError() << std::endl;
-    }
-
     InitializeCriticalSection(&devicePosMutex);
     InitializeCriticalSection(&adjustedPosMutex);
     InitializeCriticalSection(&adjustedPosTableMutex);
-    InitializeCriticalSection(&relaySocketMutex);
-    InitializeCriticalSection(&recvBufferMutex);
+    InitializeCriticalSection(&robotSocketMutex);
+    InitializeCriticalSection(&robotPoseMutex);
     InitializeCriticalSection(&statusMutex);
     InitializeCriticalSection(&basePointMutex);
     InitializeCriticalSection(&trailMutex);
+    InitializeCriticalSection(&lastCommandMutex);
 }
 
 AppState::~AppState() {
-    if (stopEvent != WSA_INVALID_EVENT) {
-        WSACloseEvent(stopEvent);
-    }
     DeleteCriticalSection(&devicePosMutex);
     DeleteCriticalSection(&adjustedPosMutex);
     DeleteCriticalSection(&adjustedPosTableMutex);
-    DeleteCriticalSection(&relaySocketMutex);
-    DeleteCriticalSection(&recvBufferMutex);
+    DeleteCriticalSection(&robotSocketMutex);
+    DeleteCriticalSection(&robotPoseMutex);
     DeleteCriticalSection(&statusMutex);
     DeleteCriticalSection(&basePointMutex);
     DeleteCriticalSection(&trailMutex);
+    DeleteCriticalSection(&lastCommandMutex);
     WSACleanup();
 }
 
