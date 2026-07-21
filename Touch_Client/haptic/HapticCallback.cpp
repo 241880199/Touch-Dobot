@@ -1,14 +1,15 @@
 #include "HapticCallback.h"
 #include "../core/AppState.h"
 #include "../relay/CoordinateTransform.h"
-#include "../core/SenderQueue.h"
-#include "../config/Config.h"
+#include "../relay/RelayCore.h"
 #include "../core/MathUtils.h"
+#include "../config/Config.h"
 #include <HDU/hduVector.h>
-#include <iostream>
 
 HDCallbackCode HDCALLBACK hapticCallback(void* pUserData) {
     auto& app = appState;
+    auto& relay = RelayCore::instance();
+
     if (app.isClosing) return HD_CALLBACK_DONE;
 
     hdBeginFrame(app.hHD);
@@ -25,7 +26,7 @@ HDCallbackCode HDCALLBACK hapticCallback(void* pUserData) {
     hduVector3Dd localDevicePos = app.devicePos;
     LeaveCriticalSection(&app.devicePosMutex);
 
-    // ===== 2. 坐标转换 =====
+    // ===== 2. 坐标转换到 robot 系 =====
     Vec3 robotPos = convertTouchToRobot(localDevicePos);
 
     EnterCriticalSection(&app.adjustedPosTableMutex);
@@ -34,81 +35,37 @@ HDCallbackCode HDCALLBACK hapticCallback(void* pUserData) {
 
     EnterCriticalSection(&app.adjustedPosMutex);
     app.adjustedPos = localDevicePos;
-    hduVector3Dd localAdjustedPos = app.adjustedPos;
     LeaveCriticalSection(&app.adjustedPosMutex);
 
-    // ===== 3. 预留：读取姿态 (HD_CURRENT_TRANSFORM) =====
-    // hdGetDoublev(HD_CURRENT_TRANSFORM, app.transformMatrix);
-    // 后续迭代：从 transformMatrix 提取 Rx/Ry/Rz 并增量映射
-
-    // ===== 4. 轨迹记录 =====
+    // ===== 3. 轨迹 =====
     EnterCriticalSection(&app.trailMutex);
-    app.trailPoints.push_back(localAdjustedPos);
+    app.trailPoints.push_back(localDevicePos);
     while ((int)app.trailPoints.size() > Config::MAX_TRAIL) {
         app.trailPoints.pop_front();
     }
     LeaveCriticalSection(&app.trailMutex);
 
-    // ===== 5. 读取按钮状态 =====
+    // ===== 4. 按钮状态 =====
     int buttonState = 0;
     hdGetIntegerv(HD_CURRENT_BUTTONS, &buttonState);
     bool button1 = (buttonState & HD_DEVICE_BUTTON_1) != 0;
-    bool button2 = (buttonState & HD_DEVICE_BUTTON_2) != 0; // 预留
+    bool button2 = (buttonState & HD_DEVICE_BUTTON_2) != 0;
     app.button2Pressed = button2;
 
-    // ===== 6. 按钮 1：运动控制 =====
-    static hduVector3Dd startPos;
+    // ===== 5. 按钮 1 状态机 → RelayCore =====
     bool stateChanged = (button1 != app.lastButtonState);
-
     if (stateChanged) {
-        EnterCriticalSection(&app.basePointMutex);
-
-        app.isTransmitting = button1;
         app.lastButtonState = button1;
-
         if (button1) {
-            // 按下：记录基准点
-            app.basePoint = robotPos;
-            app.isBasePointSet = true;
-            startPos = localDevicePos;
+            relay.onButtonPress(robotPos);
         } else {
-            // 松开：停止发送
-            app.isBasePointSet = false;
+            relay.onButtonRelease();
         }
-
-        LeaveCriticalSection(&app.basePointMutex);
-
-        // 更新 TCP 状态显示
-        EnterCriticalSection(&app.statusMutex);
-        if (button1) {
-            snprintf(app.transmissionState, sizeof(app.transmissionState), "STATE: transmitting");
-        } else {
-            snprintf(app.transmissionState, sizeof(app.transmissionState), "STATE: waiting");
-        }
-        LeaveCriticalSection(&app.statusMutex);
     }
 
-    // ===== 7. 持续发送（按钮保持按下） =====
-    if (app.isTransmitting && app.isBasePointSet && app.isTcpConnected) {
-        Vec3 base;
-        EnterCriticalSection(&app.basePointMutex);
-        base = app.basePoint;
-        LeaveCriticalSection(&app.basePointMutex);
-
-        Vec3 delta = computeDelta(robotPos, base);
-
-        // 阈值过滤
-        if (delta.length() >= Config::MIN_DELTA_THRESHOLD) {
-            // 入队（带背压控制）
-            {
-                std::lock_guard<std::mutex> lock(app.queueMutex);
-                while ((int)app.sendQueue.size() >= Config::MAX_QUEUE_SIZE) {
-                    app.sendQueue.pop(); // 丢弃最旧数据
-                }
-                app.sendQueue.push({ delta.x, delta.y, delta.z });
-            }
-            app.queueCV.notify_one();
-        }
+    // ===== 6. 持续发送（按钮保持按下） =====
+    if (relay.isTransmitting()) {
+        relay.sendPosition(localDevicePos);
     }
 
     hdEndFrame(app.hHD);
