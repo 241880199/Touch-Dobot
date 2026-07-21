@@ -26,14 +26,26 @@ bool g_dragging = false;
 void display() {
     if (appState.isClosing) return;
 
+    // 清屏
     glClearColor(0.1f, 0.12f, 0.18f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    // ===== 3D 场景渲染到右侧视口 =====
+    int vpX = HudLayout::RIGHT_X;
+    int vpY = HudLayout::PANEL_Y;
+    int vpW = HudLayout::RIGHT_W;
+    int vpH = HudLayout::RIGHT_3D_H;
+
+    glViewport(vpX, Config::WINDOW_H - vpY - vpH, vpW, vpH);
+    glScissor(vpX, Config::WINDOW_H - vpY - vpH, vpW, vpH);
+    glEnable(GL_SCISSOR_TEST);
+
     glEnable(GL_DEPTH_TEST);
 
-    // 3D 投影
+    // 3D 投影 (使用子视口宽高比)
     glMatrixMode(GL_PROJECTION);
     glLoadIdentity();
-    gluPerspective(45.0, (double)Config::WINDOW_W / Config::WINDOW_H, 10.0, 2000.0);
+    gluPerspective(45.0, (double)vpW / vpH, 10.0, 2000.0);
 
     glMatrixMode(GL_MODELVIEW);
     glLoadIdentity();
@@ -44,17 +56,19 @@ void display() {
     double cz = (Config::SAFE_Z_MIN + Config::SAFE_Z_MAX) / 2.0;
     double camDist = 600.0 * g_camDist;
 
-    gluLookAt(cx, cy - camDist * 0.5, cz + camDist,  // 相机位置
-              cx, cy, cz,                               // 看向中心
-              0, 0, 1);                                 // 上方向 Z
+    gluLookAt(cx, cy - camDist * 0.5, cz + camDist,
+              cx, cy, cz,
+              0, 0, 1);
 
     glRotatef(g_rotateX, 1, 0, 0);
     glRotatef(g_rotateY, 0, 0, 1);
 
-    // 3D 场景
     SceneRenderer::draw3D();
 
-    // 2D HUD
+    glDisable(GL_SCISSOR_TEST);
+
+    // ===== 2D HUD 全屏渲染 =====
+    glViewport(0, 0, Config::WINDOW_W, Config::WINDOW_H);
     HudOverlay::drawAll();
 
     glutSwapBuffers();

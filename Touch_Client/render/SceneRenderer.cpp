@@ -126,6 +126,35 @@ void drawTrail() {
     LeaveCriticalSection(&app.trailMutex);
 }
 
+void drawTouchPen(const Vec3& pos) {
+    // Touch 笔模型: 灰色笔身 + 笔尖红色小球
+    GLUquadric* q = gluNewQuadric();
+
+    // 笔身 (灰色圆柱, 沿 Z 向下, 长 40mm, 半径 3mm)
+    glColor3f(0.35f, 0.38f, 0.42f);
+    glPushMatrix();
+    glTranslatef((float)pos.x, (float)pos.y, (float)pos.z + 20);
+    glRotatef(-90, 1, 0, 0); // 圆柱默认沿 Z，旋转到沿 -Z
+    gluCylinder(q, 3.0, 2.5, 40.0, 8, 1);
+    glPopMatrix();
+
+    // 笔尖红色小球 (半径 4mm)
+    glColor3f(1.0f, 0.15f, 0.10f);
+    glPushMatrix();
+    glTranslatef((float)pos.x, (float)pos.y, (float)pos.z);
+    glutSolidSphere(4.0, 12, 12);
+    glPopMatrix();
+
+    // 光标光环
+    glColor4f(0.25f, 0.85f, 1.0f, 0.3f);
+    glPushMatrix();
+    glTranslatef((float)pos.x, (float)pos.y, (float)pos.z);
+    glutWireSphere(12.0, 10, 10);
+    glPopMatrix();
+
+    gluDeleteQuadric(q);
+}
+
 void draw3D() {
     drawFloor();
     drawBoundary();
@@ -149,12 +178,12 @@ void draw3D() {
     drawTargetMarker(targetPos);
     drawActualMarker(actualPos);
 
-    // Touch 光标
+    // Touch 笔模型
     Vec3 mapped;
     EnterCriticalSection(&appState.adjustedPosTableMutex);
     mapped = appState.adjustedPosTable;
     LeaveCriticalSection(&appState.adjustedPosTableMutex);
-    drawCursor(mapped);
+    drawTouchPen(mapped);
 
     // 轨迹
     drawTrail();

@@ -84,19 +84,23 @@ public:
     CRITICAL_SECTION trailMutex;
     std::deque<hduVector3Dd> trailPoints;
 
-    // ===== 交互与渲染状态（UI 后续通过 open-design MCP 实现） =====
-    double rotateX = 15.0, rotateY = 10.0;
-    float camDistance = 1.0f;
-    int lastMouseX = 0, lastMouseY = 0;
-    bool isDragging = false;
+    // ===== 指令日志 (环形缓冲区) =====
+    static const int LOG_SIZE = 50;
+    char commandLog[50][256] = {};
+    int commandLogIdx = 0;
+    int commandLogCount = 0;
+    CRITICAL_SECTION commandLogMutex;
 
-    // ===== 状态显示字符串 =====
-    char transmissionState[128] = "STATE: -";
-    char lastTransmissionDetail[256] = "Waiting for transmission...";
+    // ===== 反馈日志 (环形缓冲区) =====
+    char feedbackLog[50][256] = {};
+    int feedbackLogIdx = 0;
+    int feedbackLogCount = 0;
+    CRITICAL_SECTION feedbackLogMutex;
 
-    // ===== 构造函数 =====
-    AppState();
-    ~AppState();
+    // ===== 力数据 (预留) =====
+    double forceRaw[3] = { 0, 0, 0 };       // 机械臂原始力数据
+    double forceFiltered[3] = { 0, 0, 0 };  // 滤波后力数据
+    CRITICAL_SECTION forceMutex;
 };
 
 extern AppState appState;

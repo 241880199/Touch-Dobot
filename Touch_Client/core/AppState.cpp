@@ -14,6 +14,9 @@ AppState::AppState() {
     InitializeCriticalSection(&basePointMutex);
     InitializeCriticalSection(&trailMutex);
     InitializeCriticalSection(&lastCommandMutex);
+    InitializeCriticalSection(&commandLogMutex);
+    InitializeCriticalSection(&feedbackLogMutex);
+    InitializeCriticalSection(&forceMutex);
 }
 
 AppState::~AppState() {
@@ -26,6 +29,9 @@ AppState::~AppState() {
     DeleteCriticalSection(&basePointMutex);
     DeleteCriticalSection(&trailMutex);
     DeleteCriticalSection(&lastCommandMutex);
+    DeleteCriticalSection(&commandLogMutex);
+    DeleteCriticalSection(&feedbackLogMutex);
+    DeleteCriticalSection(&forceMutex);
     WSACleanup();
 }
 

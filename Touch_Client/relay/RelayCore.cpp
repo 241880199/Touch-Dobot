@@ -111,10 +111,17 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
     // 发送
     robotSendMotion(robotCmd.cmd.c_str());
 
-    // 记录
+    // 记录到最后指令
     EnterCriticalSection(&app.lastCommandMutex);
     strncpy_s(app.lastCommandSent, robotCmd.cmd.c_str(), sizeof(app.lastCommandSent) - 1);
     LeaveCriticalSection(&app.lastCommandMutex);
+
+    // 记录到指令日志
+    EnterCriticalSection(&app.commandLogMutex);
+    strncpy_s(app.commandLog[app.commandLogIdx], robotCmd.cmd.c_str(), sizeof(app.commandLog[0]) - 1);
+    app.commandLogIdx = (app.commandLogIdx + 1) % AppState::LOG_SIZE;
+    if (app.commandLogCount < AppState::LOG_SIZE) app.commandLogCount++;
+    LeaveCriticalSection(&app.commandLogMutex);
 
     // 更新目标位姿
     EnterCriticalSection(&app.robotPoseMutex);
@@ -137,6 +144,16 @@ void RelayCore::onButtonRelease() {
     m_basePointSet = false;
 }
 
+static void logFeedback(const char* msg, const char* portLabel) {
+    auto& app = appState;
+    EnterCriticalSection(&app.feedbackLogMutex);
+    snprintf(app.feedbackLog[app.feedbackLogIdx], sizeof(app.feedbackLog[0]),
+        "[%s] %s", portLabel, msg);
+    app.feedbackLogIdx = (app.feedbackLogIdx + 1) % AppState::LOG_SIZE;
+    if (app.feedbackLogCount < AppState::LOG_SIZE) app.feedbackLogCount++;
+    LeaveCriticalSection(&app.feedbackLogMutex);
+}
+
 void RelayCore::pollFeedback() {
     char buf[1024];
     // 读取运动端口反馈
@@ -146,6 +163,12 @@ void RelayCore::pollFeedback() {
         fb.fromPort = Config::MOTION_PORT;
         fb.errorId = (buf[0] == '0') ? 0 : -1;
         FeedbackParser::extractData(buf, fb.data, sizeof(fb.data));
+
+        // 记录日志 (截断长字符串)
+        char shortMsg[256];
+        const char* src = fb.data[0] ? fb.data : fb.raw;
+        snprintf(shortMsg, sizeof(shortMsg), "%.200s", src);
+        logFeedback(shortMsg, "30003");
 
         for (auto* ext : m_extensions) {
             ext->onAfterFeedback(fb);
@@ -158,6 +181,10 @@ void RelayCore::pollFeedback() {
         strncpy_s(fb.raw, buf, sizeof(fb.raw) - 1);
         fb.fromPort = Config::ENABLE_PORT;
         fb.errorId = (buf[0] == '0') ? 0 : -1;
+
+        char shortMsg[256];
+        snprintf(shortMsg, sizeof(shortMsg), "%.200s", fb.raw);
+        logFeedback(shortMsg, "29999");
 
         for (auto* ext : m_extensions) {
             ext->onAfterFeedback(fb);
