@@ -1,5 +1,6 @@
 #pragma once
 #include <cmath>
+#include <HDU/hduVector.h>
 
 struct Vec3 {
     double x, y, z;
@@ -18,6 +19,15 @@ struct Vec3 {
 
 // Touch 原始坐标 (devicePos[3]) → 机械臂右手系
 inline Vec3 convertTouchToRobot(const double devicePos[3]) {
+    return Vec3(
+         devicePos[0],   // X → X
+        -devicePos[2],   // Z(反转) → Y
+         devicePos[1]    // Y → Z
+    );
+}
+
+// Touch 原始坐标 (hduVector3Dd) → 机械臂右手系
+inline Vec3 convertTouchToRobot(const hduVector3Dd& devicePos) {
     return Vec3(
          devicePos[0],   // X → X
         -devicePos[2],   // Z(反转) → Y

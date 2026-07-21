@@ -73,26 +73,33 @@
   <ItemGroup>
     <!-- config -->
     <ClInclude Include="config\Config.h" />
-    <!-- utils -->
-    <ClInclude Include="utils\MathUtils.h" />
     <!-- core -->
     <ClInclude Include="core\AppState.h" />
     <ClCompile Include="core\AppState.cpp" />
-    <ClInclude Include="relay\CoordinateTransform.h" />
-    <ClInclude Include="core\SenderQueue.h" />
-    <ClCompile Include="core\SenderQueue.cpp" />
-    <!-- network -->
-    <ClInclude Include="network\PongHandler.h" />
-    <ClCompile Include="network\PongHandler.cpp" />
-    <ClInclude Include="network\RelayProtocol.h" />
-    <ClCompile Include="network\RelayProtocol.cpp" />
-    <ClInclude Include="network\TcpClient.h" />
-    <ClCompile Include="network\TcpClient.cpp" />
+    <ClInclude Include="core\MathUtils.h" />
     <!-- robot -->
-    <ClInclude Include="robot\CommandBuilder.h" />
-    <ClInclude Include="robot\RobotController.h" />
-    <ClCompile Include="robot\RobotController.cpp" />
+    <ClInclude Include="robot\RobotConnection.h" />
+    <ClCompile Include="robot\RobotConnection.cpp" />
+    <!-- relay -->
+    <ClInclude Include="relay\IExtension.h" />
+    <ClInclude Include="relay\CoordinateTransform.h" />
     <ClInclude Include="relay\SafetyBoundary.h" />
+    <ClInclude Include="relay\ProtocolAdapter.h" />
+    <ClCompile Include="relay\ProtocolAdapter.cpp" />
+    <ClInclude Include="relay\FeedbackParser.h" />
+    <ClCompile Include="relay\FeedbackParser.cpp" />
+    <ClInclude Include="relay\RelayCore.h" />
+    <ClCompile Include="relay\RelayCore.cpp" />
+    <!-- render -->
+    <ClInclude Include="render\StlMesh.h" />
+    <ClInclude Include="render\StlLoader.h" />
+    <ClCompile Include="render\StlLoader.cpp" />
+    <ClInclude Include="render\RobotModel.h" />
+    <ClCompile Include="render\RobotModel.cpp" />
+    <ClInclude Include="render\SceneRenderer.h" />
+    <ClCompile Include="render\SceneRenderer.cpp" />
+    <ClInclude Include="render\HudOverlay.h" />
+    <ClCompile Include="render\HudOverlay.cpp" />
     <!-- haptic -->
     <ClInclude Include="haptic\HapticDevice.h" />
     <ClCompile Include="haptic\HapticDevice.cpp" />
