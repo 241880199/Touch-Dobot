@@ -84,8 +84,7 @@
     <ClInclude Include="relay\IExtension.h" />
     <ClInclude Include="relay\CoordinateTransform.h" />
     <ClInclude Include="relay\SafetyBoundary.h" />
-    <ClInclude Include="relay\ProtocolAdapter.h" />
-    <ClCompile Include="relay\ProtocolAdapter.cpp" />
+    <!-- ProtocolAdapter inlined into RelayCore -->
     <ClInclude Include="relay\FeedbackParser.h" />
     <ClCompile Include="relay\FeedbackParser.cpp" />
     <ClInclude Include="relay\RelayCore.h" />
