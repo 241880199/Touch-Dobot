@@ -1,5 +1,7 @@
 #pragma once
 #include <vector>
+#include <atomic>
+#include <windows.h>
 #include <HD/hd.h>
 #include <HDU/hduVector.h>
 #include "CoordinateTransform.h"
@@ -29,12 +31,14 @@ public:
     bool isTransmitting() const { return m_transmitting; }
 
 private:
-    RelayCore() = default;
+    RelayCore();
+    ~RelayCore();
     RelayCore(const RelayCore&) = delete;
     RelayCore& operator=(const RelayCore&) = delete;
 
-    bool m_transmitting = false;
-    bool m_basePointSet = false;
+    std::atomic<bool> m_transmitting{false};
+    std::atomic<bool> m_basePointSet{false};
     Vec3 m_basePoint;
+    CRITICAL_SECTION m_basePointLock;
     std::vector<IExtension*> m_extensions;
 };

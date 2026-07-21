@@ -1,5 +1,4 @@
 #include "RelayCore.h"
-#include "ProtocolAdapter.h"
 #include "FeedbackParser.h"
 #include "SafetyBoundary.h"
 #include "../robot/RobotConnection.h"
@@ -13,6 +12,14 @@ RelayCore& RelayCore::instance() {
     return inst;
 }
 
+RelayCore::RelayCore() {
+    InitializeCriticalSection(&m_basePointLock);
+}
+
+RelayCore::~RelayCore() {
+    DeleteCriticalSection(&m_basePointLock);
+}
+
 bool RelayCore::init() {
     if (!robotConnect(Config::ROBOT_IP)) {
         std::cerr << "[Relay] 连接机械臂失败" << std::endl;
@@ -21,21 +28,23 @@ bool RelayCore::init() {
 
     // 初始化序列：ClearError → EnableRobot → CP → GetPose
     Sleep(200);
-    robotSendEnable(ProtocolAdapter::buildClearError().c_str());
+    robotSendEnable("ClearError()");
     Sleep(300);
 
-    if (!robotSendEnable(ProtocolAdapter::buildEnableRobot().c_str())) {
+    if (!robotSendEnable("EnableRobot(0.5,0,0,0)")) {
         std::cerr << "[Relay] 使能失败" << std::endl;
         return false;
     }
     std::cout << "[Relay] 机械臂使能成功" << std::endl;
     Sleep(200);
 
-    robotSendEnable(ProtocolAdapter::buildCP(Config::CP_SMOOTH_RATIO).c_str());
+    char cpBuf[64];
+    snprintf(cpBuf, sizeof(cpBuf), "CP(%u)", Config::CP_SMOOTH_RATIO);
+    robotSendEnable(cpBuf);
     Sleep(100);
 
     // 获取基准位姿
-    robotSendEnable(ProtocolAdapter::buildGetPose().c_str());
+    robotSendEnable("GetPose()");
     Sleep(200);
     char fb[1024];
     if (robotRecvEnable(fb, sizeof(fb))) {
@@ -61,7 +70,7 @@ bool RelayCore::init() {
 }
 
 void RelayCore::shutdown() {
-    robotSendEnable(ProtocolAdapter::buildDisableRobot().c_str());
+    robotSendEnable("DisableRobot()");
     Sleep(100);
     robotDisconnect();
 }
@@ -71,7 +80,10 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
 
     // 坐标转换
     Vec3 current = convertTouchToRobot(devicePos);
-    Vec3 delta = computeDelta(current, m_basePoint);
+    EnterCriticalSection(&m_basePointLock);
+    Vec3 basePoint = m_basePoint;
+    LeaveCriticalSection(&m_basePointLock);
+    Vec3 delta = computeDelta(current, basePoint);
 
     // 跳过微小移动
     if (delta.length() < Config::MIN_DELTA_THRESHOLD) return;
@@ -83,9 +95,10 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
     // 安全边界
     target = SafetyBoundary::clampToBoundary(target);
 
-    // 构造指令
-    std::string cmd = ProtocolAdapter::buildServoP(
-        target, app.robotBaseRx, app.robotBaseRy, app.robotBaseRz);
+    // 构造指令 (栈分配，无堆内存分配)
+    char cmd[256];
+    snprintf(cmd, sizeof(cmd), "ServoP(%.2f,%.2f,%.2f,%.2f,%.2f,%.2f)",
+        target.x, target.y, target.z, app.robotBaseRx, app.robotBaseRy, app.robotBaseRz);
 
     // 给扩展插件修改指令的机会
     RobotCommand robotCmd;
@@ -112,7 +125,9 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
 }
 
 void RelayCore::onButtonPress(const Vec3& robotPos) {
+    EnterCriticalSection(&m_basePointLock);
     m_basePoint = robotPos;
+    LeaveCriticalSection(&m_basePointLock);
     m_basePointSet = true;
     m_transmitting = true;
 }
@@ -152,7 +167,7 @@ void RelayCore::pollFeedback() {
 
 void RelayCore::queryPose() {
     if (!isRobotConnected()) return;
-    robotSendEnable(ProtocolAdapter::buildGetPose().c_str());
+    robotSendEnable("GetPose()");
     Sleep(50);
     char fb[1024];
     if (robotRecvEnable(fb, sizeof(fb))) {
@@ -165,7 +180,7 @@ void RelayCore::queryPose() {
 
 void RelayCore::checkAlarm() {
     if (!isRobotConnected()) return;
-    robotSendEnable(ProtocolAdapter::buildRobotMode().c_str());
+    robotSendEnable("RobotMode()");
     Sleep(50);
     char fb[1024];
     if (robotRecvEnable(fb, sizeof(fb))) {
