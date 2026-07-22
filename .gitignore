@@ -2,7 +2,8 @@
 OpenHaptics/
 
 # Build artifacts
-Codes/Touch_Client/x64/
+Touch_Client/x64/
+Touch_Client/nul
 *.exe
 *.dll
 *.ilk
