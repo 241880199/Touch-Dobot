@@ -12,6 +12,8 @@ function relay_gui()
     S.touch_pos = [0 0 0 0 0 0];   % Touch 位姿
     S.robot_pos = [300 0 200 0 0 0]; % 机械臂位姿 (默认值)
     S.robot_target = [300 0 200 0 0 0];
+    S.joint_angles = [0 0 0 0 0 0]; % 关节角度 J1~J6 (度)
+    S.joint_angles_time = tic;       % 关节角度查询计时
     S.force_raw = [0 0 0];
     S.force_filt = [0 0 0];
     S.touch_relay_delay = 0;
@@ -275,6 +277,11 @@ function relay_gui()
                     if length(vals) == 3
                         S.force_raw = vals';
                     end
+                elseif startsWith(msg, 'J|')  % 关节角度 (来自 C++ 端)
+                    vals = sscanf(msg(3:end), '%f,%f,%f,%f,%f,%f');
+                    if length(vals) == 6
+                        S.joint_angles = vals';
+                    end
                 end
             end
         catch
@@ -361,6 +368,29 @@ function relay_gui()
         end
     end
 
+    function readRobotJointAngles()
+        % 查询 CR3 关节角度 (GetAngle → 29999)
+        if isempty(S.robot_enable) || ~isvalid(S.robot_enable)
+            return;
+        end
+        try
+            write(S.robot_enable, 'GetAngle()');
+            pause(0.05);
+            if S.robot_enable.NumBytesAvailable > 0
+                fb = read(S.robot_enable, S.robot_enable.NumBytesAvailable, 'uint8');
+                fbStr = strtrim(char(fb));
+                if contains(fbStr, 'GetAngle')
+                    % 格式: ErrorID,{J1,J2,J3,J4,J5,J6},GetAngle();
+                    vals = sscanf(fbStr, '%*d,{%f,%f,%f,%f,%f,%f');
+                    if length(vals) == 6
+                        S.joint_angles = vals';
+                    end
+                end
+            end
+        catch
+        end
+    end
+
     function addCmdLog(msg)
         S.cmd_idx = mod(S.cmd_idx, 50) + 1;
         S.cmd_log{S.cmd_idx} = msg;
@@ -399,23 +429,113 @@ function relay_gui()
     end
 
     function drawRobotModel(pose)
-        x = pose(1); y = pose(2); z = pose(3);
-        % 简化: 绘制末端执行器位置标记
-        [sx, sy, sz] = sphere(8);
-        sx = sx * 8 + x; sy = sy * 8 + y; sz = sz * 8 + z;
-        if isequal(pose, S.robot_target)
-            % 目标: 半透明红色线框
-            plot3(ax_3d, x, y, z, 'ro', 'MarkerSize', 10, 'LineWidth', 2);
-        else
-            % 实际: 绿色实体
-            surf(ax_3d, sx, sy, sz, 'FaceColor', [0.2 0.85 0.35], 'EdgeColor', 'none', 'FaceAlpha', 0.8);
+        % CR3 多关节 FK 渲染（URDF 运动学参数）
+        % 使用 S.joint_angles 驱动 6 个独立关节
+        ja = S.joint_angles;
+
+        % FK: 计算各关节位置 (世界坐标, mm)
+        joints = computeFK(ja(1), ja(2), ja(3), ja(4), ja(5), ja(6));
+        % joints: 7x3 (base=原点 + J1~J6 位置)
+
+        % 绘制连杆 (粗线)
+        for i = 1:6
+            plot3(ax_3d, ...
+                [joints(i,1) joints(i+1,1)], ...
+                [joints(i,2) joints(i+1,2)], ...
+                [joints(i,3) joints(i+1,3)], ...
+                'Color', [0.25 0.28 0.32], 'LineWidth', 6);
         end
 
-        % 简易连杆 (底座到末端)
-        bx = [300 300 x];
-        by = [0 0 y];
-        bz = [0 z z];
-        plot3(ax_3d, bx, by, bz, 'Color', [0.25 0.28 0.32], 'LineWidth', 5);
+        % 绘制关节球 (蓝色)
+        for i = 2:7
+            [sx, sy, sz] = sphere(10);
+            r = 6;  % 关节球半径
+            sx = sx * r + joints(i,1);
+            sy = sy * r + joints(i,2);
+            sz = sz * r + joints(i,3);
+            surf(ax_3d, sx, sy, sz, ...
+                'FaceColor', [0.30 0.65 1.00], 'EdgeColor', 'none', 'FaceAlpha', 0.7);
+        end
+
+        % 底座 (圆柱)
+        [cx, cy, cz] = cylinder([10 12], 12);
+        cz = cz * 20;  % 底座高度
+        surf(ax_3d, cx + joints(1,1), cy + joints(1,2), cz, ...
+            'FaceColor', [0.2 0.22 0.25], 'EdgeColor', 'none');
+
+        % 末端执行器标记
+        if isequal(pose, S.robot_target)
+            plot3(ax_3d, pose(1), pose(2), pose(3), 'ro', 'MarkerSize', 10, 'LineWidth', 2);
+        else
+            [sx, sy, sz] = sphere(8);
+            sx = sx * 8 + pose(1); sy = sy * 8 + pose(2); sz = sz * 8 + pose(3);
+            surf(ax_3d, sx, sy, sz, ...
+                'FaceColor', [0.2 0.85 0.35], 'EdgeColor', 'none', 'FaceAlpha', 0.8);
+        end
+    end
+
+    function joints = computeFK(j1, j2, j3, j4, j5, j6)
+        % CR3 正向运动学 (URDF 参数, 角度单位为度, 位置单位为 mm)
+        d2r = pi / 180;
+
+        % URDF 关节参数 (mm, 弧度)
+        j1_z  = 128.3;
+        j3_x  = -274.0;
+        j4_x  = -230.0;  j4_z = 128.3;
+        j5_y  = -116.0;
+        j6_y  = 105.0;
+
+        % rpy 固定旋转
+        j2_rz = pi/2;    j2_ry = pi/2;
+        j4_rx = -pi/2;
+        j5_rz = pi/2;
+        j6_rz = -pi/2;
+
+        % 4x4 齐次变换矩阵
+        T = eye(4);
+        joints = zeros(7, 3);
+        joints(1,:) = [0 0 0];  % base 原点
+
+        % J1: base → Link1
+        T = T * tr(0, 0, j1_z) * rotz(j1 * d2r);
+        joints(2,:) = T(1:3,4)';
+
+        % J2: Link1 → Link2
+        T = T * rotz(j2_rz) * roty(j2_ry) * rotz(j2 * d2r);
+        joints(3,:) = T(1:3,4)';
+
+        % J3: Link2 → Link3
+        T = T * tr(j3_x, 0, 0) * rotz(j3 * d2r);
+        joints(4,:) = T(1:3,4)';
+
+        % J4: Link3 → Link4
+        T = T * tr(j4_x, 0, j4_z) * rotx(j4_rx) * rotz(j4 * d2r);
+        joints(5,:) = T(1:3,4)';
+
+        % J5: Link4 → Link5
+        T = T * tr(0, j5_y, 0) * rotz(j5_rz) * rotz(j5 * d2r);
+        joints(6,:) = T(1:3,4)';
+
+        % J6: Link5 → Link6
+        T = T * tr(0, j6_y, 0) * rotz(j6_rz) * rotz(j6 * d2r);
+        joints(7,:) = T(1:3,4)';
+    end
+
+    % 辅助: 齐次变换
+    function T = tr(x, y, z)
+        T = eye(4); T(1:3,4) = [x; y; z];
+    end
+    function R = rotx(angle)
+        c = cos(angle); s = sin(angle);
+        R = [1 0 0 0; 0 c -s 0; 0 s c 0; 0 0 0 1];
+    end
+    function R = roty(angle)
+        c = cos(angle); s = sin(angle);
+        R = [c 0 s 0; 0 1 0 0; -s 0 c 0; 0 0 0 1];
+    end
+    function R = rotz(angle)
+        c = cos(angle); s = sin(angle);
+        R = [c -s 0 0; s c 0 0; 0 0 1 0; 0 0 0 1];
     end
 
     function updateTextPanels()
@@ -466,6 +586,9 @@ function relay_gui()
             sprintf('                   Z: %8.2f  (target: %8.2f)', rp(3), rt(3)), ...
             '', ...
             sprintf('Orientation (deg):  Rx: %7.2f  Ry: %7.2f  Rz: %7.2f', rp(4), rp(5), rp(6)), ...
+            '', ...
+            sprintf('Joints (deg):  J1:%7.1f  J2:%7.1f  J3:%7.1f', S.joint_angles(1:3)), ...
+            sprintf('               J4:%7.1f  J5:%7.1f  J6:%7.1f', S.joint_angles(4:6)), ...
             '', ...
             sprintf('Force (N):   Fx: %7.2f   Fy: %7.2f   Fz: %7.2f', ff(1), ff(2), ff(3))};
 
