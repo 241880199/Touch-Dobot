@@ -48,25 +48,25 @@ static void drawFallbackLink(float w, float h, float d) {
 }
 
 void RobotModel::drawFallbackBase() {
-    // Base: wide cylinder with flange
+    // Base: wide tapered cylinder, height ≈ J1_Z (0.128m)
     glPushMatrix();
     glRotatef(-90, 1, 0, 0); // gluCylinder Z→Y
     GLUquadric* q = gluNewQuadric();
-    gluCylinder(q, 0.06, 0.07, 0.06, 16, 1);
+    gluCylinder(q, 0.075, 0.065, 0.12, 16, 1);
     gluDeleteQuadric(q);
     glPopMatrix();
 }
 
 void RobotModel::drawFallbackLink1() {
-    drawFallbackLink(0.08f, 0.10f, 0.08f);
+    drawFallbackLink(0.08f, 0.13f, 0.08f);  // waist: height ≈ J1_Z
 }
 
 void RobotModel::drawFallbackLink2() {
-    drawFallbackLink(0.06f, 0.22f, 0.05f);
+    drawFallbackLink(0.06f, 0.27f, 0.05f);  // upper arm: length ≈ |J3_X|
 }
 
 void RobotModel::drawFallbackLink3() {
-    drawFallbackLink(0.045f, 0.21f, 0.04f);
+    drawFallbackLink(0.045f, 0.23f, 0.04f);  // forearm: length ≈ |J4_X|
 }
 
 void RobotModel::drawFallbackLink4() {
