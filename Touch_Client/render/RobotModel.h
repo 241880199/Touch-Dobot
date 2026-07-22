@@ -12,20 +12,29 @@ public:
 
 private:
     void drawLink(const StlMesh& mesh);
-    void drawFallbackLink(float w, float h, float d); // cuboid
-    void drawFallbackBase();                           // cylinder
+    void drawLinkOrFallback(int idx, void (*fallbackFn)());
+    static void drawFallbackBase();
+    static void drawFallbackLink1();
+    static void drawFallbackLink2();
+    static void drawFallbackLink3();
+    static void drawFallbackLink4();
+    static void drawFallbackLink5();
+    static void drawFallbackLink6();
 
     StlMesh m_links[7];  // 0=base, 1~6=links
     bool m_linkLoaded[7] = {};
     bool m_loaded = false;
     bool m_useFallback = false;
 
-    // CR3 geometric parameters (mm) — used for fallback geometry and kinematics
-    static constexpr float BASE_HEIGHT = 60.0f;
-    static constexpr float LINK1_Z = 100.0f;
-    static constexpr float LINK2_LENGTH = 220.0f;
-    static constexpr float LINK3_LENGTH = 210.0f;
-    static constexpr float LINK4_Z = 50.0f;
-    static constexpr float LINK5_Z = 50.0f;
-    static constexpr float LINK6_Z = 40.0f;
+    // ===== CR3 URDF kinematic parameters =====
+    // Joint origins (meters, from DOBOT_6Axis_ROS2_V3/cra_description/urdf/cr3_robot.xacro)
+    static constexpr float J1_Z     = 0.1283f;   // joint1 origin: (0, 0, 0.1283)
+    static constexpr float J3_X     = -0.274f;   // joint3 origin: (-0.274, 0, 0)
+    static constexpr float J4_X     = -0.23f;    // joint4 origin: (-0.23, 0, 0.1283)
+    static constexpr float J4_Z     = 0.1283f;
+    static constexpr float J5_Y     = -0.116f;   // joint5 origin: (0, -0.116, 0)
+    static constexpr float J6_Y     = 0.105f;    // joint6 origin: (0, 0.105, 0)
+
+    // STL mesh scale factor: URDF/STL are in meters, scene is in millimeters
+    static constexpr float MESH_SCALE = 1000.0f;
 };

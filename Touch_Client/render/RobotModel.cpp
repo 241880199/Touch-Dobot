@@ -5,12 +5,12 @@
 #include <cmath>
 
 bool RobotModel::loadModels(const char* dir) {
-    const char* names[] = { "base", "link1", "link2", "link3", "link4", "link5", "link6" };
+    const char* names[] = { "base_link", "Link1", "Link2", "Link3", "Link4", "Link5", "Link6" };
     char path[512];
     bool anyLoaded = false;
 
     for (int i = 0; i < 7; i++) {
-        snprintf(path, sizeof(path), "%s/%s.stl", dir, names[i]);
+        snprintf(path, sizeof(path), "%s/%s.STL", dir, names[i]);
         m_links[i] = loadStl(path);
         m_linkLoaded[i] = m_links[i].valid;
         if (m_linkLoaded[i]) anyLoaded = true;
@@ -21,7 +21,7 @@ bool RobotModel::loadModels(const char* dir) {
         std::cout << "[RobotModel] STL loading failed, enabling geometric fallback mode" << std::endl;
         m_useFallback = true;
     } else {
-        std::cout << "[RobotModel] loading complete" << std::endl;
+        std::cout << "[RobotModel] STL models loaded (" << dir << ")" << std::endl;
     }
     return m_loaded || m_useFallback;
 }
@@ -30,7 +30,17 @@ void RobotModel::drawLink(const StlMesh& mesh) {
     mesh.draw();
 }
 
-void RobotModel::drawFallbackLink(float w, float h, float d) {
+void RobotModel::drawLinkOrFallback(int idx, void (*fallbackFn)()) {
+    if (m_linkLoaded[idx]) {
+        drawLink(m_links[idx]);
+    } else if (m_useFallback) {
+        fallbackFn();
+    }
+}
+
+// ===== Fallback geometry (URDF-proportioned primitives, meters like STL) =====
+
+static void drawFallbackLink(float w, float h, float d) {
     glPushMatrix();
     glScalef(w / 2.0f, h / 2.0f, d / 2.0f);
     glutSolidCube(2.0f);
@@ -38,14 +48,40 @@ void RobotModel::drawFallbackLink(float w, float h, float d) {
 }
 
 void RobotModel::drawFallbackBase() {
-    // base with flange
+    // Base: wide cylinder with flange
     glPushMatrix();
-    glRotatef(-90, 1, 0, 0); // gluCylinder defaults to Z axis, rotate to Y
+    glRotatef(-90, 1, 0, 0); // gluCylinder Z→Y
     GLUquadric* q = gluNewQuadric();
-    gluCylinder(q, 60, 70, BASE_HEIGHT, 16, 1);
+    gluCylinder(q, 0.06, 0.07, 0.06, 16, 1);
     gluDeleteQuadric(q);
     glPopMatrix();
 }
+
+void RobotModel::drawFallbackLink1() {
+    drawFallbackLink(0.08f, 0.10f, 0.08f);
+}
+
+void RobotModel::drawFallbackLink2() {
+    drawFallbackLink(0.06f, 0.22f, 0.05f);
+}
+
+void RobotModel::drawFallbackLink3() {
+    drawFallbackLink(0.045f, 0.21f, 0.04f);
+}
+
+void RobotModel::drawFallbackLink4() {
+    drawFallbackLink(0.03f, 0.05f, 0.03f);
+}
+
+void RobotModel::drawFallbackLink5() {
+    drawFallbackLink(0.025f, 0.05f, 0.025f);
+}
+
+void RobotModel::drawFallbackLink6() {
+    drawFallbackLink(0.02f, 0.04f, 0.02f);
+}
+
+// ===== Main draw: CR3 URDF kinematics =====
 
 void RobotModel::draw(const AppState::RobotPose& joints) {
     if (!m_loaded && !m_useFallback) return;
@@ -54,51 +90,58 @@ void RobotModel::draw(const AppState::RobotPose& joints) {
 
     glPushMatrix();
 
-    // === Base (world origin, no rotation or translation) ===
-    if (m_linkLoaded[0])        drawLink(m_links[0]);
-    else if (m_useFallback)     drawFallbackBase();
+    // Scale: STL/URDF are in meters, scene is in millimeters
+    glScalef(MESH_SCALE, MESH_SCALE, MESH_SCALE);
 
-    // === J1: rotate around Z (waist) ===
-    glTranslatef(0, 0, BASE_HEIGHT + LINK1_Z * 0.5f);
-    glRotatef((float)joints.rz, 0, 0, 1);
-    glTranslatef(0, 0, -LINK1_Z * 0.5f);
-    if (m_linkLoaded[1])        drawLink(m_links[1]);
-    else if (m_useFallback)     drawFallbackLink(80, LINK1_Z, 80);
+    // === Base (world origin, no transform) ===
+    drawLinkOrFallback(0, drawFallbackBase);
 
-    // === J2: rotate around Y (shoulder) ===
-    glTranslatef(0, 0, LINK1_Z);
-    glRotatef((float)joints.ry, 0, 1, 0);
-    glTranslatef(0, 0, LINK2_LENGTH * 0.3f);
-    if (m_linkLoaded[2])        drawLink(m_links[2]);
-    else if (m_useFallback)     drawFallbackLink(60, LINK2_LENGTH, 50);
+    // === Joint 1: waist rotation about Z ===
+    // URDF: origin xyz="0 0 0.1283", rpy="0 0 0", axis="0 0 1"
+    glTranslatef(0, 0, J1_Z);
+    // rpy: yaw=0, pitch=0, roll=0
+    glRotatef((float)joints.j1, 0, 0, 1);
+    drawLinkOrFallback(1, drawFallbackLink1);
 
-    // === J3: rotate around Y (elbow) ===
-    glTranslatef(0, 0, LINK2_LENGTH * 0.7f);
-    glRotatef((float)(joints.ry * 0.5), 0, 1, 0); // approximate: J3 coupled with J2
-    glTranslatef(0, 0, LINK3_LENGTH * 0.3f);
-    if (m_linkLoaded[3])        drawLink(m_links[3]);
-    else if (m_useFallback)     drawFallbackLink(45, LINK3_LENGTH, 40);
+    // === Joint 2: shoulder pitch ===
+    // URDF: origin xyz="0 0 0", rpy="1.5708 1.5708 0", axis="0 0 1"
+    // rpy=(π/2, π/2, 0) → rotation applied: Rz(0)*Ry(π/2)*Rx(π/2)
+    glRotatef(0,   0, 0, 1);  // yaw:    Rz(0°)
+    glRotatef(90,  0, 1, 0);  // pitch:  Ry(90°)
+    glRotatef(90,  1, 0, 0);  // roll:   Rx(90°)
+    glRotatef((float)joints.j2, 0, 0, 1);
+    drawLinkOrFallback(2, drawFallbackLink2);
 
-    // === J4: rotate around Z (wrist 1) ===
-    glTranslatef(0, 0, LINK3_LENGTH * 0.7f);
-    glRotatef((float)joints.rx, 0, 0, 1);
-    glTranslatef(0, 0, LINK4_Z * 0.5f);
-    if (m_linkLoaded[4])        drawLink(m_links[4]);
-    else if (m_useFallback)     drawFallbackLink(30, LINK4_Z, 30);
+    // === Joint 3: elbow ===
+    // URDF: origin xyz="-0.274 0 0", rpy="0 0 0", axis="0 0 1"
+    glTranslatef(J3_X, 0, 0);
+    // rpy: yaw=0, pitch=0, roll=0
+    glRotatef((float)joints.j3, 0, 0, 1);
+    drawLinkOrFallback(3, drawFallbackLink3);
 
-    // === J5: rotate around Y (wrist 2) ===
-    glTranslatef(0, 0, LINK4_Z);
-    glRotatef((float)(joints.ry * 0.3), 0, 1, 0);
-    glTranslatef(0, 0, LINK5_Z * 0.5f);
-    if (m_linkLoaded[5])        drawLink(m_links[5]);
-    else if (m_useFallback)     drawFallbackLink(25, LINK5_Z, 25);
+    // === Joint 4: wrist 1 ===
+    // URDF: origin xyz="-0.23 0 0.1283", rpy="0 0 -1.5708", axis="0 0 1"
+    glTranslatef(J4_X, 0, J4_Z);
+    glRotatef(-90,  0, 0, 1);  // yaw:    Rz(-90°)
+    // pitch=0, roll=0
+    glRotatef((float)joints.j4, 0, 0, 1);
+    drawLinkOrFallback(4, drawFallbackLink4);
 
-    // === J6: rotate around Z (end effector) ===
-    glTranslatef(0, 0, LINK5_Z);
-    glRotatef((float)joints.rz, 0, 0, 1);
-    glTranslatef(0, 0, LINK6_Z * 0.5f);
-    if (m_linkLoaded[6])        drawLink(m_links[6]);
-    else if (m_useFallback)     drawFallbackLink(20, LINK6_Z, 20);
+    // === Joint 5: wrist 2 ===
+    // URDF: origin xyz="0 -0.116 0", rpy="1.5708 0 0", axis="0 0 1"
+    glTranslatef(0, J5_Y, 0);
+    // yaw=0, pitch=0
+    glRotatef(90,  1, 0, 0);  // roll:   Rx(90°)
+    glRotatef((float)joints.j5, 0, 0, 1);
+    drawLinkOrFallback(5, drawFallbackLink5);
+
+    // === Joint 6: end flange ===
+    // URDF: origin xyz="0 0.105 0", rpy="-1.5708 0 0", axis="0 0 1"
+    glTranslatef(0, J6_Y, 0);
+    // yaw=0, pitch=0
+    glRotatef(-90, 1, 0, 0);  // roll:   Rx(-90°)
+    glRotatef((float)joints.j6, 0, 0, 1);
+    drawLinkOrFallback(6, drawFallbackLink6);
 
     glPopMatrix();
 }

@@ -11,6 +11,7 @@ static RobotModel s_robotModel;
 RobotModel& getRobotModel() { return s_robotModel; }
 
 void init() {
+    glEnable(GL_NORMALIZE);  // 自动归一化法线（STL 缩放后需要）
     // 加载 STL 模型（如果 models/cr3/ 目录存在），否则自动 fallback 几何体
     if (!s_robotModel.loadModels("models/cr3")) {
         s_robotModel.setFallbackMode();
