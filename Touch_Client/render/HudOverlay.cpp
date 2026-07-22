@@ -265,6 +265,18 @@ static void drawCoordPanel(int x, int y, int w, int h) {
     text2D(x + 6, ty, buf, GLUT_BITMAP_8_BY_13);
     ty -= lineH + 4;
 
+    // 关节角度
+    glColor3f(0.90f, 0.94f, 1.00f);
+    text2D(x + 6, ty, "Joints (deg):", GLUT_BITMAP_HELVETICA_10);
+    ty -= lineH;
+    snprintf(buf, sizeof(buf), "  J1:%7.1f  J2:%7.1f  J3:%7.1f", pose.j1, pose.j2, pose.j3);
+    glColor3f(0.50f, 0.80f, 0.95f);
+    text2D(x + 6, ty, buf, GLUT_BITMAP_8_BY_13);
+    ty -= lineH;
+    snprintf(buf, sizeof(buf), "  J4:%7.1f  J5:%7.1f  J6:%7.1f", pose.j4, pose.j5, pose.j6);
+    text2D(x + 6, ty, buf, GLUT_BITMAP_8_BY_13);
+    ty -= lineH + 4;
+
     // 分隔线
     drawSeparatorLine(x + 4, x + w - 4, ty + 2);
     ty -= 4;

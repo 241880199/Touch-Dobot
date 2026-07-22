@@ -18,10 +18,6 @@ static bool g_noRobot = false;
 static bool g_noTouch = false;
 
 // ===== GLUT 回调 =====
-float g_rotateX = 15.0f, g_rotateY = 10.0f;
-float g_camDist = 2.0f;
-int g_lastX = 0, g_lastY = 0;
-bool g_dragging = false;
 
 void display() {
     if (appState.isClosing) return;
@@ -30,45 +26,46 @@ void display() {
     glClearColor(0.1f, 0.12f, 0.18f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-    // ===== 3D 场景渲染到右侧视口 =====
-    int vpX = HudLayout::RIGHT_X;
-    int vpY = HudLayout::PANEL_Y;
-    int vpW = HudLayout::RIGHT_W;
-    int vpH = HudLayout::RIGHT_3D_H;
+    // ===== 获取实际窗口尺寸 =====
+    int winW = glutGet(GLUT_WINDOW_WIDTH);
+    int winH = glutGet(GLUT_WINDOW_HEIGHT);
+    float scaleX = (float)winW / Config::WINDOW_W;
+    float scaleY = (float)winH / Config::WINDOW_H;
 
-    glViewport(vpX, Config::WINDOW_H - vpY - vpH, vpW, vpH);
-    glScissor(vpX, Config::WINDOW_H - vpY - vpH, vpW, vpH);
+    // ===== 3D 场景渲染到右侧视口（按比例缩放）=====
+    int vpX = (int)(HudLayout::RIGHT_X * scaleX);
+    int vpY3D = (int)(HudLayout::PANEL_Y * scaleY);
+    int vpW = (int)(HudLayout::RIGHT_W * scaleX);
+    int vpH = (int)(HudLayout::RIGHT_3D_H * scaleY);
+
+    glViewport(vpX, vpY3D, vpW, vpH);
+    glScissor(vpX, vpY3D, vpW, vpH);
     glEnable(GL_SCISSOR_TEST);
 
     glEnable(GL_DEPTH_TEST);
 
-    // 3D 投影 (使用子视口宽高比)
+    // 正视图 — 正交投影
     glMatrixMode(GL_PROJECTION);
     glLoadIdentity();
-    gluPerspective(45.0, (double)vpW / vpH, 10.0, 2000.0);
+    double halfW = 400.0;  // 视口半宽 (mm)，覆盖机械臂 X 范围
+    double halfH = 400.0;  // 视口半高 (mm)，覆盖机械臂 Z 范围
+    double aspect = (double)vpW / vpH;
+    glOrtho(-halfW * aspect, halfW * aspect, -halfH, halfH, 10.0, 2000.0);
 
     glMatrixMode(GL_MODELVIEW);
     glLoadIdentity();
 
-    // 相机：看向工作区中心
-    double cx = (Config::SAFE_X_MIN + Config::SAFE_X_MAX) / 2.0;
-    double cy = (Config::SAFE_Y_MIN + Config::SAFE_Y_MAX) / 2.0;
-    double cz = (Config::SAFE_Z_MIN + Config::SAFE_Z_MAX) / 2.0;
-    double camDist = 600.0 * g_camDist;
-
-    gluLookAt(cx, cy - camDist * 0.5, cz + camDist,
-              cx, cy, cz,
-              0, 0, 1);
-
-    glRotatef(g_rotateX, 1, 0, 0);
-    glRotatef(g_rotateY, 0, 0, 1);
+    // 正视相机：从正前方 (Y+) 平视机械臂
+    gluLookAt(0, 800, 300,    // eye: 正前方，略高于机器人中部
+              0,   0, 300,    // center: 机器人中部
+              0,   0,   1);   // up: Z 向上
 
     SceneRenderer::draw3D();
 
     glDisable(GL_SCISSOR_TEST);
 
-    // ===== 2D HUD 全屏渲染 =====
-    glViewport(0, 0, Config::WINDOW_W, Config::WINDOW_H);
+    // ===== 2D HUD 全屏渲染（缩放至实际窗口）=====
+    glViewport(0, 0, winW, winH);
     HudOverlay::drawAll();
 
     glutSwapBuffers();
@@ -84,31 +81,8 @@ void idle() {
 }
 
 void reshape(int w, int h) {
-    glViewport(0, 0, w, h);
-}
-
-void mouse(int button, int state, int x, int y) {
-    if (button == GLUT_LEFT_BUTTON) {
-        g_dragging = (state == GLUT_DOWN);
-        if (g_dragging) { g_lastX = x; g_lastY = y; }
-    }
-    else if (button == 3 && state == GLUT_DOWN) { // 滚轮上
-        g_camDist *= 0.9f;
-        if (g_camDist < 0.3f) g_camDist = 0.3f;
-    }
-    else if (button == 4 && state == GLUT_DOWN) { // 滚轮下
-        g_camDist *= 1.1f;
-        if (g_camDist > 5.0f) g_camDist = 5.0f;
-    }
-}
-
-void motion(int x, int y) {
-    if (!g_dragging) return;
-    g_rotateY += (x - g_lastX) * 0.5f;
-    g_rotateX -= (y - g_lastY) * 0.5f;
-    if (g_rotateX < -60.0f) g_rotateX = -60.0f;
-    if (g_rotateX > 60.0f) g_rotateX = 60.0f;
-    g_lastX = x; g_lastY = y;
+    // 窗口大小变化时由 display() 按比例重新计算所有视口
+    glutPostRedisplay();
 }
 
 // ===== 定时器 (无机械臂模式下跳过) =====
@@ -130,11 +104,18 @@ void alarmCheckTimer(int) {
     }
 }
 
+void jointAngleTimer(int) {
+    if (!g_noRobot) {
+        RelayCore::instance().queryJointAngles();
+    }
+    if (!appState.isClosing) {
+        glutTimerFunc(200, jointAngleTimer, 0);
+    }
+}
+
 void keyboard(unsigned char key, int, int) {
     if (key == 'q' || key == 'Q' || key == 27) { // q 或 ESC
         std::cout << "\nShutting down..." << std::endl;
-        // 注意: 原始 GLUT 3.2 不支持 glutLeaveMainLoop()
-        // 在主循环中直接做清理然后 exit
         RelayCore::instance().shutdownRelayReporting();
         if (!g_noRobot) RelayCore::instance().shutdown();
         if (!g_noTouch) cleanupHapticDevice();
@@ -170,8 +151,6 @@ int main(int argc, char* argv[]) {
     glutDisplayFunc(display);
     glutIdleFunc(idle);
     glutReshapeFunc(reshape);
-    glutMouseFunc(mouse);
-    glutMotionFunc(motion);
     glutKeyboardFunc(keyboard);
 
     glEnable(GL_DEPTH_TEST);
@@ -212,16 +191,17 @@ int main(int argc, char* argv[]) {
     // 6. 启动定时器
     glutTimerFunc(Config::POSE_QUERY_INTERVAL, poseQueryTimer, 0);
     glutTimerFunc(Config::ALARM_CHECK_INTERVAL, alarmCheckTimer, 0);
+    glutTimerFunc(500, jointAngleTimer, 0);
 
     // 6. 进入主循环
     std::cout << "\nSystem ready." << std::endl;
-    std::cout << "  Mouse drag: rotate view | Mouse wheel: zoom | q/ESC: quit" << std::endl;
+    std::cout << "  q/ESC: quit" << std::endl;
     if (!g_noTouch && !g_noRobot) {
         std::cout << "  Touch button 1: control robot" << std::endl;
     }
     std::cout << std::endl;
 
-    glutMainLoop(); // 原始 GLUT 3.2: 此函数不返回，退出通过键盘回调中的 exit(0)
+    glutMainLoop();
 
     return 0; // unreachable
 }

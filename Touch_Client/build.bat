@@ -29,5 +29,14 @@ copy /Y "%OH_SDK%\utilities\lib\x64\Release\glut32.dll" "%OUTDIR%\" >nul
 echo   DLLs copied.
 
 echo.
+echo [3/3] Copying models...
+if exist "%~dp0models" (
+    xcopy /E /I /Y "%~dp0models" "%OUTDIR%\models" >nul
+    echo   Models copied.
+) else (
+    echo   models/ not found, skipped
+)
+
+echo.
 echo Build complete. Run: %OUTDIR%\Touch_Client.exe
 endlocal
