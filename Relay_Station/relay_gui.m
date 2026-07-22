@@ -12,8 +12,7 @@ function relay_gui()
     S.touch_pos = [0 0 0 0 0 0];   % Touch 位姿
     S.robot_pos = [300 0 200 0 0 0]; % 机械臂位姿 (默认值)
     S.robot_target = [300 0 200 0 0 0];
-    S.joint_angles = [0 0 0 0 0 0]; % 关节角度 J1~J6 (度)
-    S.joint_angles_time = tic;       % 关节角度查询计时
+    S.joint_angles = [0 0 0 0 0 0]; % 关节角度 J1~J6 (度, 由 C++ 端 J| 协议上报)
     S.force_raw = [0 0 0];
     S.force_filt = [0 0 0];
     S.touch_relay_delay = 0;
@@ -365,29 +364,6 @@ function relay_gui()
         if robotOnline
             lbl_status.Text = 'Robot: ONLINE';
             lbl_status.FontColor = green;
-        end
-    end
-
-    function readRobotJointAngles()
-        % 查询 CR3 关节角度 (GetAngle → 29999)
-        if isempty(S.robot_enable) || ~isvalid(S.robot_enable)
-            return;
-        end
-        try
-            write(S.robot_enable, 'GetAngle()');
-            pause(0.05);
-            if S.robot_enable.NumBytesAvailable > 0
-                fb = read(S.robot_enable, S.robot_enable.NumBytesAvailable, 'uint8');
-                fbStr = strtrim(char(fb));
-                if contains(fbStr, 'GetAngle')
-                    % 格式: ErrorID,{J1,J2,J3,J4,J5,J6},GetAngle();
-                    vals = sscanf(fbStr, '%*d,{%f,%f,%f,%f,%f,%f');
-                    if length(vals) == 6
-                        S.joint_angles = vals';
-                    end
-                end
-            end
-        catch
         end
     end
 
