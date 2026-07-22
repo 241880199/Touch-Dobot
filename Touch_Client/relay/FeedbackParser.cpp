@@ -28,6 +28,13 @@ bool parsePose(const char* feedback, AppState::RobotPose& out) {
         &out.x, &out.y, &out.z, &out.rx, &out.ry, &out.rz) == 6;
 }
 
+bool parseAngle(const char* feedback, double out[6]) {
+    char data[256];
+    if (!extractData(feedback, data, sizeof(data))) return false;
+    return sscanf_s(data, "%lf,%lf,%lf,%lf,%lf,%lf",
+        &out[0], &out[1], &out[2], &out[3], &out[4], &out[5]) == 6;
+}
+
 bool parseMode(const char* feedback, int& out) {
     char data[64];
     if (!extractData(feedback, data, sizeof(data))) return false;

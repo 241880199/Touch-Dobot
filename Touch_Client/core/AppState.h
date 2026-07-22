@@ -46,6 +46,7 @@ public:
     struct RobotPose {
         double x = 0, y = 0, z = 0;
         double rx = 0, ry = 0, rz = 0;
+        double j1 = 0, j2 = 0, j3 = 0, j4 = 0, j5 = 0, j6 = 0;
     };
     RobotPose robotActualPose;     // GetPose() 返回的实际位姿
     RobotPose robotTargetPose;     // Touch 发送的目标位姿

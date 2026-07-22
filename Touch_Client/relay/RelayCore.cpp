@@ -211,6 +211,33 @@ void RelayCore::queryPose() {
     }
 }
 
+void RelayCore::queryJointAngles() {
+    if (!isRobotConnected()) return;
+    robotSendEnable("GetAngle()");
+    Sleep(50);
+    char fb[1024];
+    if (robotRecvEnable(fb, sizeof(fb))) {
+        double angles[6] = {};
+        if (FeedbackParser::parseAngle(fb, angles)) {
+            auto& app = appState;
+            EnterCriticalSection(&app.robotPoseMutex);
+            app.robotActualPose.j1 = angles[0];
+            app.robotActualPose.j2 = angles[1];
+            app.robotActualPose.j3 = angles[2];
+            app.robotActualPose.j4 = angles[3];
+            app.robotActualPose.j5 = angles[4];
+            app.robotActualPose.j6 = angles[5];
+            LeaveCriticalSection(&app.robotPoseMutex);
+
+            // 上报关节角度到 MATLAB GUI
+            char buf[128];
+            snprintf(buf, sizeof(buf), "J|%.2f,%.2f,%.2f,%.2f,%.2f,%.2f",
+                angles[0], angles[1], angles[2], angles[3], angles[4], angles[5]);
+            sendRelayUpdate(buf);
+        }
+    }
+}
+
 void RelayCore::checkAlarm() {
     if (!isRobotConnected()) return;
     robotSendEnable("RobotMode()");

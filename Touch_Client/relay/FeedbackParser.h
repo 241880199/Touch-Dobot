@@ -5,6 +5,9 @@ namespace FeedbackParser {
     // 解析 GetPose() 返回: 0,{x,y,z,rx,ry,rz},GetPose();
     bool parsePose(const char* feedback, AppState::RobotPose& out);
 
+    // 解析 GetAngle() 返回: 0,{J1,J2,J3,J4,J5,J6},GetAngle();
+    bool parseAngle(const char* feedback, double out[6]);
+
     // 解析 RobotMode() 返回: 0,{mode},RobotMode();
     bool parseMode(const char* feedback, int& out);
 

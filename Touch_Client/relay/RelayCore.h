@@ -24,6 +24,7 @@ public:
     // Robot → Touch 反向数据流 (每帧调用)
     void pollFeedback();
     void queryPose();
+    void queryJointAngles();
     void checkAlarm();
 
     // 扩展
