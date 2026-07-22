@@ -485,11 +485,11 @@ function relay_gui()
         j5_y  = -116.0;
         j6_y  = 105.0;
 
-        % rpy 固定旋转
-        j2_rz = pi/2;    j2_ry = pi/2;
-        j4_rx = -pi/2;
-        j5_rz = pi/2;
-        j6_rz = -pi/2;
+        % rpy 固定旋转 (URDF fixed-axis: R = Rz(yaw) * Ry(pitch) * Rx(roll))
+        j2_ry = pi/2;  j2_rx = pi/2;   % rpy="1.5708 1.5708 0" → Ry(π/2)*Rx(π/2)
+        j4_rz = -pi/2;                  % rpy="0 0 -1.5708" → Rz(-π/2)
+        j5_rx = pi/2;                   % rpy="1.5708 0 0" → Rx(π/2)
+        j6_rx = -pi/2;                  % rpy="-1.5708 0 0" → Rx(-π/2)
 
         % 4x4 齐次变换矩阵
         T = eye(4);
@@ -501,7 +501,7 @@ function relay_gui()
         joints(2,:) = T(1:3,4)';
 
         % J2: Link1 → Link2
-        T = T * rotz(j2_rz) * roty(j2_ry) * rotz(j2 * d2r);
+        T = T * roty(j2_ry) * rotx(j2_rx) * rotz(j2 * d2r);
         joints(3,:) = T(1:3,4)';
 
         % J3: Link2 → Link3
@@ -509,15 +509,15 @@ function relay_gui()
         joints(4,:) = T(1:3,4)';
 
         % J4: Link3 → Link4
-        T = T * tr(j4_x, 0, j4_z) * rotx(j4_rx) * rotz(j4 * d2r);
+        T = T * tr(j4_x, 0, j4_z) * rotz(j4_rz) * rotz(j4 * d2r);
         joints(5,:) = T(1:3,4)';
 
         % J5: Link4 → Link5
-        T = T * tr(0, j5_y, 0) * rotz(j5_rz) * rotz(j5 * d2r);
+        T = T * tr(0, j5_y, 0) * rotx(j5_rx) * rotz(j5 * d2r);
         joints(6,:) = T(1:3,4)';
 
         % J6: Link5 → Link6
-        T = T * tr(0, j6_y, 0) * rotz(j6_rz) * rotz(j6 * d2r);
+        T = T * tr(0, j6_y, 0) * rotx(j6_rx) * rotz(j6 * d2r);
         joints(7,:) = T(1:3,4)';
     end
 
