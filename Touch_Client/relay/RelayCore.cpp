@@ -48,20 +48,16 @@ static bool escapeSingularity() {
     robotSendEnable("ResetRobot()");
     Sleep(200);
 
-    std::cout << "[脱困] 策略: ClearError → EnableRobot → 立即 JointMovJ" << std::endl;
+    std::cout << "[脱困] 策略: ClearError → JointMovJ入队 → EnableRobot 执行" << std::endl;
     std::cout << "========================================" << std::endl;
 
     double curJoints[6] = {0};
 
-    // Step 1: ClearError
+    // Step 1: ClearError (清除报警)
     robotSendEnable("ClearError()");
     Sleep(200);
 
-    // Step 2: EnableRobot (不带sleep, 抢在报警前)
-    robotSendEnable("EnableRobot(0.5,0,0,0)");
-
-    // Step 3: 立即读关节角
-    Sleep(100);
+    // Step 2: 清除后立即读关节角 (不需要使能)
     robotSendEnable("GetAngle()");
     Sleep(100);
     if (robotRecvEnable(fb, sizeof(fb))) {
@@ -71,18 +67,14 @@ static bool escapeSingularity() {
                   << " J5=" << curJoints[4] << " J6=" << curJoints[5] << std::endl;
     }
 
-    // Step 4: 大步长偏移 — 确保离开奇异区
-    // 如果关节角全是0 (零点位姿), 用绝对值偏移
+    // Step 3: 构造逃离目标 (大步长偏移, 离开 0°)
     double safeJoints[6];
     for (int i = 0; i < 6; i++) safeJoints[i] = curJoints[i];
-    // J2: 折弯大臂 (远离0°, 目标 ±30°)
-    safeJoints[1] = (fabs(curJoints[1]) < 5.0) ? 30.0 : curJoints[1] + (curJoints[1] > 0 ? 20 : -20);
-    // J3: 折弯小臂 (远离0°, 目标 ±45°, 注意限位 ±155°)
-    safeJoints[2] = (fabs(curJoints[2]) < 5.0) ? 45.0 : curJoints[2] + (curJoints[2] > 0 ? 30 : -30);
+    safeJoints[1] = (fabs(curJoints[1]) < 5.0) ? 30.0 : curJoints[1] + 20;
+    safeJoints[2] = (fabs(curJoints[2]) < 5.0) ? 45.0 : curJoints[2] + 30;
     if (safeJoints[2] > 150) safeJoints[2] = 150;
     if (safeJoints[2] < -150) safeJoints[2] = -150;
-    // J5: 转动手腕 (远离0°, 目标 30°)
-    safeJoints[4] = (fabs(curJoints[4]) < 5.0) ? 30.0 : curJoints[4] + (curJoints[4] > 0 ? 20 : -20);
+    safeJoints[4] = (fabs(curJoints[4]) < 5.0) ? 30.0 : curJoints[4] + 20;
 
     std::cout << "[脱困] 目标关节: J1=" << safeJoints[0] << " J2=" << safeJoints[1]
               << " J3=" << safeJoints[2] << " J4=" << safeJoints[3]
@@ -92,45 +84,50 @@ static bool escapeSingularity() {
     snprintf(cmd, sizeof(cmd), "JointMovJ(%.2f,%.2f,%.2f,%.2f,%.2f,%.2f)",
         safeJoints[0], safeJoints[1], safeJoints[2],
         safeJoints[3], safeJoints[4], safeJoints[5]);
-    std::cout << "[脱困] 发送: " << cmd << std::endl;
 
-    // 紧时序: 连续发送, 不给报警触发时间
+    // Step 4: 关键! 先 JointMovJ → 再 EnableRobot
+    // ClearError后机器人未报警但未使能, JointMovJ进入30003队列
+    std::cout << "[脱困] 入队: " << cmd << std::endl;
     robotSendMotion(cmd);
-    Sleep(100);
-    robotSendMotion(cmd);  // 重复一次确保执行
-    Sleep(2000);  // 等待运动完成
+    Sleep(50);
+    robotSendMotion(cmd);  // 重复确保入队
 
-    // Step 5: 检查状态，失败则重试更大幅偏移
+    // Step 5: 现在使能 — 运动队列立即执行, 抢在报警前挪开关节
+    std::cout << "[脱困] 使能并执行..." << std::endl;
+    robotSendEnable("EnableRobot(0.5,0,0,0)");
+    Sleep(3000);  // 等待 JointMovJ 执行完成
+
+    // Step 6: 检查状态
     for (int retry = 0; retry < 3; retry++) {
-        Sleep(500);
-        robotRecvMotion(fb, sizeof(fb));
-
         robotSendEnable("RobotMode()");
         Sleep(50);
         if (robotRecvEnable(fb, sizeof(fb))) {
             int mode = -1;
             FeedbackParser::parseMode(fb, mode);
             if (mode != 9 && mode != -1) {
-                std::cout << "[脱困] 脱离奇异成功 (mode=" << mode << ")" << std::endl;
+                std::cout << "[脱困] 脱困成功! (mode=" << mode << ")" << std::endl;
                 s_escaping = false;
                 return true;
             }
         }
 
         if (retry < 2) {
-            // 加大偏移重试
-            std::cout << "[脱困] 仍处于报警, 加大偏移重试 " << (retry + 2) << "/3..." << std::endl;
-            safeJoints[1] += (safeJoints[1] > 0 ? 15 : -15);
+            std::cout << "[脱困] 重试" << (retry+2) << "/3: ClearError + 更大步长..." << std::endl;
+            robotSendEnable("ClearError()");
+            Sleep(100);
+            safeJoints[1] += 15;
             safeJoints[2] += (safeJoints[2] > 0 ? 20 : -20);
-            safeJoints[4] += (safeJoints[4] > 0 ? 15 : -15);
+            safeJoints[4] += 15;
             if (safeJoints[2] > 150) safeJoints[2] = 150;
             if (safeJoints[2] < -150) safeJoints[2] = -150;
             snprintf(cmd, sizeof(cmd), "JointMovJ(%.2f,%.2f,%.2f,%.2f,%.2f,%.2f)",
                 safeJoints[0], safeJoints[1], safeJoints[2],
                 safeJoints[3], safeJoints[4], safeJoints[5]);
-            std::cout << "[脱困] 重试发送: " << cmd << std::endl;
             robotSendMotion(cmd);
-            Sleep(2000);
+            Sleep(50);
+            robotSendMotion(cmd);
+            robotSendEnable("EnableRobot(0.5,0,0,0)");
+            Sleep(3000);
         }
     }
 
