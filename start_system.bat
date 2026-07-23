@@ -6,14 +6,15 @@ echo ================================================
 echo   Touch-Dobot Remote Control - System Launcher
 echo ================================================
 echo.
-echo   Architecture:
-echo     Touch_Client --TCP:8888--^> MATLAB Relay --TCP--^> Robot(192.168.101.11)
+echo   Architecture (v3.0):
+echo     Touch_Client --TCP:8888--^> MATLAB GUI (display only)
+echo     Touch_Client --TCP:29999/30003--^> Robot(192.168.101.11)
 echo.
 
 set "MSBUILD=D:\Program Files\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\MSBuild.exe"
-set "PROJECT=D:\Projects\Touch\Codes\Touch_Client\Touch_Client.vcxproj"
+set "PROJECT=D:\Projects\Touch\Touch_Client\Touch_Client.vcxproj"
 set "OH_SDK=D:\Projects\Touch\OpenHaptics\Developer\3.5.0"
-set "OUTDIR=D:\Projects\Touch\Codes\Touch_Client\x64\Release"
+set "OUTDIR=D:\Projects\Touch\Touch_Client\x64\Release"
 set "RELAY_DIR=D:\Projects\Touch\Relay_Station"
 set "MATLAB=matlab"
 
@@ -25,7 +26,7 @@ echo   Starting MATLAB relay in a new window...
 echo   (Close the MATLAB window to stop the relay)
 echo.
 
-start "Touch-Dobot Relay" cmd /c "cd /d %RELAY_DIR% && %MATLAB% -nosplash -nodesktop -r "relay_main""
+start "Touch-Dobot Relay" cmd /c "cd /d %RELAY_DIR% && %MATLAB% -nosplash -nodesktop -r "relay_gui""
 
 echo   Waiting for relay to initialize...
 timeout /t 5 /nobreak >nul

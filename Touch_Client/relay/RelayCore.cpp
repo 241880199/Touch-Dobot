@@ -37,30 +37,35 @@ static bool escapeSingularity() {
 
     char fb[256];
 
-    // Step 0: 诊断
+    // Step 0: 排空缓冲区, 然后读错误码
+    robotDrainEnable();
     robotSendEnable("GetErrorID()");
     Sleep(100);
     if (robotRecvEnable(fb, sizeof(fb))) {
         std::cout << "[脱困] 错误码: " << fb;
     }
 
-    // Step 0.5: 尝试 ResetRobot 清空队列
+    // Step 1: ResetRobot 清空队列
     robotSendEnable("ResetRobot()");
     Sleep(300);
+    robotDrainEnable();
 
-    // Step 0.6: 如果 ClearError + EnableRobot 直接不行,
-    // 尝试彻底复位: EmergencyStop → PowerOn → ClearError → EnableRobot
-    std::cout << "[脱困] 尝试彻底复位: EmergencyStop → PowerOn → ClearError → EnableRobot" << std::endl;
+    // Step 2: 彻底复位
+    std::cout << "[脱困] 尝试彻底复位..." << std::endl;
     robotSendEnable("EmergencyStop()");
     Sleep(500);
+    robotDrainEnable();
     robotSendEnable("PowerOn()");
     std::cout << "[脱困] 等待 PowerOn (约12秒)..." << std::endl;
     for (int i = 0; i < 12; i++) { std::cout << "." << std::flush; Sleep(1000); }
     std::cout << std::endl;
+    robotDrainEnable();
     robotSendEnable("ClearError()");
     Sleep(300);
+    robotDrainEnable();
     robotSendEnable("EnableRobot(0.5,0,0,0)");
     Sleep(300);
+    robotDrainEnable();
 
     // 检查
     robotSendEnable("RobotMode()");
@@ -68,6 +73,7 @@ static bool escapeSingularity() {
     if (robotRecvEnable(fb, sizeof(fb))) {
         int mode = -1;
         FeedbackParser::parseMode(fb, mode);
+        std::cout << "[脱困] RobotMode: " << fb;
         if (mode != 9 && mode != -1) {
             std::cout << "[脱困] 彻底复位成功! (mode=" << mode << ")" << std::endl;
             s_escaping = false;
@@ -75,17 +81,16 @@ static bool escapeSingularity() {
         }
     }
 
-    // 仍失败 — 读错误码
+    // 仍失败 — 再读一次
+    robotDrainEnable();
     robotSendEnable("GetErrorID()");
     Sleep(100);
     if (robotRecvEnable(fb, sizeof(fb))) {
-        std::cout << "[脱困] 复位后仍报错: " << fb;
+        std::cout << "[脱困] 当前错误码: " << fb;
     }
 
-    std::cout << "[脱困] 错误74疑似硬件故障, 程序无法修复" << std::endl;
-    std::cout << "[脱困] 建议: 1) 检查控制柜显示屏上的具体错误信息" << std::endl;
-    std::cout << "[脱困]       2) 用DobotStudio连接查看错误详情并清除" << std::endl;
-    std::cout << "[脱困]       3) 检查伺服驱动器状态指示灯" << std::endl;
+    std::cout << "[脱困] TCP软件复位无法清除错误74" << std::endl;
+    std::cout << "[脱困] 请用 DobotStudio 连接查看错误详情" << std::endl;
     s_escaping = false;
     return false;
 }
@@ -376,6 +381,7 @@ void RelayCore::pollFeedback() {
 
 void RelayCore::queryPose() {
     if (!isRobotConnected()) return;
+    robotDrainEnable();  // 排空残留避免读到其他命令的响应
     robotSendEnable("GetPose()");
     Sleep(50);
     char fb[1024];
@@ -402,6 +408,7 @@ void RelayCore::queryPose() {
 
 void RelayCore::queryJointAngles() {
     if (!isRobotConnected()) return;
+    robotDrainEnable();  // 排空残留
     robotSendEnable("GetAngle()");
     Sleep(50);
     char fb[1024];
@@ -429,6 +436,7 @@ void RelayCore::queryJointAngles() {
 
 void RelayCore::checkAlarm() {
     if (!isRobotConnected()) return;
+    robotDrainEnable();  // 排空残留
     robotSendEnable("RobotMode()");
     Sleep(50);
     char fb[1024];

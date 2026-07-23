@@ -21,9 +21,7 @@ function relay_gui()
     S.last_time = tic;
 
     % TCP 连接
-    S.server = [];                 % Touch 客户端连接
-    S.robot_enable = [];           % 机械臂使能端口
-    S.robot_motion = [];           % 机械臂运动端口
+    S.server = [];                 % C++ Touch_Client 连接 (v3.0: 仅数据上报，不直连机械臂)
 
     % ===== 加载配置 =====
     cfg = relay_config();
@@ -63,8 +61,8 @@ function relay_gui()
                      'Text', ['Robot IP: ' cfg.robot_ip], ...
                      'FontColor', text_dim, 'FontSize', 10);
 
-    lbl_status = uilabel(pnl_top, 'Position', [1250 3 130 18], ...
-                         'Text', 'Robot: OFFLINE', ...
+    lbl_status = uilabel(pnl_top, 'Position', [1230 3 150 18], ...
+                         'Text', 'C++ Client: OFFLINE', ...
                          'FontColor', red, 'FontSize', 10, ...
                          'HorizontalAlignment', 'right');
 
@@ -168,7 +166,7 @@ function relay_gui()
     % ===== 嵌套函数 =====
 
     function initNetwork()
-        % 启动 TCP 服务器
+        % 启动 TCP 服务器 (v3.0: 仅监听 C++ 端数据上报，不直连机械臂)
         try
             S.server = tcpserver(cfg.listen_ip, cfg.relay_port);
             S.server.Timeout = cfg.timeout;
@@ -177,30 +175,17 @@ function relay_gui()
         catch e
             fprintf('[Relay] ERROR starting server: %s\n', e.message);
         end
-
-        % 连接机械臂
-        try
-            S.robot_enable = tcpclient(cfg.robot_ip, cfg.port_enable);
-            S.robot_enable.Timeout = cfg.timeout;
-            fprintf('[Relay] Connected to robot enable port %d\n', cfg.port_enable);
-        catch
-            fprintf('[Relay] WARNING: Cannot connect to robot enable port\n');
-        end
-
-        try
-            S.robot_motion = tcpclient(cfg.robot_ip, cfg.port_motion);
-            S.robot_motion.Timeout = cfg.timeout;
-            fprintf('[Relay] Connected to robot motion port %d\n', cfg.port_motion);
-        catch
-            fprintf('[Relay] WARNING: Cannot connect to robot motion port\n');
-        end
     end
 
     function onServerConnection(src, ~)
         if src.Connected
             fprintf('[Relay] Touch client connected\n');
+            lbl_status.Text = 'C++ Client: CONNECTED';
+            lbl_status.FontColor = green;
         else
             fprintf('[Relay] Touch client disconnected\n');
+            lbl_status.Text = 'C++ Client: OFFLINE';
+            lbl_status.FontColor = red;
         end
     end
 
@@ -244,33 +229,27 @@ function relay_gui()
     end
 
     function processNetworkData()
-        % 从 Touch 客户端读取数据
+        % 从 Touch 客户端读取数据 (事件驱动: readline + terminator)
         if isempty(S.server) || ~isvalid(S.server) || ~S.server.Connected
-            return;
-        end
-        if S.server.NumBytesAvailable == 0
             return;
         end
 
         try
-            data = read(S.server, S.server.NumBytesAvailable, 'uint8');
-            msgs = strsplit(char(data), '\n');
-            for i = 1:length(msgs)
-                msg = strtrim(msgs{i});
+            while S.server.NumBytesAvailable > 0
+                msg = strtrim(readline(S.server));
                 if isempty(msg), continue; end
 
                 S.packet_count = S.packet_count + 1;
 
                 % 解析消息格式
-                if startsWith(msg, 'P|')  % Touch 位姿
+                if startsWith(msg, 'P|')  % Touch 位姿 → 机器人目标位置
                     vals = sscanf(msg(3:end), '%f,%f,%f,%f,%f,%f');
                     if length(vals) == 6
                         S.touch_pos = vals';
+                        S.robot_target = vals';
                     end
-                elseif startsWith(msg, 'C|')  % 指令
+                elseif startsWith(msg, 'C|')  % 指令 (v3.0: C++ 直连机械臂，此处仅记录日志)
                     addCmdLog(msg(3:end));
-                    % 转发到机械臂
-                    forwardToRobot(msg(3:end));
                 elseif startsWith(msg, 'R|')  % 力数据
                     vals = sscanf(msg(3:end), '%f,%f,%f');
                     if length(vals) == 3
@@ -281,13 +260,15 @@ function relay_gui()
                     if length(vals) == 6
                         S.joint_angles = vals';
                     end
+                elseif startsWith(msg, 'RP|')  % 机器人实际位姿 (来自 C++ GetPose)
+                    vals = sscanf(msg(3:end), '%f,%f,%f,%f,%f,%f');
+                    if length(vals) == 6
+                        S.robot_pos = vals';
+                    end
                 end
             end
         catch
         end
-
-        % 读取机械臂反馈
-        readRobotFeedback();
 
         % 更新延迟
         t = toc(S.last_time);
@@ -295,75 +276,6 @@ function relay_gui()
             S.touch_relay_delay = t * 1000 / max(S.packet_count, 1);
             S.packet_count = 0;
             S.last_time = tic;
-        end
-    end
-
-    function forwardToRobot(cmd)
-        % 解析端口和指令
-        parts = strsplit(cmd, '|');
-        if length(parts) ~= 2, return; end
-        targetPort = str2double(parts{1});
-        cmdStr = parts{2};
-
-        client = [];
-        if targetPort == cfg.port_motion && ~isempty(S.robot_motion) && isvalid(S.robot_motion)
-            client = S.robot_motion;
-        elseif targetPort == cfg.port_enable && ~isempty(S.robot_enable) && isvalid(S.robot_enable)
-            client = S.robot_enable;
-        end
-
-        if ~isempty(client)
-            try
-                write(client, cmdStr);
-            catch
-            end
-        end
-    end
-
-    function readRobotFeedback()
-        % 读取运动端口
-        if ~isempty(S.robot_motion) && isvalid(S.robot_motion)
-            while S.robot_motion.NumBytesAvailable > 0
-                try
-                    fb = read(S.robot_motion, S.robot_motion.NumBytesAvailable, 'uint8');
-                    fbStr = strtrim(char(fb));
-                    if ~isempty(fbStr)
-                        addFbLog(['[30003] ' fbStr]);
-                        % 尝试解析位姿
-                        if contains(fbStr, 'GetPose')
-                            vals = sscanf(fbStr, '0,{%f,%f,%f,%f,%f,%f');
-                            if length(vals) == 6
-                                S.robot_pos = vals';
-                            end
-                        end
-                    end
-                catch
-                    break;
-                end
-            end
-        end
-
-        % 读取使能端口
-        if ~isempty(S.robot_enable) && isvalid(S.robot_enable)
-            while S.robot_enable.NumBytesAvailable > 0
-                try
-                    fb = read(S.robot_enable, S.robot_enable.NumBytesAvailable, 'uint8');
-                    fbStr = strtrim(char(fb));
-                    if ~isempty(fbStr)
-                        addFbLog(['[29999] ' fbStr]);
-                    end
-                catch
-                    break;
-                end
-            end
-        end
-
-        % 更新机器人状态指示器
-        robotOnline = (~isempty(S.robot_enable) && isvalid(S.robot_enable)) && ...
-                      (~isempty(S.robot_motion) && isvalid(S.robot_motion));
-        if robotOnline
-            lbl_status.Text = 'Robot: ONLINE';
-            lbl_status.FontColor = green;
         end
     end
 
@@ -580,12 +492,6 @@ function relay_gui()
         % 关闭连接
         if ~isempty(S.server) && isvalid(S.server)
             delete(S.server);
-        end
-        if ~isempty(S.robot_enable) && isvalid(S.robot_enable)
-            delete(S.robot_enable);
-        end
-        if ~isempty(S.robot_motion) && isvalid(S.robot_motion)
-            delete(S.robot_motion);
         end
 
         delete(fig);

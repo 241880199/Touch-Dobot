@@ -8,4 +8,9 @@ bool robotSendEnable(const char* cmd);
 bool robotSendMotion(const char* cmd);
 bool robotRecvMotion(char* buf, int len);
 bool robotRecvEnable(char* buf, int len);
+// 非阻塞版本 (pollFeedback 使用, select 0-timeout, 不阻塞渲染)
+bool robotRecvMotionPoll(char* buf, int len);
+bool robotRecvEnablePoll(char* buf, int len);
 bool isRobotConnected();
+// 排空使能端口缓冲区 (丢弃所有残留数据)
+void robotDrainEnable();

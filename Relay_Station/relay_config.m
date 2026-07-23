@@ -21,7 +21,7 @@ function cfg = relay_config()
     cfg.max_log_lines = 200;          % 控制台最大显示行数
 
     % ===== 安全边界 (mm, 机械臂用户坐标系) =====
-    cfg.safe_x_min = 180; cfg.safe_x_max = 420;
-    cfg.safe_y_min = -200; cfg.safe_y_max = 200;
-    cfg.safe_z_min = 30;  cfg.safe_z_max = 300;
+    cfg.safe_x_min = 50;  cfg.safe_x_max = 600;
+    cfg.safe_y_min = -500; cfg.safe_y_max = 500;
+    cfg.safe_z_min = 0;   cfg.safe_z_max = 550;
 end

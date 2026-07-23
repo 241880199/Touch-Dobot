@@ -15,14 +15,11 @@ static SOCKET connectPort(const char* ip, int port) {
     inet_pton(AF_INET, ip, &addr.sin_addr);
     addr.sin_port = htons(port);
 
-    // 设置非阻塞
+    // 非阻塞 connect (最多等 3 秒)
     u_long mode = 1;
     ioctlsocket(sock, FIONBIO, &mode);
-
-    // 非阻塞 connect
     connect(sock, (SOCKADDR*)&addr, sizeof(addr));
 
-    // 等待连接完成 (最多 3 秒)
     fd_set set;
     FD_ZERO(&set);
     FD_SET(sock, &set);
@@ -32,13 +29,15 @@ static SOCKET connectPort(const char* ip, int port) {
         return INVALID_SOCKET;
     }
 
-    // 恢复阻塞模式
+    // 恢复阻塞
     mode = 0;
     ioctlsocket(sock, FIONBIO, &mode);
 
-    int timeout = 1000;
-    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
-    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (char*)&timeout, sizeof(timeout));
+    // 超时: 发送 100ms, 接收 200ms (保证 init 序列 GetPose 等可靠收到)
+    int sndTimeout = 100;
+    int rcvTimeout = 200;
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (char*)&sndTimeout, sizeof(sndTimeout));
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (char*)&rcvTimeout, sizeof(rcvTimeout));
 
     return sock;
 }
@@ -93,8 +92,20 @@ static bool sendToSocket(SOCKET sock, const char* cmd) {
     return sent == len;
 }
 
+// 阻塞读取 (init 序列使用)
 static int recvFromSocket(SOCKET sock, char* buf, int len) {
     if (sock == INVALID_SOCKET) return -1;
+    return recv(sock, buf, len, 0);
+}
+
+// 非阻塞读取 (pollFeedback 使用，不阻塞 GLUT 渲染循环)
+static int recvFromSocketNoBlock(SOCKET sock, char* buf, int len) {
+    if (sock == INVALID_SOCKET) return -1;
+    fd_set set;
+    FD_ZERO(&set);
+    FD_SET(sock, &set);
+    timeval tv = { 0, 0 };
+    if (select(0, &set, NULL, NULL, &tv) <= 0) return -1;
     return recv(sock, buf, len, 0);
 }
 
@@ -114,6 +125,7 @@ bool robotSendMotion(const char* cmd) {
     return sendToSocket(sock, cmd);
 }
 
+// 阻塞版本 (init 序列用)
 bool robotRecvMotion(char* buf, int len) {
     auto& app = appState;
     EnterCriticalSection(&app.robotSocketMutex);
@@ -134,6 +146,48 @@ bool robotRecvEnable(char* buf, int len) {
     return false;
 }
 
+// 非阻塞版本 (pollFeedback 用)
+bool robotRecvMotionPoll(char* buf, int len) {
+    auto& app = appState;
+    EnterCriticalSection(&app.robotSocketMutex);
+    SOCKET sock = app.robotMotionSocket;
+    LeaveCriticalSection(&app.robotSocketMutex);
+    int n = recvFromSocketNoBlock(sock, buf, len - 1);
+    if (n > 0) { buf[n] = '\0'; return true; }
+    return false;
+}
+
+bool robotRecvEnablePoll(char* buf, int len) {
+    auto& app = appState;
+    EnterCriticalSection(&app.robotSocketMutex);
+    SOCKET sock = app.robotEnableSocket;
+    LeaveCriticalSection(&app.robotSocketMutex);
+    int n = recvFromSocketNoBlock(sock, buf, len - 1);
+    if (n > 0) { buf[n] = '\0'; return true; }
+    return false;
+}
+
 bool isRobotConnected() {
     return appState.isRobotConnected;
+}
+
+void robotDrainEnable() {
+    auto& app = appState;
+    EnterCriticalSection(&app.robotSocketMutex);
+    SOCKET sock = app.robotEnableSocket;
+    LeaveCriticalSection(&app.robotSocketMutex);
+
+    if (sock == INVALID_SOCKET) return;
+
+    char buf[256];
+    // 非阻塞清空所有残留数据
+    fd_set set;
+    FD_ZERO(&set);
+    FD_SET(sock, &set);
+    timeval tv = {0, 0};
+    while (select(0, &set, NULL, NULL, &tv) > 0) {
+        recv(sock, buf, sizeof(buf), 0);
+        FD_ZERO(&set);
+        FD_SET(sock, &set);
+    }
 }
