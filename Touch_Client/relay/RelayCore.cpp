@@ -6,6 +6,7 @@
 #include "../config/Config.h"
 #include <iostream>
 #include <windows.h>
+#include "../safety/SafetyPredictor.h"
 
 RelayCore& RelayCore::instance() {
     static RelayCore inst;
@@ -46,27 +47,42 @@ bool RelayCore::init() {
     robotSendEnable(cpBuf);
     Sleep(100);
 
-    // 获取基准位姿
-    robotSendEnable("GetPose()");
-    Sleep(200);
-    char fb[1024];
-    if (robotRecvEnable(fb, sizeof(fb))) {
-        AppState::RobotPose pose;
-        if (FeedbackParser::parsePose(fb, pose)) {
-            auto& app = appState;
-            EnterCriticalSection(&app.robotPoseMutex);
-            app.robotBase.x = pose.x;
-            app.robotBase.y = pose.y;
-            app.robotBase.z = pose.z;
-            app.robotBaseRx = pose.rx;
-            app.robotBaseRy = pose.ry;
-            app.robotBaseRz = pose.rz;
-            app.robotActualPose = pose;
-            app.robotTargetPose = pose;
-            app.isRobotBaseSet = true;
-            LeaveCriticalSection(&app.robotPoseMutex);
-            std::cout << "[Relay] 基准位姿: (" << pose.x << "," << pose.y << "," << pose.z << ")" << std::endl;
+    // 获取基准位姿 (重试 5 次，每次等待 100ms)
+    bool gotBase = false;
+    for (int retry = 0; retry < 5; retry++) {
+        robotSendEnable("GetPose()");
+        Sleep(100);
+        char fb[1024];
+        if (robotRecvEnable(fb, sizeof(fb))) {
+            AppState::RobotPose pose;
+            if (FeedbackParser::parsePose(fb, pose)) {
+                auto& app = appState;
+                EnterCriticalSection(&app.robotPoseMutex);
+                app.robotBase.x = pose.x;
+                app.robotBase.y = pose.y;
+                app.robotBase.z = pose.z;
+                app.robotBaseRx = pose.rx;
+                app.robotBaseRy = pose.ry;
+                app.robotBaseRz = pose.rz;
+                app.robotActualPose = pose;
+                app.robotTargetPose = pose;
+                app.isRobotBaseSet = true;
+                LeaveCriticalSection(&app.robotPoseMutex);
+                std::cout << "[Relay] 基准位姿: (" << pose.x << "," << pose.y << "," << pose.z << ")" << std::endl;
+                gotBase = true;
+                break;
+            }
         }
+        std::cout << "[Relay] GetPose retry " << (retry + 1) << "/5..." << std::endl;
+    }
+
+    if (!gotBase) {
+        std::cerr << "[Relay] FATAL: 无法获取机械臂当前位姿，拒绝运动控制" << std::endl;
+        std::cerr << "[Relay] 请检查机械臂连接状态后重试" << std::endl;
+        robotSendEnable("DisableRobot()");
+        Sleep(100);
+        robotDisconnect();
+        return false;
     }
 
     return true;
@@ -81,73 +97,142 @@ void RelayCore::shutdown() {
 void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
     if (!m_transmitting || !m_basePointSet || !isRobotConnected()) return;
 
-    // 坐标转换
+    // ===== 安全守卫 =====
+    if (!appState.isRobotBaseSet) return;
+
+    // ===== ServoP 频率限制: 30Hz =====
+    DWORD now = GetTickCount();
+    if (now - m_lastServoTime < 33) return;
+    m_lastServoTime = now;
+
+    // ===== 增量式位移: 每帧计算 Touch 相对于上一帧的微小位移 =====
     Vec3 current = convertTouchToRobot(devicePos);
+
     EnterCriticalSection(&m_basePointLock);
-    Vec3 basePoint = m_basePoint;
-    LeaveCriticalSection(&m_basePointLock);
-    Vec3 delta = computeDelta(current, basePoint);
-
-    // 跳过微小移动
-    if (delta.length() < Config::MIN_DELTA_THRESHOLD) return;
-
-    auto& app = appState;
-    Vec3 base(app.robotBase.x, app.robotBase.y, app.robotBase.z);
-    Vec3 target = computeTarget(base, delta);
-
-    // 安全边界
-    target = SafetyBoundary::clampToBoundary(target);
-
-    // 构造指令 (栈分配，无堆内存分配)
-    char cmd[256];
-    snprintf(cmd, sizeof(cmd), "ServoP(%.2f,%.2f,%.2f,%.2f,%.2f,%.2f)",
-        target.x, target.y, target.z, app.robotBaseRx, app.robotBaseRy, app.robotBaseRz);
-
-    // 给扩展插件修改指令的机会
-    RobotCommand robotCmd;
-    robotCmd.cmd = cmd;
-    robotCmd.targetPort = Config::MOTION_PORT;
-    for (auto* ext : m_extensions) {
-        ext->onBeforeSend(robotCmd);
+    if (!m_lastTouchValid) {
+        // 第一帧: 初始化参考点
+        m_lastTouchPos = current;
+        m_lastTouchValid = true;
+        LeaveCriticalSection(&m_basePointLock);
+        return;
     }
 
-    // 发送
-    robotSendMotion(robotCmd.cmd.c_str());
+    // 计算增量
+    double dx = current.x - m_lastTouchPos.x;
+    double dy = current.y - m_lastTouchPos.y;
+    double dz = current.z - m_lastTouchPos.z;
+
+    // 更新 Touch 参考点
+    m_lastTouchPos = current;
+
+    // 跳过微小增量 (Touch 噪声)
+    if (fabs(dx) < 0.05 && fabs(dy) < 0.05 && fabs(dz) < 0.05) {
+        LeaveCriticalSection(&m_basePointLock);
+        return;
+    }
+
+    // ===== 增量步长限制: 单步最大 3mm, 再乘以速度衰减因子 =====
+    static double s_speedMul = 1.0;  // 跨帧持久, 由 SafetyPredictor 更新
+    double len = sqrt(dx*dx + dy*dy + dz*dz);
+    double maxStep = 3.0 * s_speedMul;
+    if (len > maxStep) {
+        double scale = maxStep / len;
+        dx *= scale; dy *= scale; dz *= scale;
+    }
+
+    // 累加到目标位置
+    m_targetPos.x += dx;
+    m_targetPos.y += dy;
+    m_targetPos.z += dz;
+
+    // 安全边界钳位 (并同步 target 到钳位值，防止"卡边界")
+    Vec3 clamped = SafetyBoundary::clampToBoundary(m_targetPos);
+    m_targetPos = clamped;
+
+    // ===== SafetyPredictor 预判 =====
+    SafetyVerdict verdict = SafetyPredictor::instance().evaluate(clamped);
+
+    if (verdict.action == SafetyVerdict::REJECT) {
+        std::cerr << "[Safety] REJECT: " << verdict.reason
+                  << " — target=(" << clamped.x << "," << clamped.y << "," << clamped.z << ")"
+                  << std::endl;
+        LeaveCriticalSection(&m_basePointLock);
+        return;  // 不发送，目标位置回滚 (m_targetPos 已更新，但不下发)
+    }
+
+    // 更新速度衰减因子 (用于下帧)
+    s_speedMul = (verdict.action == SafetyVerdict::WARN_SLOW) ? verdict.speedFactor : 1.0;
+    LeaveCriticalSection(&m_basePointLock);
+
+    // ===== 构造并发送 ServoP =====
+    auto& app = appState;
+    char cmd[256];
+    snprintf(cmd, sizeof(cmd), "ServoP(%.2f,%.2f,%.2f,%.2f,%.2f,%.2f)",
+        clamped.x, clamped.y, clamped.z,
+        app.robotBaseRx, app.robotBaseRy, app.robotBaseRz);
+
+    bool sent = robotSendMotion(cmd);
+    static int sendCount = 0, failCount = 0;
+    sendCount++;
+    if (!sent) failCount++;
+    if (sendCount % 50 == 0) {
+        std::cout << "[Relay] Motion sends: " << sendCount
+                  << " ok, " << failCount << " fail"
+                  << "  target=(" << clamped.x << "," << clamped.y << "," << clamped.z << ")"
+                  << std::endl;
+    }
 
     // 上报到 MATLAB GUI
-    reportCommand(robotCmd.cmd.c_str());
+    reportCommand(cmd);
 
     // 记录到最后指令
     EnterCriticalSection(&app.lastCommandMutex);
-    strncpy_s(app.lastCommandSent, robotCmd.cmd.c_str(), sizeof(app.lastCommandSent) - 1);
+    strncpy_s(app.lastCommandSent, cmd, sizeof(app.lastCommandSent) - 1);
     LeaveCriticalSection(&app.lastCommandMutex);
 
     // 记录到指令日志
     EnterCriticalSection(&app.commandLogMutex);
-    strncpy_s(app.commandLog[app.commandLogIdx], robotCmd.cmd.c_str(), sizeof(app.commandLog[0]) - 1);
+    strncpy_s(app.commandLog[app.commandLogIdx], cmd, sizeof(app.commandLog[0]) - 1);
     app.commandLogIdx = (app.commandLogIdx + 1) % AppState::LOG_SIZE;
     if (app.commandLogCount < AppState::LOG_SIZE) app.commandLogCount++;
     LeaveCriticalSection(&app.commandLogMutex);
 
     // 更新目标位姿
     EnterCriticalSection(&app.robotPoseMutex);
-    app.robotTargetPose.x = target.x;
-    app.robotTargetPose.y = target.y;
-    app.robotTargetPose.z = target.z;
+    app.robotTargetPose.x = clamped.x;
+    app.robotTargetPose.y = clamped.y;
+    app.robotTargetPose.z = clamped.z;
     LeaveCriticalSection(&app.robotPoseMutex);
 }
 
 void RelayCore::onButtonPress(const Vec3& robotPos) {
     EnterCriticalSection(&m_basePointLock);
-    m_basePoint = robotPos;
+    // 以机器人当前实际位姿作为 target 起点
+    {
+        auto& app = appState;
+        EnterCriticalSection(&app.robotPoseMutex);
+        m_targetPos.x = app.robotActualPose.x;
+        m_targetPos.y = app.robotActualPose.y;
+        m_targetPos.z = app.robotActualPose.z;
+        LeaveCriticalSection(&app.robotPoseMutex);
+    }
+    m_lastTouchPos = robotPos;
+    m_lastTouchValid = true;
     LeaveCriticalSection(&m_basePointLock);
     m_basePointSet = true;
     m_transmitting = true;
+
+    std::cout << "[Relay] Button PRESS  — target start=("
+              << m_targetPos.x << "," << m_targetPos.y << "," << m_targetPos.z << ")"
+              << std::endl;
+    std::cout << "[Relay] Hold button + move Touch (incremental mode)" << std::endl;
 }
 
 void RelayCore::onButtonRelease() {
     m_transmitting = false;
     m_basePointSet = false;
+    m_lastTouchValid = false;
+    std::cout << "[Relay] Button RELEASE — motion stopped" << std::endl;
 }
 
 static void logFeedback(const char* msg, const char* portLabel) {
@@ -162,8 +247,8 @@ static void logFeedback(const char* msg, const char* portLabel) {
 
 void RelayCore::pollFeedback() {
     char buf[1024];
-    // 读取运动端口反馈
-    while (robotRecvMotion(buf, sizeof(buf))) {
+    // 读取运动端口反馈 (非阻塞)
+    while (robotRecvMotionPoll(buf, sizeof(buf))) {
         RobotFeedback fb;
         strncpy_s(fb.raw, buf, sizeof(fb.raw) - 1);
         fb.fromPort = Config::MOTION_PORT;
@@ -181,21 +266,10 @@ void RelayCore::pollFeedback() {
         }
     }
 
-    // 读取使能端口反馈
-    while (robotRecvEnable(buf, sizeof(buf))) {
-        RobotFeedback fb;
-        strncpy_s(fb.raw, buf, sizeof(fb.raw) - 1);
-        fb.fromPort = Config::ENABLE_PORT;
-        fb.errorId = (buf[0] == '0') ? 0 : -1;
-
-        char shortMsg[256];
-        snprintf(shortMsg, sizeof(shortMsg), "%.200s", fb.raw);
-        logFeedback(shortMsg, "29999");
-
-        for (auto* ext : m_extensions) {
-            ext->onAfterFeedback(fb);
-        }
-    }
+    // 注意: 不读取使能端口 (29999)
+    // 使能端口采用"命令-响应"模式 (GetPose/GetAngle/RobotMode)，
+    // 响应必须由发送命令的函数独享读取，避免 pollFeedback 偷走数据
+    // 导致 robotActualPose 永远停留在 init 时的值。
 }
 
 void RelayCore::queryPose() {
@@ -207,7 +281,20 @@ void RelayCore::queryPose() {
         auto& app = appState;
         EnterCriticalSection(&app.robotPoseMutex);
         FeedbackParser::parsePose(fb, app.robotActualPose);
+        // 在锁内读取位姿，避免与 jointAngle 定时器竞态
+        double px = app.robotActualPose.x;
+        double py = app.robotActualPose.y;
+        double pz = app.robotActualPose.z;
+        double prx = app.robotActualPose.rx;
+        double pry = app.robotActualPose.ry;
+        double prz = app.robotActualPose.rz;
         LeaveCriticalSection(&app.robotPoseMutex);
+
+        // 上报机器人实际位姿到 MATLAB GUI
+        char buf[128];
+        snprintf(buf, sizeof(buf), "RP|%.2f,%.2f,%.2f,%.2f,%.2f,%.2f",
+            px, py, pz, prx, pry, prz);
+        sendRelayUpdate(buf);
     }
 }
 
@@ -250,6 +337,14 @@ void RelayCore::checkAlarm() {
         bool wasAlarm = app.isRobotInAlarm.exchange(mode == 9);
         if (mode == 9 && !wasAlarm) {
             std::cout << "[Relay] 检测到机械臂报警 (mode=9)" << std::endl;
+
+            // 立即获取当前位置并记录到 SafetyPredictor 黑名单
+            queryPose();
+            EnterCriticalSection(&app.robotPoseMutex);
+            AppState::RobotPose alarmPose = app.robotActualPose;
+            LeaveCriticalSection(&app.robotPoseMutex);
+
+            SafetyPredictor::instance().addAlarmRecord(alarmPose);
         }
     }
 }
@@ -294,14 +389,15 @@ void RelayCore::shutdownRelayReporting() {
     LeaveCriticalSection(&m_relaySocketMutex);
 }
 
-void RelayCore::sendRelayUpdate(const char* msg) {
+int RelayCore::sendRelayUpdate(const char* msg) {
     EnterCriticalSection(&m_relaySocketMutex);
     SOCKET sock = m_relaySocket;
     LeaveCriticalSection(&m_relaySocketMutex);
-    if (sock == INVALID_SOCKET) return;
+    if (sock == INVALID_SOCKET) return -1;
 
-    send(sock, msg, (int)strlen(msg), 0);
-    send(sock, "\n", 1, 0);
+    int n1 = send(sock, msg, (int)strlen(msg), 0);
+    int n2 = send(sock, "\n", 1, 0);
+    return n1 + n2;
 }
 
 void RelayCore::reportPosition() {
@@ -318,7 +414,12 @@ void RelayCore::reportPosition() {
 
     snprintf(buf, sizeof(buf), "P|%.2f,%.2f,%.2f,%.2f,%.2f,%.2f",
         pos[0], pos[1], pos[2], 0.0, 0.0, 0.0);
-    sendRelayUpdate(buf);
+
+    int sent = sendRelayUpdate(buf);
+    static int dbgCount = 0;
+    if (++dbgCount % 100 == 0) {
+        std::cout << "[Relay] Sent " << dbgCount << " position updates, last send=" << sent << "B" << std::endl;
+    }
 }
 
 void RelayCore::reportCommand(const char* cmd) {
