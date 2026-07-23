@@ -374,31 +374,34 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
     // ===== 增量步长限制: 单步最大 3mm, 再乘以速度衰减因子 =====
     static double s_speedMul = 1.0;  // 跨帧持久, 由 SafetyPredictor 更新
     double len = sqrt(dx*dx + dy*dy + dz*dz);
-    double maxStep = 3.0 * s_speedMul;
+    double maxStep = 4.5 * s_speedMul;
     if (len > maxStep) {
         double scale = maxStep / len;
         dx *= scale; dy *= scale; dz *= scale;
     }
 
-    // 累加到目标位置
-    m_targetPos.x += dx;
-    m_targetPos.y += dy;
-    m_targetPos.z += dz;
+    // 计算候选位置 (先不更新 m_targetPos)
+    Vec3 candidate;
+    candidate.x = m_targetPos.x + dx;
+    candidate.y = m_targetPos.y + dy;
+    candidate.z = m_targetPos.z + dz;
 
-    // 安全边界钳位 (并同步 target 到钳位值，防止"卡边界")
-    Vec3 clamped = SafetyBoundary::clampToBoundary(m_targetPos);
-    m_targetPos = clamped;
+    // 安全边界钳位
+    Vec3 clamped = SafetyBoundary::clampToBoundary(candidate);
 
-    // ===== SafetyPredictor 预判 =====
+    // ===== SafetyPredictor 预判 (先评估，后更新，防止边界漂移) =====
     SafetyVerdict verdict = SafetyPredictor::instance().evaluate(clamped);
 
     if (verdict.action == SafetyVerdict::REJECT) {
         std::cerr << "[Safety] REJECT: " << verdict.reason
-                  << " — target=(" << clamped.x << "," << clamped.y << "," << clamped.z << ")"
+                  << " — candidate=(" << clamped.x << "," << clamped.y << "," << clamped.z << ")"
                   << std::endl;
         LeaveCriticalSection(&m_basePointLock);
-        return;  // 不发送，目标位置回滚 (m_targetPos 已更新，但不下发)
+        return;  // 不更新 m_targetPos，下帧从同一位置重新计算
     }
+
+    // 通过安全检查后才更新目标位置
+    m_targetPos = clamped;
 
     // 更新速度衰减因子 (用于下帧)
     s_speedMul = (verdict.action == SafetyVerdict::WARN_SLOW) ? verdict.speedFactor : 1.0;
@@ -447,14 +450,13 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
 
 void RelayCore::onButtonPress(const Vec3& robotPos) {
     EnterCriticalSection(&m_basePointLock);
-    // 以机器人当前实际位姿作为 target 起点
+    // 以机器人当前实际位姿作为 target 起点 (钳位到安全边界内)
     {
         auto& app = appState;
         EnterCriticalSection(&app.robotPoseMutex);
-        m_targetPos.x = app.robotActualPose.x;
-        m_targetPos.y = app.robotActualPose.y;
-        m_targetPos.z = app.robotActualPose.z;
+        Vec3 rawPos(app.robotActualPose.x, app.robotActualPose.y, app.robotActualPose.z);
         LeaveCriticalSection(&app.robotPoseMutex);
+        m_targetPos = SafetyBoundary::clampToBoundary(rawPos);
     }
     m_lastTouchPos = robotPos;
     m_lastTouchValid = true;

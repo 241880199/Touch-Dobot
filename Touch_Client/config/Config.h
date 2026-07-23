@@ -17,9 +17,10 @@ namespace Config {
     // ========== 安全边界（机械臂用户坐标系，单位mm） ==========
     // 初始值设为保守范围，根据实际环境调整
     // CR3 工作半径 620mm，覆盖全工作空间并保留边界余量
-    const double SAFE_X_MIN = 50.0,  SAFE_X_MAX = 600.0;
-    const double SAFE_Y_MIN = -500.0, SAFE_Y_MAX = 500.0;
-    const double SAFE_Z_MIN = 0.0,   SAFE_Z_MAX = 550.0;
+    // 用户坐标系安全边界 (机器人静止位姿 ~(-103,-153,381))
+    const double SAFE_X_MIN = -300.0, SAFE_X_MAX = 250.0;
+    const double SAFE_Y_MIN = -350.0, SAFE_Y_MAX = 250.0;
+    const double SAFE_Z_MIN = 140.0,  SAFE_Z_MAX = 500.0;
     const double SAFE_BOUNDARY_BUFFER_RATIO = 0.2; // 20%边界缓冲区，线速度衰减
 
     // ========== SafetyPredictor 安全预判参数 ==========

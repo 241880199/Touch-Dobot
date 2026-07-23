@@ -339,6 +339,46 @@ static void drawCoordPanel(int x, int y, int w, int h) {
         snprintf(buf, sizeof(buf), "Alarms: 0");
     }
     text2D(x + 6, ty, buf, GLUT_BITMAP_8_BY_13);
+
+    // 奇异位形接近度 (末端距 Z 轴)
+    ty -= lineH;
+    {
+        double r_xy = sqrt(pose.x * pose.x + pose.y * pose.y);
+        if (r_xy < 80.0) {
+            glColor3f(1.0f, 0.78f, 0.28f);
+        } else {
+            glColor3f(0.45f, 0.50f, 0.55f);
+        }
+        snprintf(buf, sizeof(buf), "Z-axis dist: %.0f mm %s", r_xy, r_xy < 30.0 ? "!!SINGULAR!!" : r_xy < 80.0 ? "(near limit)" : "");
+        text2D(x + 6, ty, buf, GLUT_BITMAP_8_BY_13);
+    }
+
+    // 关节限位状态
+    ty -= lineH;
+    {
+        static const double jlims[6][2] = {
+            {-360, 360}, {-360, 360}, {-155, 155},
+            {-360, 360}, {-360, 360}, {-360, 360}
+        };
+        double jvals[6] = { pose.j1, pose.j2, pose.j3, pose.j4, pose.j5, pose.j6 };
+        double minMargin = 999;
+        int worstJoint = -1;
+        for (int i = 0; i < 6; i++) {
+            double dLo = fabs(jvals[i] - jlims[i][0]);
+            double dHi = fabs(jlims[i][1] - jvals[i]);
+            double m = (dLo < dHi) ? dLo : dHi;
+            if (m < minMargin) { minMargin = m; worstJoint = i; }
+        }
+        if (minMargin < 15.0) {
+            glColor3f(1.0f, 0.55f, 0.25f);
+            const char* jn[6] = {"J1","J2","J3","J4","J5","J6"};
+            snprintf(buf, sizeof(buf), "%s near limit: %.1f deg", jn[worstJoint], minMargin);
+        } else {
+            glColor3f(0.45f, 0.50f, 0.55f);
+            snprintf(buf, sizeof(buf), "Joints: OK (min margin %.0f deg)", minMargin);
+        }
+        text2D(x + 6, ty, buf, GLUT_BITMAP_8_BY_13);
+    }
 }
 
 // ===== 主入口 =====

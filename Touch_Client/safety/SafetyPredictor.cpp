@@ -49,13 +49,63 @@ SafetyVerdict SafetyPredictor::evaluate(const Vec3& target) {
         return m_lastVerdict;
     }
 
-    // ===== Layer 2: kinematics check =====
+    // ===== 几何奇异区域预警 (不依赖 IK 模型) =====
+    double r_xy = sqrt(target.x * target.x + target.y * target.y);
+    if (r_xy < 30.0) {
+        m_lastVerdict = {SafetyVerdict::WARN_SLOW, "cylindrical singularity: too close to Z axis (<30mm)", 0.3};
+        return m_lastVerdict;
+    }
+    if (r_xy < 80.0) {
+        m_lastVerdict = {SafetyVerdict::WARN_SLOW, "approaching cylindrical singularity (<80mm from Z axis)", 0.6};
+        return m_lastVerdict;
+    }
 
-    // 2a. numerical IK
+    // ===== Layer 2: kinematics check =====
+    // 用机器人当前关节角作为 IK 种子 (比从零开始收敛快得多)
+    double seed[6];
+    {
+        auto& app = appState;
+        EnterCriticalSection(&app.robotPoseMutex);
+        seed[0] = app.robotActualPose.j1;
+        seed[1] = app.robotActualPose.j2;
+        seed[2] = app.robotActualPose.j3;
+        seed[3] = app.robotActualPose.j4;
+        seed[4] = app.robotActualPose.j5;
+        seed[5] = app.robotActualPose.j6;
+        LeaveCriticalSection(&app.robotPoseMutex);
+    }
+    // 如果当前关节角全为 0 (未初始化), 回退到上次成功的解
+    bool seedValid = false;
+    for (int i = 0; i < 6; i++) {
+        if (fabs(seed[i]) > 0.001) { seedValid = true; break; }
+    }
+    if (!seedValid) memcpy(seed, m_lastJoints, 6 * sizeof(double));
+
+    // 关节限位预警 (距限位 <10° 时减速)
+    static const double JLIM_WARN_DEG = 10.0;
+    const double jlims[6][2] = {
+        {-360, 360}, {-360, 360}, {-155, 155},
+        {-360, 360}, {-360, 360}, {-360, 360}
+    };
+    const char* jnames[6] = {"J1","J2","J3","J4","J5","J6"};
+    for (int i = 0; i < 6; i++) {
+        double dLo = fabs(seed[i] - jlims[i][0]);
+        double dHi = fabs(jlims[i][1] - seed[i]);
+        double margin = (dLo < dHi) ? dLo : dHi;
+        if (margin < JLIM_WARN_DEG) {
+            static char jbuf[64];
+            snprintf(jbuf, sizeof(jbuf), "%s near joint limit (%.1f deg)", jnames[i], margin);
+            m_lastVerdict = {SafetyVerdict::WARN_SLOW, jbuf, 0.5};
+            return m_lastVerdict;
+        }
+    }
+
+    // 2a. numerical IK — URDF 模型与 Dobot 控制器坐标系不匹配, 降级为辅助判断
     double joints[6];
-    bool converged = Kinematics::inverse(target, m_lastJoints, joints);
+    bool converged = Kinematics::inverse(target, seed, joints);
     if (!converged) {
-        m_lastVerdict = {SafetyVerdict::REJECT, "IK no solution (unreachable)", 0.0};
+        memcpy(m_lastJoints, seed, 6 * sizeof(double));
+        m_lastVerdict = {SafetyVerdict::WARN_SLOW, "IK no solution", 1.0};  // 全速, 不阻塞
         return m_lastVerdict;
     }
 

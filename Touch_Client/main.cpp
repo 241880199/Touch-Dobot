@@ -44,21 +44,19 @@ void display() {
 
     glEnable(GL_DEPTH_TEST);
 
-    // 正视图 — 正交投影
+    // 等距 3D 透视视角 — 右手坐标系 (X右 Y前 Z上)
     glMatrixMode(GL_PROJECTION);
     glLoadIdentity();
-    double halfW = 400.0;  // 视口半宽 (mm)，覆盖机械臂 X 范围
-    double halfH = 400.0;  // 视口半高 (mm)，覆盖机械臂 Z 范围
     double aspect = (double)vpW / vpH;
-    glOrtho(-halfW * aspect, halfW * aspect, -halfH, halfH, 10.0, 2000.0);
+    gluPerspective(35.0, aspect, 10.0, 5000.0);
 
     glMatrixMode(GL_MODELVIEW);
     glLoadIdentity();
 
-    // 正视相机：从正前方 (Y+) 平视机械臂
-    gluLookAt(0, 800, 300,    // eye: 正前方，略高于机器人中部
-              0,   0, 300,    // center: 机器人中部
-              0,   0,   1);   // up: Z 向上
+    // 等距视角：从右前上方观察，以基座附近为中心
+    gluLookAt(650, -650, 450,   // eye: 右前上方角落
+              150,    0, 200,   // center: 基座上方 (机器人工作空间中心)
+                0,    0,   1);  // up: Z 向上
 
     SceneRenderer::draw3D();
 

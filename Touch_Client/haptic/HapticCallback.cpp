@@ -37,22 +37,24 @@ HDCallbackCode HDCALLBACK hapticCallback(void* pUserData) {
     app.adjustedPos = localDevicePos;
     LeaveCriticalSection(&app.adjustedPosMutex);
 
-    // ===== 3. 轨迹 =====
-    EnterCriticalSection(&app.trailMutex);
-    app.trailPoints.push_back(localDevicePos);
-    while ((int)app.trailPoints.size() > Config::MAX_TRAIL) {
-        app.trailPoints.pop_front();
-    }
-    LeaveCriticalSection(&app.trailMutex);
-
-    // ===== 4. 按钮状态 =====
+    // ===== 3. 按钮状态 =====
     int buttonState = 0;
     hdGetIntegerv(HD_CURRENT_BUTTONS, &buttonState);
     bool button1 = (buttonState & HD_DEVICE_BUTTON_1) != 0;
     bool button2 = (buttonState & HD_DEVICE_BUTTON_2) != 0;
     app.button2Pressed = button2;
 
-    // ===== 5. 按钮 1 状态机 → RelayCore =====
+    // ===== 4. 轨迹 (仅按钮按下时记录) =====
+    if (button1) {
+        EnterCriticalSection(&app.trailMutex);
+        app.trailPoints.push_back(localDevicePos);
+        while ((int)app.trailPoints.size() > Config::MAX_TRAIL) {
+            app.trailPoints.pop_front();
+        }
+        LeaveCriticalSection(&app.trailMutex);
+    }
+
+    // ===== 5. 按钮 1 状态机 -> RelayCore =====
     bool stateChanged = (button1 != app.lastButtonState);
     if (stateChanged) {
         app.lastButtonState = button1;

@@ -3,6 +3,7 @@
 #include "../core/AppState.h"
 #include "../config/Config.h"
 #include "../relay/CoordinateTransform.h"
+#include "../relay/RelayCore.h"
 
 namespace SceneRenderer {
 
@@ -38,15 +39,59 @@ void drawFloor() {
 }
 
 void drawAxes() {
+    float len = 80.0f;    // 轴线长度
+    float head = 5.0f;    // 箭头大小
+    float hw = 3.0f;      // 箭头半宽
+
     glLineWidth(3.0f);
     glBegin(GL_LINES);
-    // X (红)
-    glColor3f(1.0f, 0.35f, 0.35f); glVertex3f(0, 0, 0); glVertex3f(50, 0, 0);
-    // Y (绿)
-    glColor3f(0.35f, 0.95f, 0.45f); glVertex3f(0, 0, 0); glVertex3f(0, 50, 0);
-    // Z (蓝)
-    glColor3f(0.35f, 0.55f, 1.0f); glVertex3f(0, 0, 0); glVertex3f(0, 0, 50);
+    // X 轴 (红) — 右手系: X 右
+    glColor3f(1.0f, 0.35f, 0.35f); glVertex3f(0, 0, 0); glVertex3f(len, 0, 0);
+    // Y 轴 (绿) — 右手系: Y 前
+    glColor3f(0.35f, 0.95f, 0.45f); glVertex3f(0, 0, 0); glVertex3f(0, len, 0);
+    // Z 轴 (蓝) — 右手系: Z 上
+    glColor3f(0.35f, 0.55f, 1.0f); glVertex3f(0, 0, 0); glVertex3f(0, 0, len);
     glEnd();
+
+    // X 轴箭头
+    glColor3f(1.0f, 0.35f, 0.35f);
+    glBegin(GL_TRIANGLES);
+    glVertex3f(len, 0, 0); glVertex3f(len-head,  hw, 0); glVertex3f(len-head, -hw, 0);
+    glVertex3f(len, 0, 0); glVertex3f(len-head, 0,  hw); glVertex3f(len-head, 0, -hw);
+    glEnd();
+
+    // Y 轴箭头
+    glColor3f(0.35f, 0.95f, 0.45f);
+    glBegin(GL_TRIANGLES);
+    glVertex3f(0, len, 0); glVertex3f( hw, len-head, 0); glVertex3f(-hw, len-head, 0);
+    glVertex3f(0, len, 0); glVertex3f(0, len-head,  hw); glVertex3f(0, len-head, -hw);
+    glEnd();
+
+    // Z 轴箭头
+    glColor3f(0.35f, 0.55f, 1.0f);
+    glBegin(GL_TRIANGLES);
+    glVertex3f(0, 0, len); glVertex3f( hw, 0, len-head); glVertex3f(-hw, 0, len-head);
+    glVertex3f(0, 0, len); glVertex3f(0,  hw, len-head); glVertex3f(0, -hw, len-head);
+    glEnd();
+
+    // 轴标签
+    glColor3f(1.0f, 0.5f, 0.5f);
+    glRasterPos3f(len + 10, 0, 0);
+    glutBitmapCharacter(GLUT_BITMAP_HELVETICA_12, 'X');
+
+    glColor3f(0.5f, 1.0f, 0.5f);
+    glRasterPos3f(0, len + 10, 0);
+    glutBitmapCharacter(GLUT_BITMAP_HELVETICA_12, 'Y');
+
+    glColor3f(0.5f, 0.7f, 1.0f);
+    glRasterPos3f(0, 0, len + 10);
+    glutBitmapCharacter(GLUT_BITMAP_HELVETICA_12, 'Z');
+
+    // 原点小球
+    glColor3f(0.8f, 0.8f, 0.8f);
+    glPushMatrix();
+    glutSolidSphere(3.0, 8, 8);
+    glPopMatrix();
 }
 
 void drawBoundary() {
@@ -75,20 +120,36 @@ void drawBoundary() {
     glEnd();
 }
 
-void drawCursor(const Vec3& pos) {
-    glColor4f(1.0f, 1.0f, 1.0f, 0.9f);
+void drawEndEffectorLight(const Vec3& pos, bool isActive) {
+    if (isActive) {
+        // 按下按钮: 亮白发光球体 + 青色光环 (正在指令机械臂)
+        glColor4f(1.0f, 1.0f, 1.0f, 0.95f);
+        glPushMatrix();
+        glTranslatef((float)pos.x, (float)pos.y, (float)pos.z);
+        glutSolidSphere(5.0, 16, 16);
+        glPopMatrix();
 
-    glPushMatrix();
-    glTranslatef((float)pos.x, (float)pos.y, (float)pos.z);
-    glutSolidSphere(4.0, 16, 16);
-    glPopMatrix();
+        // 发光光环 (较大、较亮)
+        glColor4f(0.25f, 0.85f, 1.0f, 0.6f);
+        glPushMatrix();
+        glTranslatef((float)pos.x, (float)pos.y, (float)pos.z);
+        glutWireSphere(10.0, 12, 12);
+        glPopMatrix();
+    } else {
+        // 松开按钮: 暗灰球体 + 暗淡光环 (跟随机械臂实际位置)
+        glColor4f(0.55f, 0.60f, 0.65f, 0.7f);
+        glPushMatrix();
+        glTranslatef((float)pos.x, (float)pos.y, (float)pos.z);
+        glutSolidSphere(4.0, 12, 12);
+        glPopMatrix();
 
-    // 发光光环
-    glColor4f(0.25f, 0.85f, 1.0f, 0.5f);
-    glPushMatrix();
-    glTranslatef((float)pos.x, (float)pos.y, (float)pos.z);
-    glutWireSphere(8.0, 12, 12);
-    glPopMatrix();
+        // 暗淡光环
+        glColor4f(0.25f, 0.85f, 1.0f, 0.25f);
+        glPushMatrix();
+        glTranslatef((float)pos.x, (float)pos.y, (float)pos.z);
+        glutWireSphere(8.0, 10, 10);
+        glPopMatrix();
+    }
 }
 
 void drawTargetMarker(const Vec3& pos) {
@@ -127,35 +188,6 @@ void drawTrail() {
     LeaveCriticalSection(&app.trailMutex);
 }
 
-void drawTouchPen(const Vec3& pos) {
-    // Touch 笔模型: 灰色笔身 + 笔尖红色小球
-    GLUquadric* q = gluNewQuadric();
-
-    // 笔身 (灰色圆柱, 沿 Z 向下, 长 40mm, 半径 3mm)
-    glColor3f(0.35f, 0.38f, 0.42f);
-    glPushMatrix();
-    glTranslatef((float)pos.x, (float)pos.y, (float)pos.z + 20);
-    glRotatef(-90, 1, 0, 0); // 圆柱默认沿 Z，旋转到沿 -Z
-    gluCylinder(q, 3.0, 2.5, 40.0, 8, 1);
-    glPopMatrix();
-
-    // 笔尖红色小球 (半径 4mm)
-    glColor3f(1.0f, 0.15f, 0.10f);
-    glPushMatrix();
-    glTranslatef((float)pos.x, (float)pos.y, (float)pos.z);
-    glutSolidSphere(4.0, 12, 12);
-    glPopMatrix();
-
-    // 光标光环
-    glColor4f(0.25f, 0.85f, 1.0f, 0.3f);
-    glPushMatrix();
-    glTranslatef((float)pos.x, (float)pos.y, (float)pos.z);
-    glutWireSphere(12.0, 10, 10);
-    glPopMatrix();
-
-    gluDeleteQuadric(q);
-}
-
 void draw3D() {
     drawFloor();
     drawBoundary();
@@ -170,23 +202,31 @@ void draw3D() {
         LeaveCriticalSection(&appState.robotPoseMutex);
     }
 
-    // 机械臂用实际位姿驱动
+    // 机械臂可视化组: 缩小至 50% + 右移 100mm (适配视口)
+    glPushMatrix();
+    glTranslatef(100.0f, 0.0f, 0.0f);
+    glScalef(0.5f, 0.5f, 0.5f);
+
+    // 机械臂用实际关节角驱动
     s_robotModel.draw(actual);
 
-    // 目标位置标记
+    // 目标位置标记 (红色线框 — 指令目标)
     Vec3 targetPos(target.x, target.y, target.z);
-    Vec3 actualPos(actual.x, actual.y, actual.z);
     drawTargetMarker(targetPos);
+
+    // 实际位置标记 (绿色球 — GetPose 反馈)
+    Vec3 actualPos(actual.x, actual.y, actual.z);
     drawActualMarker(actualPos);
 
-    // Touch 笔模型
-    Vec3 mapped;
-    EnterCriticalSection(&appState.adjustedPosTableMutex);
-    mapped = appState.adjustedPosTable;
-    LeaveCriticalSection(&appState.adjustedPosTableMutex);
-    drawTouchPen(mapped);
+    // 末端光点: 始终跟随 targetPos，与机械臂运动逻辑一致
+    // targetPos 在按下时累积增量，松开时保持原位，完美反映机械臂实际运动
+    bool transmitting = RelayCore::instance().isTransmitting();
+    Vec3 lightPos = targetPos;
+    drawEndEffectorLight(lightPos, transmitting);
 
-    // 轨迹
+    glPopMatrix();
+
+    // 轨迹 (仅按钮按下时记录)
     drawTrail();
 }
 
