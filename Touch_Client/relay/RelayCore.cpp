@@ -44,104 +44,61 @@ static bool escapeSingularity() {
         std::cout << "[脱困] 错误码: " << fb;
     }
 
-    // Step 0.5: PowerOn (如果控制器刚重启, 需要先上电, 约10秒)
-    std::cout << "[脱困] 尝试 PowerOn..." << std::endl;
-    robotSendEnable("PowerOn()");
-    Sleep(200);
-    if (robotRecvEnable(fb, sizeof(fb))) {
-        std::cout << "[脱困] PowerOn 响应: " << fb;
-    }
-    // PowerOn 需要约10秒, 等待
-    for (int i = 0; i < 10; i++) {
-        std::cout << "." << std::flush;
-        Sleep(1000);
-    }
-    std::cout << std::endl;
-
-    // Step 0.6: ResetRobot 清空残留指令队列
-    robotSendEnable("ResetRobot()");
-    Sleep(200);
-
-    std::cout << "[脱困] 策略: ClearError → JointMovJ入队 → EnableRobot 执行" << std::endl;
+    std::cout << "[脱困] 策略: SetCollideDrag(1) 强制拖拽 — 报警状态下也生效" << std::endl;
+    std::cout << "========================================" << std::endl;
+    std::cout << "[脱困]   1. 把大臂/小臂折弯 (J2/J3 离开 0°)" << std::endl;
+    std::cout << "[脱困]   2. 把手腕转一下 (J5 离开 0°)" << std::endl;
+    std::cout << "[脱困]   3. 保持机械臂自然弯曲姿态" << std::endl;
     std::cout << "========================================" << std::endl;
 
-    double curJoints[6] = {0};
-
-    // Step 1: ClearError (清除报警)
+    // Step 1: 强制进入拖拽模式 (即使在报警状态)
+    // ClearError 先试一次, 但即使失败也不影响 SetCollideDrag
     robotSendEnable("ClearError()");
     Sleep(200);
-
-    // Step 2: 清除后立即读关节角 (不需要使能)
-    robotSendEnable("GetAngle()");
-    Sleep(100);
+    robotSendEnable("SetCollideDrag(1)");
+    Sleep(300);
     if (robotRecvEnable(fb, sizeof(fb))) {
-        FeedbackParser::parseAngle(fb, curJoints);
-        std::cout << "[脱困] 当前关节: J1=" << curJoints[0] << " J2=" << curJoints[1]
-                  << " J3=" << curJoints[2] << " J4=" << curJoints[3]
-                  << " J5=" << curJoints[4] << " J6=" << curJoints[5] << std::endl;
+        std::cout << "[脱困] SetCollideDrag(1) 响应: " << fb;
     }
 
-    // Step 3: 构造逃离目标 (大步长偏移, 离开 0°)
-    double safeJoints[6];
-    for (int i = 0; i < 6; i++) safeJoints[i] = curJoints[i];
-    safeJoints[1] = (fabs(curJoints[1]) < 5.0) ? 30.0 : curJoints[1] + 20;
-    safeJoints[2] = (fabs(curJoints[2]) < 5.0) ? 45.0 : curJoints[2] + 30;
-    if (safeJoints[2] > 150) safeJoints[2] = 150;
-    if (safeJoints[2] < -150) safeJoints[2] = -150;
-    safeJoints[4] = (fabs(curJoints[4]) < 5.0) ? 30.0 : curJoints[4] + 20;
+    std::cout << "[脱困] 强制拖拽已激活 — 请手动拖动机械臂到安全位置" << std::endl;
+    std::cout << "[脱困] 拖动完成后按 Enter 继续" << std::endl;
 
-    std::cout << "[脱困] 目标关节: J1=" << safeJoints[0] << " J2=" << safeJoints[1]
-              << " J3=" << safeJoints[2] << " J4=" << safeJoints[3]
-              << " J5=" << safeJoints[4] << " J6=" << safeJoints[5] << std::endl;
-
-    char cmd[256];
-    snprintf(cmd, sizeof(cmd), "JointMovJ(%.2f,%.2f,%.2f,%.2f,%.2f,%.2f)",
-        safeJoints[0], safeJoints[1], safeJoints[2],
-        safeJoints[3], safeJoints[4], safeJoints[5]);
-
-    // Step 4: 关键! 先 JointMovJ → 再 EnableRobot
-    // ClearError后机器人未报警但未使能, JointMovJ进入30003队列
-    std::cout << "[脱困] 入队: " << cmd << std::endl;
-    robotSendMotion(cmd);
-    Sleep(50);
-    robotSendMotion(cmd);  // 重复确保入队
-
-    // Step 5: 现在使能 — 运动队列立即执行, 抢在报警前挪开关节
-    std::cout << "[脱困] 使能并执行..." << std::endl;
-    robotSendEnable("EnableRobot(0.5,0,0,0)");
-    Sleep(3000);  // 等待 JointMovJ 执行完成
-
-    // Step 6: 检查状态
-    for (int retry = 0; retry < 3; retry++) {
-        robotSendEnable("RobotMode()");
-        Sleep(50);
-        if (robotRecvEnable(fb, sizeof(fb))) {
-            int mode = -1;
-            FeedbackParser::parseMode(fb, mode);
-            if (mode != 9 && mode != -1) {
-                std::cout << "[脱困] 脱困成功! (mode=" << mode << ")" << std::endl;
-                s_escaping = false;
-                return true;
-            }
+    // Step 2: 等待用户手动拖动
+    for (int i = 0; i < 120; i++) {
+        if (GetAsyncKeyState(VK_RETURN) & 0x8000) {
+            std::cout << "[脱困] 用户按下 Enter" << std::endl;
+            while (GetAsyncKeyState(VK_RETURN) & 0x8000) Sleep(10);
+            break;
         }
+        if (i % 5 == 0 && i > 0) {
+            std::cout << "[脱困] 等待中... (" << (120 - i) << "s) 按 Enter 继续" << std::endl;
+        }
+        Sleep(1000);
+    }
 
-        if (retry < 2) {
-            std::cout << "[脱困] 重试" << (retry+2) << "/3: ClearError + 更大步长..." << std::endl;
-            robotSendEnable("ClearError()");
-            Sleep(100);
-            safeJoints[1] += 15;
-            safeJoints[2] += (safeJoints[2] > 0 ? 20 : -20);
-            safeJoints[4] += 15;
-            if (safeJoints[2] > 150) safeJoints[2] = 150;
-            if (safeJoints[2] < -150) safeJoints[2] = -150;
-            snprintf(cmd, sizeof(cmd), "JointMovJ(%.2f,%.2f,%.2f,%.2f,%.2f,%.2f)",
-                safeJoints[0], safeJoints[1], safeJoints[2],
-                safeJoints[3], safeJoints[4], safeJoints[5]);
-            robotSendMotion(cmd);
-            Sleep(50);
-            robotSendMotion(cmd);
-            robotSendEnable("EnableRobot(0.5,0,0,0)");
-            Sleep(3000);
+    // Step 3: 退出拖拽模式
+    std::cout << "[脱困] 退出拖拽模式..." << std::endl;
+    robotSendEnable("SetCollideDrag(0)");
+    Sleep(200);
+    robotRecvEnable(fb, sizeof(fb));
+
+    // Step 4: 重新使能
+    robotSendEnable("ClearError()");
+    Sleep(200);
+    robotSendEnable("EnableRobot(0.5,0,0,0)");
+    Sleep(300);
+
+    // Step 5: 检查状态
+    robotSendEnable("RobotMode()");
+    Sleep(50);
+    if (robotRecvEnable(fb, sizeof(fb))) {
+        int mode = -1;
+        FeedbackParser::parseMode(fb, mode);
+        if (mode != 9 && mode != -1) {
+            std::cout << "[脱困] 脱困成功! (mode=" << mode << ")" << std::endl;
+            s_escaping = false;
+            return true;
         }
     }
 
