@@ -64,45 +64,104 @@ static bool escapeSingularity() {
     std::cout << "[脱困] 强制拖拽已激活 — 请手动拖动机械臂到安全位置" << std::endl;
     std::cout << "[脱困] 拖动完成后按 Enter 继续" << std::endl;
 
-    // Step 2: 等待用户手动拖动
-    for (int i = 0; i < 120; i++) {
-        if (GetAsyncKeyState(VK_RETURN) & 0x8000) {
-            std::cout << "[脱困] 用户按下 Enter" << std::endl;
-            while (GetAsyncKeyState(VK_RETURN) & 0x8000) Sleep(10);
-            break;
+    // Step 2: 等待用户手动拖动 + 验证关节是否挪动
+    bool moved = false;
+    const int MAX_WAIT = 120;
+    double prevJoints[6] = {0};
+
+    while (!moved) {
+        std::cout << "[脱困] 拖拽模式已激活 — 请手动拖动机械臂到安全位置" << std::endl;
+
+        for (int i = 0; i < MAX_WAIT; i++) {
+            if (GetAsyncKeyState(VK_RETURN) & 0x8000) {
+                std::cout << "[脱困] 用户按下 Enter" << std::endl;
+                while (GetAsyncKeyState(VK_RETURN) & 0x8000) Sleep(10);
+                break;
+            }
+            if (i % 5 == 0 && i > 0) {
+                std::cout << "[脱困] 等待中... (" << (MAX_WAIT - i) << "s) 按 Enter 确认" << std::endl;
+            }
+            Sleep(1000);
         }
-        if (i % 5 == 0 && i > 0) {
-            std::cout << "[脱困] 等待中... (" << (120 - i) << "s) 按 Enter 继续" << std::endl;
+
+        // 验证: 读关节角, 确认机械臂确实挪动了
+        std::cout << "[脱困] 验证机械臂状态..." << std::endl;
+        robotSendEnable("GetAngle()");
+        Sleep(100);
+        double curJoints[6] = {0};
+        if (robotRecvEnable(fb, sizeof(fb))) {
+            FeedbackParser::parseAngle(fb, curJoints);
+            std::cout << "[脱困] 当前关节: J1=" << curJoints[0] << " J2=" << curJoints[1]
+                      << " J3=" << curJoints[2] << " J4=" << curJoints[3]
+                      << " J5=" << curJoints[4] << " J6=" << curJoints[5] << std::endl;
         }
-        Sleep(1000);
+
+        // 检查 J2/J3/J5 是否离开零点 (容差 3°)
+        bool j2ok = fabs(curJoints[1]) > 3.0;
+        bool j3ok = fabs(curJoints[2]) > 3.0;
+        bool j5ok = fabs(curJoints[4]) > 3.0;
+
+        if (j2ok && j3ok && j5ok) {
+            std::cout << "[脱困] 关节已离开零点, 验证通过" << std::endl;
+            moved = true;
+        } else {
+            std::cout << "[脱困] 关节仍接近零点 (";
+            if (!j2ok) std::cout << "J2=" << curJoints[1] << "° ";
+            if (!j3ok) std::cout << "J3=" << curJoints[2] << "° ";
+            if (!j5ok) std::cout << "J5=" << curJoints[4] << "° ";
+            std::cout << "), 请继续拖动!" << std::endl;
+            // 继续循环, 再次等待
+        }
     }
 
     // Step 3: 退出拖拽模式
-    std::cout << "[脱困] 退出拖拽模式..." << std::endl;
+    std::cout << "[脱困] 退出强制拖拽模式..." << std::endl;
     robotSendEnable("SetCollideDrag(0)");
-    Sleep(200);
-    robotRecvEnable(fb, sizeof(fb));
+    Sleep(300);
+    if (robotRecvEnable(fb, sizeof(fb))) {
+        std::cout << "[脱困] SetCollideDrag(0) 响应: " << fb;
+    }
 
     // Step 4: 重新使能
+    std::cout << "[脱困] ClearError + EnableRobot..." << std::endl;
     robotSendEnable("ClearError()");
     Sleep(200);
     robotSendEnable("EnableRobot(0.5,0,0,0)");
     Sleep(300);
 
-    // Step 5: 检查状态
+    // Step 5: 检查使能结果
     robotSendEnable("RobotMode()");
-    Sleep(50);
+    Sleep(100);
     if (robotRecvEnable(fb, sizeof(fb))) {
+        std::cout << "[脱困] RobotMode 响应: " << fb;
         int mode = -1;
         FeedbackParser::parseMode(fb, mode);
         if (mode != 9 && mode != -1) {
             std::cout << "[脱困] 脱困成功! (mode=" << mode << ")" << std::endl;
+            // 再次确认关节角
+            robotSendEnable("GetAngle()");
+            Sleep(50);
+            if (robotRecvEnable(fb, sizeof(fb))) {
+                double finalJoints[6];
+                FeedbackParser::parseAngle(fb, finalJoints);
+                std::cout << "[脱困] 最终关节: J1=" << finalJoints[0] << " J2=" << finalJoints[1]
+                          << " J3=" << finalJoints[2] << " J4=" << finalJoints[3]
+                          << " J5=" << finalJoints[4] << " J6=" << finalJoints[5] << std::endl;
+            }
             s_escaping = false;
             return true;
         }
     }
 
-    std::cerr << "[脱困] 脱困失败，机械臂仍处于报警状态" << std::endl;
+    // Step 6: 使能失败, 读错误码帮助诊断
+    std::cout << "[脱困] 使能后仍报警, 读取错误码..." << std::endl;
+    robotSendEnable("GetErrorID()");
+    Sleep(100);
+    if (robotRecvEnable(fb, sizeof(fb))) {
+        std::cout << "[脱困] 当前错误码: " << fb;
+    }
+
+    std::cerr << "[脱困] 脱困失败" << std::endl;
     s_escaping = false;
     return false;
 }
