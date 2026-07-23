@@ -140,6 +140,10 @@ bool RelayCore::init() {
         }
     }
 
+    // 降低碰撞检测灵敏度 (5级最灵敏 → 设为2级, 减少误触发)
+    robotSendEnable("SetCollisionLevel(2)");
+    Sleep(100);
+
     char cpBuf[64];
     snprintf(cpBuf, sizeof(cpBuf), "CP(%u)", Config::CP_SMOOTH_RATIO);
     robotSendEnable(cpBuf);
