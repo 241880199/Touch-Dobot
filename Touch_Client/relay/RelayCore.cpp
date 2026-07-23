@@ -130,26 +130,35 @@ bool RelayCore::init() {
     std::cout << "[Relay] 机械臂使能成功" << std::endl;
     Sleep(200);
 
-    // ===== 奇异检测: 使能后检查是否立即报警 =====
+    // ===== 奇异检测: 使能后检查是否立即报警 (重试3次, 每次100ms) =====
     {
-        robotSendEnable("RobotMode()");
-        Sleep(100);
-        char fb[128];
-        if (robotRecvEnable(fb, sizeof(fb))) {
-            int mode = -1;
-            FeedbackParser::parseMode(fb, mode);
-            if (mode == 9) {
-                std::cout << "[Relay] 使能后检测到报警 (mode=9)，启动脱困流程..." << std::endl;
-                if (!escapeSingularity()) {
-                    std::cerr << "[Relay] FATAL: 脱困失败，请断电后手动将机械臂挪出奇异区再上电" << std::endl;
-                    robotSendEnable("DisableRobot()");
-                    Sleep(100);
-                    robotDisconnect();
-                    return false;
+        int mode = -1;
+        for (int retry = 0; retry < 3; retry++) {
+            robotSendEnable("RobotMode()");
+            Sleep(100);
+            char fb[128];
+            if (robotRecvEnable(fb, sizeof(fb))) {
+                // 过滤非JSON反馈 (movJ/servoP等响应)
+                if (FeedbackParser::parseMode(fb, mode)) {
+                    break;
                 }
-            } else {
-                std::cout << "[Relay] 机械臂状态正常 (mode=" << mode << ")" << std::endl;
             }
+            std::cout << "[Relay] RobotMode retry " << (retry + 1) << "/3..." << std::endl;
+        }
+
+        if (mode == 9) {
+            std::cout << "[Relay] 使能后检测到报警 (mode=9)，启动脱困流程..." << std::endl;
+            if (!escapeSingularity()) {
+                std::cerr << "[Relay] FATAL: 脱困失败，请断电后手动将机械臂挪出奇异区再上电" << std::endl;
+                robotSendEnable("DisableRobot()");
+                Sleep(100);
+                robotDisconnect();
+                return false;
+            }
+        } else if (mode == -1) {
+            std::cout << "[Relay] 无法读取RobotMode (mode=-1)，继续初始化..." << std::endl;
+        } else {
+            std::cout << "[Relay] 机械臂状态正常 (mode=" << mode << ")" << std::endl;
         }
     }
 
@@ -447,7 +456,9 @@ void RelayCore::checkAlarm() {
         auto& app = appState;
         bool wasAlarm = app.isRobotInAlarm.exchange(mode == 9);
         if (mode == 9 && !wasAlarm) {
-            std::cout << "[Relay] 检测到机械臂报警 (mode=9)" << std::endl;
+            std::cout << "\n[Relay] !!! 检测到机械臂报警 (mode=9) !!!" << std::endl;
+            std::cout << "[Relay] 按 'e' 键启动自动脱困流程 (StartDrag + 手动拖动)" << std::endl;
+            std::cout << "[Relay] 或重启程序触发 init 阶段的脱困检测\n" << std::endl;
 
             // 立即获取当前位置并记录到 SafetyPredictor 黑名单
             queryPose();
@@ -458,6 +469,16 @@ void RelayCore::checkAlarm() {
             SafetyPredictor::instance().addAlarmRecord(alarmPose);
         }
     }
+}
+
+// ===== 手动触发脱困 (在运行中按 'e' 调用) =====
+bool RelayCore::triggerEscape() {
+    if (!isRobotConnected()) {
+        std::cerr << "[Relay] 机械臂未连接，无法脱困" << std::endl;
+        return false;
+    }
+    std::cout << "[Relay] 手动触发脱困流程..." << std::endl;
+    return escapeSingularity();
 }
 
 void RelayCore::registerExtension(IExtension* ext) {

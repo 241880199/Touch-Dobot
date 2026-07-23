@@ -27,13 +27,16 @@ public:
     void queryJointAngles();
     void checkAlarm();
 
+    // 奇异脱困 (可在运行中手动触发)
+    bool triggerEscape();
+
     // 扩展
     void registerExtension(IExtension* ext);
 
     // MATLAB GUI 上报
     void initRelayReporting();
     void shutdownRelayReporting();
-    void sendRelayUpdate(const char* msg);
+    int  sendRelayUpdate(const char* msg);
     void reportPosition();
     void reportCommand(const char* cmd);
 
@@ -48,7 +51,9 @@ private:
 
     std::atomic<bool> m_transmitting{false};
     std::atomic<bool> m_basePointSet{false};
-    Vec3 m_basePoint;
+    Vec3 m_targetPos;           // 累加式机器人目标位置
+    Vec3 m_lastTouchPos;        // 上一帧 Touch 位置 (robot系), 用于增量计算
+    bool   m_lastTouchValid = false;
     CRITICAL_SECTION m_basePointLock;
     std::vector<IExtension*> m_extensions;
 
@@ -56,4 +61,5 @@ private:
     SOCKET m_relaySocket = INVALID_SOCKET;
     CRITICAL_SECTION m_relaySocketMutex;
     DWORD m_lastRelayUpdate = 0;
+    DWORD m_lastServoTime = 0;      // ServoP 发送频率控制
 };

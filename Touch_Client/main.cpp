@@ -117,9 +117,18 @@ void keyboard(unsigned char key, int, int) {
     if (key == 'q' || key == 'Q' || key == 27) { // q 或 ESC
         std::cout << "\nShutting down..." << std::endl;
         RelayCore::instance().shutdownRelayReporting();
-        if (!g_noRobot) RelayCore::instance().shutdown();
+        if (!g_noRobot) {
+            std::cout << "Disabling robot..." << std::endl;
+            RelayCore::instance().shutdown();  // 发送 DisableRobot() + 断开连接
+        }
         if (!g_noTouch) cleanupHapticDevice();
         exit(0);
+    }
+    if (key == 'e' || key == 'E') {
+        if (!g_noRobot) {
+            std::cout << "\n[Main] 手动触发脱困..." << std::endl;
+            RelayCore::instance().triggerEscape();
+        }
     }
 }
 
