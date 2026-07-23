@@ -16,10 +16,19 @@ namespace Config {
 
     // ========== 安全边界（机械臂用户坐标系，单位mm） ==========
     // 初始值设为保守范围，根据实际环境调整
-    const double SAFE_X_MIN = 180.0, SAFE_X_MAX = 420.0;
-    const double SAFE_Y_MIN = -200.0, SAFE_Y_MAX = 200.0;
-    const double SAFE_Z_MIN = 30.0,  SAFE_Z_MAX = 300.0;
+    // CR3 工作半径 620mm，覆盖全工作空间并保留边界余量
+    const double SAFE_X_MIN = 50.0,  SAFE_X_MAX = 600.0;
+    const double SAFE_Y_MIN = -500.0, SAFE_Y_MAX = 500.0;
+    const double SAFE_Z_MIN = 0.0,   SAFE_Z_MAX = 550.0;
     const double SAFE_BOUNDARY_BUFFER_RATIO = 0.2; // 20%边界缓冲区，线速度衰减
+
+    // ========== SafetyPredictor 安全预判参数 ==========
+    const double WORKSPACE_RADIUS         = 620.0;   // CR3 最大工作半径 (mm)
+    const double ROBOT_MAX_Z              = 795.0;   // CR3 总高度 (mm)
+    const double SINGULARITY_COND_WARN    = 100.0;   // 雅可比条件数: 警告阈值
+    const double SINGULARITY_COND_REJECT  = 500.0;   // 雅可比条件数: 拒绝阈值
+    const double ALARM_DANGER_RADIUS      = 30.0;    // 历史报警点: 危险半径 (mm)
+    const double ALARM_WARN_RADIUS        = 80.0;    // 历史报警点: 警告半径 (mm)
 
     // ========== 网络参数 ==========
     constexpr const char* ROBOT_IP = "192.168.101.11";
