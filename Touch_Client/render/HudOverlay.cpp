@@ -4,6 +4,7 @@
 #include <GL/glut.h>
 #include <cstdio>
 #include <cstring>
+#include "../safety/SafetyPredictor.h"
 
 namespace HudOverlay {
 
@@ -300,6 +301,43 @@ static void drawCoordPanel(int x, int y, int w, int h) {
     const char* tx = (target.x != 0 || target.y != 0 || target.z != 0) ? "ACTIVE" : "IDLE";
     glColor3f(tx[0] == 'A' ? 0.35f : 0.55f, tx[0] == 'A' ? 0.90f : 0.55f, 0.55f);
     snprintf(buf, sizeof(buf), "TX: %s", tx);
+    text2D(x + 6, ty, buf, GLUT_BITMAP_8_BY_13);
+
+    // ===== SafetyPredictor 状态 =====
+    ty -= 6;
+    drawSeparatorLine(x + 4, x + w - 4, ty + 2);
+    ty -= 4;
+
+    SafetyVerdict v = SafetyPredictor::instance().lastVerdict();
+    int alarmCount = SafetyPredictor::instance().alarmCount();
+
+    // 安全状态灯
+    ty -= lineH;
+    switch (v.action) {
+        case SafetyVerdict::ALLOW:
+            glColor3f(0.35f, 0.90f, 0.50f);
+            snprintf(buf, sizeof(buf), "Safety: OK");
+            break;
+        case SafetyVerdict::WARN_SLOW:
+            glColor3f(1.0f, 0.78f, 0.28f);
+            snprintf(buf, sizeof(buf), "Safety: WARN — %s (x%.0f%%)", v.reason, v.speedFactor * 100);
+            break;
+        case SafetyVerdict::REJECT:
+            glColor3f(1.0f, 0.35f, 0.35f);
+            snprintf(buf, sizeof(buf), "Safety: REJECT — %s", v.reason);
+            break;
+    }
+    text2D(x + 6, ty, buf, GLUT_BITMAP_8_BY_13);
+
+    // 报警历史计数
+    ty -= lineH;
+    if (alarmCount > 0) {
+        glColor3f(1.0f, 0.55f, 0.25f);
+        snprintf(buf, sizeof(buf), "Alarms: %d recorded", alarmCount);
+    } else {
+        glColor3f(0.45f, 0.50f, 0.55f);
+        snprintf(buf, sizeof(buf), "Alarms: 0");
+    }
     text2D(x + 6, ty, buf, GLUT_BITMAP_8_BY_13);
 }
 
