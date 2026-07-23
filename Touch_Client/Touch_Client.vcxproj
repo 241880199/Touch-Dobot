@@ -81,6 +81,8 @@
     <!-- robot -->
     <ClInclude Include="robot\RobotConnection.h" />
     <ClCompile Include="robot\RobotConnection.cpp" />
+    <ClInclude Include="robot\Kinematics.h" />
+    <ClCompile Include="robot\Kinematics.cpp" />
     <!-- relay -->
     <ClInclude Include="relay\IExtension.h" />
     <ClInclude Include="relay\CoordinateTransform.h" />
