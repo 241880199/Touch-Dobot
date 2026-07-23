@@ -34,69 +34,48 @@ static bool escapeSingularity() {
     }
     s_escaping = true;
     std::cout << "[脱困] 检测到机械臂报警 (疑似奇异构型)" << std::endl;
-    std::cout << "[脱困] 进入拖拽模式，请手动拖动机械臂到安全位置" << std::endl;
     std::cout << "[脱困]   1. 把大臂/小臂折弯 (J2/J3 离开 0°)" << std::endl;
     std::cout << "[脱困]   2. 把手腕转一下 (J5 离开 0°)" << std::endl;
     std::cout << "[脱困]   3. 保持机械臂自然弯曲姿态" << std::endl;
     std::cout << "========================================" << std::endl;
 
-    // 尝试拖拽模式 (CR3 固件 ≥3.5.2)
+    char fb[256];
+
+    // Step 1: ClearError + EnableRobot
     robotSendEnable("ClearError()");
     Sleep(200);
-    robotSendEnable("StartDrag()");
+    robotSendEnable("EnableRobot(0.5,0,0,0)");
     Sleep(300);
 
-    // 读取 StartDrag 响应
-    char fb[256];
-    if (robotRecvEnable(fb, sizeof(fb))) {
-        std::cout << "[脱困] StartDrag 响应: " << fb;
-    }
+    // Step 2: BrakeControl 松 J2/J3/J5 抱闸 (不依赖 StartDrag)
+    std::cout << "[脱困] 松开 J2/J3/J5 抱闸..." << std::endl;
+    robotSendEnable("BrakeControl(2,1)"); Sleep(100); robotRecvEnable(fb, sizeof(fb));
+    robotSendEnable("BrakeControl(3,1)"); Sleep(100); robotRecvEnable(fb, sizeof(fb));
+    robotSendEnable("BrakeControl(5,1)"); Sleep(100); robotRecvEnable(fb, sizeof(fb));
 
-    // 等待用户手动拖动 (最多等 120 秒, 每秒检测一次 RobotMode)
-    std::cout << "[脱困] 拖拽模式已激活 — 请手动拖动机械臂..." << std::endl;
-    std::cout << "[脱困] 拖动完成后按 Enter 继续 (或等待自动检测)" << std::endl;
+    std::cout << "[脱困] 抱闸已松开，请手动拖动机械臂..." << std::endl;
+    std::cout << "[脱困] 拖动完成后按 Enter 继续" << std::endl;
 
-    bool escaped = false;
+    // Step 3: 等待用户手动拖动
     for (int i = 0; i < 120; i++) {
-        // 检查 RobotMode
-        robotSendEnable("RobotMode()");
-        Sleep(50);
-        if (robotRecvEnable(fb, sizeof(fb))) {
-            int mode = -1;
-            FeedbackParser::parseMode(fb, mode);
-            if (mode != 9 && mode != -1) {
-                escaped = true;
-                std::cout << "[脱困] 机械臂已脱离报警状态 (mode=" << mode << ")" << std::endl;
-                break;
-            }
-        }
-
-        // 每秒提示一次
-        if (i % 5 == 0 && i > 0) {
-            std::cout << "[脱困] 等待中... (" << (120 - i) << "s 超时) 按 Enter 跳过等待" << std::endl;
-        }
-
-        // 非阻塞检查键盘 (Windows)
         if (GetAsyncKeyState(VK_RETURN) & 0x8000) {
-            std::cout << "[脱困] 用户按下 Enter，停止等待" << std::endl;
-            // 清掉回车缓冲区
+            std::cout << "[脱困] 用户按下 Enter" << std::endl;
             while (GetAsyncKeyState(VK_RETURN) & 0x8000) Sleep(10);
             break;
         }
-
+        if (i % 5 == 0 && i > 0) {
+            std::cout << "[脱困] 等待中... (" << (120 - i) << "s) 按 Enter 继续" << std::endl;
+        }
         Sleep(1000);
     }
 
-    if (!escaped) {
-        std::cout << "[脱困] 等待超时，尝试用 GetPose 验证当前位置..." << std::endl;
-    }
+    // Step 4: 锁回抱闸
+    std::cout << "[脱困] 锁回 J2/J3/J5 抱闸..." << std::endl;
+    robotSendEnable("BrakeControl(2,0)"); Sleep(100); robotRecvEnable(fb, sizeof(fb));
+    robotSendEnable("BrakeControl(3,0)"); Sleep(100); robotRecvEnable(fb, sizeof(fb));
+    robotSendEnable("BrakeControl(5,0)"); Sleep(100); robotRecvEnable(fb, sizeof(fb));
 
-    // 退出拖拽模式
-    robotSendEnable("StopDrag()");
-    Sleep(200);
-    robotRecvEnable(fb, sizeof(fb));
-
-    // 重新使能
+    // Step 5: 重新使能
     robotSendEnable("ClearError()");
     Sleep(200);
     robotSendEnable("EnableRobot(0.5,0,0,0)");
