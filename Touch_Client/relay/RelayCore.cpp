@@ -26,7 +26,13 @@ RelayCore::~RelayCore() {
 
 // ===== 奇异脱困: 检测报警 → 拖拽模式 → 等待手动挪动 → 重新使能 =====
 static bool escapeSingularity() {
-    std::cout << "\n========================================" << std::endl;
+    // 防止重入
+    static bool s_escaping = false;
+    if (s_escaping) {
+        std::cout << "[脱困] 已在脱困流程中，跳过重复触发" << std::endl;
+        return false;
+    }
+    s_escaping = true;
     std::cout << "[脱困] 检测到机械臂报警 (疑似奇异构型)" << std::endl;
     std::cout << "[脱困] 进入拖拽模式，请手动拖动机械臂到安全位置" << std::endl;
     std::cout << "[脱困]   1. 把大臂/小臂折弯 (J2/J3 离开 0°)" << std::endl;
@@ -104,11 +110,13 @@ static bool escapeSingularity() {
         FeedbackParser::parseMode(fb, mode);
         if (mode != 9 && mode != -1) {
             std::cout << "[脱困] 重新使能成功 (mode=" << mode << ")" << std::endl;
+            s_escaping = false;
             return true;
         }
     }
 
     std::cerr << "[脱困] 脱困失败，机械臂仍处于报警状态" << std::endl;
+    s_escaping = false;
     return false;
 }
 
@@ -457,27 +465,31 @@ void RelayCore::checkAlarm() {
         bool wasAlarm = app.isRobotInAlarm.exchange(mode == 9);
         if (mode == 9 && !wasAlarm) {
             std::cout << "\n[Relay] !!! 检测到机械臂报警 (mode=9) !!!" << std::endl;
-            std::cout << "[Relay] 按 'e' 键启动自动脱困流程 (StartDrag + 手动拖动)" << std::endl;
-            std::cout << "[Relay] 或重启程序触发 init 阶段的脱困检测\n" << std::endl;
 
             // 立即获取当前位置并记录到 SafetyPredictor 黑名单
             queryPose();
             EnterCriticalSection(&app.robotPoseMutex);
             AppState::RobotPose alarmPose = app.robotActualPose;
             LeaveCriticalSection(&app.robotPoseMutex);
-
             SafetyPredictor::instance().addAlarmRecord(alarmPose);
+
+            // 自动进入脱困流程
+            std::cout << "[Relay] 自动启动脱困流程..." << std::endl;
+            if (escapeSingularity()) {
+                std::cout << "[Relay] 脱困成功，恢复正常操作" << std::endl;
+                app.isRobotInAlarm = false;
+            } else {
+                std::cout << "[Relay] 脱困失败，按 'e' 重试或重启程序" << std::endl;
+            }
         }
     }
 }
 
-// ===== 手动触发脱困 (在运行中按 'e' 调用) =====
 bool RelayCore::triggerEscape() {
     if (!isRobotConnected()) {
         std::cerr << "[Relay] 机械臂未连接，无法脱困" << std::endl;
         return false;
     }
-    std::cout << "[Relay] 手动触发脱困流程..." << std::endl;
     return escapeSingularity();
 }
 
