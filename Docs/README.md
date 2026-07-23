@@ -1,110 +1,193 @@
-# Touch-Dobot 远程交互系统
+# Touch-Dobot 远程控制系统
 
-## 项目简介
-通过 Force Dimension Touch 设备远程控制 Dobot CR3 机械臂，实现双向力反馈闭环。
-**核心技术栈：** C++ / OpenHaptics / MATLAB / TCP Socket / OpenGL
+通过 Force Dimension Touch 力反馈设备远程控制 Dobot CR3 六轴机械臂。
 
----
-
-## 仓库目录结构
-
-| 目录 | 说明 |
-| :--- | :--- |
-| **`Touch_Client/`** | Touch 端主程序 (C++)。Touch 设备控制、3D 可视化界面、力反馈渲染、TCP 通信。 |
-| **`Relay_Station/`** | 中继站程序 (MATLAB)。TCP 服务器、坐标转换、机械臂指令生成、力反馈转发、时延监控。 |
-| **`Robot_Control/`** | 机械臂底层控制模块。SDK 封装、运动控制接口、力/力矩读取。 |
-| **`Algo_Sandbox/`** | 算法验证沙箱。坐标变换推导、滤波算法测试 (Python/Matlab)。 |
-| **`Network_Shared/`** | 公共通信协议定义。TCP 消息格式规范、数据包结构。 |
-| **`Docs/`** | 项目文档、技术资料。 |
-
----
-
-## 系统架构
-
-### 正向链路 (人 → 机械臂)
-1. Touch 端读取原始坐标及姿态，通过 TCP 发送给中继站
-2. 中继站接收坐标，调用坐标转换算法，映射为机械臂目标位姿
-3. 生成运动指令 (ServoP)，通过 TCP 发送给机械臂控制器
-4. 机械臂执行运动
-
-### 反向链路 (机械臂 → 人)
-1. 中继站通过 SDK 实时读取末端力/力矩数据
-2. 滤波算法对原始力数据进行平滑处理
-3. 处理后的力数据通过 TCP 发送给 Touch 端
-4. Touch 程序调用 OpenHaptics SDK 驱动手柄产生阻力
-
----
-
-## Touch_Client 当前进度 (v3.0)
-
-### 已完成功能
-- **Touch 设备集成**: OpenHaptics HDAPI 1kHz 触觉回调，位置读取 + 按钮状态
-- **3D 可视化**: GLUT/OpenGL 渲染，透视等距视角，右手坐标系，CR3 STL 模型加载，末端光点指示器
-- **机械臂通信**: 双端口 TCP (29999 Dashboard + 30003 Motion)，ServoP 增量运动控制
-- **安全系统**: 四层防护 (工作半径 + 用户边界 + IK 辅助 + 奇异检测 + 报警历史)
-- **HUD 界面**: 指令日志、反馈日志、坐标/关节角显示、安全状态、奇异位形预警
-- **MATLAB GUI 上报**: TCP 位置/指令实时上报 (localhost:8888)
-- **脱困流程**: 自动检测报警 → 拖拽模式 → 手动调整 → 重新使能
-
-### 安全边界配置
-- X: [-300, 250] mm
-- Y: [-350, 250] mm
-- Z: [140, 500] mm
-- 工作半径: 620mm
-
-### 已知限制
-- URDF 运动学模型与 Dobot 控制器坐标系存在偏移 (约 408mm, 含旋转分量)，IK 数值解不可靠，已降级为辅助判断
-- Touch→Robot 坐标映射为硬编码，未经实物标定
-
----
-
-## 项目推进阶段
-
-### 第一阶段: 环境搭建与单点验证 ✅
-- 机械臂硬件连接，SDK 验证
-- OpenHaptics 开发环境配置
-- PC 间 TCP 通信验证
-
-### 第二阶段: 核心模块开发 ✅
-- Touch 坐标读取 + TCP 客户端
-- MATLAB 中继站基础框架
-- 坐标转换矩阵 + 滤波器初版
-
-### 第三阶段: 闭环联调 (进行中)
-- 中继站力数据读取与回传
-- Touch 端力反馈渲染
-- 通信联调
-- 安全边界 + 滤波集成
-
-### 第四阶段: 系统优化与测试
-- 端到端延迟测试
-- 力反馈增益调优
-- 长时间运行稳定性
-
----
-
-## 构建说明 (Touch_Client)
-
-### 依赖
-- Visual Studio 2022 Build Tools
-- OpenHaptics SDK 3.5.0
-- freeglut 3.2 (含于 OpenHaptics)
-
-### 编译
-```bat
-cd Touch_Client
-build_and_run.bat
+```
+Touch 设备 ──(OpenHaptics)──> Touch_Client (C++) ──(TCP:30003)──> CR3 机械臂
+                                    │
+                                    └──(TCP:8888)──> MATLAB GUI (监控)
 ```
 
-### 命令行参数
-- `--no-robot`: 无机械臂模式 (仅 Touch + 可视化)
-- `--no-touch`: 无 Touch 模式 (仅机械臂连接)
-- `q` / `ESC`: 退出
-- `e`: 手动触发脱困
+---
+
+## 目录结构
+
+```
+Touch-Dobot/
+├── Touch_Client/        C++ Touch 端主程序 (OpenGL 可视化 + 触觉反馈)
+│   ├── main.cpp         入口, GLUT 窗口 + 定时器
+│   ├── config/          配置常量 (安全边界, 网络, 窗口)
+│   ├── core/            全局状态 (AppState)
+│   ├── haptic/          Touch 设备驱动 (HDAPI 1kHz 回调)
+│   ├── relay/           中继逻辑 (坐标映射, 安全边界, TCP 协议)
+│   ├── render/          3D 渲染 (机械臂模型, 光点, HUD)
+│   ├── robot/           机械臂通信 + 运动学
+│   ├── safety/          安全预判器 (四层防护)
+│   └── models/cr3/      CR3 STL 模型文件 (7 个连杆)
+├── Relay_Station/       MATLAB 中继站 (TCP 服务器 + GUI 监控)
+│   ├── relay_main.m     主入口
+│   ├── relay_gui.m      GUI 界面
+│   └── relay_config.m   配置文件
+├── OpenHaptics/         OpenHaptics SDK 3.5.0 (含 GLUT 3.2)
+├── scripts/             构建/测试脚本
+├── Docs/                文档
+└── start_system.bat     一键启动 (编译 + 中继站 + Touch_Client)
+```
 
 ---
 
-## 协作规范
-1. **提交代码**: 不上传 `.exe`, `.obj`, `.o`, `build/` 等编译产物
-2. **分支管理**: 日常开发使用独立分支，测试通过后合并 master
-3. **文档维护**: 通信协议、算法推导及时更新到 `Docs/`
+## 环境依赖
+
+| 组件 | 版本/路径 | 说明 |
+|------|----------|------|
+| Visual Studio | 2022 BuildTools | `D:\Program Files\Microsoft Visual Studio\2022\BuildTools\` |
+| OpenHaptics SDK | 3.5.0 | `D:\Projects\Touch\OpenHaptics\Developer\3.5.0\` |
+| MATLAB | R2020a+ | 仅中继站需要, 需安装 Instrument Control Toolbox |
+| GLUT | 3.2 (随 OH SDK) | `OpenHaptics\...\utilities\include\GL\` |
+| CR3 STL 模型 | `Touch_Client\models\cr3\` | base_link + Link1~Link6 (二进制 STL) |
+
+## 快速开始
+
+### 1. 仅编译 Touch_Client
+
+```bat
+cd Touch_Client
+build.bat
+```
+
+输出: `x64\Release\Touch_Client.exe`
+
+### 2. 无机械臂测试 (仅 Touch + 可视化)
+
+```bat
+x64\Release\Touch_Client.exe --no-robot
+```
+
+### 3. 无 Touch 测试 (仅机械臂连接)
+
+```bat
+x64\Release\Touch_Client.exe --no-touch
+```
+
+### 4. 一键启动完整系统
+
+```bat
+start_system.bat
+```
+
+自动执行: 启动 MATLAB 中继站 → 编译 Touch_Client → 复制 DLL → 运行
+
+### 键盘操作
+
+| 按键 | 功能 |
+|------|------|
+| Touch 按钮 1 按下 + 移动 | 增量控制机械臂运动 |
+| `q` / `ESC` | 退出程序 |
+| `e` | 手动触发脱困流程 |
+
+---
+
+## 配置说明
+
+### 机械臂 IP (`Touch_Client/config/Config.h`)
+
+```cpp
+constexpr const char* ROBOT_IP = "192.168.101.11";
+const int ENABLE_PORT = 29999;   // Dashboard 协议端口
+const int MOTION_PORT = 30003;   // 运动控制端口
+```
+
+### 安全边界 (`Touch_Client/config/Config.h`)
+
+```cpp
+const double SAFE_X_MIN = -300.0, SAFE_X_MAX = 250.0;
+const double SAFE_Y_MIN = -350.0, SAFE_Y_MAX = 250.0;
+const double SAFE_Z_MIN = 140.0,  SAFE_Z_MAX = 500.0;
+```
+
+基于机械臂静止位姿 (~ -103, -153, 381) 设定。修改后需重新编译。
+
+### 中继站配置 (`Relay_Station/relay_config.m`)
+
+```matlab
+cfg.robot_ip = '192.168.101.11';
+cfg.relay_port = 8888;  % Touch_Client → MATLAB 上报端口
+```
+
+### MATLAB GUI 上报
+
+Touch_Client 启动后自动连接 `127.0.0.1:8888`，实时上报机械臂位姿/关节角/指令日志。
+
+---
+
+## 安全系统 (四层)
+
+| 层 | 检测项 | 失败动作 |
+|----|--------|----------|
+| 几何 | 圆柱奇异 (距 Z 轴 < 80mm) / 关节限位 < 10° | WARN 减速 |
+| 1 | 工作半径 620mm / 用户安全边界 | REJECT 拒绝 |
+| 2 | IK 数值逆解 (URDF 模型, 辅助判断) | WARN 减速 |
+| 3 | 奇异位形 (雅可比条件数 > 500) | REJECT 拒绝 |
+| 4 | 历史报警黑名单 (< 80mm) | WARN 减速 |
+
+HUD 面板实时显示: 安全状态、Z 轴距离、关节限位余量、报警计数。
+
+---
+
+## 架构说明 (v3.0)
+
+Touch_Client 是一个**单进程 C++ 桌面应用**，使用 freeglut + 即时模式 OpenGL 渲染。
+
+### 线程模型
+
+| 线程 | 频率 | 职责 |
+|------|------|------|
+| GLUT 主循环 | ~60Hz | 渲染 3D 场景 + 2D HUD |
+| HDAPI 触觉回调 | 1kHz | 读取 Touch 位置/按钮, 写入力反馈 |
+| GetPose 定时器 | 10Hz | 查询机械臂 Cartesian 位姿 |
+| GetAngle 定时器 | 5Hz | 查询机械臂关节角 |
+| Alarm 巡检定时器 | ~3Hz | 检测机械臂报警状态 |
+| TCP 发送线程 | 按需 | 队列化发送运动指令 |
+
+### 运动控制
+
+- **增量模式**: Touch 每帧位移增量 → 累加目标坐标 → 安全预判 → ServoP
+- 每帧最大增量: **4.5mm**，30Hz ServoP 频率
+- 按钮按下时从当前机器人位姿开始累积，松开停止
+
+### Touch→Robot 坐标映射 (`CoordinateTransform.h`)
+
+```cpp
+robot_x =  touch_x;
+robot_y = -touch_z;
+robot_z =  touch_y;
+```
+
+硬编码轴映射，未经实物标定。
+
+### 已知限制
+
+- URDF 运动学模型与 Dobot 控制器坐标系存在偏移 (~408mm, 含旋转分量)，IK 数值解不可靠
+- 坐标映射为硬编码，X/Y/Z 方向可能与直觉不完全一致
+- 力反馈通道已预留接口，尚未集成滤波和渲染
+
+---
+
+## 故障排查
+
+### Touch_Client 启动失败
+- 确认 Touch 设备 USB 已连接，驱动已安装
+- 无 Touch 环境使用 `--no-touch` 参数
+- 检查 `hd.dll` / `hdu.dll` / `glut32.dll` 是否在 exe 同目录
+
+### 机械臂连接失败
+- 确认机械臂 IP 可达 (`ping 192.168.101.11`)
+- 无机械臂环境使用 `--no-robot` 参数
+- 检查防火墙是否放行端口 29999/30003
+
+### 安全边界持续触发
+- 机械臂静止位姿可能已超出 `Config.h` 中的安全边界
+- 根据实际 GetPose 读数调整 `SAFE_X/Y/Z_MIN/MAX`
+
+### 编译错误: CALLBACK 宏重定义
+- 已知警告 (glut.h vs Windows SDK)，不影响功能
