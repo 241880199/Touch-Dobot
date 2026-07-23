@@ -33,11 +33,24 @@ static bool escapeSingularity() {
         return false;
     }
     s_escaping = true;
-    std::cout << "[脱困] 检测到机械臂报警 (疑似奇异构型)" << std::endl;
+    std::cout << "[脱困] 检测到报警，开始诊断..." << std::endl;
+
+    char fb[256];
+
+    // Step 0: 诊断 — 读取具体错误码
+    robotSendEnable("GetErrorID()");
+    Sleep(100);
+    if (robotRecvEnable(fb, sizeof(fb))) {
+        std::cout << "[脱困] 错误码: " << fb;
+    }
+
+    // Step 0.5: ResetRobot 清空可能残留的指令队列
+    robotSendEnable("ResetRobot()");
+    Sleep(200);
+
     std::cout << "[脱困] 策略: ClearError → EnableRobot → 立即 JointMovJ" << std::endl;
     std::cout << "========================================" << std::endl;
 
-    char fb[256];
     double curJoints[6] = {0};
 
     // Step 1: ClearError
