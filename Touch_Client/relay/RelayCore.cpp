@@ -37,14 +37,25 @@ static bool escapeSingularity() {
 
     char fb[256];
 
-    // ===== 读取关节角, 检测哪个关节触发限位 =====
+    // ===== 读取当前状态 (GetPose + GetAngle) =====
+    robotDrainEnable();
+    robotSendEnable("GetPose()");
+    Sleep(100);
+    AppState::RobotPose curPose;
+    if (robotRecvEnable(fb, sizeof(fb))) {
+        FeedbackParser::parsePose(fb, curPose);
+        std::cout << "[脱困] 末端位姿: X=" << curPose.x << " Y=" << curPose.y
+                  << " Z=" << curPose.z << " Rx=" << curPose.rx
+                  << " Ry=" << curPose.ry << " Rz=" << curPose.rz << std::endl;
+    }
+
     robotDrainEnable();
     robotSendEnable("GetAngle()");
     Sleep(100);
     double curJoints[6] = {0};
     if (robotRecvEnable(fb, sizeof(fb))) {
         FeedbackParser::parseAngle(fb, curJoints);
-        std::cout << "[脱困] 当前关节: J1=" << curJoints[0] << " J2=" << curJoints[1]
+        std::cout << "[脱困] 关节角: J1=" << curJoints[0] << " J2=" << curJoints[1]
                   << " J3=" << curJoints[2] << " J4=" << curJoints[3]
                   << " J5=" << curJoints[4] << " J6=" << curJoints[5] << std::endl;
     }
@@ -117,26 +128,37 @@ static bool escapeSingularity() {
         Sleep(1000);
     }
 
-    // Step 3: 验证关节已离开限位
+    // Step 3: 验证 (GetPose + GetAngle)
+    robotDrainEnable();
+    robotSendEnable("GetPose()");
+    Sleep(100);
+    AppState::RobotPose newPose;
+    if (robotRecvEnable(fb, sizeof(fb))) {
+        FeedbackParser::parsePose(fb, newPose);
+        std::cout << "[脱困] 拖动后末端: X=" << newPose.x << " Y=" << newPose.y
+                  << " Z=" << newPose.z << " Rx=" << newPose.rx
+                  << " Ry=" << newPose.ry << " Rz=" << newPose.rz << std::endl;
+    }
+
     robotDrainEnable();
     robotSendEnable("GetAngle()");
     Sleep(100);
     double newJoints[6] = {0};
     if (robotRecvEnable(fb, sizeof(fb))) {
         FeedbackParser::parseAngle(fb, newJoints);
-        std::cout << "[脱困] 转动后: J1=" << newJoints[0] << " J2=" << newJoints[1]
+        std::cout << "[脱困] 拖动后关节: J1=" << newJoints[0] << " J2=" << newJoints[1]
                   << " J3=" << newJoints[2] << " J4=" << newJoints[3]
                   << " J5=" << newJoints[4] << " J6=" << newJoints[5] << std::endl;
     }
 
     double newVal = newJoints[stuckJoint - 1];
     if (isUpperLimit && newVal < limits[stuckJoint-1].maxV - 5.0) {
-        std::cout << "[脱困] " << stuckName << " 已离开上限, 验证通过" << std::endl;
+        std::cout << "[脱困] " << stuckName << " 已离开上限" << std::endl;
     } else if (!isUpperLimit && newVal > limits[stuckJoint-1].minV + 5.0) {
-        std::cout << "[脱困] " << stuckName << " 已离开下限, 验证通过" << std::endl;
+        std::cout << "[脱困] " << stuckName << " 已离开下限" << std::endl;
     } else {
         std::cout << "[脱困] " << stuckName << " 仍接近限位 ("
-                  << newVal << "°), 继续尝试..." << std::endl;
+                  << newVal << "°)" << std::endl;
     }
 
     // Step 4: 退出拖拽
@@ -144,26 +166,42 @@ static bool escapeSingularity() {
     Sleep(300);
     robotDrainEnable();
 
-    // Step 5: ClearError + EnableRobot
+    // Step 5: 先独立尝试 ClearError (不使能)
+    std::cout << "[脱困] 尝试 ClearError..." << std::endl;
     robotSendEnable("ClearError()");
     Sleep(300);
     robotDrainEnable();
+
+    robotSendEnable("RobotMode()");
+    Sleep(100);
+    int mode = -1;
+    if (robotRecvEnable(fb, sizeof(fb))) {
+        FeedbackParser::parseMode(fb, mode);
+        std::cout << "[脱困] ClearError后 mode=" << mode;
+    }
+
+    if (mode != 9 && mode != -1) {
+        std::cout << "[脱困] ClearError 直接清除成功!" << std::endl;
+        s_escaping = false;
+        return true;
+    }
+
+    // Step 6: ClearError 不够, 需要 EnableRobot
+    std::cout << "[脱困] 尝试 EnableRobot..." << std::endl;
     robotSendEnable("EnableRobot(0.5,0,0,0)");
     Sleep(300);
     robotDrainEnable();
 
-    // Step 6: 检查
     robotSendEnable("RobotMode()");
     Sleep(100);
     if (robotRecvEnable(fb, sizeof(fb))) {
-        int mode = -1;
         FeedbackParser::parseMode(fb, mode);
         if (mode != 9 && mode != -1) {
-            std::cout << "[脱困] 脱困成功! mode=" << mode << std::endl;
+            std::cout << "[脱困] EnableRobot后成功! mode=" << mode << std::endl;
             s_escaping = false;
             return true;
         }
-        std::cout << "[脱困] 仍报警: " << fb;
+        std::cout << "[脱困] EnableRobot后仍报警: " << fb;
     }
 
     s_escaping = false;
