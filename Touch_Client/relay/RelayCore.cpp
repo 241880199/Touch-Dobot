@@ -37,96 +37,135 @@ static bool escapeSingularity() {
 
     char fb[256];
 
-    // ===== 全面诊断 =====
-    std::cout << "[脱困] === 机械臂诊断 ===" << std::endl;
-
-    // 1. 错误码
-    robotDrainEnable();
-    robotSendEnable("GetErrorID()");
-    Sleep(100);
-    if (robotRecvEnable(fb, sizeof(fb))) {
-        std::cout << "[诊断] 错误码: " << fb;
-    }
-
-    // 2. 当前模式
-    robotDrainEnable();
-    robotSendEnable("RobotMode()");
-    Sleep(100);
-    if (robotRecvEnable(fb, sizeof(fb))) {
-        std::cout << "[诊断] RobotMode: " << fb;
-    }
-
-    // 3. 当前位姿
-    robotDrainEnable();
-    robotSendEnable("GetPose()");
-    Sleep(100);
-    if (robotRecvEnable(fb, sizeof(fb))) {
-        std::cout << "[诊断] GetPose: " << fb;
-    }
-
-    // 4. 关节角
+    // ===== 读取关节角, 检测哪个关节触发限位 =====
     robotDrainEnable();
     robotSendEnable("GetAngle()");
     Sleep(100);
+    double curJoints[6] = {0};
     if (robotRecvEnable(fb, sizeof(fb))) {
-        std::cout << "[诊断] GetAngle: " << fb;
+        FeedbackParser::parseAngle(fb, curJoints);
+        std::cout << "[脱困] 当前关节: J1=" << curJoints[0] << " J2=" << curJoints[1]
+                  << " J3=" << curJoints[2] << " J4=" << curJoints[3]
+                  << " J5=" << curJoints[4] << " J6=" << curJoints[5] << std::endl;
     }
 
-    // 5. 尝试 ClearError
+    // 检查哪个关节接近限位 (容差 5°)
+    struct { int id; double val, minV, maxV; const char* name; } limits[6] = {
+        {1, curJoints[0], -360, 360, "J1"},
+        {2, curJoints[1], -360, 360, "J2"},
+        {3, curJoints[2], -155, 155, "J3"},
+        {4, curJoints[3], -360, 360, "J4"},
+        {5, curJoints[4], -360, 360, "J5"},
+        {6, curJoints[5], -360, 360, "J6"},
+    };
+
+    int stuckJoint = -1;
+    const char* stuckName = "";
+    bool isUpperLimit = false;
+    for (int i = 0; i < 6; i++) {
+        if (limits[i].val >= limits[i].maxV - 5.0) {
+            stuckJoint = limits[i].id;
+            stuckName = limits[i].name;
+            isUpperLimit = true;
+            break;
+        }
+        if (limits[i].val <= limits[i].minV + 5.0) {
+            stuckJoint = limits[i].id;
+            stuckName = limits[i].name;
+            isUpperLimit = false;
+            break;
+        }
+    }
+
+    if (stuckJoint == -1) {
+        std::cout << "[脱困] 未检测到关节限位, 可能是其他原因" << std::endl;
+        s_escaping = false;
+        return false;
+    }
+
+    std::cout << "[脱困] 检测到 " << stuckName << " "
+              << (isUpperLimit ? "正向" : "负向") << "限位 (当前 "
+              << limits[stuckJoint-1].val << "°)" << std::endl;
+
+    // Step 1: 强制进入拖拽模式
+    std::cout << "[脱困] 进入强制拖拽模式..." << std::endl;
+    robotSendEnable("SetCollideDrag(1)");
+    Sleep(300);
     robotDrainEnable();
+    if (robotRecvEnable(fb, sizeof(fb))) {
+        std::cout << "[脱困] SetCollideDrag(1): " << fb;
+    }
+
+    // Step 2: 提示用户只动问题关节
+    std::cout << "\n========================================" << std::endl;
+    std::cout << "[脱困] 请将 " << stuckName << " 向"
+              << (isUpperLimit ? "负方向(反向)" : "正方向(正向)")
+              << "转动 20~30°!" << std::endl;
+    std::cout << "[脱困] (其他关节不需要动)" << std::endl;
+    std::cout << "[脱困] 转动完成后按 Enter 继续" << std::endl;
+    std::cout << "========================================" << std::endl;
+
+    // 等待
+    for (int i = 0; i < 120; i++) {
+        if (GetAsyncKeyState(VK_RETURN) & 0x8000) {
+            while (GetAsyncKeyState(VK_RETURN) & 0x8000) Sleep(10);
+            break;
+        }
+        if (i % 5 == 0 && i > 0) {
+            std::cout << "[脱困] 等待中... (" << (120-i) << "s) 按 Enter" << std::endl;
+        }
+        Sleep(1000);
+    }
+
+    // Step 3: 验证关节已离开限位
+    robotDrainEnable();
+    robotSendEnable("GetAngle()");
+    Sleep(100);
+    double newJoints[6] = {0};
+    if (robotRecvEnable(fb, sizeof(fb))) {
+        FeedbackParser::parseAngle(fb, newJoints);
+        std::cout << "[脱困] 转动后: J1=" << newJoints[0] << " J2=" << newJoints[1]
+                  << " J3=" << newJoints[2] << " J4=" << newJoints[3]
+                  << " J5=" << newJoints[4] << " J6=" << newJoints[5] << std::endl;
+    }
+
+    double newVal = newJoints[stuckJoint - 1];
+    if (isUpperLimit && newVal < limits[stuckJoint-1].maxV - 5.0) {
+        std::cout << "[脱困] " << stuckName << " 已离开上限, 验证通过" << std::endl;
+    } else if (!isUpperLimit && newVal > limits[stuckJoint-1].minV + 5.0) {
+        std::cout << "[脱困] " << stuckName << " 已离开下限, 验证通过" << std::endl;
+    } else {
+        std::cout << "[脱困] " << stuckName << " 仍接近限位 ("
+                  << newVal << "°), 继续尝试..." << std::endl;
+    }
+
+    // Step 4: 退出拖拽
+    robotSendEnable("SetCollideDrag(0)");
+    Sleep(300);
+    robotDrainEnable();
+
+    // Step 5: ClearError + EnableRobot
     robotSendEnable("ClearError()");
     Sleep(300);
-    if (robotRecvEnable(fb, sizeof(fb))) {
-        std::cout << "[诊断] ClearError: " << fb;
-    }
-
-    // 6. 再次检查
-    robotDrainEnable();
-    robotSendEnable("RobotMode()");
-    Sleep(100);
-    if (robotRecvEnable(fb, sizeof(fb))) {
-        std::cout << "[诊断] ClearError后 RobotMode: " << fb;
-    }
-
-    robotDrainEnable();
-    robotSendEnable("GetErrorID()");
-    Sleep(100);
-    if (robotRecvEnable(fb, sizeof(fb))) {
-        std::cout << "[诊断] ClearError后 错误码: " << fb;
-    }
-
-    // 7. 再次尝试 EnableRobot (不先 EmergencyStop)
-    std::cout << "[脱困] 再试 EnableRobot..." << std::endl;
     robotDrainEnable();
     robotSendEnable("EnableRobot(0.5,0,0,0)");
     Sleep(300);
-    if (robotRecvEnable(fb, sizeof(fb))) {
-        std::cout << "[脱困] EnableRobot响应: " << fb;
-    }
-
     robotDrainEnable();
+
+    // Step 6: 检查
     robotSendEnable("RobotMode()");
     Sleep(100);
     if (robotRecvEnable(fb, sizeof(fb))) {
         int mode = -1;
         FeedbackParser::parseMode(fb, mode);
-        std::cout << "[脱困] 最终 RobotMode: " << fb;
         if (mode != 9 && mode != -1) {
-            std::cout << "[脱困] 成功! mode=" << mode << std::endl;
+            std::cout << "[脱困] 脱困成功! mode=" << mode << std::endl;
             s_escaping = false;
             return true;
         }
+        std::cout << "[脱困] 仍报警: " << fb;
     }
 
-    robotDrainEnable();
-    robotSendEnable("GetErrorID()");
-    Sleep(100);
-    if (robotRecvEnable(fb, sizeof(fb))) {
-        std::cout << "[脱困] 最终错误码: " << fb;
-    }
-
-    std::cout << "[脱困] 错误74无法通过TCP清除" << std::endl;
-    std::cout << "[脱困] 需要DobotStudio: 先结束本程序(q), 确保无其他进程连接, 再开DobotStudio" << std::endl;
     s_escaping = false;
     return false;
 }
