@@ -24,13 +24,101 @@ RelayCore::~RelayCore() {
     DeleteCriticalSection(&m_relaySocketMutex);
 }
 
+// ===== 奇异脱困: 检测报警 → 拖拽模式 → 等待手动挪动 → 重新使能 =====
+static bool escapeSingularity() {
+    std::cout << "\n========================================" << std::endl;
+    std::cout << "[脱困] 检测到机械臂报警 (疑似奇异构型)" << std::endl;
+    std::cout << "[脱困] 进入拖拽模式，请手动拖动机械臂到安全位置" << std::endl;
+    std::cout << "[脱困]   1. 把大臂/小臂折弯 (J2/J3 离开 0°)" << std::endl;
+    std::cout << "[脱困]   2. 把手腕转一下 (J5 离开 0°)" << std::endl;
+    std::cout << "[脱困]   3. 保持机械臂自然弯曲姿态" << std::endl;
+    std::cout << "========================================" << std::endl;
+
+    // 尝试拖拽模式 (CR3 固件 ≥3.5.2)
+    robotSendEnable("ClearError()");
+    Sleep(200);
+    robotSendEnable("StartDrag()");
+    Sleep(300);
+
+    // 读取 StartDrag 响应
+    char fb[256];
+    if (robotRecvEnable(fb, sizeof(fb))) {
+        std::cout << "[脱困] StartDrag 响应: " << fb;
+    }
+
+    // 等待用户手动拖动 (最多等 120 秒, 每秒检测一次 RobotMode)
+    std::cout << "[脱困] 拖拽模式已激活 — 请手动拖动机械臂..." << std::endl;
+    std::cout << "[脱困] 拖动完成后按 Enter 继续 (或等待自动检测)" << std::endl;
+
+    bool escaped = false;
+    for (int i = 0; i < 120; i++) {
+        // 检查 RobotMode
+        robotSendEnable("RobotMode()");
+        Sleep(50);
+        if (robotRecvEnable(fb, sizeof(fb))) {
+            int mode = -1;
+            FeedbackParser::parseMode(fb, mode);
+            if (mode != 9 && mode != -1) {
+                escaped = true;
+                std::cout << "[脱困] 机械臂已脱离报警状态 (mode=" << mode << ")" << std::endl;
+                break;
+            }
+        }
+
+        // 每秒提示一次
+        if (i % 5 == 0 && i > 0) {
+            std::cout << "[脱困] 等待中... (" << (120 - i) << "s 超时) 按 Enter 跳过等待" << std::endl;
+        }
+
+        // 非阻塞检查键盘 (Windows)
+        if (GetAsyncKeyState(VK_RETURN) & 0x8000) {
+            std::cout << "[脱困] 用户按下 Enter，停止等待" << std::endl;
+            // 清掉回车缓冲区
+            while (GetAsyncKeyState(VK_RETURN) & 0x8000) Sleep(10);
+            break;
+        }
+
+        Sleep(1000);
+    }
+
+    if (!escaped) {
+        std::cout << "[脱困] 等待超时，尝试用 GetPose 验证当前位置..." << std::endl;
+    }
+
+    // 退出拖拽模式
+    robotSendEnable("StopDrag()");
+    Sleep(200);
+    robotRecvEnable(fb, sizeof(fb));
+
+    // 重新使能
+    robotSendEnable("ClearError()");
+    Sleep(200);
+    robotSendEnable("EnableRobot(0.5,0,0,0)");
+    Sleep(300);
+
+    // 再次检查 RobotMode
+    robotSendEnable("RobotMode()");
+    Sleep(50);
+    if (robotRecvEnable(fb, sizeof(fb))) {
+        int mode = -1;
+        FeedbackParser::parseMode(fb, mode);
+        if (mode != 9 && mode != -1) {
+            std::cout << "[脱困] 重新使能成功 (mode=" << mode << ")" << std::endl;
+            return true;
+        }
+    }
+
+    std::cerr << "[脱困] 脱困失败，机械臂仍处于报警状态" << std::endl;
+    return false;
+}
+
 bool RelayCore::init() {
     if (!robotConnect(Config::ROBOT_IP)) {
         std::cerr << "[Relay] 连接机械臂失败" << std::endl;
         return false;
     }
 
-    // 初始化序列：ClearError → EnableRobot → CP → GetPose
+    // 初始化序列：ClearError → EnableRobot → (报警检测) → CP → GetPose
     Sleep(200);
     robotSendEnable("ClearError()");
     Sleep(300);
@@ -41,6 +129,29 @@ bool RelayCore::init() {
     }
     std::cout << "[Relay] 机械臂使能成功" << std::endl;
     Sleep(200);
+
+    // ===== 奇异检测: 使能后检查是否立即报警 =====
+    {
+        robotSendEnable("RobotMode()");
+        Sleep(100);
+        char fb[128];
+        if (robotRecvEnable(fb, sizeof(fb))) {
+            int mode = -1;
+            FeedbackParser::parseMode(fb, mode);
+            if (mode == 9) {
+                std::cout << "[Relay] 使能后检测到报警 (mode=9)，启动脱困流程..." << std::endl;
+                if (!escapeSingularity()) {
+                    std::cerr << "[Relay] FATAL: 脱困失败，请断电后手动将机械臂挪出奇异区再上电" << std::endl;
+                    robotSendEnable("DisableRobot()");
+                    Sleep(100);
+                    robotDisconnect();
+                    return false;
+                }
+            } else {
+                std::cout << "[Relay] 机械臂状态正常 (mode=" << mode << ")" << std::endl;
+            }
+        }
+    }
 
     char cpBuf[64];
     snprintf(cpBuf, sizeof(cpBuf), "CP(%u)", Config::CP_SMOOTH_RATIO);
