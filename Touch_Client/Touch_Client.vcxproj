@@ -83,6 +83,9 @@
     <ClCompile Include="robot\RobotConnection.cpp" />
     <ClInclude Include="robot\Kinematics.h" />
     <ClCompile Include="robot\Kinematics.cpp" />
+    <!-- safety -->
+    <ClInclude Include="safety\SafetyPredictor.h" />
+    <ClCompile Include="safety\SafetyPredictor.cpp" />
     <!-- relay -->
     <ClInclude Include="relay\IExtension.h" />
     <ClInclude Include="relay\CoordinateTransform.h" />
