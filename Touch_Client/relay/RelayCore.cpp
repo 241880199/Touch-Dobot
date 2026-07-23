@@ -101,10 +101,18 @@ bool RelayCore::init() {
         return false;
     }
 
-    // 初始化序列：ClearError → EnableRobot → (报警检测) → CP → GetPose
+    // 初始化序列：ClearError → 降灵敏度 → EnableRobot → (报警检测) → CP → GetPose
     Sleep(200);
     robotSendEnable("ClearError()");
     Sleep(300);
+
+    // 使能前关闭所有可能误触发的灵敏度设置
+    robotSendEnable("SetCollisionLevel(0)");   // 碰撞检测: 0=最不灵敏
+    Sleep(50);
+    robotSendEnable("SetSafeSkin(0)");          // 关闭电子皮肤
+    Sleep(50);
+    robotSendEnable("LoadSwitch(0)");           // 关闭负载自适应
+    Sleep(50);
 
     if (!robotSendEnable("EnableRobot(0.5,0,0,0)")) {
         std::cerr << "[Relay] 使能失败" << std::endl;
@@ -117,11 +125,11 @@ bool RelayCore::init() {
     {
         int mode = -1;
         for (int retry = 0; retry < 3; retry++) {
+            robotDrainEnable();
             robotSendEnable("RobotMode()");
             Sleep(100);
             char fb[128];
             if (robotRecvEnable(fb, sizeof(fb))) {
-                // 过滤非JSON反馈 (movJ/servoP等响应)
                 if (FeedbackParser::parseMode(fb, mode)) {
                     break;
                 }
@@ -132,7 +140,7 @@ bool RelayCore::init() {
         if (mode == 9) {
             std::cout << "[Relay] 使能后检测到报警 (mode=9)，启动脱困流程..." << std::endl;
             if (!escapeSingularity()) {
-                std::cerr << "[Relay] FATAL: 脱困失败，请断电后手动将机械臂挪出奇异区再上电" << std::endl;
+                std::cerr << "[Relay] FATAL: 脱困失败" << std::endl;
                 robotSendEnable("DisableRobot()");
                 Sleep(100);
                 robotDisconnect();
@@ -144,10 +152,6 @@ bool RelayCore::init() {
             std::cout << "[Relay] 机械臂状态正常 (mode=" << mode << ")" << std::endl;
         }
     }
-
-    // 降低碰撞检测灵敏度 (5级最灵敏 → 设为2级, 减少误触发)
-    robotSendEnable("SetCollisionLevel(2)");
-    Sleep(100);
 
     char cpBuf[64];
     snprintf(cpBuf, sizeof(cpBuf), "CP(%u)", Config::CP_SMOOTH_RATIO);
