@@ -34,12 +34,11 @@ static bool escapeSingularity() {
     }
     s_escaping = true;
     std::cout << "[脱困] 检测到机械臂报警 (疑似奇异构型)" << std::endl;
-    std::cout << "[脱困]   1. 把大臂/小臂折弯 (J2/J3 离开 0°)" << std::endl;
-    std::cout << "[脱困]   2. 把手腕转一下 (J5 离开 0°)" << std::endl;
-    std::cout << "[脱困]   3. 保持机械臂自然弯曲姿态" << std::endl;
+    std::cout << "[脱困] 策略: JointMovJ 关节空间运动 (绕开 IK 奇异)" << std::endl;
     std::cout << "========================================" << std::endl;
 
     char fb[256];
+    double curJoints[6] = {0};
 
     // Step 1: ClearError + EnableRobot
     robotSendEnable("ClearError()");
@@ -47,48 +46,53 @@ static bool escapeSingularity() {
     robotSendEnable("EnableRobot(0.5,0,0,0)");
     Sleep(300);
 
-    // Step 2: BrakeControl 松 J2/J3/J5 抱闸 (不依赖 StartDrag)
-    std::cout << "[脱困] 松开 J2/J3/J5 抱闸..." << std::endl;
-    robotSendEnable("BrakeControl(2,1)"); Sleep(100); robotRecvEnable(fb, sizeof(fb));
-    robotSendEnable("BrakeControl(3,1)"); Sleep(100); robotRecvEnable(fb, sizeof(fb));
-    robotSendEnable("BrakeControl(5,1)"); Sleep(100); robotRecvEnable(fb, sizeof(fb));
-
-    std::cout << "[脱困] 抱闸已松开，请手动拖动机械臂..." << std::endl;
-    std::cout << "[脱困] 拖动完成后按 Enter 继续" << std::endl;
-
-    // Step 3: 等待用户手动拖动
-    for (int i = 0; i < 120; i++) {
-        if (GetAsyncKeyState(VK_RETURN) & 0x8000) {
-            std::cout << "[脱困] 用户按下 Enter" << std::endl;
-            while (GetAsyncKeyState(VK_RETURN) & 0x8000) Sleep(10);
-            break;
-        }
-        if (i % 5 == 0 && i > 0) {
-            std::cout << "[脱困] 等待中... (" << (120 - i) << "s) 按 Enter 继续" << std::endl;
-        }
-        Sleep(1000);
+    // Step 2: 获取当前关节角
+    std::cout << "[脱困] 读取当前关节角..." << std::endl;
+    robotSendEnable("GetAngle()");
+    Sleep(100);
+    if (robotRecvEnable(fb, sizeof(fb))) {
+        FeedbackParser::parseAngle(fb, curJoints);
+        std::cout << "[脱困] 当前关节: J1=" << curJoints[0] << " J2=" << curJoints[1]
+                  << " J3=" << curJoints[2] << " J4=" << curJoints[3]
+                  << " J5=" << curJoints[4] << " J6=" << curJoints[5] << std::endl;
     }
 
-    // Step 4: 锁回抱闸
-    std::cout << "[脱困] 锁回 J2/J3/J5 抱闸..." << std::endl;
-    robotSendEnable("BrakeControl(2,0)"); Sleep(100); robotRecvEnable(fb, sizeof(fb));
-    robotSendEnable("BrakeControl(3,0)"); Sleep(100); robotRecvEnable(fb, sizeof(fb));
-    robotSendEnable("BrakeControl(5,0)"); Sleep(100); robotRecvEnable(fb, sizeof(fb));
+    // Step 3: 用 JointMovJ 把 J2/J3/J5 偏移 10~15° 离开奇异区
+    // J3 检查限位 ±155°，J2/J5 无限制
+    double safeJoints[6];
+    for (int i = 0; i < 6; i++) safeJoints[i] = curJoints[i];
+    safeJoints[1] += (curJoints[1] >= 0 ? 10.0 : -10.0);  // J2: 远离0°
+    safeJoints[2] += (curJoints[2] >= 0 ? 10.0 : -10.0);  // J3: 远离0°, 注意限位
+    if (safeJoints[2] > 150) safeJoints[2] = 150;
+    if (safeJoints[2] < -150) safeJoints[2] = -150;
+    safeJoints[4] += (curJoints[4] >= 0 ? 15.0 : -15.0);  // J5: 远离0°
 
-    // Step 5: 重新使能
-    robotSendEnable("ClearError()");
-    Sleep(200);
-    robotSendEnable("EnableRobot(0.5,0,0,0)");
-    Sleep(300);
+    std::cout << "[脱困] 目标关节: J1=" << safeJoints[0] << " J2=" << safeJoints[1]
+              << " J3=" << safeJoints[2] << " J4=" << safeJoints[3]
+              << " J5=" << safeJoints[4] << " J6=" << safeJoints[5] << std::endl;
 
-    // 再次检查 RobotMode
+    char cmd[256];
+    snprintf(cmd, sizeof(cmd), "JointMovJ(%.2f,%.2f,%.2f,%.2f,%.2f,%.2f)",
+        safeJoints[0], safeJoints[1], safeJoints[2],
+        safeJoints[3], safeJoints[4], safeJoints[5]);
+    std::cout << "[脱困] 发送: " << cmd << std::endl;
+
+    robotSendMotion(cmd);
+    Sleep(500);  // 等待运动完成
+
+    // 读运动反馈
+    robotRecvMotion(fb, sizeof(fb));
+    std::cout << "[脱困] JointMovJ 响应: " << fb;
+
+    // Step 4: 检查状态
+    Sleep(500);
     robotSendEnable("RobotMode()");
     Sleep(50);
     if (robotRecvEnable(fb, sizeof(fb))) {
         int mode = -1;
         FeedbackParser::parseMode(fb, mode);
         if (mode != 9 && mode != -1) {
-            std::cout << "[脱困] 重新使能成功 (mode=" << mode << ")" << std::endl;
+            std::cout << "[脱困] JointMovJ 成功脱离奇异 (mode=" << mode << ")" << std::endl;
             s_escaping = false;
             return true;
         }
