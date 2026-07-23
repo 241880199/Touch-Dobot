@@ -37,60 +37,96 @@ static bool escapeSingularity() {
 
     char fb[256];
 
-    // Step 0: 排空缓冲区, 然后读错误码
+    // ===== 全面诊断 =====
+    std::cout << "[脱困] === 机械臂诊断 ===" << std::endl;
+
+    // 1. 错误码
     robotDrainEnable();
     robotSendEnable("GetErrorID()");
     Sleep(100);
     if (robotRecvEnable(fb, sizeof(fb))) {
-        std::cout << "[脱困] 错误码: " << fb;
+        std::cout << "[诊断] 错误码: " << fb;
     }
 
-    // Step 1: ResetRobot 清空队列
-    robotSendEnable("ResetRobot()");
-    Sleep(300);
+    // 2. 当前模式
     robotDrainEnable();
+    robotSendEnable("RobotMode()");
+    Sleep(100);
+    if (robotRecvEnable(fb, sizeof(fb))) {
+        std::cout << "[诊断] RobotMode: " << fb;
+    }
 
-    // Step 2: 彻底复位
-    std::cout << "[脱困] 尝试彻底复位..." << std::endl;
-    robotSendEnable("EmergencyStop()");
-    Sleep(500);
+    // 3. 当前位姿
     robotDrainEnable();
-    robotSendEnable("PowerOn()");
-    std::cout << "[脱困] 等待 PowerOn (约12秒)..." << std::endl;
-    for (int i = 0; i < 12; i++) { std::cout << "." << std::flush; Sleep(1000); }
-    std::cout << std::endl;
+    robotSendEnable("GetPose()");
+    Sleep(100);
+    if (robotRecvEnable(fb, sizeof(fb))) {
+        std::cout << "[诊断] GetPose: " << fb;
+    }
+
+    // 4. 关节角
+    robotDrainEnable();
+    robotSendEnable("GetAngle()");
+    Sleep(100);
+    if (robotRecvEnable(fb, sizeof(fb))) {
+        std::cout << "[诊断] GetAngle: " << fb;
+    }
+
+    // 5. 尝试 ClearError
     robotDrainEnable();
     robotSendEnable("ClearError()");
     Sleep(300);
+    if (robotRecvEnable(fb, sizeof(fb))) {
+        std::cout << "[诊断] ClearError: " << fb;
+    }
+
+    // 6. 再次检查
+    robotDrainEnable();
+    robotSendEnable("RobotMode()");
+    Sleep(100);
+    if (robotRecvEnable(fb, sizeof(fb))) {
+        std::cout << "[诊断] ClearError后 RobotMode: " << fb;
+    }
+
+    robotDrainEnable();
+    robotSendEnable("GetErrorID()");
+    Sleep(100);
+    if (robotRecvEnable(fb, sizeof(fb))) {
+        std::cout << "[诊断] ClearError后 错误码: " << fb;
+    }
+
+    // 7. 再次尝试 EnableRobot (不先 EmergencyStop)
+    std::cout << "[脱困] 再试 EnableRobot..." << std::endl;
     robotDrainEnable();
     robotSendEnable("EnableRobot(0.5,0,0,0)");
     Sleep(300);
-    robotDrainEnable();
+    if (robotRecvEnable(fb, sizeof(fb))) {
+        std::cout << "[脱困] EnableRobot响应: " << fb;
+    }
 
-    // 检查
+    robotDrainEnable();
     robotSendEnable("RobotMode()");
     Sleep(100);
     if (robotRecvEnable(fb, sizeof(fb))) {
         int mode = -1;
         FeedbackParser::parseMode(fb, mode);
-        std::cout << "[脱困] RobotMode: " << fb;
+        std::cout << "[脱困] 最终 RobotMode: " << fb;
         if (mode != 9 && mode != -1) {
-            std::cout << "[脱困] 彻底复位成功! (mode=" << mode << ")" << std::endl;
+            std::cout << "[脱困] 成功! mode=" << mode << std::endl;
             s_escaping = false;
             return true;
         }
     }
 
-    // 仍失败 — 再读一次
     robotDrainEnable();
     robotSendEnable("GetErrorID()");
     Sleep(100);
     if (robotRecvEnable(fb, sizeof(fb))) {
-        std::cout << "[脱困] 当前错误码: " << fb;
+        std::cout << "[脱困] 最终错误码: " << fb;
     }
 
-    std::cout << "[脱困] TCP软件复位无法清除错误74" << std::endl;
-    std::cout << "[脱困] 请用 DobotStudio 连接查看错误详情" << std::endl;
+    std::cout << "[脱困] 错误74无法通过TCP清除" << std::endl;
+    std::cout << "[脱困] 需要DobotStudio: 先结束本程序(q), 确保无其他进程连接, 再开DobotStudio" << std::endl;
     s_escaping = false;
     return false;
 }
