@@ -44,7 +44,21 @@ static bool escapeSingularity() {
         std::cout << "[脱困] 错误码: " << fb;
     }
 
-    // Step 0.5: ResetRobot 清空可能残留的指令队列
+    // Step 0.5: PowerOn (如果控制器刚重启, 需要先上电, 约10秒)
+    std::cout << "[脱困] 尝试 PowerOn..." << std::endl;
+    robotSendEnable("PowerOn()");
+    Sleep(200);
+    if (robotRecvEnable(fb, sizeof(fb))) {
+        std::cout << "[脱困] PowerOn 响应: " << fb;
+    }
+    // PowerOn 需要约10秒, 等待
+    for (int i = 0; i < 10; i++) {
+        std::cout << "." << std::flush;
+        Sleep(1000);
+    }
+    std::cout << std::endl;
+
+    // Step 0.6: ResetRobot 清空残留指令队列
     robotSendEnable("ResetRobot()");
     Sleep(200);
 
