@@ -98,13 +98,24 @@ static bool escapeSingularity() {
               << (isUpperLimit ? "正向" : "负向") << "限位 (当前 "
               << limits[stuckJoint-1].val << "°)" << std::endl;
 
-    // Step 1: 强制进入拖拽模式
+    // Step 1: 强制进入拖拽模式 + 单独松问题关节抱闸
     std::cout << "[脱困] 进入强制拖拽模式..." << std::endl;
     robotSendEnable("SetCollideDrag(1)");
     Sleep(300);
     robotDrainEnable();
     if (robotRecvEnable(fb, sizeof(fb))) {
-        std::cout << "[脱困] SetCollideDrag(1): " << fb;
+        std::cout << "[脱困] SetCollideDrag(1) 原始: " << fb;
+    }
+
+    // 单独松开问题关节的抱闸 (双保险)
+    char brakeCmd[32];
+    snprintf(brakeCmd, sizeof(brakeCmd), "BrakeControl(%d,1)", stuckJoint);
+    std::cout << "[脱困] 单独松 " << stuckName << " 抱闸: " << brakeCmd << std::endl;
+    robotSendEnable(brakeCmd);
+    Sleep(200);
+    robotDrainEnable();
+    if (robotRecvEnable(fb, sizeof(fb))) {
+        std::cout << "[脱困] " << brakeCmd << " 原始: " << fb;
     }
 
     // Step 2: 提示用户只动问题关节
@@ -146,6 +157,7 @@ static bool escapeSingularity() {
     double newJoints[6] = {0};
     if (robotRecvEnable(fb, sizeof(fb))) {
         FeedbackParser::parseAngle(fb, newJoints);
+        std::cout << "[脱困] GetAngle原始: " << fb;
         std::cout << "[脱困] 拖动后关节: J1=" << newJoints[0] << " J2=" << newJoints[1]
                   << " J3=" << newJoints[2] << " J4=" << newJoints[3]
                   << " J5=" << newJoints[4] << " J6=" << newJoints[5] << std::endl;
@@ -161,9 +173,13 @@ static bool escapeSingularity() {
                   << newVal << "°)" << std::endl;
     }
 
-    // Step 4: 退出拖拽
+    // Step 4: 退出拖拽 + 锁回问题关节
     robotSendEnable("SetCollideDrag(0)");
     Sleep(300);
+    robotDrainEnable();
+    snprintf(brakeCmd, sizeof(brakeCmd), "BrakeControl(%d,0)", stuckJoint);
+    robotSendEnable(brakeCmd);
+    Sleep(200);
     robotDrainEnable();
 
     // Step 5: 先独立尝试 ClearError (不使能)
