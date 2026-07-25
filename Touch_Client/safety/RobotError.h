@@ -45,6 +45,9 @@ enum class Severity {
     FATAL       // 停止运动 + DisableRobot
 };
 
+// 前向声明
+inline const char* errorCodeName(RobotErrorCode code);
+
 // ===== 错误上下文 =====
 struct RobotError {
     RobotErrorCode code = RobotErrorCode::OK;

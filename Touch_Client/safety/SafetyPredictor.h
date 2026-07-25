@@ -3,6 +3,9 @@
 #include <ctime>
 #include "../relay/CoordinateTransform.h"
 #include "../core/AppState.h"
+#include "RobotError.h"
+#include "EscalationTracker.h"
+#include "ConstraintForce.h"
 
 struct AlarmRecord {
     double x, y, z;
@@ -13,8 +16,16 @@ struct AlarmRecord {
 struct SafetyVerdict {
     enum Action { ALLOW = 0, WARN_SLOW = 1, REJECT = 2 };
     Action action;
+    RobotErrorCode errorCode;      // 具体错误码
     const char* reason;
-    double speedFactor;  // 1.0 = 全速, 0.0 = 停止
+    double speedFactor;            // 1.0 = 全速, 0.0 = 停止
+    double constraintForce[3];     // Touch坐标系虚拟约束力
+
+    SafetyVerdict() : action(ALLOW), errorCode(RobotErrorCode::OK),
+        reason(nullptr), speedFactor(1.0)
+    {
+        constraintForce[0] = constraintForce[1] = constraintForce[2] = 0.0;
+    }
 };
 
 class SafetyPredictor {
@@ -32,6 +43,15 @@ public:
     // 获取最近一次 verdict (给 HUD 显示)
     SafetyVerdict lastVerdict() const { return m_lastVerdict; }
 
+    // 计算虚拟约束力 (每次 ServoP 前调用)
+    void computeConstraintForce(const Vec3& target, double out[3]);
+
+    // 获取最近一次 RobotError
+    RobotError lastError() const { return m_lastError; }
+
+    // 升级跟踪器
+    EscalationTracker& escalation() { return m_escalation; }
+
     // 持久化
     void loadAlarmLog(const char* path);
     void saveAlarmLog(const char* path) const;
@@ -46,7 +66,9 @@ private:
 
     double m_lastJoints[6];
     std::vector<AlarmRecord> m_alarmList;
-    SafetyVerdict m_lastVerdict = {SafetyVerdict::ALLOW, nullptr, 1.0};
+    SafetyVerdict m_lastVerdict;
+    RobotError m_lastError;
+    EscalationTracker m_escalation;
 
     // 内部阈值
     static const double WORKSPACE_RADIUS;      // 620 mm
