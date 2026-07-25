@@ -5,6 +5,8 @@
 #include <cstdio>
 #include <cstring>
 #include "../safety/SafetyPredictor.h"
+#include "../safety/RobotDiagnostics.h"
+#include "../relay/RelayCore.h"
 
 namespace HudOverlay {
 
@@ -86,13 +88,45 @@ static void drawTopBar() {
     glColor3f(0.70f, 0.74f, 0.78f);
     text2D(560, 18, buf);
 
-    // 右侧: 连接状态指示灯
-    const char* robotStatus = app.isRobotConnected ? "ONLINE" : "OFFLINE";
-    int rx = w - 110;
-    glColor3f(app.isRobotConnected ? 0.30f : 1.0f, app.isRobotConnected ? 0.90f : 0.30f, 0.30f);
-    text2D(rx, 18, "Robot:");
-    glColor3f(app.isRobotConnected ? 0.35f : 1.0f, app.isRobotConnected ? 0.90f : 0.35f, 0.50f);
-    text2D(rx + 50, 18, robotStatus);
+    // 右侧: 状态机状态 + 延迟
+    auto& relay = RelayCore::instance();
+    const auto& sm = relay.stateMachine();
+    int rx = w - 280;
+
+    // 状态标签 (颜色根据状态)
+    const char* stateStr = sm.stateStr();
+    RobotState st = sm.currentState();
+    switch (st) {
+        case RobotState::RUNNING:
+        case RobotState::READY:
+            glColor3f(0.30f, 0.90f, 0.40f); break;  // green
+        case RobotState::DEGRADED:
+            glColor3f(1.00f, 0.60f, 0.15f); break;  // orange
+        case RobotState::ALARM:
+        case RobotState::FATAL:
+            glColor3f(1.00f, 0.30f, 0.30f); break;  // red
+        case RobotState::RECOVERING:
+            glColor3f(1.00f, 0.85f, 0.20f); break;  // yellow
+        default:
+            glColor3f(0.50f, 0.55f, 0.60f); break;  // gray
+    }
+    snprintf(buf, sizeof(buf), "[%s]", stateStr);
+    text2D(rx, 18, buf);
+
+    // 延迟
+    rx += 120;
+    snprintf(buf, sizeof(buf), "RTT: %.1f ms", app.latencyMs.load());
+    glColor3f(0.60f, 0.70f, 0.80f);
+    text2D(rx, 18, buf);
+
+    // Speed factor
+    rx += 100;
+    snprintf(buf, sizeof(buf), "Spd: %.1fx", sm.speedFactor());
+    if (sm.speedFactor() < 0.5f)
+        glColor3f(1.0f, 0.5f, 0.2f);
+    else
+        glColor3f(0.60f, 0.70f, 0.80f);
+    text2D(rx, 18, buf);
 }
 
 // ===== 左栏上半：Touch→Robot 指令日志 =====
@@ -387,6 +421,62 @@ static void drawCoordPanel(int x, int y, int w, int h) {
         }
         text2D(x + 6, ty, buf, GLUT_BITMAP_8_BY_13);
     }
+
+    // 最新诊断
+    const auto& verdict = SafetyPredictor::instance().lastVerdict();
+    if (verdict.errorCode != RobotErrorCode::OK) {
+        ty -= lineH * 2;
+        drawSeparatorLine(x + 4, x + w - 4, ty + lineH);
+        glColor3f(1.0f, 0.85f, 0.25f);
+        text2D(x + 6, ty, "Latest Warning:", GLUT_BITMAP_8_BY_13);
+        ty -= lineH;
+        glColor3f(1.0f, 0.60f, 0.20f);
+        text2D(x + 6, ty, verdict.reason ? verdict.reason : errorCodeName(verdict.errorCode),
+            GLUT_BITMAP_8_BY_13);
+    }
+}
+
+// ===== 右栏底部：诊断事件 =====
+static void drawDiagnosticsPanel(int x, int y, int w, int h) {
+    drawPanelBg(x, y, w, h);
+    drawPanelTitle(x, y + h, w, "Diagnostics");
+
+    auto& diag = RobotDiagnostics::instance();
+    int lineH = 13;
+    int ty = y + h - 28;
+    int maxLines = (h - 30) / lineH;
+    if (maxLines > 5) maxLines = 5;
+
+    int idx = diag.writeIndex();
+    int total = diag.historySize();
+    
+    for (int i = 0; i < maxLines && i < total; i++) {
+        int pos = (idx - 1 - i + RobotDiagnostics::HISTORY_SIZE)
+                  % RobotDiagnostics::HISTORY_SIZE;
+        const auto& e = diag.history()[pos];
+        
+        if (e.error == RobotErrorCode::OK) continue;
+
+        char buf[128];
+        snprintf(buf, sizeof(buf), "%s speed=%.1f",
+            errorCodeName(e.error), e.speedFactor);
+        
+        Severity sev = getSeverity(e.error);
+        if (sev == Severity::FATAL || sev == Severity::REJECT)
+            glColor3f(1.0f, 0.35f, 0.35f);
+        else if (sev == Severity::DEGRADE)
+            glColor3f(1.0f, 0.60f, 0.15f);
+        else
+            glColor3f(0.90f, 0.85f, 0.30f);
+        
+        text2D(x + 6, ty, buf, GLUT_BITMAP_8_BY_13);
+        ty -= lineH;
+    }
+
+    if (total == 0) {
+        glColor3f(0.35f, 0.38f, 0.42f);
+        text2D(x + 6, ty, "(no errors)");
+    }
 }
 
 // ===== 主入口 =====
@@ -427,6 +517,12 @@ void drawAll() {
     int rw = HudLayout::RIGHT_W;
     int rh = HudLayout::RIGHT_BOTTOM_H;
     drawCoordPanel(rx, ry, rw, rh);
+
+    // Diagnostics strip below coord panel
+    int diagH = 70;
+    drawDiagnosticsPanel(HudLayout::RIGHT_X,
+        HudLayout::RIGHT_BOTTOM_Y,
+        HudLayout::RIGHT_W, diagH);
 
     // 恢复投影
     glPopMatrix();
