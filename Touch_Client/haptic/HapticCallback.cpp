@@ -4,6 +4,8 @@
 #include "../relay/RelayCore.h"
 #include "../core/MathUtils.h"
 #include "../config/Config.h"
+#include "../safety/ConstraintForce.h"
+#include "../safety/SafetyPredictor.h"
 #include <HDU/hduVector.h>
 
 HDCallbackCode HDCALLBACK hapticCallback(void* pUserData) {
@@ -73,17 +75,36 @@ HDCallbackCode HDCALLBACK hapticCallback(void* pUserData) {
     // ===== 7. 向 MATLAB GUI 上报位置 =====
     relay.reportPosition();
 
-    // ===== 8. 力反馈渲染 (从传感器到 Touch 设备) =====
+    // ===== 8. 力反馈渲染 (传感器力 + 虚拟约束力) =====
     {
-        double force[3] = { 0.0, 0.0, 0.0 };
+        double totalForce[3] = { 0.0, 0.0, 0.0 };
+
+        // 8a. 传感器力 (仅在非 stale 时)
         EnterCriticalSection(&app.forceDataMutex);
         if (!app.forceData.isStale) {
-            force[0] = app.forceData.hapticOut[0];
-            force[1] = app.forceData.hapticOut[1];
-            force[2] = app.forceData.hapticOut[2];
+            totalForce[0] = app.forceData.hapticOut[0];
+            totalForce[1] = app.forceData.hapticOut[1];
+            totalForce[2] = app.forceData.hapticOut[2];
         }
         LeaveCriticalSection(&app.forceDataMutex);
-        hdSetDoublev(HD_CURRENT_FORCE, force);
+
+        // 8b. 虚拟约束力 (始终渲染，独立于传感器/机械臂状态)
+        double constraint[3] = {0};
+        SafetyPredictor::instance().computeConstraintForce(robotPos, constraint);
+        totalForce[0] += constraint[0];
+        totalForce[1] += constraint[1];
+        totalForce[2] += constraint[2];
+
+        // 8c. 总力 clamp
+        double maxF = Config::FORCE_MAX_TOUCH_N;
+        if (totalForce[0] > maxF) totalForce[0] = maxF;
+        if (totalForce[0] < -maxF) totalForce[0] = -maxF;
+        if (totalForce[1] > maxF) totalForce[1] = maxF;
+        if (totalForce[1] < -maxF) totalForce[1] = -maxF;
+        if (totalForce[2] > maxF) totalForce[2] = maxF;
+        if (totalForce[2] < -maxF) totalForce[2] = -maxF;
+
+        hdSetDoublev(HD_CURRENT_FORCE, totalForce);
     }
 
     hdEndFrame(app.hHD);
