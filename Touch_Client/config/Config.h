@@ -79,6 +79,13 @@ namespace Config {
     const int ESCALATE_DEGRADE_TO_REJECT = 10;  // DEGRADE 连续帧数 → REJECT
     const int DEESCALATE_CLEAR_FRAMES    = 30;  // 清除后多少帧降级
 
+    // ========== 看门狗参数 ==========
+    const int WATCHDOG_TIMEOUT_MS = 200;     // 触觉线程看门狗超时 (ms)
+
+    // ========== 升级时间阈值 ==========
+    const int MIN_WARN_MS    = 50;           // WARN 至少持续 50ms 才能升级到 DEGRADE
+    const int MIN_DEGRADE_MS = 200;          // DEGRADE 至少持续 200ms 才能升级到 REJECT
+
     // ========== 诊断日志参数 ==========
     constexpr const char* DIAGNOSTIC_LOG_PATH = "robot_diagnostics.log";
 
