@@ -177,24 +177,27 @@ static void drawForceRawPanel(int x, int y, int w, int h) {
     char buf[128];
 
     EnterCriticalSection(&app.forceDataMutex);
-    double fx = app.forceData.raw[0];
-    double fy = app.forceData.raw[1];
-    double fz = app.forceData.raw[2];
+    double* fr = app.forceData.raw;
+    bool stale = app.forceData.isStale;
     LeaveCriticalSection(&app.forceDataMutex);
 
-    int cy = y + h / 2;
-    glColor3f(0.60f, 0.65f, 0.70f);
-    text2D(x + 6, cy + 12, "Force sensor data from robot end-effector");
-    glColor3f(0.40f, 0.44f, 0.50f);
-    text2D(x + 6, cy - 4, "(awaiting force sensor integration)");
+    int lineH = 16;
+    int ty = y + h - 28;
 
-    snprintf(buf, sizeof(buf), "Fx: %6.2f N", fx);
-    glColor3f(0.70f, 0.74f, 0.78f);
-    text2D(x + 6, cy - 22, buf);
-    snprintf(buf, sizeof(buf), "Fy: %6.2f N", fy);
-    text2D(x + 140, cy - 22, buf);
-    snprintf(buf, sizeof(buf), "Fz: %6.2f N", fz);
-    text2D(x + 260, cy - 22, buf);
+    if (stale) {
+        glColor3f(1.0f, 0.35f, 0.35f);
+        text2D(x + 6, ty, "*** NO DATA — check sensor connection ***", GLUT_BITMAP_8_BY_13);
+        ty -= lineH;
+    }
+
+    snprintf(buf, sizeof(buf), "Fx: %7.2f N    Fy: %7.2f N    Fz: %7.2f N", fr[0], fr[1], fr[2]);
+    glColor3f(0.70f, 0.85f, 0.50f);
+    text2D(x + 6, ty, buf, GLUT_BITMAP_8_BY_13);
+    ty -= lineH;
+
+    snprintf(buf, sizeof(buf), "Mx: %7.2f Nm   My: %7.2f Nm   Mz: %7.2f Nm", fr[3], fr[4], fr[5]);
+    glColor3f(0.50f, 0.80f, 0.95f);
+    text2D(x + 6, ty, buf, GLUT_BITMAP_8_BY_13);
 }
 
 // ===== 中栏下半：滤波力数据 =====
@@ -207,24 +210,29 @@ static void drawForceFilteredPanel(int x, int y, int w, int h) {
     char buf[128];
 
     EnterCriticalSection(&app.forceDataMutex);
-    double fx = app.forceData.filtered[0];
-    double fy = app.forceData.filtered[1];
-    double fz = app.forceData.filtered[2];
+    double* ff = app.forceData.filtered;
+    double* ho = app.forceData.hapticOut;
+    bool stale = app.forceData.isStale;
     LeaveCriticalSection(&app.forceDataMutex);
 
-    int cy = y + h / 2;
-    glColor3f(0.60f, 0.65f, 0.70f);
-    text2D(x + 6, cy + 12, "Filtered force sent to Touch device");
-    glColor3f(0.40f, 0.44f, 0.50f);
-    text2D(x + 6, cy - 4, "(filter pipeline not yet integrated)");
+    int lineH = 16;
+    int ty = y + h - 28;
 
-    snprintf(buf, sizeof(buf), "Fx: %6.2f N", fx);
-    glColor3f(0.70f, 0.74f, 0.78f);
-    text2D(x + 6, cy - 22, buf);
-    snprintf(buf, sizeof(buf), "Fy: %6.2f N", fy);
-    text2D(x + 140, cy - 22, buf);
-    snprintf(buf, sizeof(buf), "Fz: %6.2f N", fz);
-    text2D(x + 260, cy - 22, buf);
+    snprintf(buf, sizeof(buf), "Filtered:  Fx: %6.2f  Fy: %6.2f  Fz: %6.2f N", ff[0], ff[1], ff[2]);
+    if (stale) glColor3f(0.55f, 0.30f, 0.30f);
+    else      glColor3f(0.60f, 0.65f, 0.70f);
+    text2D(x + 6, ty, buf, GLUT_BITMAP_8_BY_13);
+    ty -= lineH;
+
+    snprintf(buf, sizeof(buf), "HapticOut:  X: %5.2f  Y: %5.2f  Z: %5.2f N", ho[0], ho[1], ho[2]);
+    glColor3f(0.35f, 0.90f, 0.50f);
+    text2D(x + 6, ty, buf, GLUT_BITMAP_8_BY_13);
+    ty -= lineH;
+
+    if (stale) {
+        glColor3f(1.0f, 0.50f, 0.25f);
+        text2D(x + 6, ty, "Touch force output: ZERO (safety)", GLUT_BITMAP_8_BY_13);
+    }
 }
 
 // ===== 右栏下半：坐标 + 力数据 =====
@@ -284,15 +292,15 @@ static void drawCoordPanel(int x, int y, int w, int h) {
 
     // 力数据
     EnterCriticalSection(&app.forceDataMutex);
-    double fx = app.forceData.filtered[0];
-    double fy = app.forceData.filtered[1];
-    double fz = app.forceData.filtered[2];
+    double ffx = app.forceData.filtered[0];
+    double ffy = app.forceData.filtered[1];
+    double ffz = app.forceData.filtered[2];
     LeaveCriticalSection(&app.forceDataMutex);
 
     glColor3f(0.90f, 0.94f, 1.00f);
     text2D(x + 6, ty, "Force (N):", GLUT_BITMAP_HELVETICA_10);
     ty -= lineH;
-    snprintf(buf, sizeof(buf), "  Fx: %7.2f  Fy: %7.2f  Fz: %7.2f", fx, fy, fz);
+    snprintf(buf, sizeof(buf), "  Fx: %7.2f  Fy: %7.2f  Fz: %7.2f", ffx, ffy, ffz);
     glColor3f(0.50f, 0.80f, 0.95f);
     text2D(x + 6, ty, buf, GLUT_BITMAP_8_BY_13);
 
