@@ -29,6 +29,7 @@ SafetyPredictor& SafetyPredictor::instance() {
 
 SafetyVerdict SafetyPredictor::evaluate(const Vec3& target) {
     // ===== Layer 1: hard boundaries (O(1) compute) =====
+    Vec3 clamped;
 
     // 1a. workspace radius
     double dist = sqrt(target.x * target.x + target.y * target.y);
@@ -37,7 +38,7 @@ SafetyVerdict SafetyPredictor::evaluate(const Vec3& target) {
         m_lastVerdict.errorCode = RobotErrorCode::ERR_WORKSPACE_RADIUS;
         m_lastVerdict.reason = "exceeds workspace radius (620mm)";
         m_lastVerdict.speedFactor = 0.0;
-        return m_lastVerdict;
+        goto evaluate_done;
     }
 
     // 1b. Z-axis range
@@ -46,17 +47,17 @@ SafetyVerdict SafetyPredictor::evaluate(const Vec3& target) {
         m_lastVerdict.errorCode = RobotErrorCode::ERR_Z_RANGE;
         m_lastVerdict.reason = "Z-axis out of range (0~795mm)";
         m_lastVerdict.speedFactor = 0.0;
-        return m_lastVerdict;
+        goto evaluate_done;
     }
 
     // 1c. safety boundary (reuse existing SafetyBoundary)
-    Vec3 clamped = SafetyBoundary::clampToBoundary(target);
+    clamped = SafetyBoundary::clampToBoundary(target);
     if (clamped.x != target.x || clamped.y != target.y || clamped.z != target.z) {
         m_lastVerdict.action = SafetyVerdict::REJECT;
         m_lastVerdict.errorCode = RobotErrorCode::ERR_SAFETY_BOUNDARY;
         m_lastVerdict.reason = "exceeds safety boundary";
         m_lastVerdict.speedFactor = 0.0;
-        return m_lastVerdict;
+        goto evaluate_done;
     }
 
     // ===== 几何奇异区域预警 (不依赖 IK 模型) =====
@@ -66,14 +67,14 @@ SafetyVerdict SafetyPredictor::evaluate(const Vec3& target) {
         m_lastVerdict.errorCode = RobotErrorCode::ERR_CYLINDRICAL_SING;
         m_lastVerdict.reason = "cylindrical singularity: too close to Z axis (<30mm)";
         m_lastVerdict.speedFactor = 0.3;
-        return m_lastVerdict;
+        goto evaluate_done;
     }
     if (r_xy < 80.0) {
         m_lastVerdict.action = SafetyVerdict::WARN_SLOW;
         m_lastVerdict.errorCode = RobotErrorCode::ERR_CYLINDRICAL_WARN;
         m_lastVerdict.reason = "approaching cylindrical singularity (<80mm from Z axis)";
         m_lastVerdict.speedFactor = 0.6;
-        return m_lastVerdict;
+        goto evaluate_done;
     }
 
     // ===== Layer 2: kinematics check =====
@@ -115,7 +116,7 @@ SafetyVerdict SafetyPredictor::evaluate(const Vec3& target) {
             m_lastVerdict.errorCode = RobotErrorCode::ERR_JOINTLIMIT_WARN;
             m_lastVerdict.reason = jbuf;
             m_lastVerdict.speedFactor = 0.5;
-            return m_lastVerdict;
+            goto evaluate_done;
         }
     }
 
@@ -128,7 +129,7 @@ SafetyVerdict SafetyPredictor::evaluate(const Vec3& target) {
         m_lastVerdict.errorCode = RobotErrorCode::ERR_IK_NO_SOLUTION;
         m_lastVerdict.reason = "IK no solution";
         m_lastVerdict.speedFactor = 1.0;  // 全速, 不阻塞
-        return m_lastVerdict;
+        goto evaluate_done;
     }
 
     // 2b. joint limits
@@ -137,7 +138,7 @@ SafetyVerdict SafetyPredictor::evaluate(const Vec3& target) {
         m_lastVerdict.errorCode = RobotErrorCode::ERR_JOINTLIMIT_EXCEED;
         m_lastVerdict.reason = "joint outside limits";
         m_lastVerdict.speedFactor = 0.0;
-        return m_lastVerdict;
+        goto evaluate_done;
     }
 
     // ===== Layer 3: singularity detection (soft boundary) =====
@@ -151,7 +152,7 @@ SafetyVerdict SafetyPredictor::evaluate(const Vec3& target) {
         m_lastVerdict.errorCode = RobotErrorCode::ERR_IK_SINGULAR;
         m_lastVerdict.reason = "singular configuration (cond>>500)";
         m_lastVerdict.speedFactor = 0.0;
-        return m_lastVerdict;
+        goto evaluate_done;
     }
 
     if (cond > SINGULARITY_WARN) {
@@ -161,7 +162,7 @@ SafetyVerdict SafetyPredictor::evaluate(const Vec3& target) {
         m_lastVerdict.speedFactor = SINGULARITY_SPEED;
         // still cache joints (slow down but don't block)
         memcpy(m_lastJoints, joints, 6 * sizeof(double));
-        return m_lastVerdict;
+        goto evaluate_done;
     }
 
     // ===== Layer 4: alarm history blacklist =====
@@ -173,7 +174,7 @@ SafetyVerdict SafetyPredictor::evaluate(const Vec3& target) {
         m_lastVerdict.reason = "near historical alarm point (<30mm)";
         m_lastVerdict.speedFactor = ALARM_DANGER_SPEED;
         memcpy(m_lastJoints, joints, 6 * sizeof(double));
-        return m_lastVerdict;
+        goto evaluate_done;
     }
     if (minDist < ALARM_WARN_R) {
         m_lastVerdict.action = SafetyVerdict::WARN_SLOW;
@@ -181,7 +182,7 @@ SafetyVerdict SafetyPredictor::evaluate(const Vec3& target) {
         m_lastVerdict.reason = "near historical alarm zone (<80mm)";
         m_lastVerdict.speedFactor = ALARM_WARN_SPEED;
         memcpy(m_lastJoints, joints, 6 * sizeof(double));
-        return m_lastVerdict;
+        goto evaluate_done;
     }
 
     // ===== pass =====
@@ -190,7 +191,9 @@ SafetyVerdict SafetyPredictor::evaluate(const Vec3& target) {
     m_lastVerdict.errorCode = RobotErrorCode::OK;
     m_lastVerdict.reason = nullptr;
     m_lastVerdict.speedFactor = 1.0;
+    goto evaluate_done;
 
+evaluate_done:
     // Compute constraint force for haptic rendering
     ConstraintForce::computeTotalForce(target, m_alarmList, m_lastVerdict.constraintForce);
 

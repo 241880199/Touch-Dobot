@@ -51,5 +51,6 @@ private:
     int m_count = 0;
     int m_errorCounts[24] = {0};
     FILE* m_logFile = nullptr;
+    bool m_isShutdown = false;
     uint64_t m_sessionStartMs = 0;
 };

@@ -6,20 +6,6 @@
 
 namespace ConstraintForce {
 
-// ===== 辅助: 向量归一化 =====
-static void normalize(const double v[3], double out[3]) {
-    double mag = sqrt(v[0]*v[0] + v[1]*v[1] + v[2]*v[2]);
-    if (mag < 1e-12) { out[0] = out[1] = out[2] = 0.0; return; }
-    double inv = 1.0 / mag;
-    out[0] = v[0] * inv;
-    out[1] = v[1] * inv;
-    out[2] = v[2] * inv;
-}
-
-static double length(const double v[3]) {
-    return sqrt(v[0]*v[0] + v[1]*v[1] + v[2]*v[2]);
-}
-
 // ===== 安全边界力 =====
 void computeBoundaryForce(const Vec3& target, double out[3]) {
     out[0] = out[1] = out[2] = 0.0;

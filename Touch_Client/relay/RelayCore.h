@@ -80,4 +80,5 @@ private:
     RobotStateMachine m_stateMachine;
     DWORD m_lastPingMs = 0;
     DWORD m_lastHeartbeatMs = 0;
+    bool m_heartbeatLostReported = false;
 };

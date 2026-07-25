@@ -33,6 +33,8 @@ void RobotDiagnostics::init(const char* path) {
 }
 
 void RobotDiagnostics::shutdown() {
+    if (m_isShutdown) return;
+    m_isShutdown = true;
     writeSessionReport();
     if (m_logFile) {
         fclose(m_logFile);

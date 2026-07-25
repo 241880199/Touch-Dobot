@@ -1,40 +1,73 @@
 #include "RobotStateMachine.h"
 #include "../config/Config.h"
+#include "RobotDiagnostics.h"
 #include <algorithm>
 #include <iostream>
 
 RobotStateMachine::RobotStateMachine() {
+    InitializeCriticalSection(&m_lock);
     m_state = RobotState::DISCONNECTED;
 }
 
+// ===== 查询方法 (带锁) =====
+
+RobotState RobotStateMachine::currentState() const {
+    EnterCriticalSection(&m_lock);
+    RobotState result = m_state;
+    LeaveCriticalSection(&m_lock);
+    return result;
+}
+
+const char* RobotStateMachine::stateStr() const {
+    EnterCriticalSection(&m_lock);
+    const char* result = stateName(m_state);
+    LeaveCriticalSection(&m_lock);
+    return result;
+}
+
 double RobotStateMachine::speedFactor() const {
+    EnterCriticalSection(&m_lock);
+    double result;
     switch (m_state) {
         case RobotState::RUNNING:
-            return (m_lastError.code != RobotErrorCode::OK)
+            result = (m_lastError.code != RobotErrorCode::OK)
                 ? std::max(0.1, 1.0 - m_escalation.count() * 0.15)
                 : 1.0;
+            break;
         case RobotState::DEGRADED:
-            return 0.3;
+            result = 0.3;
+            break;
         case RobotState::ALARM:
         case RobotState::RECOVERING:
         case RobotState::FATAL:
-            return 0.0;
+            result = 0.0;
+            break;
         default:
-            return 1.0;
+            result = 1.0;
+            break;
     }
+    LeaveCriticalSection(&m_lock);
+    return result;
 }
 
 bool RobotStateMachine::canMove() const {
-    return m_state == RobotState::RUNNING || m_state == RobotState::DEGRADED;
+    EnterCriticalSection(&m_lock);
+    bool result = (m_state == RobotState::RUNNING || m_state == RobotState::DEGRADED);
+    LeaveCriticalSection(&m_lock);
+    return result;
 }
 
 bool RobotStateMachine::canSendForce() const {
-    // 传感器力仅在 RUNNING 和 DEGRADED 发送
-    // 约束力始终发送 (独立于机器人状态)
-    return m_state == RobotState::RUNNING || m_state == RobotState::DEGRADED;
+    EnterCriticalSection(&m_lock);
+    bool result = (m_state == RobotState::RUNNING || m_state == RobotState::DEGRADED);
+    LeaveCriticalSection(&m_lock);
+    return result;
 }
 
+// ===== 事件驱动 (带锁) =====
+
 void RobotStateMachine::onError(RobotError& error, const Vec3& moveDelta) {
+    EnterCriticalSection(&m_lock);
     m_lastError = error;
 
     // 升级计数
@@ -85,9 +118,11 @@ void RobotStateMachine::onError(RobotError& error, const Vec3& moveDelta) {
             }
             break;
     }
+    LeaveCriticalSection(&m_lock);
 }
 
 void RobotStateMachine::onRecovery() {
+    EnterCriticalSection(&m_lock);
     switch (m_state) {
         case RobotState::ALARM:
             std::cout << "[StateMachine] ALARM → READY (recovered)" << std::endl;
@@ -110,42 +145,55 @@ void RobotStateMachine::onRecovery() {
         default:
             break;
     }
+    LeaveCriticalSection(&m_lock);
 }
 
 void RobotStateMachine::onButtonPress() {
+    EnterCriticalSection(&m_lock);
     if (m_state == RobotState::READY) {
         transitionTo(RobotState::RUNNING);
     }
+    LeaveCriticalSection(&m_lock);
 }
 
 void RobotStateMachine::onButtonRelease() {
+    EnterCriticalSection(&m_lock);
     if (m_state == RobotState::RUNNING || m_state == RobotState::DEGRADED) {
         transitionTo(RobotState::READY);
     }
+    LeaveCriticalSection(&m_lock);
 }
 
 void RobotStateMachine::onConnect() {
+    EnterCriticalSection(&m_lock);
     if (m_state == RobotState::DISCONNECTED || m_state == RobotState::RECOVERING) {
         transitionTo(RobotState::CONNECTED);
     }
+    LeaveCriticalSection(&m_lock);
 }
 
 void RobotStateMachine::onDisconnect() {
+    EnterCriticalSection(&m_lock);
     if (m_state == RobotState::RUNNING || m_state == RobotState::DEGRADED) {
         transitionTo(RobotState::RECOVERING);
     } else {
         transitionTo(RobotState::DISCONNECTED);
     }
+    LeaveCriticalSection(&m_lock);
 }
 
 void RobotStateMachine::onEnableSuccess() {
+    EnterCriticalSection(&m_lock);
     if (m_state == RobotState::CONNECTED) {
         transitionTo(RobotState::READY);
     }
+    LeaveCriticalSection(&m_lock);
 }
 
 void RobotStateMachine::onEnableFail() {
+    EnterCriticalSection(&m_lock);
     transitionTo(RobotState::FATAL);
+    LeaveCriticalSection(&m_lock);
 }
 
 void RobotStateMachine::transitionTo(RobotState newState) {
@@ -153,5 +201,6 @@ void RobotStateMachine::transitionTo(RobotState newState) {
     const char* from = stateName(m_state);
     const char* to = stateName(newState);
     std::cout << "[StateMachine] " << from << " → " << to << std::endl;
+    RobotDiagnostics::instance().logStateChange(m_state, newState);
     m_state = newState;
 }

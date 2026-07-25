@@ -4,6 +4,7 @@
 #include "../robot/RobotConnection.h"
 #include "../core/AppState.h"
 #include "../config/Config.h"
+#include <algorithm>
 #include <iostream>
 #include <windows.h>
 #include "../safety/SafetyPredictor.h"
@@ -279,6 +280,7 @@ bool RelayCore::init() {
 
     m_stateMachine.onConnect();
     m_lastHeartbeatMs = GetTickCount();
+    m_heartbeatLostReported = false;
 
     // 初始化序列：ClearError → 降灵敏度 → EnableRobot → (报警检测) → CP → GetPose
     Sleep(200);
@@ -431,7 +433,7 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
     static double s_speedMul = 1.0;  // 跨帧持久, 由 SafetyPredictor 更新
     double len = sqrt(dx*dx + dy*dy + dz*dz);
     // Apply state machine speed factor ON TOP of safety verdict
-    double effectiveSpeed = s_speedMul * m_stateMachine.speedFactor();
+    double effectiveSpeed = std::min(s_speedMul, m_stateMachine.speedFactor());
     double maxStep = 4.5 * effectiveSpeed;
     if (len > maxStep) {
         double scale = maxStep / len;
@@ -456,6 +458,12 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
         RobotError error = SafetyPredictor::instance().lastError();
         m_stateMachine.onError(error, deltaVec);
     } else {
+        // Check for reverse-motion de-escalation (immediate recovery)
+        Vec3 deltaVec(dx, dy, dz);
+        auto& esc = m_stateMachine.escalation();
+        if (esc.isEscalated() && esc.shouldDeescalate(deltaVec, esc.lastRejectDirection)) {
+            m_stateMachine.onRecovery();
+        }
         m_stateMachine.escalation().onClear();
     }
 
@@ -640,17 +648,42 @@ void RelayCore::queryPose() {
     DWORD now = GetTickCount();
     if (now - m_lastPingMs > (DWORD)Config::PING_INTERVAL_MS) {
         m_lastPingMs = now;
-        pingRobot();
+        // Send PING to enable port
+        if (isRobotConnected()) {
+            char pingBuf[64];
+            uint64_t sentMs = GetTickCount64();
+            snprintf(pingBuf, sizeof(pingBuf), "PING|%llu", sentMs);
+            robotSendEnable(pingBuf);
+            // Read PONG response (non-blocking poll with short wait)
+            Sleep(5);
+            char pongBuf[128] = {};
+            if (robotRecvEnablePoll(pongBuf, sizeof(pongBuf))) {
+                if (strncmp(pongBuf, "PONG", 4) == 0) {
+                    uint64_t now64 = GetTickCount64();
+                    const char* pipe = strchr(pongBuf, '|');
+                    if (pipe) {
+                        uint64_t echoMs = _strtoui64(pipe + 1, nullptr, 10);
+                        auto& app = appState;
+                        app.latencyMs = (float)(now64 - echoMs);
+                    }
+                }
+            }
+        }
     }
 
     // Health check: if no heartbeat for HEARTBEAT_TIMEOUT_MS, trigger disconnect
     if (now - m_lastHeartbeatMs > (DWORD)Config::HEARTBEAT_TIMEOUT_MS) {
-        RobotError error;
-        error.code = RobotErrorCode::ERR_HEARTBEAT_LOST;
-        error.severity = Severity::FATAL;
-        error.timestampMs = GetTickCount64();
-        Vec3 zeroDelta = {0, 0, 0};
-        m_stateMachine.onError(error, zeroDelta);
+        if (!m_heartbeatLostReported) {
+            m_heartbeatLostReported = true;
+            RobotError error;
+            error.code = RobotErrorCode::ERR_HEARTBEAT_LOST;
+            error.severity = Severity::FATAL;
+            error.timestampMs = GetTickCount64();
+            Vec3 zeroDelta = {0, 0, 0};
+            m_stateMachine.onError(error, zeroDelta);
+        }
+    } else {
+        m_heartbeatLostReported = false;
     }
 
     // Heartbeat update
@@ -687,13 +720,19 @@ void RelayCore::queryJointAngles() {
     // Health check: if no heartbeat for HEARTBEAT_TIMEOUT_MS, trigger disconnect
     DWORD now = GetTickCount();
     if (now - m_lastHeartbeatMs > (DWORD)Config::HEARTBEAT_TIMEOUT_MS) {
-        RobotError error;
-        error.code = RobotErrorCode::ERR_HEARTBEAT_LOST;
-        error.severity = Severity::FATAL;
-        error.timestampMs = GetTickCount64();
-        Vec3 zeroDelta = {0, 0, 0};
-        m_stateMachine.onError(error, zeroDelta);
+        if (!m_heartbeatLostReported) {
+            m_heartbeatLostReported = true;
+            RobotError error;
+            error.code = RobotErrorCode::ERR_HEARTBEAT_LOST;
+            error.severity = Severity::FATAL;
+            error.timestampMs = GetTickCount64();
+            Vec3 zeroDelta = {0, 0, 0};
+            m_stateMachine.onError(error, zeroDelta);
+        }
+    } else {
+        m_heartbeatLostReported = false;
     }
+    m_lastHeartbeatMs = GetTickCount();
 }
 
 void RelayCore::pingRobot() {

@@ -516,13 +516,12 @@ void drawAll() {
     int ry = HudLayout::RIGHT_BOTTOM_Y;
     int rw = HudLayout::RIGHT_W;
     int rh = HudLayout::RIGHT_BOTTOM_H;
-    drawCoordPanel(rx, ry, rw, rh);
-
-    // Diagnostics strip below coord panel
     int diagH = 70;
-    drawDiagnosticsPanel(HudLayout::RIGHT_X,
-        HudLayout::RIGHT_BOTTOM_Y,
-        HudLayout::RIGHT_W, diagH);
+    int diagGap = 4;
+    drawCoordPanel(rx, ry + diagH + diagGap, rw, rh - diagH - diagGap);
+
+    // Diagnostics strip at bottom of right column
+    drawDiagnosticsPanel(rx, ry, rw, diagH);
 
     // 恢复投影
     glPopMatrix();
