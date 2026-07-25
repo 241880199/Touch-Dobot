@@ -47,6 +47,16 @@ namespace Config {
     const float MIN_DELTA_THRESHOLD = 1.0f;  // 最小位移阈值 (mm)
     const unsigned int CP_SMOOTH_RATIO = 100; // 平滑过渡比例 (0~100)
 
+    // ========== 力传感器参数 ==========
+    const int FORCE_REALTIME_PORT = 30004;       // 实时反馈端口 (125Hz)
+    const int FORCE_FILTER_CUTOFF = 30;          // Butterworth 截止频率 (Hz)
+    const int FORCE_STALE_MS = 200;              // 数据超时阈值 (ms)
+    const double FORCE_DEADZONE_N = 0.5;         // 死区 (N)
+    const double FORCE_MAX_SENSOR_N = 200.0;     // 传感器量程 (N)
+    const double FORCE_MAX_TOUCH_N = 3.3;        // Touch 最大安全力 (N)
+    const double FORCE_GRADIENT_LIMIT = 50.0;    // 梯度限幅 (N/frame)
+    const int FORCE_RECONNECT_INTERVAL = 2000;   // 断线重试间隔 (ms)
+
     // ========== 发送队列参数 ==========
     const int MAX_QUEUE_SIZE = 5;            // 队列容量上限（满时丢弃旧数据）
     const int TCP_SEND_INTERVAL = 10;        // 发送间隔 (ms)
