@@ -55,6 +55,10 @@ public:
     // 状态转换 (供外部手动触发)
     void transitionTo(RobotState newState);
 
+    // FATAL 回调 (FATAL 状态进入时自动调用)
+    using FatalCallback = void(*)();
+    void setFatalCallback(FatalCallback cb) { m_onFatal = cb; }
+
     // 错误跟踪器 (供 SafetyPredictor 读取) — 不加锁，调用者需同步
     EscalationTracker& escalation() { return m_escalation; }
     const EscalationTracker& escalation() const { return m_escalation; }
@@ -64,4 +68,5 @@ private:
     EscalationTracker m_escalation;
     RobotError m_lastError;  // 最近一次错误
     mutable CRITICAL_SECTION m_lock;
+    FatalCallback m_onFatal = nullptr;
 };

@@ -203,4 +203,12 @@ void RobotStateMachine::transitionTo(RobotState newState) {
     std::cout << "[StateMachine] " << from << " → " << to << std::endl;
     RobotDiagnostics::instance().logStateChange(m_state, newState);
     m_state = newState;
+
+    // FATAL 回调：在锁外调用以避免回调中的 I/O 阻塞状态机
+    if (newState == RobotState::FATAL && m_onFatal) {
+        FatalCallback cb = m_onFatal;
+        LeaveCriticalSection(&m_lock);
+        cb();
+        EnterCriticalSection(&m_lock);
+    }
 }

@@ -282,6 +282,13 @@ bool RelayCore::init() {
     m_lastHeartbeatMs = GetTickCount();
     m_heartbeatLostReported = false;
 
+    // Register FATAL callback: disable robot hardware on fatal error
+    m_stateMachine.setFatalCallback([]() {
+        robotSendEnable("DisableRobot()");
+        Sleep(100);
+        std::cerr << "[Safety] FATAL: robot disabled by state machine" << std::endl;
+    });
+
     // 初始化序列：ClearError → 降灵敏度 → EnableRobot → (报警检测) → CP → GetPose
     Sleep(200);
     robotSendEnable("ClearError()");
