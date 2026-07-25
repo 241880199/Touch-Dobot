@@ -1,9 +1,8 @@
+#define _USE_MATH_DEFINES
 #include "ForcePipeline.h"
 #include "../config/Config.h"
 #include <cmath>
 #include <algorithm>
-
-#define M_PI 3.14159265358979323846
 
 // ===== Butterworth2 implementation =====
 

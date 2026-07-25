@@ -64,6 +64,7 @@ RelayCore::RelayCore() {
 }
 
 RelayCore::~RelayCore() {
+    shutdownForceReader();
     shutdownRelayReporting();
     DeleteCriticalSection(&m_basePointLock);
     DeleteCriticalSection(&m_relaySocketMutex);
@@ -752,17 +753,36 @@ bool RelayCore::initForceReader() {
 }
 
 void RelayCore::pollForce() {
+    // Rate limiter: ~30Hz (filter design assumes 120Hz sample rate, ~4x cutoff)
+    static DWORD lastPollMs = 0;
+    DWORD now = GetTickCount();
+    if (now - lastPollMs < 33) return;
+    lastPollMs = now;
+
     auto& app = appState;
     EnterCriticalSection(&app.forceDataMutex);
+
+    // Staleness check: if no data for > FORCE_STALE_MS, zero out all outputs
+    if (app.forceData.lastUpdateMs > 0 &&
+        (now - app.forceData.lastUpdateMs) > static_cast<DWORD>(Config::FORCE_STALE_MS)) {
+        app.forceData.isStale = true;
+        for (int i = 0; i < 6; i++) app.forceData.filtered[i] = 0.0;
+        for (int i = 0; i < 3; i++) app.forceData.hapticOut[i] = 0.0;
+    }
+
     ForcePipeline::step(app.forceData);
 
-    // Build F| protocol message
+    // Build F| protocol message — send all zeros when stale
     char buf[128];
-    snprintf(buf, sizeof(buf), "F|%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%d",
-        app.forceData.filtered[0], app.forceData.filtered[1],
-        app.forceData.filtered[2], app.forceData.filtered[3],
-        app.forceData.filtered[4], app.forceData.filtered[5],
-        app.forceData.isStale ? 1 : 0);
+    if (app.forceData.isStale) {
+        snprintf(buf, sizeof(buf), "F|0.00,0.00,0.00,0.00,0.00,0.00,1");
+    } else {
+        snprintf(buf, sizeof(buf), "F|%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%d",
+            app.forceData.filtered[0], app.forceData.filtered[1],
+            app.forceData.filtered[2], app.forceData.filtered[3],
+            app.forceData.filtered[4], app.forceData.filtered[5],
+            app.forceData.isStale ? 1 : 0);
+    }
     LeaveCriticalSection(&app.forceDataMutex);
 
     sendRelayUpdate(buf);

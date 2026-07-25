@@ -5,6 +5,11 @@
 #include <cstring>
 
 static SOCKET g_realtimeSocket = INVALID_SOCKET;
+static CRITICAL_SECTION g_realtimeSocketMutex;
+static struct RealtimeSocketGuard {
+    RealtimeSocketGuard() { InitializeCriticalSection(&g_realtimeSocketMutex); }
+    ~RealtimeSocketGuard() { DeleteCriticalSection(&g_realtimeSocketMutex); }
+} g_realtimeGuard;
 
 #pragma comment(lib, "ws2_32.lib")
 
@@ -84,19 +89,27 @@ void robotDisconnect() {
         app.robotMotionSocket = INVALID_SOCKET;
     }
     app.isRobotConnected = false;
+    LeaveCriticalSection(&app.robotSocketMutex);
+
+    EnterCriticalSection(&g_realtimeSocketMutex);
     if (g_realtimeSocket != INVALID_SOCKET) {
         closesocket(g_realtimeSocket);
         g_realtimeSocket = INVALID_SOCKET;
     }
-    LeaveCriticalSection(&app.robotSocketMutex);
+    LeaveCriticalSection(&g_realtimeSocketMutex);
 }
 
 bool robotConnectRealtime(const char* ip) {
+    EnterCriticalSection(&g_realtimeSocketMutex);
+
     if (g_realtimeSocket != INVALID_SOCKET) {
         closesocket(g_realtimeSocket);
     }
     g_realtimeSocket = WSASocket(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0, 0);
-    if (g_realtimeSocket == INVALID_SOCKET) return false;
+    if (g_realtimeSocket == INVALID_SOCKET) {
+        LeaveCriticalSection(&g_realtimeSocketMutex);
+        return false;
+    }
 
     sockaddr_in addr;
     addr.sin_family = AF_INET;
@@ -115,6 +128,7 @@ bool robotConnectRealtime(const char* ip) {
     if (select(0, NULL, &set, NULL, &tv) <= 0) {
         closesocket(g_realtimeSocket);
         g_realtimeSocket = INVALID_SOCKET;
+        LeaveCriticalSection(&g_realtimeSocketMutex);
         return false;
     }
 
@@ -124,28 +138,39 @@ bool robotConnectRealtime(const char* ip) {
     int timeout = 100;
     setsockopt(g_realtimeSocket, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
 
+    LeaveCriticalSection(&g_realtimeSocketMutex);
     std::cout << "[Force] Connected to realtime port " << Config::FORCE_REALTIME_PORT << std::endl;
     return true;
 }
 
 bool robotRecvRealtime(char* buf, int len) {
-    if (g_realtimeSocket == INVALID_SOCKET) return false;
+    EnterCriticalSection(&g_realtimeSocketMutex);
+    if (g_realtimeSocket == INVALID_SOCKET) {
+        LeaveCriticalSection(&g_realtimeSocketMutex);
+        return false;
+    }
     int n = recv(g_realtimeSocket, buf, len, 0);
-    if (n == len) return true;  // must receive exactly 1440 bytes
+    if (n == len) {
+        LeaveCriticalSection(&g_realtimeSocketMutex);
+        return true;  // must receive exactly 1440 bytes
+    }
     if (n <= 0) {
         // Connection lost
         closesocket(g_realtimeSocket);
         g_realtimeSocket = INVALID_SOCKET;
     }
+    LeaveCriticalSection(&g_realtimeSocketMutex);
     return false;
 }
 
 void robotCloseRealtime() {
+    EnterCriticalSection(&g_realtimeSocketMutex);
     if (g_realtimeSocket != INVALID_SOCKET) {
         closesocket(g_realtimeSocket);
         g_realtimeSocket = INVALID_SOCKET;
         std::cout << "[Force] Realtime port disconnected" << std::endl;
     }
+    LeaveCriticalSection(&g_realtimeSocketMutex);
 }
 
 static bool sendToSocket(SOCKET sock, const char* cmd) {
