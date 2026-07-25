@@ -8,6 +8,7 @@
 #include <HDU/hduVector.h>
 #include "CoordinateTransform.h"
 #include "IExtension.h"
+#include "../safety/RobotStateMachine.h"
 
 class RelayCore {
 public:
@@ -48,6 +49,13 @@ public:
     // 状态查询（供 Render 层读取）
     bool isTransmitting() const { return m_transmitting; }
 
+    // 状态机 (供 HUD / 外部读取)
+    RobotStateMachine& stateMachine() { return m_stateMachine; }
+    const RobotStateMachine& stateMachine() const { return m_stateMachine; }
+
+    // PING/PONG 延迟测量
+    void pingRobot();
+
 private:
     RelayCore();
     ~RelayCore();
@@ -68,4 +76,8 @@ private:
     DWORD m_lastRelayUpdate = 0;
     DWORD m_lastServoTime = 0;      // ServoP 发送频率控制
     HANDLE m_forceThread = NULL;
+
+    RobotStateMachine m_stateMachine;
+    DWORD m_lastPingMs = 0;
+    DWORD m_lastHeartbeatMs = 0;
 };

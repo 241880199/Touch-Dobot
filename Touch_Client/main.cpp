@@ -12,6 +12,7 @@
 #include "relay/RelayCore.h"
 #include "render/SceneRenderer.h"
 #include "render/HudOverlay.h"
+#include "safety/RobotDiagnostics.h"
 
 // ===== 运行模式 =====
 static bool g_noRobot = false;
@@ -120,6 +121,7 @@ void keyboard(unsigned char key, int, int) {
     if (key == 'q' || key == 'Q' || key == 27) { // q 或 ESC
         std::cout << "\nShutting down..." << std::endl;
         RelayCore::instance().shutdownRelayReporting();
+        RobotDiagnostics::instance().shutdown();
         if (!g_noRobot) {
             std::cout << "Disabling robot..." << std::endl;
             RelayCore::instance().shutdown();  // 发送 DisableRobot() + 断开连接
@@ -202,15 +204,18 @@ int main(int argc, char* argv[]) {
         RelayCore::instance().initForceReader();
     }
 
-    // 5. 初始化 3D 场景 (始终执行)
+    // 5. 初始化诊断日志
+    RobotDiagnostics::instance().init(Config::DIAGNOSTIC_LOG_PATH);
+
+    // 6. 初始化 3D 场景 (始终执行)
     SceneRenderer::init();
 
-    // 6. 启动定时器
+    // 7. 启动定时器
     glutTimerFunc(Config::POSE_QUERY_INTERVAL, poseQueryTimer, 0);
     glutTimerFunc(Config::ALARM_CHECK_INTERVAL, alarmCheckTimer, 0);
     glutTimerFunc(500, jointAngleTimer, 0);
 
-    // 6. 进入主循环
+    // 8. 进入主循环
     std::cout << "\nSystem ready." << std::endl;
     std::cout << "  q/ESC: quit" << std::endl;
     if (!g_noTouch && !g_noRobot) {

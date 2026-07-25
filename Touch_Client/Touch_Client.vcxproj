@@ -87,6 +87,10 @@
     <ClInclude Include="safety\SafetyPredictor.h" />
     <ClInclude Include="safety\RobotError.h" />
     <ClInclude Include="safety\EscalationTracker.h" />
+    <ClInclude Include="safety\RobotStateMachine.h" />
+    <ClCompile Include="safety\RobotStateMachine.cpp" />
+    <ClInclude Include="safety\RobotDiagnostics.h" />
+    <ClCompile Include="safety\RobotDiagnostics.cpp" />
     <ClCompile Include="safety\SafetyPredictor.cpp" />
     <ClInclude Include="safety\ConstraintForce.h" />
     <ClCompile Include="safety\ConstraintForce.cpp" />

@@ -7,6 +7,7 @@
 #include <iostream>
 #include <windows.h>
 #include "../safety/SafetyPredictor.h"
+#include "../safety/RobotDiagnostics.h"
 #include "../force/ForcePipeline.h"
 
 // ===== ForceReader 线程: 阻塞读取 30004 实时力数据 (125Hz) =====
@@ -276,6 +277,9 @@ bool RelayCore::init() {
         return false;
     }
 
+    m_stateMachine.onConnect();
+    m_lastHeartbeatMs = GetTickCount();
+
     // 初始化序列：ClearError → 降灵敏度 → EnableRobot → (报警检测) → CP → GetPose
     Sleep(200);
     robotSendEnable("ClearError()");
@@ -291,6 +295,7 @@ bool RelayCore::init() {
 
     if (!robotSendEnable("EnableRobot(0.5,0,0,0)")) {
         std::cerr << "[Relay] 使能失败" << std::endl;
+        m_stateMachine.onEnableFail();
         return false;
     }
     std::cout << "[Relay] 机械臂使能成功" << std::endl;
@@ -319,6 +324,7 @@ bool RelayCore::init() {
                 robotSendEnable("DisableRobot()");
                 Sleep(100);
                 robotDisconnect();
+                m_stateMachine.onEnableFail();
                 return false;
             }
         } else if (mode == -1) {
@@ -368,9 +374,11 @@ bool RelayCore::init() {
         robotSendEnable("DisableRobot()");
         Sleep(100);
         robotDisconnect();
+        m_stateMachine.onEnableFail();
         return false;
     }
 
+    m_stateMachine.onEnableSuccess();
     return true;
 }
 
@@ -379,6 +387,7 @@ void RelayCore::shutdown() {
     robotSendEnable("DisableRobot()");
     Sleep(100);
     robotDisconnect();
+    m_stateMachine.onDisconnect();
 }
 
 void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
@@ -421,7 +430,9 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
     // ===== 增量步长限制: 单步最大 3mm, 再乘以速度衰减因子 =====
     static double s_speedMul = 1.0;  // 跨帧持久, 由 SafetyPredictor 更新
     double len = sqrt(dx*dx + dy*dy + dz*dz);
-    double maxStep = 4.5 * s_speedMul;
+    // Apply state machine speed factor ON TOP of safety verdict
+    double effectiveSpeed = s_speedMul * m_stateMachine.speedFactor();
+    double maxStep = 4.5 * effectiveSpeed;
     if (len > maxStep) {
         double scale = maxStep / len;
         dx *= scale; dy *= scale; dz *= scale;
@@ -438,6 +449,21 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
 
     // ===== SafetyPredictor 预判 (先评估，后更新，防止边界漂移) =====
     SafetyVerdict verdict = SafetyPredictor::instance().evaluate(clamped);
+
+    // State machine: escalate on warning
+    if (verdict.errorCode != RobotErrorCode::OK) {
+        Vec3 deltaVec(dx, dy, dz);
+        RobotError error = SafetyPredictor::instance().lastError();
+        m_stateMachine.onError(error, deltaVec);
+    } else {
+        m_stateMachine.escalation().onClear();
+    }
+
+    // Check if state machine allows motion
+    if (!m_stateMachine.canMove()) {
+        LeaveCriticalSection(&m_basePointLock);
+        return;
+    }
 
     if (verdict.action == SafetyVerdict::REJECT) {
         std::cerr << "[Safety] REJECT: " << verdict.reason
@@ -496,6 +522,7 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
 }
 
 void RelayCore::onButtonPress(const Vec3& robotPos) {
+    m_stateMachine.onButtonPress();
     EnterCriticalSection(&m_basePointLock);
     // 以机器人当前实际位姿作为 target 起点 (钳位到安全边界内)
     {
@@ -521,6 +548,7 @@ void RelayCore::onButtonRelease() {
     m_transmitting = false;
     m_basePointSet = false;
     m_lastTouchValid = false;
+    m_stateMachine.onButtonRelease();
     std::cout << "[Relay] Button RELEASE — motion stopped" << std::endl;
 }
 
@@ -543,6 +571,27 @@ void RelayCore::pollFeedback() {
         fb.fromPort = Config::MOTION_PORT;
         fb.errorId = (buf[0] == '0') ? 0 : -1;
         FeedbackParser::extractData(buf, fb.data, sizeof(fb.data));
+
+        // Parse ServoP errors and report to state machine
+        if (fb.raw[0] != '0') {
+            int dobotCode = 0;
+            if (FeedbackParser::extractErrorCode(fb.raw, dobotCode) && dobotCode != 0) {
+                RobotErrorCode errCode = FeedbackParser::mapRobotErrorCode(dobotCode);
+                RobotError error;
+                error.code = errCode;
+                error.severity = getSeverity(errCode);
+                error.timestampMs = GetTickCount64();
+                // Get current target from state
+                error.targetPosition = m_targetPos;
+                error.speedFactor = m_stateMachine.speedFactor();
+
+                Vec3 zeroDelta = {0, 0, 0};  // no user delta for feedback errors
+                m_stateMachine.onError(error, zeroDelta);
+
+                double constraintMag = 0;  // feedback error has no constraint force
+                RobotDiagnostics::instance().logError(error, constraintMag);
+            }
+        }
 
         // 记录日志 (截断长字符串)
         char shortMsg[256];
@@ -586,6 +635,26 @@ void RelayCore::queryPose() {
             px, py, pz, prx, pry, prz);
         sendRelayUpdate(buf);
     }
+
+    // PING/PONG latency measurement
+    DWORD now = GetTickCount();
+    if (now - m_lastPingMs > (DWORD)Config::PING_INTERVAL_MS) {
+        m_lastPingMs = now;
+        pingRobot();
+    }
+
+    // Health check: if no heartbeat for HEARTBEAT_TIMEOUT_MS, trigger disconnect
+    if (now - m_lastHeartbeatMs > (DWORD)Config::HEARTBEAT_TIMEOUT_MS) {
+        RobotError error;
+        error.code = RobotErrorCode::ERR_HEARTBEAT_LOST;
+        error.severity = Severity::FATAL;
+        error.timestampMs = GetTickCount64();
+        Vec3 zeroDelta = {0, 0, 0};
+        m_stateMachine.onError(error, zeroDelta);
+    }
+
+    // Heartbeat update
+    m_lastHeartbeatMs = now;
 }
 
 void RelayCore::queryJointAngles() {
@@ -614,6 +683,25 @@ void RelayCore::queryJointAngles() {
             sendRelayUpdate(buf);
         }
     }
+
+    // Health check: if no heartbeat for HEARTBEAT_TIMEOUT_MS, trigger disconnect
+    DWORD now = GetTickCount();
+    if (now - m_lastHeartbeatMs > (DWORD)Config::HEARTBEAT_TIMEOUT_MS) {
+        RobotError error;
+        error.code = RobotErrorCode::ERR_HEARTBEAT_LOST;
+        error.severity = Severity::FATAL;
+        error.timestampMs = GetTickCount64();
+        Vec3 zeroDelta = {0, 0, 0};
+        m_stateMachine.onError(error, zeroDelta);
+    }
+}
+
+void RelayCore::pingRobot() {
+    if (!isRobotConnected()) return;
+    char pingBuf[64];
+    snprintf(pingBuf, sizeof(pingBuf), "PING|%llu", GetTickCount64());
+    robotSendEnable(pingBuf);
+    // Response handled in pollFeedback (PONG echo)
 }
 
 void RelayCore::checkAlarm() {
@@ -630,6 +718,14 @@ void RelayCore::checkAlarm() {
         if (mode == 9 && !wasAlarm) {
             std::cout << "\n[Relay] !!! 检测到机械臂报警 (mode=9) !!!" << std::endl;
 
+            // Report alarm to state machine
+            RobotError error;
+            error.code = RobotErrorCode::ERR_ALARM_MODE9;
+            error.severity = Severity::FATAL;
+            error.timestampMs = GetTickCount64();
+            Vec3 zeroDelta = {0, 0, 0};
+            m_stateMachine.onError(error, zeroDelta);
+
             // 立即获取当前位置并记录到 SafetyPredictor 黑名单
             queryPose();
             EnterCriticalSection(&app.robotPoseMutex);
@@ -642,6 +738,7 @@ void RelayCore::checkAlarm() {
             if (escapeSingularity()) {
                 std::cout << "[Relay] 脱困成功，恢复正常操作" << std::endl;
                 app.isRobotInAlarm = false;
+                m_stateMachine.onRecovery();
             } else {
                 std::cout << "[Relay] 脱困失败，按 'e' 重试或重启程序" << std::endl;
             }
