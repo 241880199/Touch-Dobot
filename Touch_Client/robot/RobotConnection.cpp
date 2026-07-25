@@ -4,6 +4,8 @@
 #include <iostream>
 #include <cstring>
 
+static SOCKET g_realtimeSocket = INVALID_SOCKET;
+
 #pragma comment(lib, "ws2_32.lib")
 
 static SOCKET connectPort(const char* ip, int port) {
@@ -82,7 +84,68 @@ void robotDisconnect() {
         app.robotMotionSocket = INVALID_SOCKET;
     }
     app.isRobotConnected = false;
+    if (g_realtimeSocket != INVALID_SOCKET) {
+        closesocket(g_realtimeSocket);
+        g_realtimeSocket = INVALID_SOCKET;
+    }
     LeaveCriticalSection(&app.robotSocketMutex);
+}
+
+bool robotConnectRealtime(const char* ip) {
+    if (g_realtimeSocket != INVALID_SOCKET) {
+        closesocket(g_realtimeSocket);
+    }
+    g_realtimeSocket = WSASocket(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0, 0);
+    if (g_realtimeSocket == INVALID_SOCKET) return false;
+
+    sockaddr_in addr;
+    addr.sin_family = AF_INET;
+    inet_pton(AF_INET, ip, &addr.sin_addr);
+    addr.sin_port = htons(Config::FORCE_REALTIME_PORT);
+
+    // Non-blocking connect with 3s timeout (same pattern as connectPort)
+    u_long mode = 1;
+    ioctlsocket(g_realtimeSocket, FIONBIO, &mode);
+    connect(g_realtimeSocket, (SOCKADDR*)&addr, sizeof(addr));
+
+    fd_set set;
+    FD_ZERO(&set);
+    FD_SET(g_realtimeSocket, &set);
+    timeval tv = {3, 0};
+    if (select(0, NULL, &set, NULL, &tv) <= 0) {
+        closesocket(g_realtimeSocket);
+        g_realtimeSocket = INVALID_SOCKET;
+        return false;
+    }
+
+    // Back to blocking mode, but with short recv timeout (8ms expected interval)
+    mode = 0;
+    ioctlsocket(g_realtimeSocket, FIONBIO, &mode);
+    int timeout = 100;
+    setsockopt(g_realtimeSocket, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
+
+    std::cout << "[Force] Connected to realtime port " << Config::FORCE_REALTIME_PORT << std::endl;
+    return true;
+}
+
+bool robotRecvRealtime(char* buf, int len) {
+    if (g_realtimeSocket == INVALID_SOCKET) return false;
+    int n = recv(g_realtimeSocket, buf, len, 0);
+    if (n == len) return true;  // must receive exactly 1440 bytes
+    if (n <= 0) {
+        // Connection lost
+        closesocket(g_realtimeSocket);
+        g_realtimeSocket = INVALID_SOCKET;
+    }
+    return false;
+}
+
+void robotCloseRealtime() {
+    if (g_realtimeSocket != INVALID_SOCKET) {
+        closesocket(g_realtimeSocket);
+        g_realtimeSocket = INVALID_SOCKET;
+        std::cout << "[Force] Realtime port disconnected" << std::endl;
+    }
 }
 
 static bool sendToSocket(SOCKET sock, const char* cmd) {

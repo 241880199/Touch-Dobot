@@ -176,11 +176,11 @@ static void drawForceRawPanel(int x, int y, int w, int h) {
     auto& app = appState;
     char buf[128];
 
-    EnterCriticalSection(&app.forceMutex);
-    double fx = app.forceRaw[0];
-    double fy = app.forceRaw[1];
-    double fz = app.forceRaw[2];
-    LeaveCriticalSection(&app.forceMutex);
+    EnterCriticalSection(&app.forceDataMutex);
+    double fx = app.forceData.raw[0];
+    double fy = app.forceData.raw[1];
+    double fz = app.forceData.raw[2];
+    LeaveCriticalSection(&app.forceDataMutex);
 
     int cy = y + h / 2;
     glColor3f(0.60f, 0.65f, 0.70f);
@@ -206,11 +206,11 @@ static void drawForceFilteredPanel(int x, int y, int w, int h) {
     auto& app = appState;
     char buf[128];
 
-    EnterCriticalSection(&app.forceMutex);
-    double fx = app.forceFiltered[0];
-    double fy = app.forceFiltered[1];
-    double fz = app.forceFiltered[2];
-    LeaveCriticalSection(&app.forceMutex);
+    EnterCriticalSection(&app.forceDataMutex);
+    double fx = app.forceData.filtered[0];
+    double fy = app.forceData.filtered[1];
+    double fz = app.forceData.filtered[2];
+    LeaveCriticalSection(&app.forceDataMutex);
 
     int cy = y + h / 2;
     glColor3f(0.60f, 0.65f, 0.70f);
@@ -283,11 +283,11 @@ static void drawCoordPanel(int x, int y, int w, int h) {
     ty -= 4;
 
     // 力数据
-    EnterCriticalSection(&app.forceMutex);
-    double fx = app.forceFiltered[0];
-    double fy = app.forceFiltered[1];
-    double fz = app.forceFiltered[2];
-    LeaveCriticalSection(&app.forceMutex);
+    EnterCriticalSection(&app.forceDataMutex);
+    double fx = app.forceData.filtered[0];
+    double fy = app.forceData.filtered[1];
+    double fz = app.forceData.filtered[2];
+    LeaveCriticalSection(&app.forceDataMutex);
 
     glColor3f(0.90f, 0.94f, 1.00f);
     text2D(x + 6, ty, "Force (N):", GLUT_BITMAP_HELVETICA_10);
