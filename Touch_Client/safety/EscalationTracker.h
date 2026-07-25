@@ -1,7 +1,9 @@
 #pragma once
 #include <cmath>
+#include <windows.h>
 #include "RobotError.h"
 #include "../relay/CoordinateTransform.h"
+#include "../config/Config.h"
 
 // ===== 错误升级跟踪器 =====
 // 持续触发同一错误 → 升级 WARN→DEGRADE→REJECT
@@ -12,6 +14,7 @@ struct EscalationTracker {
     Vec3 lastRejectDirection = {0, 0, 0};
     bool escalated = false;
     int clearFrames = 0;  // 错误清除后的帧计数
+    DWORD m_firstErrorMs = 0;  // 第一次出错的时间戳 (for time-based escalation)
 
     static constexpr int WARN_TO_DEGRADE   = 3;  // from Config::ESCALATE_WARN_TO_DEGRADE
     static constexpr int DEGRADE_TO_REJECT = 10; // from Config::ESCALATE_DEGRADE_TO_REJECT
@@ -25,6 +28,7 @@ struct EscalationTracker {
         } else {
             currentCode = code;
             consecutiveFrames = 1;
+            m_firstErrorMs = GetTickCount();  // 新错误类型，重新计时
         }
         clearFrames = 0;
         lastRejectDirection = delta;
@@ -33,9 +37,12 @@ struct EscalationTracker {
     // 检查是否应升级
     bool shouldEscalate() const {
         Severity sev = getSeverity(currentCode);
-        if (sev == Severity::WARN && consecutiveFrames >= WARN_TO_DEGRADE)
+        DWORD elapsed = GetTickCount() - m_firstErrorMs;
+        if (sev == Severity::WARN && consecutiveFrames >= WARN_TO_DEGRADE
+            && elapsed >= Config::MIN_WARN_MS)
             return true;
-        if (sev == Severity::DEGRADE && consecutiveFrames >= DEGRADE_TO_REJECT)
+        if (sev == Severity::DEGRADE && consecutiveFrames >= DEGRADE_TO_REJECT
+            && elapsed >= Config::MIN_DEGRADE_MS)
             return true;
         return false;
     }
@@ -61,6 +68,7 @@ struct EscalationTracker {
         consecutiveFrames = 0;
         escalated = false;
         clearFrames = 0;
+        m_firstErrorMs = 0;
         lastRejectDirection = {0, 0, 0};
     }
 
