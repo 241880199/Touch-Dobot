@@ -638,7 +638,8 @@ void RelayCore::pollFeedback() {
                 m_stateMachine.onError(error, zeroDelta);
 
                 double constraintMag = 0;  // feedback error has no constraint force
-                RobotDiagnostics::instance().logError(error, constraintMag);
+                RobotDiagnostics::instance().logError(error, constraintMag,
+                    m_stateMachine.currentState());
             }
         }
 

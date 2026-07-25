@@ -204,7 +204,8 @@ SafetyVerdict SafetyPredictor::evaluate(const Vec3& target) {
     goto evaluate_done;
 
 evaluate_done:
-    // Compute constraint force for haptic rendering
+    // Lock protects m_alarmList read (computeTotalForce) + m_lastError write
+    EnterCriticalSection(&m_lock);
     ConstraintForce::computeTotalForce(target, m_alarmList, m_lastVerdict.constraintForce);
 
     // Build RobotError for diagnostics
@@ -224,6 +225,7 @@ evaluate_done:
         LeaveCriticalSection(&app.robotPoseMutex);
     }
     m_lastError.speedFactor = m_lastVerdict.speedFactor;
+    LeaveCriticalSection(&m_lock);
 
     return m_lastVerdict;
 }
@@ -231,7 +233,9 @@ evaluate_done:
 // ===== constraint force =====
 
 void SafetyPredictor::computeConstraintForce(const Vec3& target, double out[3]) {
+    EnterCriticalSection(&m_lock);
     ConstraintForce::computeTotalForce(target, m_alarmList, out);
+    LeaveCriticalSection(&m_lock);
 }
 
 // ===== alarm blacklist =====
@@ -248,16 +252,21 @@ void SafetyPredictor::addAlarmRecord(const AppState::RobotPose& pose) {
     rec.j5 = pose.j5;
     rec.j6 = pose.j6;
     rec.timestamp = time(nullptr);
+
+    EnterCriticalSection(&m_lock);
     m_alarmList.push_back(rec);
+    size_t total = m_alarmList.size();
+    LeaveCriticalSection(&m_lock);
 
     std::cout << "[Safety] Alarm recorded at (" << rec.x << "," << rec.y << "," << rec.z
-              << ") -- total alarms: " << m_alarmList.size() << std::endl;
+              << ") -- total alarms: " << total << std::endl;
 
-    // auto-save
+    // auto-save (saveAlarmLog acquires m_lock internally)
     saveAlarmLog("alarms.log");
 }
 
 double SafetyPredictor::nearestAlarmDistance(const Vec3& target) const {
+    EnterCriticalSection(&m_lock);
     double minDist = 1e12;
     for (const auto& a : m_alarmList) {
         double dx = target.x - a.x;
@@ -266,6 +275,7 @@ double SafetyPredictor::nearestAlarmDistance(const Vec3& target) const {
         double d = sqrt(dx*dx + dy*dy + dz*dz);
         if (d < minDist) minDist = d;
     }
+    LeaveCriticalSection(&m_lock);
     return minDist;
 }
 
@@ -278,6 +288,7 @@ void SafetyPredictor::loadAlarmLog(const char* path) {
         return;
     }
 
+    EnterCriticalSection(&m_lock);
     m_alarmList.clear();
     char line[512];
     while (fgets(line, sizeof(line), f)) {
@@ -291,23 +302,28 @@ void SafetyPredictor::loadAlarmLog(const char* path) {
             m_alarmList.push_back(rec);
         }
     }
+    size_t count = m_alarmList.size();
+    LeaveCriticalSection(&m_lock);
     fclose(f);
-    std::cout << "[Safety] Loaded " << m_alarmList.size() << " alarm records from " << path << std::endl;
+    std::cout << "[Safety] Loaded " << count << " alarm records from " << path << std::endl;
 }
 
 void SafetyPredictor::saveAlarmLog(const char* path) const {
-    if (m_alarmList.empty()) return;
+    // Copy alarm data under lock, then do I/O outside
+    EnterCriticalSection(&m_lock);
+    if (m_alarmList.empty()) { LeaveCriticalSection(&m_lock); return; }
+    AlarmRecord rec = m_alarmList.back();
+    LeaveCriticalSection(&m_lock);
 
     FILE* f = nullptr;
     if (fopen_s(&f, path, "a") != 0 || !f) return;
 
-    const auto& a = m_alarmList.back();  // append only the last record
     char timeBuf[32];
     struct tm tmInfo;
-    localtime_s(&tmInfo, &a.timestamp);
+    localtime_s(&tmInfo, &rec.timestamp);
     strftime(timeBuf, sizeof(timeBuf), "%Y-%m-%d %H:%M:%S", &tmInfo);
 
     fprintf(f, "%s x=%.2f y=%.2f z=%.2f J1=%.2f J2=%.2f J3=%.2f J4=%.2f J5=%.2f J6=%.2f\n",
-        timeBuf, a.x, a.y, a.z, a.j1, a.j2, a.j3, a.j4, a.j5, a.j6);
+        timeBuf, rec.x, rec.y, rec.z, rec.j1, rec.j2, rec.j3, rec.j4, rec.j5, rec.j6);
     fclose(f);
 }

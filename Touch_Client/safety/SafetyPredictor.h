@@ -1,6 +1,7 @@
 #pragma once
 #include <vector>
 #include <ctime>
+#include <windows.h>
 #include "../relay/CoordinateTransform.h"
 #include "../core/AppState.h"
 #include "RobotError.h"
@@ -38,16 +39,31 @@ public:
     // 报警黑名单管理
     void addAlarmRecord(const AppState::RobotPose& pose);
     double nearestAlarmDistance(const Vec3& target) const;
-    int alarmCount() const { return (int)m_alarmList.size(); }
+    int alarmCount() const {
+        EnterCriticalSection(&m_lock);
+        int n = (int)m_alarmList.size();
+        LeaveCriticalSection(&m_lock);
+        return n;
+    }
 
     // 获取最近一次 verdict (给 HUD 显示)
-    SafetyVerdict lastVerdict() const { return m_lastVerdict; }
+    SafetyVerdict lastVerdict() const {
+        EnterCriticalSection(&m_lock);
+        SafetyVerdict v = m_lastVerdict;
+        LeaveCriticalSection(&m_lock);
+        return v;
+    }
 
     // 计算虚拟约束力 (每次 ServoP 前调用)
     void computeConstraintForce(const Vec3& target, double out[3]);
 
     // 获取最近一次 RobotError
-    RobotError lastError() const { return m_lastError; }
+    RobotError lastError() const {
+        EnterCriticalSection(&m_lock);
+        RobotError e = m_lastError;
+        LeaveCriticalSection(&m_lock);
+        return e;
+    }
 
     // 升级跟踪器
     EscalationTracker& escalation() { return m_escalation; }
@@ -62,10 +78,15 @@ public:
 private:
     SafetyPredictor() {
         for (int i = 0; i < 6; i++) m_lastJoints[i] = 0.0;
+        InitializeCriticalSection(&m_lock);
     }
+    ~SafetyPredictor() { DeleteCriticalSection(&m_lock); }
+    SafetyPredictor(const SafetyPredictor&) = delete;
+    SafetyPredictor& operator=(const SafetyPredictor&) = delete;
 
     double m_lastJoints[6];
     std::vector<AlarmRecord> m_alarmList;
+    mutable CRITICAL_SECTION m_lock;  // protects m_alarmList + m_lastVerdict + m_lastError
     SafetyVerdict m_lastVerdict;
     RobotError m_lastError;
     EscalationTracker m_escalation;

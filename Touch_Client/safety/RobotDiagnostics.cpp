@@ -90,11 +90,12 @@ void RobotDiagnostics::logStateChange(RobotState from, RobotState to) {
     log(e);
 }
 
-void RobotDiagnostics::logError(const RobotError& error, double constraintMag) {
+void RobotDiagnostics::logError(const RobotError& error, double constraintMag,
+                                RobotState from) {
     DiagnosticEvent e;
     e.timestampMs = error.timestampMs;
-    e.fromState = RobotState::RUNNING;  // placeholder — caller should set
-    e.toState = RobotState::RUNNING;
+    e.fromState = from;
+    e.toState = from;
     e.error = error.code;
     e.targetPosition = error.targetPosition;
     memcpy(e.jointAngles, error.currentJoints, sizeof(e.jointAngles));

@@ -28,7 +28,8 @@ public:
     // 记录事件
     void log(const DiagnosticEvent& e);
     void logStateChange(RobotState from, RobotState to);
-    void logError(const RobotError& error, double constraintMag);
+    void logError(const RobotError& error, double constraintMag,
+                  RobotState from = RobotState::RUNNING);
 
     // 统计数据
     int errorCount(RobotErrorCode code) const;

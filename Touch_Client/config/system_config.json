@@ -1,0 +1,42 @@
+{
+  "_comment": "=== Touch-Dobot 系统共享配置（单一数据源）===",
+  "_comment_sync": "修改此文件后，C++ 和 MATLAB 两侧自动同步。请勿直接修改 Config.h 或 relay_config.m 中的共享值。",
+
+  "robot": {
+    "ip": "192.168.101.11",
+    "port_enable": 29999,
+    "port_motion": 30003,
+    "port_realtime": 30004
+  },
+
+  "relay": {
+    "ip": "127.0.0.1",
+    "port": 8888,
+    "listen_ip": "0.0.0.0"
+  },
+
+  "safety_bounds": {
+    "_comment": "机械臂用户坐标系安全边界 (mm)，基于机器人静止位姿 ~(-103,-153,381)",
+    "x_min": -300.0,
+    "x_max": 250.0,
+    "y_min": -350.0,
+    "y_max": 250.0,
+    "z_min": 140.0,
+    "z_max": 500.0
+  },
+
+  "connection": {
+    "_comment": "连接健康监控与重连参数",
+    "reconnect_max_retries": 5,
+    "reconnect_base_delay_ms": 1000
+  },
+
+  "matlab": {
+    "_comment": "MATLAB 中继站专用参数（C++ 侧不使用）",
+    "timeout_sec": 5,
+    "reconnect_interval_sec": 3,
+    "max_reconnect_attempts": 10,
+    "log_dir": "logs",
+    "max_log_lines": 200
+  }
+}
