@@ -73,6 +73,19 @@ HDCallbackCode HDCALLBACK hapticCallback(void* pUserData) {
     // ===== 7. 向 MATLAB GUI 上报位置 =====
     relay.reportPosition();
 
+    // ===== 8. 力反馈渲染 (从传感器到 Touch 设备) =====
+    {
+        double force[3] = { 0.0, 0.0, 0.0 };
+        EnterCriticalSection(&app.forceDataMutex);
+        if (!app.forceData.isStale) {
+            force[0] = app.forceData.hapticOut[0];
+            force[1] = app.forceData.hapticOut[1];
+            force[2] = app.forceData.hapticOut[2];
+        }
+        LeaveCriticalSection(&app.forceDataMutex);
+        hdSetDoublev(HD_CURRENT_FORCE, force);
+    }
+
     hdEndFrame(app.hHD);
     return HD_CALLBACK_CONTINUE;
 }
