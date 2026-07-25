@@ -8,7 +8,6 @@
 // Run: test_safety_core.exe
 
 #include <iostream>
-#include <cassert>
 #include <cmath>
 #include <windows.h>
 
