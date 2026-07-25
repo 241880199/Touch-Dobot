@@ -57,6 +57,31 @@ namespace Config {
     const double FORCE_GRADIENT_LIMIT = 50.0;    // 梯度限幅 (N/frame)
     const int FORCE_RECONNECT_INTERVAL = 2000;   // 断线重试间隔 (ms)
 
+    // ========== 虚拟约束力参数 ==========
+    const double CONSTRAINT_BOUNDARY_RANGE      = 50.0;   // 安全边界感应距离 (mm)
+    const double CONSTRAINT_BOUNDARY_MAX_FORCE  = 2.0;    // 安全边界最大约束力 (N)
+    const double CONSTRAINT_SINGULAR_RANGE      = 80.0;   // 圆柱奇异感应距离 (mm)
+    const double CONSTRAINT_SINGULAR_MAX_FORCE  = 2.5;    // 圆柱奇异最大约束力 (N)
+    const double CONSTRAINT_ALARM_HISTORY_RANGE    = 80.0; // 报警历史感应距离 (mm)
+    const double CONSTRAINT_ALARM_HISTORY_MAX_FORCE = 1.5; // 报警历史最大约束力 (N)
+    const double CONSTRAINT_WORKSPACE_EDGE_START     = 550.0; // 工作空间边缘感应起点 (mm)
+    const double CONSTRAINT_WORKSPACE_EDGE_MAX_FORCE = 1.0;   // 工作空间边缘最大约束力 (N)
+
+    // ========== 连接健康监控参数 ==========
+    const int HEARTBEAT_TIMEOUT_MS  = 500;    // 心跳超时 (ms)
+    const int RECONNECT_MAX_RETRIES = 5;      // 最大重连次数
+    const int RECONNECT_BASE_DELAY_MS = 1000; // 重连基础延迟 (ms), 指数退避
+    const int PING_INTERVAL_MS      = 500;    // PING 间隔 (ms)
+    const int PING_TIMEOUT_MS       = 500;    // PING 超时 (ms)
+
+    // ========== 错误升级参数 ==========
+    const int ESCALATE_WARN_TO_DEGRADE   = 3;   // WARN 连续帧数 → DEGRADE
+    const int ESCALATE_DEGRADE_TO_REJECT = 10;  // DEGRADE 连续帧数 → REJECT
+    const int DEESCALATE_CLEAR_FRAMES    = 30;  // 清除后多少帧降级
+
+    // ========== 诊断日志参数 ==========
+    constexpr const char* DIAGNOSTIC_LOG_PATH = "robot_diagnostics.log";
+
     // ========== 发送队列参数 ==========
     const int MAX_QUEUE_SIZE = 5;            // 队列容量上限（满时丢弃旧数据）
     const int TCP_SEND_INTERVAL = 10;        // 发送间隔 (ms)
