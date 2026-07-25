@@ -16,6 +16,7 @@ for %%e in (
     test_feedback_parser.exe
     test_escalation.exe
     test_kinematics.exe
+    test_coord_safety.exe
 ) do (
     if exist "%TESTDIR%\%%e" (
         echo === %%e ===
