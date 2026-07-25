@@ -330,8 +330,6 @@ bool RelayCore::init() {
             std::cout << "[Relay] 使能后检测到报警 (mode=9)，启动脱困流程..." << std::endl;
             if (!escapeSingularity()) {
                 std::cerr << "[Relay] FATAL: 脱困失败" << std::endl;
-                robotSendEnable("DisableRobot()");
-                Sleep(100);
                 robotDisconnect();
                 m_stateMachine.onEnableFail();
                 return false;
@@ -380,8 +378,6 @@ bool RelayCore::init() {
     if (!gotBase) {
         std::cerr << "[Relay] FATAL: 无法获取机械臂当前位姿，拒绝运动控制" << std::endl;
         std::cerr << "[Relay] 请检查机械臂连接状态后重试" << std::endl;
-        robotSendEnable("DisableRobot()");
-        Sleep(100);
         robotDisconnect();
         m_stateMachine.onEnableFail();
         return false;
