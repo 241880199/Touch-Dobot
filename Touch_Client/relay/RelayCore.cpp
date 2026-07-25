@@ -5,6 +5,7 @@
 #include "../core/AppState.h"
 #include "../config/Config.h"
 #include <algorithm>
+#include <cmath>
 #include <iostream>
 #include <windows.h>
 #include "../safety/SafetyPredictor.h"
@@ -425,6 +426,23 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
 
     // 更新 Touch 参考点
     m_lastTouchPos = current;
+
+    // NaN/Inf guard: 连续 3 帧异常 → FATAL
+    if (std::isnan(dx) || std::isnan(dy) || std::isnan(dz) ||
+        std::isinf(dx) || std::isinf(dy) || std::isinf(dz)) {
+        m_nanFrameCount++;
+        if (m_nanFrameCount >= 3) {
+            RobotError error;
+            error.code = RobotErrorCode::ERR_EMERGENCY_STOP;
+            error.severity = Severity::FATAL;
+            error.timestampMs = GetTickCount64();
+            Vec3 zeroDelta = {0, 0, 0};
+            m_stateMachine.onError(error, zeroDelta);
+        }
+        LeaveCriticalSection(&m_basePointLock);
+        return;
+    }
+    m_nanFrameCount = 0;  // 正常帧清零
 
     // 跳过微小增量 (Touch 噪声)
     if (fabs(dx) < 0.05 && fabs(dy) < 0.05 && fabs(dz) < 0.05) {

@@ -31,6 +31,16 @@ SafetyVerdict SafetyPredictor::evaluate(const Vec3& target) {
     // ===== Layer 1: hard boundaries (O(1) compute) =====
     Vec3 clamped;
 
+    // NaN/Inf 输入防护 (最后防线)
+    if (std::isnan(target.x) || std::isnan(target.y) || std::isnan(target.z) ||
+        std::isinf(target.x) || std::isinf(target.y) || std::isinf(target.z)) {
+        m_lastVerdict.action = SafetyVerdict::REJECT;
+        m_lastVerdict.errorCode = RobotErrorCode::ERR_EMERGENCY_STOP;
+        m_lastVerdict.reason = "NaN/Inf target position";
+        m_lastVerdict.speedFactor = 0.0;
+        goto evaluate_done;
+    }
+
     // 1a. workspace radius
     double dist = sqrt(target.x * target.x + target.y * target.y);
     if (dist > WORKSPACE_RADIUS) {

@@ -81,4 +81,5 @@ private:
     DWORD m_lastPingMs = 0;
     DWORD m_lastHeartbeatMs = 0;
     bool m_heartbeatLostReported = false;
+    int m_nanFrameCount = 0;  // 连续 NaN 帧计数 (>=3 → FATAL)
 };
