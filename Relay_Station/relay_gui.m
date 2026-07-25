@@ -15,6 +15,8 @@ function relay_gui()
     S.joint_angles = [0 0 0 0 0 0]; % 关节角度 J1~J6 (度, 由 C++ 端 J| 协议上报)
     S.force_raw = [0 0 0];
     S.force_filt = [0 0 0];
+    S.force_moment = [0 0 0];
+    S.force_stale = 0;
     S.touch_relay_delay = 0;
     S.relay_robot_delay = 0;
     S.packet_count = 0;
@@ -255,6 +257,14 @@ function relay_gui()
                     if length(vals) == 3
                         S.force_raw = vals';
                     end
+                elseif startsWith(msg, 'F|')  % 6 轴力传感器数据: F|fx,fy,fz,mx,my,mz,stale
+                    vals = str2double(split(msg(3:end), ','));
+                    if numel(vals) >= 7
+                        S.force_raw = vals(1:3)';
+                        S.force_filt = vals(1:3)';
+                        S.force_moment = vals(4:6)';
+                        S.force_stale = vals(7);
+                    end
                 elseif startsWith(msg, 'J|')  % 关节角度 (来自 C++ 端)
                     vals = sscanf(msg(3:end), '%f,%f,%f,%f,%f,%f');
                     if length(vals) == 6
@@ -458,12 +468,23 @@ function relay_gui()
         % 力数据
         fr = S.force_raw;
         ff = S.force_filt;
-        lbl_force_raw.Text = { ...
-            'Force sensor data from robot end-effector', '', ...
-            sprintf('Fx: %7.2f N   Fy: %7.2f N   Fz: %7.2f N', fr(1), fr(2), fr(3))};
-        lbl_force_filt.Text = { ...
-            'Filtered force sent to Touch device', '', ...
-            sprintf('Fx: %7.2f N   Fy: %7.2f N   Fz: %7.2f N', ff(1), ff(2), ff(3))};
+        mm = S.force_moment;
+        lbl_force_raw.Text = {
+            sprintf('Raw:  Fx: %7.2f N  Fy: %7.2f N  Fz: %7.2f N', fr(1), fr(2), fr(3)),
+            sprintf('      Mx: %7.2f Nm My: %7.2f Nm Mz: %7.2f Nm', mm(1), mm(2), mm(3)),
+            ''};
+        lbl_force_filt.Text = {
+            sprintf('Filt: Fx: %7.2f N  Fy: %7.2f N  Fz: %7.2f N', ff(1), ff(2), ff(3)),
+            ''};
+        if S.force_stale
+            lbl_force_raw.Text{3} = '*** FORCE SENSOR OFFLINE ***';
+            lbl_force_raw.ForegroundColor = [1.0 0.3 0.3];
+            lbl_force_filt.Text{2} = '*** FORCE SENSOR OFFLINE ***';
+            lbl_force_filt.ForegroundColor = [1.0 0.3 0.3];
+        else
+            lbl_force_raw.ForegroundColor = [0.6 0.65 0.7];
+            lbl_force_filt.ForegroundColor = [0.6 0.65 0.7];
+        end
 
         % 坐标
         rp = S.robot_pos;
