@@ -44,6 +44,23 @@ static DWORD WINAPI forceReaderThread(LPVOID) {
             app.forceData.lastUpdateMs = GetTickCount();
             app.forceData.isStale = false;
             LeaveCriticalSection(&app.forceDataMutex);
+
+            // 看门狗兜底: 每 300ms 检查一次 (GLUT 可能已死)
+            static DWORD lastWatchdogCheck = 0;
+            DWORD now = GetTickCount();
+            if (now - lastWatchdogCheck > 300) {
+                lastWatchdogCheck = now;
+                auto& relay = RelayCore::instance();
+                DWORD lastHaptic = relay.lastHapticFrameMs();
+                if (relay.isTransmitting() && lastHaptic > 0 &&
+                    (now - lastHaptic) > (DWORD)(Config::WATCHDOG_TIMEOUT_MS * 2)) {
+                    std::cerr << "[Safety] ForceReader WATCHDOG: GLUT appears dead ("
+                              << (now - lastHaptic) << "ms since last haptic frame) — "
+                              << "sending EmergencyStop" << std::endl;
+                    robotSendEnable("DisableRobot()");
+                    Sleep(100);
+                }
+            }
         }
 
         robotCloseRealtime();
@@ -402,6 +419,9 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
     // ===== 安全守卫 =====
     if (!appState.isRobotBaseSet) return;
 
+    // 更新触觉线程心跳时间戳
+    m_lastHapticFrameMs = GetTickCount();
+
     // ===== ServoP 频率限制: 30Hz =====
     DWORD now = GetTickCount();
     if (now - m_lastServoTime < 33) return;
@@ -754,6 +774,26 @@ void RelayCore::queryJointAngles() {
         m_heartbeatLostReported = false;
     }
     m_lastHeartbeatMs = GetTickCount();
+}
+
+void RelayCore::checkHapticWatchdog() {
+    if (!m_transmitting.load()) return;  // 未运动时不检查
+    DWORD now = GetTickCount();
+    DWORD lastFrame = m_lastHapticFrameMs.load();
+    if (lastFrame > 0 && (now - lastFrame) > (DWORD)Config::WATCHDOG_TIMEOUT_MS) {
+        if (!m_watchdogTripped) {
+            m_watchdogTripped = true;
+            std::cerr << "[Safety] WATCHDOG: haptic thread silent for "
+                      << (now - lastFrame) << "ms — triggering FATAL" << std::endl;
+            RobotError error;
+            error.code = RobotErrorCode::ERR_EMERGENCY_STOP;
+            error.severity = Severity::FATAL;
+            error.timestampMs = GetTickCount64();
+            Vec3 zeroDelta = {0, 0, 0};
+            m_stateMachine.onError(error, zeroDelta);
+            // FATAL callback (registered in init) will DisableRobot()
+        }
+    }
 }
 
 void RelayCore::pingRobot() {

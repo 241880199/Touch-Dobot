@@ -80,6 +80,10 @@ void idle() {
         glutPostRedisplay();
         // Poll force data at ~30Hz alongside feedback
         RelayCore::instance().pollForce();
+        // Check haptic watchdog (only when not in --no-robot mode)
+        if (!g_noRobot) {
+            RelayCore::instance().checkHapticWatchdog();
+        }
         Sleep(1);
     }
 }

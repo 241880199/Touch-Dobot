@@ -49,6 +49,10 @@ public:
     // 状态查询（供 Render 层读取）
     bool isTransmitting() const { return m_transmitting; }
 
+    // 看门狗状态查询
+    DWORD lastHapticFrameMs() const { return m_lastHapticFrameMs.load(); }
+    void checkHapticWatchdog();
+
     // 状态机 (供 HUD / 外部读取)
     RobotStateMachine& stateMachine() { return m_stateMachine; }
     const RobotStateMachine& stateMachine() const { return m_stateMachine; }
@@ -82,4 +86,8 @@ private:
     DWORD m_lastHeartbeatMs = 0;
     bool m_heartbeatLostReported = false;
     int m_nanFrameCount = 0;  // 连续 NaN 帧计数 (>=3 → FATAL)
+
+    // 看门狗
+    std::atomic<DWORD> m_lastHapticFrameMs{0};
+    bool m_watchdogTripped = false;
 };
