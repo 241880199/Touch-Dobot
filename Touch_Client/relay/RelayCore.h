@@ -27,6 +27,11 @@ public:
     void queryJointAngles();
     void checkAlarm();
 
+    // 力传感器数据流
+    bool initForceReader();
+    void pollForce();
+    void shutdownForceReader();
+
     // 奇异脱困 (可在运行中手动触发)
     bool triggerEscape();
 
@@ -62,4 +67,5 @@ private:
     CRITICAL_SECTION m_relaySocketMutex;
     DWORD m_lastRelayUpdate = 0;
     DWORD m_lastServoTime = 0;      // ServoP 发送频率控制
+    HANDLE m_forceThread = NULL;
 };

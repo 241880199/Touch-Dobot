@@ -7,6 +7,51 @@
 #include <iostream>
 #include <windows.h>
 #include "../safety/SafetyPredictor.h"
+#include "../force/ForcePipeline.h"
+
+// ===== ForceReader 线程: 阻塞读取 30004 实时力数据 (125Hz) =====
+static DWORD WINAPI forceReaderThread(LPVOID) {
+    auto& app = appState;
+    std::cout << "[Force] Reader thread started, connecting to port "
+              << Config::FORCE_REALTIME_PORT << "..." << std::endl;
+
+    while (!app.isClosing) {
+        if (!robotConnectRealtime(Config::ROBOT_IP)) {
+            std::cerr << "[Force] Realtime port connect failed, retrying in "
+                      << Config::FORCE_RECONNECT_INTERVAL << "ms..." << std::endl;
+            Sleep(Config::FORCE_RECONNECT_INTERVAL);
+            continue;
+        }
+
+        std::cout << "[Force] Reader thread receiving at 125Hz..." << std::endl;
+        char buf[1440];
+
+        while (!app.isClosing) {
+            if (!robotRecvRealtime(buf, sizeof(buf))) {
+                std::cerr << "[Force] Realtime recv failed, reconnecting..." << std::endl;
+                break;  // reconnect loop
+            }
+
+            // Parse ActualTCPForce at offset 576 (6 doubles, 48 bytes)
+            double* forcePtr = reinterpret_cast<double*>(buf + 576);
+            EnterCriticalSection(&app.forceDataMutex);
+            for (int i = 0; i < 6; i++) {
+                app.forceData.raw[i] = forcePtr[i];
+            }
+            app.forceData.lastUpdateMs = GetTickCount();
+            app.forceData.isStale = false;
+            LeaveCriticalSection(&app.forceDataMutex);
+        }
+
+        robotCloseRealtime();
+        if (!app.isClosing) {
+            Sleep(Config::FORCE_RECONNECT_INTERVAL);
+        }
+    }
+
+    std::cout << "[Force] Reader thread exiting" << std::endl;
+    return 0;
+}
 
 RelayCore& RelayCore::instance() {
     static RelayCore inst;
@@ -329,6 +374,7 @@ bool RelayCore::init() {
 }
 
 void RelayCore::shutdown() {
+    shutdownForceReader();
     robotSendEnable("DisableRobot()");
     Sleep(100);
     robotDisconnect();
@@ -687,4 +733,47 @@ void RelayCore::reportCommand(const char* cmd) {
     char buf[384];
     snprintf(buf, sizeof(buf), "C|%s", cmd);
     sendRelayUpdate(buf);
+}
+
+// ===== ForceReader 管理 =====
+
+bool RelayCore::initForceReader() {
+    if (!isRobotConnected()) {
+        std::cout << "[Force] Robot not connected, skipping ForceReader" << std::endl;
+        return false;
+    }
+    ForcePipeline::init();
+    m_forceThread = CreateThread(NULL, 0, forceReaderThread, NULL, 0, NULL);
+    if (!m_forceThread) {
+        std::cerr << "[Force] Failed to create ForceReader thread" << std::endl;
+        return false;
+    }
+    return true;
+}
+
+void RelayCore::pollForce() {
+    auto& app = appState;
+    EnterCriticalSection(&app.forceDataMutex);
+    ForcePipeline::step(app.forceData);
+
+    // Build F| protocol message
+    char buf[128];
+    snprintf(buf, sizeof(buf), "F|%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%d",
+        app.forceData.filtered[0], app.forceData.filtered[1],
+        app.forceData.filtered[2], app.forceData.filtered[3],
+        app.forceData.filtered[4], app.forceData.filtered[5],
+        app.forceData.isStale ? 1 : 0);
+    LeaveCriticalSection(&app.forceDataMutex);
+
+    sendRelayUpdate(buf);
+}
+
+void RelayCore::shutdownForceReader() {
+    if (m_forceThread) {
+        WaitForSingleObject(m_forceThread, 1000);
+        CloseHandle(m_forceThread);
+        m_forceThread = NULL;
+    }
+    robotCloseRealtime();
+    ForcePipeline::shutdown();
 }
