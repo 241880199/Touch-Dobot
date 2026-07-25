@@ -75,7 +75,12 @@ void display() {
 }
 
 void idle() {
-    if (!appState.isClosing) { glutPostRedisplay(); Sleep(1); }
+    if (!appState.isClosing) {
+        glutPostRedisplay();
+        // Poll force data at ~30Hz alongside feedback
+        RelayCore::instance().pollForce();
+        Sleep(1);
+    }
 }
 
 void reshape(int w, int h) {
@@ -191,6 +196,11 @@ int main(int argc, char* argv[]) {
 
     // 4. 连接 MATLAB GUI (localhost:8888)
     RelayCore::instance().initRelayReporting();
+
+    // 4.5 启动力传感器实时读取 (30004, 125Hz)
+    if (!g_noRobot) {
+        RelayCore::instance().initForceReader();
+    }
 
     // 5. 初始化 3D 场景 (始终执行)
     SceneRenderer::init();
