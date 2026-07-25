@@ -13,9 +13,9 @@ struct EscalationTracker {
     bool escalated = false;
     int clearFrames = 0;  // 错误清除后的帧计数
 
-    static const int WARN_TO_DEGRADE;    // from Config
-    static const int DEGRADE_TO_REJECT;
-    static const int CLEAR_FRAMES;
+    static constexpr int WARN_TO_DEGRADE   = 3;  // from Config::ESCALATE_WARN_TO_DEGRADE
+    static constexpr int DEGRADE_TO_REJECT = 10; // from Config::ESCALATE_DEGRADE_TO_REJECT
+    static constexpr int CLEAR_FRAMES      = 30; // from Config::DEESCALATE_CLEAR_FRAMES
 
     // 记录一帧的错误
     // delta: 操作员当前移动方向 (Touch 增量)
@@ -67,8 +67,3 @@ struct EscalationTracker {
     bool isEscalated() const { return escalated; }
     int count() const { return consecutiveFrames; }
 };
-
-// static const definitions (from Config)
-const int EscalationTracker::WARN_TO_DEGRADE   = 3;   // Config::ESCALATE_WARN_TO_DEGRADE
-const int EscalationTracker::DEGRADE_TO_REJECT = 10;  // Config::ESCALATE_DEGRADE_TO_REJECT
-const int EscalationTracker::CLEAR_FRAMES      = 30;  // Config::DEESCALATE_CLEAR_FRAMES
