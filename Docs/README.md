@@ -16,13 +16,15 @@ Touch 设备 ──(OpenHaptics)──> Touch_Client (C++) ──(TCP:30003)─�
 Touch-Dobot/
 ├── Touch_Client/        C++ Touch 端主程序 (OpenGL 可视化 + 触觉反馈)
 │   ├── main.cpp         入口, GLUT 窗口 + 定时器
-│   ├── config/          配置常量 (安全边界, 网络, 窗口)
+│   ├── config/          配置 (Config.h 常量 + system_config.json 共享源)
 │   ├── core/            全局状态 (AppState)
 │   ├── haptic/          Touch 设备驱动 (HDAPI 1kHz 回调)
+│   ├── force/           力反馈管线 (Butterworth 滤波 + 力映射 + 坐标变换)
 │   ├── relay/           中继逻辑 (坐标映射, 安全边界, TCP 协议)
 │   ├── render/          3D 渲染 (机械臂模型, 光点, HUD)
 │   ├── robot/           机械臂通信 + 运动学
-│   ├── safety/          安全预判器 (四层防护)
+│   ├── safety/          安全系统 (状态机 + 错误处理 + 虚拟约束力 + 诊断日志)
+│   ├── tests/           单元测试 (7 套, 108 用例)
 │   └── models/cr3/      CR3 STL 模型文件 (7 个连杆)
 ├── Relay_Station/       MATLAB 中继站 (TCP 服务器 + GUI 监控)
 │   ├── relay_main.m     主入口
@@ -89,30 +91,26 @@ start_system.bat
 
 ## 配置说明
 
-### 机械臂 IP (`Touch_Client/config/Config.h`)
+### 共享配置 (`Touch_Client/config/system_config.json`)
 
-```cpp
-constexpr const char* ROBOT_IP = "192.168.101.11";
-const int ENABLE_PORT = 29999;   // Dashboard 协议端口
-const int MOTION_PORT = 30003;   // 运动控制端口
+单一数据源。包含 robot (IP/端口)、relay、safety_bounds、connection、matlab 段。
+
+- **C++ 侧**: `Config.h` 编译时常量需与 JSON 保持同步
+- **MATLAB 侧**: `relay_config.m` 运行时从 JSON 自动读取
+
+修改 IP/端口/安全边界时请先编辑 JSON，再更新 `Config.h`。
+
+### 安全边界
+
+```json
+"safety_bounds": {
+    "x_min": -300.0, "x_max": 250.0,
+    "y_min": -350.0, "y_max": 250.0,
+    "z_min": 140.0,  "z_max": 500.0
+}
 ```
 
-### 安全边界 (`Touch_Client/config/Config.h`)
-
-```cpp
-const double SAFE_X_MIN = -300.0, SAFE_X_MAX = 250.0;
-const double SAFE_Y_MIN = -350.0, SAFE_Y_MAX = 250.0;
-const double SAFE_Z_MIN = 140.0,  SAFE_Z_MAX = 500.0;
-```
-
-基于机械臂静止位姿 (~ -103, -153, 381) 设定。修改后需重新编译。
-
-### 中继站配置 (`Relay_Station/relay_config.m`)
-
-```matlab
-cfg.robot_ip = '192.168.101.11';
-cfg.relay_port = 8888;  % Touch_Client → MATLAB 上报端口
-```
+基于机械臂静止位姿 (~ -103, -153, 381) 设定。
 
 ### MATLAB GUI 上报
 
@@ -167,9 +165,10 @@ robot_z =  touch_y;
 
 ### 已知限制
 
-- URDF 运动学模型与 Dobot 控制器坐标系存在偏移 (~408mm, 含旋转分量)，IK 数值解不可靠
-- 坐标映射为硬编码，X/Y/Z 方向可能与直觉不完全一致
-- 力反馈通道已预留接口，尚未集成滤波和渲染
+- URDF 运动学模型与 Dobot 控制器坐标系存在偏移 (~408mm, 含旋转分量)，IK 数值解作为辅助参考
+- 坐标映射为硬编码，X/Y/Z 方向未经实物标定
+- 力控闭环 (ServoP + 阻抗控制) 尚未实现，当前为纯遥操作模式
+- 力矩触觉渲染需 4DOF+ 触觉设备，当前 Touch 仅支持 3 轴力反馈
 
 ---
 

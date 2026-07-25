@@ -1,6 +1,8 @@
-% Touch-Dobot 中继站 v2.0
+% Touch-Dobot 中继站 v2.0 [已废弃 — SUPERSEDED by v3.0]
 % 功能：TCP 代理 — Touch ↔ 中继站 ↔ Dobot 机械臂
-% 运行：cd 到本目录，输入 relay_main
+% v3.0 架构: C++ Touch_Client 直连 CR3 (29999+30003+30004), MATLAB 仅做可视化
+% 当前入口: relay_gui (纯可视化前端)
+% 本文件保留供参考，不应在生产中使用。
 
 function relay_main()
     % ===== 加载配置 =====
