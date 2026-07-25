@@ -16,13 +16,12 @@ AppState::AppState() {
     InitializeCriticalSection(&lastCommandMutex);
     InitializeCriticalSection(&commandLogMutex);
     InitializeCriticalSection(&feedbackLogMutex);
-    InitializeCriticalSection(&forceMutex);
+    InitializeCriticalSection(&forceDataMutex);
 
     // 大数组用 ZeroMemory 避免 in-class initializer 与 MSVC 的兼容问题
     ZeroMemory(commandLog, sizeof(commandLog));
     ZeroMemory(feedbackLog, sizeof(feedbackLog));
-    ZeroMemory(forceRaw, sizeof(forceRaw));
-    ZeroMemory(forceFiltered, sizeof(forceFiltered));
+    ZeroMemory(&forceData, sizeof(forceData));
 }
 
 AppState::~AppState() {
@@ -37,7 +36,7 @@ AppState::~AppState() {
     DeleteCriticalSection(&lastCommandMutex);
     DeleteCriticalSection(&commandLogMutex);
     DeleteCriticalSection(&feedbackLogMutex);
-    DeleteCriticalSection(&forceMutex);
+    DeleteCriticalSection(&forceDataMutex);
     WSACleanup();
 }
 

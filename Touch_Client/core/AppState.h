@@ -101,10 +101,16 @@ public:
     int feedbackLogCount = 0;
     CRITICAL_SECTION feedbackLogMutex;
 
-    // ===== 力数据 (预留) =====
-    double forceRaw[3];
-    double forceFiltered[3];
-    CRITICAL_SECTION forceMutex;
+    // ===== 力数据 =====
+    struct ForceData {
+        double raw[6] = {0};        // Fx,Fy,Fz,Mx,My,Mz (N, Nm)
+        double filtered[6] = {0};   // Butterworth 低通滤波输出
+        double hapticOut[3] = {0};  // 已变换到 Touch 坐标系，haptic 线程直接读
+        bool isStale = true;        // 超过 200ms 无新数据
+        DWORD lastUpdateMs = 0;
+    };
+    ForceData forceData;
+    CRITICAL_SECTION forceDataMutex;
 };
 
 extern AppState appState;
