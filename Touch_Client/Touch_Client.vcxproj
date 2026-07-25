@@ -110,6 +110,9 @@
     <ClCompile Include="haptic\HapticDevice.cpp" />
     <ClInclude Include="haptic\HapticCallback.h" />
     <ClCompile Include="haptic\HapticCallback.cpp" />
+    <!-- force -->
+    <ClInclude Include="force\ForcePipeline.h" />
+    <ClCompile Include="force\ForcePipeline.cpp" />
     <!-- main -->
     <ClCompile Include="main.cpp" />
   </ItemGroup>
