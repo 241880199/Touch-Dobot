@@ -1,43 +1,27 @@
 #pragma once
 
-// Gaussian elimination solver for Ax = b (linear least squares via normal equations)
-class GaussSolver {
-public:
-    // Solve overdetermined system via normal equations: A^T A x = A^T b
-    // A is (nRows x nCols) row-major, b is (nRows x 1)
-    // x is (nCols x 1) output; residualRms = ||Ax - b|| / sqrt(nRows)
-    // Returns false if singular or degenerate
-    static bool solve(int nRows, const double A[], const double b[],
-                      int nCols, double x[], double& residualRms);
-private:
-    static bool gaussElim(int n, double A[], double b[], double x[]);
-};
-
-// Force sensor calibration — multi-pose automatic sweep
+// Force sensor calibration — static bias + motion mass estimation
 namespace ForceCalibration {
 
     enum class State {
         IDLE,
-        TARE,      // 2s still collection for initial bias estimate
-        MOVE,      // Waiting for user to position robot
-        SAMPLE,    // User-triggered sampling (SPACE to start, SPACE to stop, min 0.5s)
-        SOLVE,     // Normal equations -> extract params
-        VERIFY,    // Check residual
+        TARE,      // 2s static collection for force/torque bias
+        MOTION,    // User moves robot; record F vs a to fit mass
+        SOLVE,     // Fit mass + apply results
         DONE,      // Success
         ABORTED    // User interrupt or safety trip
     };
 
-    // Start calibration (must be called from main thread when not transmitting)
+    // Start calibration
     bool start();
 
-    // Abort immediately (called from safety handlers or user interrupt)
+    // Abort immediately
     void abort();
 
-    // Toggle sampling: in MOVE -> start SAMPLE; in SAMPLE -> stop & advance
+    // SPACE: start/stop sampling in TARE/MOTION phases
     void confirmPose();
 
-    // Callback: set drag mode (called when entering/leaving MOVE state, and on abort)
-    // Pass nullptr to clear
+    // Drag mode callback (called on state transitions)
     void setDragModeCallback(void (*cb)(bool enable));
 
     bool isRunning();
@@ -45,19 +29,13 @@ namespace ForceCalibration {
     State currentState();
     const char* statusText();
 
-    // Called each frame (~125Hz from ForceReader) to drive state machine
-    // Returns true when calibration is complete (DONE or ABORTED)
+    // Called each frame from pollForce (~30Hz)
     bool update(double dt, const double raw[6], const double pose[6]);
 
-    // Persistence — explicit parameter version
-    bool saveToFile(const char* path, double residualRms,
-                    double massKg, const double comSensor[3],
+    // Persistence
+    bool saveToFile(const char* path, double massKg,
                     const double biasForce[3], const double biasTorque[3]);
-
-    // Convenience: save current internal calibration state to path
-    bool saveToFile(const char* path);
-
-    bool loadFromFile(const char* path, double& massKg, double comSensor[3],
-                      double biasForce[3], double biasTorque[3], double& residualRms);
+    bool loadFromFile(const char* path, double& massKg,
+                      double biasForce[3], double biasTorque[3]);
 
 } // namespace ForceCalibration

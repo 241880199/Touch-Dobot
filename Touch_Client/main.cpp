@@ -67,14 +67,9 @@ void idle() {
                 lastCalibState = curState;
                 std::cout << "[Force] Calibration: " << ForceCalibration::statusText() << std::endl;
                 if (curState == ForceCalibration::State::DONE) {
-                    // Load saved results and apply to ForceCompensation
-                    double massKg, com[3], biasF[3], biasM[3], residualRms;
-                    if (ForceCalibration::loadFromFile("force_calib.json",
-                            massKg, com, biasF, biasM, residualRms)) {
-                        ForceCompensation::setCalibration(massKg, com, biasF, biasM);
-                        std::cout << "[Force] Calibration applied! mass=" << massKg
-                                  << "kg, residual=" << residualRms << "N" << std::endl;
-                    }
+                    // Results already applied by ForceCalibration::update() SOLVE phase.
+                    // Just print confirmation.
+                    std::cout << "[Force] Calibration results saved to force_calib.json" << std::endl;
                 }
             }
         }
@@ -190,8 +185,7 @@ void keyboard(unsigned char key, int, int) {
 
         // If idle, try to start force calibration
         if (!g_noRobot && relay.startForceCalibration()) {
-            std::cout << "[Force] Move robot to each target orientation "
-                      << "and press SPACE to confirm." << std::endl;
+            std::cout << "[Force] TARE: keep robot still (2s), then drag to move for mass cal." << std::endl;
             return;
         }
 
@@ -521,15 +515,14 @@ int main(int argc, char* argv[]) {
 
     // 4.6 加载力传感器标定文件
     {
-        double massKg, com[3], biasF[3], biasM[3], residualRms;
-        if (ForceCalibration::loadFromFile("force_calib.json",
-                massKg, com, biasF, biasM, residualRms)) {
-            ForceCompensation::setCalibration(massKg, com, biasF, biasM);
+        double massKg, biasF[3], biasM[3];
+        if (ForceCalibration::loadFromFile("force_calib.json", massKg, biasF, biasM)) {
+            double comZero[3] = {0};
+            ForceCompensation::setCalibration(massKg, comZero, biasF, biasM);
             std::cout << "[Force] Loaded force_calib.json (mass=" << massKg
-                      << "kg, residual=" << residualRms << "N)" << std::endl;
+                      << "kg, bias=" << biasF[0] << "," << biasF[1] << "," << biasF[2] << "N)" << std::endl;
         } else {
-            std::cout << "[Force] No calibration file — force compensation disabled. "
-                      << "Press 'c' when idle to calibrate." << std::endl;
+            std::cout << "[Force] No calibration file — press 'c' when idle to calibrate." << std::endl;
         }
     }
 
