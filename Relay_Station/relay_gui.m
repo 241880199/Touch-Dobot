@@ -555,10 +555,14 @@ function relay_gui()
             sprintf('TX: %s', ternary(txActive, 'ACTIVE', 'IDLE'))};
 
         % -- Safety & Diagnostics --
-        stateNames = {'RUNNING', 'WARN', 'DEGRADE', 'FATAL'};
-        stateColors = {clr.green, clr.yellow, clr.orange, clr.red};
+        % C++ RobotState enum: 0=DISCONNECTED 1=CONNECTED 2=READY 3=RUNNING
+        %   4=DEGRADED 5=ALARM 6=RECOVERING 7=FATAL
+        stateNames = {'DISCONNECTED','CONNECTED','READY','RUNNING',...
+                      'DEGRADED','ALARM','RECOVERING','FATAL'};
+        stateColors = {clr.text_dim, clr.blue, clr.blue, clr.green,...
+                       clr.orange, clr.yellow, clr.yellow, clr.red};
         st = S.safety_state + 1;
-        if st < 1, st = 1; elseif st > 4, st = 4; end
+        if st < 1, st = 1; elseif st > 8, st = 8; end
 
         safetyLines = {};
         safetyLines{1} = sprintf('Safety: %s  |  Speed: %.1fx  |  Alarms: %d', ...
@@ -569,7 +573,7 @@ function relay_gui()
         [minM, worstJ] = min(S.joint_margins);
         if minM < 15
             safetyLines{2} = sprintf('J%d near limit: %.1f deg margin', worstJ, minM);
-            if st < 3  % don't downgrade FATAL/DEGRADE red/orange to joint orange
+            if st < 5  % don't downgrade DEGRADE/ALARM/RECOVERING/FATAL to joint orange
                 lblSafety.FontColor = clr.orange;
             end
         else
