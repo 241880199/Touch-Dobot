@@ -152,6 +152,25 @@ void jointAngleTimer(int) {
     }
 }
 
+void safetyStatusTimer(int) {
+    if (!g_noRobot) {
+        RelayCore::instance().sendSafetyStatus();
+        RelayCore::instance().sendSingularity();
+    }
+    if (!appState.isClosing) {
+        glutTimerFunc(200, safetyStatusTimer, 0);
+    }
+}
+
+void jointMarginTimer(int) {
+    if (!g_noRobot) {
+        RelayCore::instance().sendJointMargins();
+    }
+    if (!appState.isClosing) {
+        glutTimerFunc(500, jointMarginTimer, 0);
+    }
+}
+
 void keyboard(unsigned char key, int, int) {
     if (key == 'q' || key == 'Q' || key == 27) { // q 或 ESC
         std::cout << "\nShutting down..." << std::endl;
@@ -270,6 +289,8 @@ void keyboard(unsigned char key, int, int) {
                   << "; " << result.R[6] << ", " << result.R[7] << ", " << result.R[8] << "]" << std::endl;
         std::cout << "[CALIB] t = [" << result.t[0] << ", " << result.t[1] << ", " << result.t[2] << "]" << std::endl;
         std::cout << "[CALIB] Saved to calibration.json" << std::endl;
+
+        RelayCore::instance().sendCalibStatus();
 
         Calibration::cancelCollect();
         return;
@@ -503,6 +524,7 @@ int main(int argc, char* argv[]) {
     if (Calibration::load("calibration.json")) {
         std::cout << "[Calib] Loaded calibration.json (RMS="
                   << Calibration::rmsError << "mm)" << std::endl;
+        RelayCore::instance().sendCalibStatus();
     } else {
         std::cout << "[Calib] No calibration file, using default axis mapping" << std::endl;
     }
@@ -511,6 +533,8 @@ int main(int argc, char* argv[]) {
     glutTimerFunc(Config::POSE_QUERY_INTERVAL, poseQueryTimer, 0);
     glutTimerFunc(Config::ALARM_CHECK_INTERVAL, alarmCheckTimer, 0);
     glutTimerFunc(500, jointAngleTimer, 0);
+    glutTimerFunc(1000, safetyStatusTimer, 0);
+    glutTimerFunc(1500, jointMarginTimer, 0);
 
     // 8. 进入主循环
     // 刷新心跳时间戳：init()、STL 加载等启动步骤可能耗时超过 HEARTBEAT_TIMEOUT_MS
