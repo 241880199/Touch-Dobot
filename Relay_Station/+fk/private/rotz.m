@@ -1,0 +1,9 @@
+% Relay_Station/+fk/private/rotz.m
+% 4x4 homogeneous rotation around Z-axis
+function R = rotz(a)
+    c = cos(a); s = sin(a);
+    R = [c -s 0 0;
+         s  c 0 0;
+         0  0 1 0;
+         0  0 0 1];
+end
