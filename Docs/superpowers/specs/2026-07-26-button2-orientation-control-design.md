@@ -179,11 +179,13 @@ Orientation safety is enforced BEFORE ServoP construction — bad orientation de
 
 ## 7. Force Feedback
 
-Rule unchanged: **force feedback activates when button 1 is held**, regardless of button 2 state.
+Rule: **force feedback activates when either button 1 or button 2 is held**.
 
 - Button 1 only → force ON (existing)
+- Button 2 only → force ON (orientation control benefits from constraint forces)
 - Button 1+2 → force ON
-- Button 2 only → force OFF (no position motion, constraint forces meaningless)
+
+Implementation: in HapticCallback, change the force-rendering gate from `if (button1)` to `if (button1 || button2)`.
 
 ## 8. MATLAB GUI Update
 

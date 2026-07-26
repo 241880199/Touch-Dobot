@@ -12,7 +12,7 @@
 
 - Button 1 position-only behavior must be preserved (no regression)
 - `--no-robot` mode must still start and run (orientation data computed but not sent)
-- Force feedback activates only when button 1 is held (regardless of button 2)
+- Force feedback activates when either button 1 or button 2 is held (constraint forces benefit both position and orientation control)
 - Orientation is incremental: press→record reference, release→invalidate, re-press→re-reference (no jumps)
 - Euler angle convention: ZYX intrinsic (`R = Rz·Ry·Rx`), matching Dobot RPY convention from `GetPose()`
 - Thread safety: `stylusOrient` must use a dedicated CRITICAL_SECTION since haptic thread writes and main thread reads
@@ -507,6 +507,22 @@ The existing continuous transmission (lines 72-74) reads:
 ```
 
 Keep this unchanged — `isTransmitting()` already returns true when either button mode is active (since `onButton2Press` sets `m_transmitting = true` if not already set).
+
+- [ ] **Step 3b: Update force feedback gate — activate on button1 OR button2**
+
+The existing force rendering block (lines 81-85) gates all force output on `if (button1)`. Change to activate on either button:
+
+**Old code (line 84):**
+```cpp
+        if (button1) {
+```
+
+**New code:**
+```cpp
+        if (button1 || button2) {
+```
+
+This ensures constraint forces (singularity, boundary, alarm history) are rendered during orientation-only control as well.
 
 - [ ] **Step 4: Update P| message to include stylus orientation**
 
