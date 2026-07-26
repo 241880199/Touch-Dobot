@@ -190,8 +190,8 @@ function relay_gui()
     xlabel(ax3d, 'X (mm)'); ylabel(ax3d, 'Y (mm)'); zlabel(ax3d, 'Z (mm)');
     hold(ax3d, 'on'); axis(ax3d, 'equal');
     ax3d.Layout.Row = 1;  ax3d.Layout.Column = 1;
-    ax3d.View = [45 30];
-    xlim(ax3d, [0 500]); ylim(ax3d, [-250 250]); zlim(ax3d, [0 400]);
+    ax3d.View = [60 25];
+    xlim(ax3d, [-350 400]); ylim(ax3d, [-400 400]); zlim(ax3d, [-50 650]);
 
     % Robot State 面板
     pnlState = uigridlayout(glRight, [2 1]);
@@ -243,14 +243,14 @@ function relay_gui()
 
     % ===== 3D 场景初始化 =====
     % 地面网格
-    [Xg, Yg] = meshgrid(0:50:500, -250:50:250);
+    [Xg, Yg] = meshgrid(-300:50:400, -400:50:400);
     Zg = zeros(size(Xg));
     mesh(ax3d, Xg, Yg, Zg, 'FaceAlpha', 0.1, 'EdgeColor', [0.2 0.25 0.3], 'LineWidth', 0.5);
 
     % 坐标系
-    quiver3(ax3d, 0,0,0, 80,0,0, 'r', 'LineWidth', 2, 'MaxHeadSize', 5);
-    quiver3(ax3d, 0,0,0, 0,80,0, 'g', 'LineWidth', 2, 'MaxHeadSize', 5);
-    quiver3(ax3d, 0,0,0, 0,0,80, 'b', 'LineWidth', 2, 'MaxHeadSize', 5);
+    quiver3(ax3d, 0,0,0, 150,0,0, 'r', 'LineWidth', 2, 'MaxHeadSize', 8);
+    quiver3(ax3d, 0,0,0, 0,150,0, 'g', 'LineWidth', 2, 'MaxHeadSize', 8);
+    quiver3(ax3d, 0,0,0, 0,0,150, 'b', 'LineWidth', 2, 'MaxHeadSize', 8);
 
     % 安全边界线框
     xL = [cfg.safe_x_min cfg.safe_x_max];
