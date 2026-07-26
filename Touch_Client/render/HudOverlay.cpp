@@ -280,6 +280,20 @@ static void drawCoordPanel(int x, int y, int w, int h) {
     int lineH = 16;
     int ty = y + h - 28;
 
+    // ===== 标定状态 =====
+    if (Calibration::collectMode) {
+        glColor3f(1.0f, 0.85f, 0.25f);  // amber
+        snprintf(buf, sizeof(buf), "*** CALIBRATION MODE ***  Points: %d",
+                 Calibration::collectCount);
+        text2D(x + 6, ty, buf, GLUT_BITMAP_8_BY_13);
+        ty -= lineH + 4;
+    } else if (Calibration::enabled) {
+        glColor3f(0.35f, 0.90f, 0.50f);  // green
+        snprintf(buf, sizeof(buf), "Calib: RMS=%.2f mm", Calibration::rmsError);
+        text2D(x + 6, ty, buf, GLUT_BITMAP_8_BY_13);
+        ty -= lineH + 4;
+    }
+
     // 机械臂位姿
     EnterCriticalSection(&app.robotPoseMutex);
     AppState::RobotPose pose = app.robotActualPose;

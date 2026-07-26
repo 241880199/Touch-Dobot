@@ -5,6 +5,7 @@
 #include <HDU/hduVector.h>
 #include <iostream>
 #include <cmath>
+#include <conio.h>
 
 #include "config/Config.h"
 #include "core/AppState.h"
@@ -13,12 +14,15 @@
 #include "render/SceneRenderer.h"
 #include "render/HudOverlay.h"
 #include "safety/RobotDiagnostics.h"
+#include "calibration/CalibrationSolver.h"
 
 // ===== 运行模式 =====
 static bool g_noRobot = false;
 static bool g_noTouch = false;
 
 // ===== GLUT 回调 =====
+
+void keyboard(unsigned char key, int, int);  // forward decl for console polling in idle()
 
 void display() {
     if (appState.isClosing) return;
@@ -79,6 +83,13 @@ void idle() {
     static int dbgCount = 0;
     if (!appState.isClosing) {
         glutPostRedisplay();
+
+        // 控制台键盘轮询 (标定模式等操作不依赖 GLUT 窗口焦点)
+        if (_kbhit()) {
+            int ch = _getch();
+            keyboard((unsigned char)ch, 0, 0);
+        }
+
         // Poll force data at ~30Hz alongside feedback
         RelayCore::instance().pollForce();
         // Check haptic watchdog (only when not in --no-robot mode)
@@ -149,6 +160,105 @@ void keyboard(unsigned char key, int, int) {
                 std::cout << "[Main] 脱困失败" << std::endl;
             }
         }
+    }
+
+    // ===== 标定模式 =====
+    // 'c': 切换标定采集模式
+    if (key == 'c' || key == 'C') {
+        if (Calibration::collectMode) {
+            Calibration::cancelCollect();
+            std::cout << "\n[CALIB] Mode OFF" << std::endl;
+        } else {
+            Calibration::startCollect();
+            std::cout << "\n[CALIB] Mode ON — "
+                      << "Align Touch pen + robot to marker, press SPACE to record,"
+                      << " 's' to solve, 'c' to exit" << std::endl;
+        }
+        return;
+    }
+
+    // Space: 记录标定点对 (Touch原始坐标 + Robot GetPose)
+    if (key == ' ' && Calibration::collectMode) {
+        int idx = Calibration::collectCount;
+        if (idx >= Calibration::MAX_COLLECT_POINTS) {
+            std::cout << "[CALIB] Max " << Calibration::MAX_COLLECT_POINTS << " points reached" << std::endl;
+            return;
+        }
+
+        // 读取 Touch 原始设备坐标 (未变换)
+        hduVector3Dd rawTouch;
+        EnterCriticalSection(&appState.devicePosMutex);
+        rawTouch = appState.devicePos;
+        LeaveCriticalSection(&appState.devicePosMutex);
+
+        // 读取机械臂实际位姿
+        EnterCriticalSection(&appState.robotPoseMutex);
+        double rx = appState.robotActualPose.x;
+        double ry = appState.robotActualPose.y;
+        double rz = appState.robotActualPose.z;
+        LeaveCriticalSection(&appState.robotPoseMutex);
+
+        // 存储 (原始Touch, Robot实际)
+        Calibration::collectTouch[idx][0] = rawTouch[0];
+        Calibration::collectTouch[idx][1] = rawTouch[1];
+        Calibration::collectTouch[idx][2] = rawTouch[2];
+        Calibration::collectRobot[idx][0] = rx;
+        Calibration::collectRobot[idx][1] = ry;
+        Calibration::collectRobot[idx][2] = rz;
+        Calibration::collectCount++;
+
+        std::cout << "[CALIB] Point " << Calibration::collectCount << " recorded:"
+                  << " Touch(" << rawTouch[0] << "," << rawTouch[1] << "," << rawTouch[2] << ")"
+                  << " -> Robot(" << rx << "," << ry << "," << rz << ")"
+                  << std::endl;
+        return;
+    }
+
+    // 's': 求解标定并保存
+    if ((key == 's' || key == 'S') && Calibration::collectMode) {
+        if (Calibration::collectCount < 3) {
+            std::cout << "[CALIB] Need at least 3 points, have "
+                      << Calibration::collectCount << std::endl;
+            return;
+        }
+
+        // 构建点对列表
+        std::vector<std::pair<Vec3, Vec3>> pairs;
+        for (int i = 0; i < Calibration::collectCount; i++) {
+            pairs.push_back({
+                Vec3(Calibration::collectTouch[i][0],
+                     Calibration::collectTouch[i][1],
+                     Calibration::collectTouch[i][2]),
+                Vec3(Calibration::collectRobot[i][0],
+                     Calibration::collectRobot[i][1],
+                     Calibration::collectRobot[i][2])
+            });
+        }
+
+        KabschResult result = solveKabsch(pairs);
+        if (!result.valid) {
+            std::cout << "[CALIB] Solver failed — points may be degenerate" << std::endl;
+            return;
+        }
+
+        // 写入标定状态
+        for (int i = 0; i < 9; i++) Calibration::R[i] = result.R[i];
+        for (int i = 0; i < 3; i++) Calibration::t[i] = result.t[i];
+        Calibration::rmsError = result.rmsError;
+        Calibration::enabled = true;
+
+        // 保存到文件
+        Calibration::save("calibration.json");
+
+        std::cout << "\n[CALIB] Solved! RMS error = " << result.rmsError << " mm" << std::endl;
+        std::cout << "[CALIB] R = [" << result.R[0] << ", " << result.R[1] << ", " << result.R[2]
+                  << "; " << result.R[3] << ", " << result.R[4] << ", " << result.R[5]
+                  << "; " << result.R[6] << ", " << result.R[7] << ", " << result.R[8] << "]" << std::endl;
+        std::cout << "[CALIB] t = [" << result.t[0] << ", " << result.t[1] << ", " << result.t[2] << "]" << std::endl;
+        std::cout << "[CALIB] Saved to calibration.json" << std::endl;
+
+        Calibration::cancelCollect();
+        return;
     }
 }
 
@@ -224,6 +334,14 @@ int main(int argc, char* argv[]) {
 
     // 6. 初始化 3D 场景 (始终执行)
     SceneRenderer::init();
+
+    // 6.5 加载标定文件 (如存在)
+    if (Calibration::load("calibration.json")) {
+        std::cout << "[Calib] Loaded calibration.json (RMS="
+                  << Calibration::rmsError << "mm)" << std::endl;
+    } else {
+        std::cout << "[Calib] No calibration file, using default axis mapping" << std::endl;
+    }
 
     // 7. 启动定时器
     glutTimerFunc(Config::POSE_QUERY_INTERVAL, poseQueryTimer, 0);
