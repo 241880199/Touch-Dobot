@@ -1,6 +1,6 @@
 #pragma once
 
-// UI 布局常量
+// UI 布局常量 (extracted from HudOverlay — all 2D UI moved to MATLAB GUI)
 namespace HudLayout {
     constexpr int TOP_BAR_H = 30;
     constexpr int PANEL_Y = TOP_BAR_H + 2;
@@ -23,8 +23,4 @@ namespace HudLayout {
 
     // 子面板: 左栏和中栏各分上下两部分
     constexpr int SUB_H = (PANEL_H - 6) / 2;
-}
-
-namespace HudOverlay {
-    void drawAll();
 }

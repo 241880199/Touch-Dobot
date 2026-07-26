@@ -111,8 +111,7 @@
     <ClCompile Include="render\RobotModel.cpp" />
     <ClInclude Include="render\SceneRenderer.h" />
     <ClCompile Include="render\SceneRenderer.cpp" />
-    <ClInclude Include="render\HudOverlay.h" />
-    <ClCompile Include="render\HudOverlay.cpp" />
+    <ClInclude Include="render\HudLayout.h" />
     <!-- haptic -->
     <ClInclude Include="haptic\HapticDevice.h" />
     <ClCompile Include="haptic\HapticDevice.cpp" />

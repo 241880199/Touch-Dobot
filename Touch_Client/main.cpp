@@ -12,7 +12,7 @@
 #include "haptic/HapticDevice.h"
 #include "relay/RelayCore.h"
 #include "render/SceneRenderer.h"
-#include "render/HudOverlay.h"
+#include "render/HudLayout.h"
 #include "safety/RobotDiagnostics.h"
 #include "calibration/CalibrationSolver.h"
 #include "robot/Kinematics.h"
@@ -81,8 +81,6 @@ void display() {
 
     // ===== 2D HUD 全屏渲染（缩放至实际窗口）=====
     glViewport(0, 0, winW, winH);
-    HudOverlay::drawAll();
-
     glutSwapBuffers();
 
     // 非阻塞反馈处理 (无机械臂时跳过)
