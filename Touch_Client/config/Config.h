@@ -57,14 +57,31 @@ namespace Config {
 
     // ========== 力传感器参数 ==========
     const int FORCE_REALTIME_PORT = 30004;       // 实时反馈端口 (125Hz)
+    const int FORCE_EFFECTIVE_SAMPLE_RATE = 125; // 传感器数据采样率 (Hz)
     const int FORCE_FILTER_CUTOFF = 30;          // Butterworth 截止频率 (Hz)
     const int FORCE_STALE_MS = 200;              // 数据超时阈值 (ms)
-    const double FORCE_DEADZONE_N = 0.2;         // 死区 (N) — 降低以减少小力过滤
+    const double FORCE_RESIDUAL_DEADZONE_N = 0.05; // 补偿后残余死区 (N)
     const double FORCE_MAX_SENSOR_N = 200.0;     // 传感器量程 (N)
     const double FORCE_MAX_TOUCH_N = 3.3;        // Touch 最大安全力 (N)
     const double FORCE_REFLECTION_GAIN = 5.0;    // 力反射增益 — 放大传感器力到可感知范围
     const double FORCE_GRADIENT_LIMIT = 50.0;    // 梯度限幅 (N/frame)
     const int FORCE_RECONNECT_INTERVAL = 2000;   // 断线重试间隔 (ms)
+
+    // ========== 力传感器标定参数 ==========
+    const double FORCE_CALIB_SPEED_FACTOR = 0.30;       // 标定期速度因子
+    const double FORCE_CALIB_STILL_COLLECT_S = 2.0;      // 初始静止采集时间 (s)
+    const double FORCE_CALIB_MOVE_TIMEOUT_S = 5.0;       // 单姿态移动超时 (s)
+    const double FORCE_CALIB_SETTLE_TIME_S = 0.5;        // 姿态稳定等待 (s)
+    const double FORCE_CALIB_SAMPLE_TIME_S = 0.5;        // 数据采集时间 (s)
+    const double FORCE_CALIB_MAX_RESIDUAL_N = 0.3;       // 标定残差阈值 (N)
+    const double FORCE_CALIB_POSE_ANGLE_DEG = 15.0;      // 标定姿态偏角 (度)
+    const int    FORCE_CALIB_NUM_POSES = 6;               // 标定姿态数
+
+    // ========== 力补偿运行时参数 ==========
+    const double FORCE_MOTION_VEL_THRESH_MS = 0.002;      // 静止判定: 速度阈值 (m/s)
+    const double FORCE_MOTION_ACC_THRESH_MSS = 0.005;     // 静止判定: 加速度阈值 (m/s²)
+    const double FORCE_BIAS_EMA_ALPHA = 0.01;             // 零偏 EMA 更新率 (仅静止态)
+    const double FORCE_ACC_FILTER_CUTOFF_HZ = 10.0;       // 加速度估计低通截止 (Hz)
 
     // ========== 虚拟约束力参数 ==========
     const double CONSTRAINT_BOUNDARY_RANGE      = 50.0;   // 安全边界感应距离 (mm)
