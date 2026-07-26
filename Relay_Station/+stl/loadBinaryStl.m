@@ -16,10 +16,14 @@ function mesh = loadBinaryStl(filepath)
     fseek(fid, 80, 'bof');
     count = fread(fid, 1, 'uint32');
     if isempty(count) || count == 0, fclose(fid); return; end
-    raw = fread(fid, count * 12, 'float32');
+    % Each triangle: 12 float32 + 2-byte attribute = 50 bytes
+    % Read triangle-by-triangle to skip the 2-byte attribute between records
+    raw = zeros(count, 12, 'single');
+    for i = 1:count
+        raw(i, :) = fread(fid, 12, 'float32');
+        fseek(fid, 2, 'cof');  % skip 2-byte attribute
+    end
     fclose(fid);
-    if numel(raw) < count * 12, warning('stl:truncated', 'File truncated'); return; end
-    raw = reshape(raw, 12, count)';
     mesh.normals = raw(:, 1:3);
     vertData = raw(:, 4:12)';
     mesh.vertices = reshape(vertData, 3, count*3)' * 1000;  % m → mm

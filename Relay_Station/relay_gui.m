@@ -97,22 +97,36 @@ function relay_gui()
     glLeft.BackgroundColor = clr.bg_panel;
 
     % 指令面板
-    pnlCmd = uipanel(glLeft, 'BackgroundColor', clr.bg_panel, 'BorderType', 'none');
+    pnlCmd = uigridlayout(glLeft, [2 1]);
+    pnlCmd.RowHeight = {22, '1x'};
+    pnlCmd.Padding = [4 0 4 2];  pnlCmd.RowSpacing = 0;
+    pnlCmd.BackgroundColor = clr.bg_panel;
     pnlCmd.Layout.Row = 1;  pnlCmd.Layout.Column = 1;
+
     lblCmdTitle = uilabel(pnlCmd, 'Text', 'Touch -> Robot (Commands)', ...
-        'Position', [6 0 360 22], 'FontColor', clr.text_on, 'FontSize', 11, 'FontWeight', 'bold');
+        'FontColor', clr.text_on, 'FontSize', 11, 'FontWeight', 'bold');
+    lblCmdTitle.Layout.Row = 1;  lblCmdTitle.Layout.Column = 1;
+
     lblCmd = uilabel(pnlCmd, 'Text', '(waiting for commands...)', ...
-        'Position', [6 -350 360 350], 'FontColor', [0.30 0.85 0.50], ...
-        'FontSize', 9, 'VerticalAlignment', 'top', 'FontName', 'Consolas');
+        'FontColor', [0.30 0.85 0.50], 'FontSize', 9, ...
+        'VerticalAlignment', 'top', 'FontName', 'Consolas');
+    lblCmd.Layout.Row = 2;  lblCmd.Layout.Column = 1;
 
     % 反馈面板
-    pnlFb = uipanel(glLeft, 'BackgroundColor', clr.bg_panel, 'BorderType', 'none');
+    pnlFb = uigridlayout(glLeft, [2 1]);
+    pnlFb.RowHeight = {22, '1x'};
+    pnlFb.Padding = [4 0 4 2];  pnlFb.RowSpacing = 0;
+    pnlFb.BackgroundColor = clr.bg_panel;
     pnlFb.Layout.Row = 2;  pnlFb.Layout.Column = 1;
+
     lblFbTitle = uilabel(pnlFb, 'Text', 'Robot -> Relay (Feedback)', ...
-        'Position', [6 0 360 22], 'FontColor', clr.text_on, 'FontSize', 11, 'FontWeight', 'bold');
+        'FontColor', clr.text_on, 'FontSize', 11, 'FontWeight', 'bold');
+    lblFbTitle.Layout.Row = 1;  lblFbTitle.Layout.Column = 1;
+
     lblFb = uilabel(pnlFb, 'Text', '(waiting for feedback...)', ...
-        'Position', [6 -350 360 350], 'FontColor', clr.text_dim, ...
-        'FontSize', 9, 'VerticalAlignment', 'top', 'FontName', 'Consolas');
+        'FontColor', clr.text_dim, 'FontSize', 9, ...
+        'VerticalAlignment', 'top', 'FontName', 'Consolas');
+    lblFb.Layout.Row = 2;  lblFb.Layout.Column = 1;
 
     % ===== 中栏 (Col 2): 力数据 =====
     pnlMid = uipanel(g, 'BackgroundColor', clr.bg_panel, 'BorderType', 'none');
@@ -123,26 +137,38 @@ function relay_gui()
     glMid.BackgroundColor = clr.bg_panel;
 
     % 原始力
-    pnlFR = uipanel(glMid, 'BackgroundColor', clr.bg_panel, 'BorderType', 'none');
+    pnlFR = uigridlayout(glMid, [2 1]);
+    pnlFR.RowHeight = {22, '1x'};
+    pnlFR.Padding = [4 0 4 2];  pnlFR.RowSpacing = 0;
+    pnlFR.BackgroundColor = clr.bg_panel;
     pnlFR.Layout.Row = 1;  pnlFR.Layout.Column = 1;
+
     lblFRTitle = uilabel(pnlFR, 'Text', 'Force Sensor (Raw · 30004)', ...
-        'Position', [6 0 360 22], 'FontColor', clr.text_on, 'FontSize', 11, 'FontWeight', 'bold');
-    lblForceRaw = uilabel(pnlFR, 'Position', [10 -100 350 120], ...
-        'Text', {'Awaiting force sensor data...', '', ...
-                 'Fx:   0.00 N   Fy:   0.00 N   Fz:   0.00 N'}, ...
+        'FontColor', clr.text_on, 'FontSize', 11, 'FontWeight', 'bold');
+    lblFRTitle.Layout.Row = 1;  lblFRTitle.Layout.Column = 1;
+
+    lblForceRaw = uilabel(pnlFR, 'Text', {'Awaiting force sensor data...', '', ...
+        'Fx:   0.00 N   Fy:   0.00 N   Fz:   0.00 N'}, ...
         'FontColor', clr.text_dim, 'FontSize', 10, ...
         'VerticalAlignment', 'top', 'FontName', 'Consolas');
+    lblForceRaw.Layout.Row = 2;  lblForceRaw.Layout.Column = 1;
 
     % 滤波力
-    pnlFF = uipanel(glMid, 'BackgroundColor', clr.bg_panel, 'BorderType', 'none');
+    pnlFF = uigridlayout(glMid, [2 1]);
+    pnlFF.RowHeight = {22, '1x'};
+    pnlFF.Padding = [4 0 4 2];  pnlFF.RowSpacing = 0;
+    pnlFF.BackgroundColor = clr.bg_panel;
     pnlFF.Layout.Row = 2;  pnlFF.Layout.Column = 1;
+
     lblFFTitle = uilabel(pnlFF, 'Text', 'Force Output (Filtered -> Touch)', ...
-        'Position', [6 0 360 22], 'FontColor', clr.text_on, 'FontSize', 11, 'FontWeight', 'bold');
-    lblForceFilt = uilabel(pnlFF, 'Position', [10 -100 350 120], ...
-        'Text', {'Filtered force for haptic feedback...', '', ...
-                 'Fx:   0.00 N   Fy:   0.00 N   Fz:   0.00 N'}, ...
+        'FontColor', clr.text_on, 'FontSize', 11, 'FontWeight', 'bold');
+    lblFFTitle.Layout.Row = 1;  lblFFTitle.Layout.Column = 1;
+
+    lblForceFilt = uilabel(pnlFF, 'Text', {'Filtered force for haptic feedback...', '', ...
+        'Fx:   0.00 N   Fy:   0.00 N   Fz:   0.00 N'}, ...
         'FontColor', clr.text_dim, 'FontSize', 10, ...
         'VerticalAlignment', 'top', 'FontName', 'Consolas');
+    lblForceFilt.Layout.Row = 2;  lblForceFilt.Layout.Column = 1;
 
     % ===== 右栏 (Col 3): 3D + 状态 + 安全 =====
     pnlRight = uipanel(g, 'BackgroundColor', clr.bg_panel, 'BorderType', 'none');
@@ -153,7 +179,9 @@ function relay_gui()
     glRight.BackgroundColor = clr.bg_panel;
 
     % 3D 视图
-    pnl3D = uipanel(glRight, 'BackgroundColor', clr.bg_panel, 'BorderType', 'none');
+    pnl3D = uigridlayout(glRight, [1 1]);
+    pnl3D.Padding = [0 0 0 0];
+    pnl3D.BackgroundColor = clr.bg_panel;
     pnl3D.Layout.Row = 1;  pnl3D.Layout.Column = 1;
     ax3d = uiaxes(pnl3D, 'BackgroundColor', clr.bg_axes3d, ...
         'XColor', clr.text_dim, 'YColor', clr.text_dim, 'ZColor', clr.text_dim, ...
@@ -161,6 +189,7 @@ function relay_gui()
     title(ax3d, 'Digital Twin', 'Color', clr.text_on, 'FontSize', 11);
     xlabel(ax3d, 'X (mm)'); ylabel(ax3d, 'Y (mm)'); zlabel(ax3d, 'Z (mm)');
     hold(ax3d, 'on'); axis(ax3d, 'equal');
+    ax3d.Layout.Row = 1;  ax3d.Layout.Column = 1;
     ax3d.View = [45 30];
     xlim(ax3d, [0 500]); ylim(ax3d, [-250 250]); zlim(ax3d, [0 400]);
 
