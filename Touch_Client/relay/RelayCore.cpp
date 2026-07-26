@@ -586,6 +586,11 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
         // Update reference for next frame
         m_lastStylusOrient = current;
 
+        // NaN/Inf guard: skip this frame's orientation delta (don't increment nan counter)
+        if (std::isnan(drx) || std::isnan(dry) || std::isnan(drz) ||
+            std::isinf(drx) || std::isinf(dry) || std::isinf(drz)) {
+            // orientation delta skipped for this frame only
+        } else {
         // Deadzone filter
         if (fabs(drx) >= Config::ORIENT_DEADZONE_DEG ||
             fabs(dry) >= Config::ORIENT_DEADZONE_DEG ||
@@ -614,6 +619,7 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
         targetRx = m_targetOrient.x;
         targetRy = m_targetOrient.y;
         targetRz = m_targetOrient.z;
+        }  // end !NaN guard
     }
 
     // ===== 构造并发送 ServoP =====
@@ -689,7 +695,10 @@ void RelayCore::onButtonRelease() {
 
 void RelayCore::onButton2Press(const Vec3& stylusOrient) {
     EnterCriticalSection(&m_basePointLock);
-    // Capture stylus reference orientation at press moment
+    // Capture stylus/robot reference snapshots at press moment.
+    // These are stored for diagnostics/re-sync and logged on press — they are
+    // NOT used in the per-frame delta computation. The per-frame tracking uses
+    // m_lastStylusOrient (incremental delta) in sendPosition().
     m_orientRefStylus = stylusOrient;
 
     // Capture robot current orientation
@@ -718,6 +727,7 @@ void RelayCore::onButton2Press(const Vec3& stylusOrient) {
             m_targetPos = SafetyBoundary::clampToBoundary(rawPos);
         }
         m_transmitting = true;
+        m_basePointSet = true;
     }
     LeaveCriticalSection(&m_basePointLock);
 

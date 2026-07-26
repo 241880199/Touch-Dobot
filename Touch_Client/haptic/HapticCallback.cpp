@@ -1,3 +1,4 @@
+#define _USE_MATH_DEFINES
 #include "HapticCallback.h"
 #include "../core/AppState.h"
 #include "../relay/CoordinateTransform.h"
@@ -8,6 +9,7 @@
 #include "../safety/SafetyPredictor.h"
 #include <HDU/hduVector.h>
 #include <iostream>
+#include <cmath>
 
 HDCallbackCode HDCALLBACK hapticCallback(void* pUserData) {
     auto& app = appState;
@@ -59,9 +61,9 @@ HDCallbackCode HDCALLBACK hapticCallback(void* pUserData) {
             rz_rad = 0.0;
         }
 
-        double rx_deg = rx_rad * 180.0 / 3.14159265358979323846;
-        double ry_deg = ry_rad * 180.0 / 3.14159265358979323846;
-        double rz_deg = rz_rad * 180.0 / 3.14159265358979323846;
+        double rx_deg = rx_rad * 180.0 / M_PI;
+        double ry_deg = ry_rad * 180.0 / M_PI;
+        double rz_deg = rz_rad * 180.0 / M_PI;
 
         EnterCriticalSection(&app.stylusOrientMutex);
         app.stylusOrient[0] = rx_deg;
@@ -137,7 +139,7 @@ HDCallbackCode HDCALLBACK hapticCallback(void* pUserData) {
     relay.reportPosition();
 
     // ===== 8. 力反馈渲染 (传感器力 + 虚拟约束力) =====
-    // 仅按钮1按下时渲染力反馈，松开时清零
+    // 按钮1或按钮2按下时渲染力反馈，松开时清零
     {
         double totalForce[3] = { 0.0, 0.0, 0.0 };
 
@@ -178,7 +180,8 @@ HDCallbackCode HDCALLBACK hapticCallback(void* pUserData) {
                 std::cerr << "[Haptic] Force applied: (" << totalForce[0] << ", "
                           << totalForce[1] << ", " << totalForce[2] << ") N  mag=" << mag
                           << "  stale=" << app.forceData.isStale
-                          << "  button1=" << button1 << std::endl;
+                          << "  button1=" << button1
+                          << "  button2=" << button2 << std::endl;
             }
         }
     }

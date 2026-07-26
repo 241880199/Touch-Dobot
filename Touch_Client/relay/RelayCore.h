@@ -93,6 +93,8 @@ private:
     bool   m_lastTouchValid = false;
 
     // ===== 姿态控制 (Button 2) =====
+    // NOTE: These are accessed only from the haptic callback thread (1kHz).
+    // m_basePointLock is used in onButton2Press for consistency but no cross-thread contention exists.
     Vec3 m_targetOrient;          // 累加式姿态目标 (Rx, Ry, Rz in degrees)
     Vec3 m_lastStylusOrient;      // 上一帧笔杆姿态, 用于增量计算
     Vec3 m_orientRefStylus;       // 按下瞬间的笔杆参考姿态
