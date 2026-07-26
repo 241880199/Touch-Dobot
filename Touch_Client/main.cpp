@@ -12,7 +12,6 @@
 #include "haptic/HapticDevice.h"
 #include "relay/RelayCore.h"
 #include "render/SceneRenderer.h"
-#include "render/HudLayout.h"
 #include "safety/RobotDiagnostics.h"
 #include "calibration/CalibrationSolver.h"
 #include "robot/Kinematics.h"
@@ -38,57 +37,12 @@ void keyboard(unsigned char key, int, int);  // forward decl for console polling
 
 void display() {
     if (appState.isClosing) return;
-
-    // 清屏
-    glClearColor(0.1f, 0.12f, 0.18f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
-    // ===== 获取实际窗口尺寸 =====
-    int winW = glutGet(GLUT_WINDOW_WIDTH);
-    int winH = glutGet(GLUT_WINDOW_HEIGHT);
-    float scaleX = (float)winW / Config::WINDOW_W;
-    float scaleY = (float)winH / Config::WINDOW_H;
-
-    // ===== 3D 场景渲染到右侧视口（按比例缩放）=====
-    int vpX = (int)(HudLayout::RIGHT_X * scaleX);
-    int vpY3D = (int)(HudLayout::PANEL_Y * scaleY);
-    int vpW = (int)(HudLayout::RIGHT_W * scaleX);
-    int vpH = (int)(HudLayout::RIGHT_3D_H * scaleY);
-
-    glViewport(vpX, vpY3D, vpW, vpH);
-    glScissor(vpX, vpY3D, vpW, vpH);
-    glEnable(GL_SCISSOR_TEST);
-
-    glEnable(GL_DEPTH_TEST);
-
-    // 等距 3D 透视视角 — 右手坐标系 (X右 Y前 Z上)
-    glMatrixMode(GL_PROJECTION);
-    glLoadIdentity();
-    double aspect = (double)vpW / vpH;
-    gluPerspective(35.0, aspect, 10.0, 5000.0);
-
-    glMatrixMode(GL_MODELVIEW);
-    glLoadIdentity();
-
-    // 等距视角：从右前上方观察，以基座附近为中心
-    gluLookAt(650, -650, 450,   // eye: 右前上方角落
-              150,    0, 200,   // center: 基座上方 (机器人工作空间中心)
-                0,    0,   1);  // up: Z 向上
-
-    SceneRenderer::draw3D();
-
-    glDisable(GL_SCISSOR_TEST);
-
-    // ===== 2D HUD 全屏渲染（缩放至实际窗口）=====
-    glViewport(0, 0, winW, winH);
     glutSwapBuffers();
-
-    // 非阻塞反馈处理 (无机械臂时跳过)
     if (!g_noRobot) {
         RelayCore::instance().pollFeedback();
     }
 }
-
 void idle() {
     static int dbgCount = 0;
     if (!appState.isClosing) {
@@ -469,6 +423,7 @@ int main(int argc, char* argv[]) {
     glutInitWindowSize(Config::WINDOW_W, Config::WINDOW_H);
     glutInitWindowPosition(100, 100);
     glutCreateWindow("Touch-Dobot Digital Twin");
+    glutHideWindow();
 
     glutDisplayFunc(display);
     glutIdleFunc(idle);
