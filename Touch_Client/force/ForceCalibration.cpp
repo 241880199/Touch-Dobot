@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <algorithm>
 
 // ===== Internal state =====
@@ -297,6 +298,17 @@ bool saveToFile(const char* path, double massKg,
     return true;
 }
 
+// Helper: find key in JSON buf, return pointer to first char after ':' (skipping whitespace)
+static const char* jsonFind(const char* buf, const char* key) {
+    const char* p = strstr(buf, key);
+    if (!p) return nullptr;
+    p += strlen(key);
+    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+    if (*p == ':') p++;
+    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+    return p;  // points to '[' or first digit/'-'
+}
+
 bool loadFromFile(const char* path, double& massKg,
                   double biasForce[3], double biasTorque[3])
 {
@@ -309,30 +321,30 @@ bool loadFromFile(const char* path, double& massKg,
     if (n == 0) return false;
     buf[n] = '\0';
 
-    const char* p = strstr(buf, "\"mass_kg\":");
+    const char* p = jsonFind(buf, "\"mass_kg\"");
     if (!p) return false;
-    massKg = strtod(p + 10, nullptr);
+    massKg = strtod(p, nullptr);
 
-    p = strstr(buf, "\"bias_force_n\":[");
+    p = jsonFind(buf, "\"bias_force_n\"");
     if (!p) return false;
-    p += 15;
+    if (*p == '[') p++;  // skip opening bracket
     for (int i = 0; i < 3; i++) {
         char* end = nullptr;
         biasForce[i] = strtod(p, &end);
         if (end == p) return false;
         p = end;
-        while (*p == ',' || *p == ' ' || *p == '\n' || *p == '\r' || *p == '\t') p++;
+        while (*p == ',' || *p == ' ' || *p == '\n' || *p == '\r' || *p == '\t' || *p == ']') p++;
     }
 
-    p = strstr(buf, "\"bias_torque_nm\":[");
+    p = jsonFind(buf, "\"bias_torque_nm\"");
     if (!p) return false;
-    p += 17;
+    if (*p == '[') p++;
     for (int i = 0; i < 3; i++) {
         char* end = nullptr;
         biasTorque[i] = strtod(p, &end);
         if (end == p) return false;
         p = end;
-        while (*p == ',' || *p == ' ' || *p == '\n' || *p == '\r' || *p == '\t') p++;
+        while (*p == ',' || *p == ' ' || *p == '\n' || *p == '\r' || *p == '\t' || *p == ']') p++;
     }
 
     return true;
