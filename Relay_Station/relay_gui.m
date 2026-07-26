@@ -318,15 +318,243 @@ function relay_gui()
     end
 
     function processNetworkData()
-        % TODO: Task 9 — 从 TCP 读取并解析 Touch 数据包
+        if isempty(S.server) || ~isvalid(S.server) || S.server.NumBytesAvailable == 0
+            return;
+        end
+        try
+            while S.server.NumBytesAvailable > 0
+                raw = readline(S.server);
+                if isempty(raw) || ismissing(raw), continue; end
+                if isstring(raw), raw = char(raw); end
+                if ~ischar(raw), continue; end
+                msg = strtrim(raw);
+                if isempty(msg), continue; end
+
+                S.packet_count = S.packet_count + 1;
+
+                % -- 现有协议 --
+                if startsWith(msg, 'P|')
+                    vals = sscanf(msg(3:end), '%f,%f,%f,%f,%f,%f');
+                    if length(vals) == 6, S.touch_pos = vals'; S.robot_target = vals'; end
+                elseif startsWith(msg, 'C|')
+                    S.cmd_idx = mod(S.cmd_idx, 50) + 1;
+                    S.cmd_log{S.cmd_idx} = msg(3:end);
+                elseif startsWith(msg, 'F|')
+                    vals = str2double(split(msg(3:end), ','));
+                    if numel(vals) >= 7
+                        S.force_raw = vals(1:3)'; S.force_filt = vals(1:3)';
+                        S.force_moment = vals(4:6)'; S.force_stale = vals(7);
+                    end
+                elseif startsWith(msg, 'J|')
+                    vals = sscanf(msg(3:end), '%f,%f,%f,%f,%f,%f');
+                    if length(vals) == 6, S.joint_angles = vals'; end
+                elseif startsWith(msg, 'RP|')
+                    vals = sscanf(msg(3:end), '%f,%f,%f,%f,%f,%f');
+                    if length(vals) == 6, S.robot_pos = vals'; end
+                % -- 新协议 --
+                elseif startsWith(msg, 'S|')
+                    vals = sscanf(msg(3:end), '%d,%f,%d');
+                    if length(vals) == 3
+                        S.safety_state = vals(1); S.safety_speed = vals(2);
+                        S.safety_alarms = vals(3);
+                    end
+                elseif startsWith(msg, 'L|')
+                    vals = sscanf(msg(3:end), '%f,%f,%f,%f,%f,%f');
+                    if length(vals) == 6, S.joint_margins = vals'; end
+                elseif startsWith(msg, 'G|')
+                    vals = sscanf(msg(3:end), '%f,%d');
+                    if length(vals) == 2, S.z_dist = vals(1); S.singular = vals(2); end
+                elseif startsWith(msg, 'B|')
+                    vals = sscanf(msg(3:end), '%d,%f');
+                    if length(vals) == 2
+                        S.calib_enabled = (vals(1) == 1); S.calib_rms = vals(2);
+                    end
+                elseif startsWith(msg, 'D|')
+                    parts = split(msg(3:end), ',');
+                    if numel(parts) >= 2
+                        S.diag_code = str2double(parts{1});
+                        S.diag_spd  = str2double(parts{2});
+                        if numel(parts) >= 3, S.diag_reason = strjoin(parts(3:end), ','); end
+                    end
+                end
+            end
+        catch
+        end
+        % 延迟统计
+        t = toc(S.last_time);
+        if t > 0.5
+            S.touch_relay_delay = t * 1000 / max(S.packet_count, 1);
+            S.packet_count = 0; S.last_time = tic;
+        end
     end
 
     function update3DModel()
-        % TODO: Task 10 — FK + STL 变换
+        ja = S.joint_angles;
+        % 更新 STL 模型 (hgtransform)
+        if stlLoaded
+            for i = 0:6
+                T = fk.linkTransform(ja(1),ja(2),ja(3),ja(4),ja(5),ja(6), i);
+                % hgtransform Matrix is column-major 4x4
+                linkHg(i+1).Matrix = T;
+            end
+        else
+            % Fallback: 骨架模型 (复用原 computeFK 逻辑)
+            joints = fk.robotFk(ja(1),ja(2),ja(3),ja(4),ja(5),ja(6));
+            % 清除旧的 fallback 对象 (简化处理: 每帧重绘)
+            delete(findobj(ax3d, 'Tag', 'fallback'));
+            for i = 1:6
+                plot3(ax3d, [joints(i,1) joints(i+1,1)], ...
+                           [joints(i,2) joints(i+1,2)], ...
+                           [joints(i,3) joints(i+1,3)], ...
+                    'Color', [0.25 0.28 0.32], 'LineWidth', 6, 'Tag', 'fallback');
+            end
+            for i = 2:7
+                [sx, sy, sz] = sphere(10);
+                r = 6;
+                surf(ax3d, sx*r+joints(i,1), sy*r+joints(i,2), sz*r+joints(i,3), ...
+                    'FaceColor', [0.30 0.65 1.00], 'EdgeColor', 'none', ...
+                    'FaceAlpha', 0.7, 'Tag', 'fallback');
+            end
+        end
+
+        % Touch 笔可视化
+        tp = S.touch_pos;
+        if any(tp(1:3) ~= 0)
+            [cx, cy, cz] = cylinder([2 1.5], 8);
+            cz = cz * 40;
+            set(touchPenBody, 'XData', cx+tp(1), 'YData', cy+tp(2), ...
+                'ZData', cz+tp(3), 'Visible', 'on');
+            [sx, sy, sz] = sphere(12);
+            set(touchPenTip, 'XData', sx*4+tp(1), 'YData', sy*4+tp(2), ...
+                'ZData', sz*4+tp(3), 'Visible', 'on');
+        else
+            set(touchPenBody, 'Visible', 'off');
+            set(touchPenTip, 'Visible', 'off');
+        end
+
+        % 末端标记
+        rp = S.robot_pos;
+        if any(rp(1:3) ~= 0)
+            [sx, sy, sz] = sphere(8);
+            set(eeMarkerActual, 'XData', sx*8+rp(1), 'YData', sy*8+rp(2), ...
+                'ZData', sz*8+rp(3), 'Visible', 'on');
+        else
+            set(eeMarkerActual, 'Visible', 'off');
+        end
+        rt = S.robot_target;
+        if any(rt(1:3) ~= 0)
+            set(eeMarkerTarget, 'XData', rt(1), 'YData', rt(2), 'ZData', rt(3), 'Visible', 'on');
+        else
+            set(eeMarkerTarget, 'Visible', 'off');
+        end
     end
 
     function updateTextPanels()
-        % TODO: Task 11 — 更新文本面板
+        % -- 指令日志 --
+        lines = {};
+        for i = 1:50
+            idx = mod(S.cmd_idx - i + 50, 50) + 1;
+            if ~isempty(S.cmd_log{idx}), lines{end+1} = S.cmd_log{idx}; end
+        end
+        if isempty(lines), lblCmd.Text = '(waiting for commands...)';
+        else, lblCmd.Text = lines; end
+
+        % -- 反馈日志 --
+        lines = {};
+        for i = 1:50
+            idx = mod(S.fb_idx - i + 50, 50) + 1;
+            if ~isempty(S.fb_log{idx}), lines{end+1} = S.fb_log{idx}; end
+        end
+        if isempty(lines), lblFb.Text = '(waiting for feedback...)';
+        else, lblFb.Text = lines; end
+
+        % -- 力数据 --
+        fr = S.force_raw; ff = S.force_filt; mm = S.force_moment;
+        lblForceRaw.Text = {
+            sprintf('Raw:  Fx: %7.2f N  Fy: %7.2f N  Fz: %7.2f N', fr(1), fr(2), fr(3));
+            sprintf('      Mx: %7.2f Nm My: %7.2f Nm Mz: %7.2f Nm', mm(1), mm(2), mm(3));
+            ''};
+        lblForceFilt.Text = {
+            sprintf('Filt: Fx: %7.2f N  Fy: %7.2f N  Fz: %7.2f N', ff(1), ff(2), ff(3));
+            ''};
+        if S.force_stale
+            lblForceRaw.Text{3} = '*** FORCE SENSOR OFFLINE ***';
+            lblForceRaw.FontColor = [1.0 0.3 0.3];
+            lblForceFilt.Text{2} = '*** FORCE SENSOR OFFLINE ***';
+            lblForceFilt.FontColor = [1.0 0.3 0.3];
+        else
+            lblForceRaw.FontColor = clr.text_dim;
+            lblForceFilt.FontColor = clr.text_dim;
+        end
+
+        % -- Robot State --
+        rp = S.robot_pos; rt = S.robot_target; ja = S.joint_angles;
+        txActive = any(rt(1:3) ~= 0);
+        lblCoord.Text = {
+            sprintf('Position (mm):    X: %8.2f  (target: %8.2f)', rp(1), rt(1));
+            sprintf('                   Y: %8.2f  (target: %8.2f)', rp(2), rt(2));
+            sprintf('                   Z: %8.2f  (target: %8.2f)', rp(3), rt(3));
+            sprintf('Orientation (deg): Rx: %7.2f  Ry: %7.2f  Rz: %7.2f', rp(4), rp(5), rp(6));
+            '';
+            sprintf('Joints (deg):  J1:%7.1f  J2:%7.1f  J3:%7.1f', ja(1:3));
+            sprintf('               J4:%7.1f  J5:%7.1f  J6:%7.1f', ja(4:6));
+            '';
+            sprintf('Force (N):   Fx: %7.2f   Fy: %7.2f   Fz: %7.2f', ff(1), ff(2), ff(3));
+            '';
+            sprintf('TX: %s', ternary(txActive, 'ACTIVE', 'IDLE'))};
+
+        % -- Safety & Diagnostics --
+        stateNames = {'RUNNING', 'WARN', 'DEGRADE', 'FATAL'};
+        stateColors = {clr.green, clr.yellow, clr.orange, clr.red};
+        st = S.safety_state + 1;
+        if st < 1, st = 1; elseif st > 4, st = 4; end
+
+        safetyLines = {};
+        safetyLines{1} = sprintf('Safety: %s  |  Speed: %.1fx  |  Alarms: %d', ...
+            stateNames{st}, S.safety_speed, S.safety_alarms);
+        lblSafety.FontColor = stateColors{st};
+
+        % 关节限位
+        [minM, worstJ] = min(S.joint_margins);
+        if minM < 15
+            safetyLines{2} = sprintf('J%d near limit: %.1f deg margin', worstJ, minM);
+            lblSafety.FontColor = clr.orange;
+        else
+            safetyLines{2} = sprintf('Joints: OK (min margin %.0f deg)', minM);
+        end
+
+        % 奇异位形
+        if S.singular
+            safetyLines{3} = sprintf('Z-axis dist: %.0f mm  !!SINGULAR!!', S.z_dist);
+        else
+            safetyLines{3} = sprintf('Z-axis dist: %.0f mm', S.z_dist);
+        end
+
+        % 标定
+        if S.calib_enabled
+            safetyLines{4} = sprintf('Calib: RMS=%.2f mm', S.calib_rms);
+        else
+            safetyLines{4} = 'Calib: not calibrated';
+        end
+
+        % 诊断
+        if S.diag_code ~= 0
+            safetyLines{5} = sprintf('Last Diag: code=%d speed=%.1f %s', ...
+                S.diag_code, S.diag_spd, S.diag_reason);
+        else
+            safetyLines{5} = 'Diagnostics: (no errors)';
+        end
+
+        lblSafety.Text = safetyLines;
+
+        % -- 延迟 + 状态 --
+        lblDelay.Text = sprintf('Touch->Relay: %.1f ms', S.touch_relay_delay);
+        lblState.Text = sprintf('[%s]  Spd: %.1fx', stateNames{st}, S.safety_speed);
+        lblState.FontColor = stateColors{st};
+    end
+
+    function r = ternary(cond, tVal, fVal)
+        if cond, r = tVal; else, r = fVal; end
     end
 
 end
