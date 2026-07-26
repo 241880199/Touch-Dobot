@@ -59,9 +59,10 @@ namespace Config {
     const int FORCE_REALTIME_PORT = 30004;       // 实时反馈端口 (125Hz)
     const int FORCE_FILTER_CUTOFF = 30;          // Butterworth 截止频率 (Hz)
     const int FORCE_STALE_MS = 200;              // 数据超时阈值 (ms)
-    const double FORCE_DEADZONE_N = 0.5;         // 死区 (N)
+    const double FORCE_DEADZONE_N = 0.2;         // 死区 (N) — 降低以减少小力过滤
     const double FORCE_MAX_SENSOR_N = 200.0;     // 传感器量程 (N)
     const double FORCE_MAX_TOUCH_N = 3.3;        // Touch 最大安全力 (N)
+    const double FORCE_REFLECTION_GAIN = 5.0;    // 力反射增益 — 放大传感器力到可感知范围
     const double FORCE_GRADIENT_LIMIT = 50.0;    // 梯度限幅 (N/frame)
     const int FORCE_RECONNECT_INTERVAL = 2000;   // 断线重试间隔 (ms)
 

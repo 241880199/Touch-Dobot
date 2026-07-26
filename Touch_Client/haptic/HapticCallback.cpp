@@ -7,6 +7,7 @@
 #include "../safety/ConstraintForce.h"
 #include "../safety/SafetyPredictor.h"
 #include <HDU/hduVector.h>
+#include <iostream>
 
 HDCallbackCode HDCALLBACK hapticCallback(void* pUserData) {
     auto& app = appState;
@@ -105,6 +106,18 @@ HDCallbackCode HDCALLBACK hapticCallback(void* pUserData) {
         if (totalForce[2] < -maxF) totalForce[2] = -maxF;
 
         hdSetDoublev(HD_CURRENT_FORCE, totalForce);
+
+        // Debug: print force values every ~2s (at 1kHz callback, every 2000th call)
+        static int dbgCount = 0;
+        if (++dbgCount % 2000 == 0) {
+            double mag = sqrt(totalForce[0]*totalForce[0] + totalForce[1]*totalForce[1] + totalForce[2]*totalForce[2]);
+            if (mag > 0.01) {  // only print when there's meaningful force
+                std::cerr << "[Haptic] Force applied: (" << totalForce[0] << ", "
+                          << totalForce[1] << ", " << totalForce[2] << ") N  mag=" << mag
+                          << "  constraint=(" << constraint[0] << "," << constraint[1] << "," << constraint[2]
+                          << ")  stale=" << app.forceData.isStale << std::endl;
+            }
+        }
     }
 
     hdEndFrame(app.hHD);

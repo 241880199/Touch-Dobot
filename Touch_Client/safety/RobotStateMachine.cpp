@@ -114,6 +114,8 @@ void RobotStateMachine::onError(RobotError& error, const Vec3& moveDelta) {
         case RobotState::READY:
             // No motion states — WARN/REJECT have no effect
             if (error.severity == Severity::FATAL && m_state != RobotState::FATAL) {
+                std::cout << "[StateMachine] " << stateName(m_state)
+                          << " → FATAL: " << errorCodeName(error.code) << std::endl;
                 transitionTo(RobotState::FATAL);
             }
             break;
@@ -142,6 +144,13 @@ void RobotStateMachine::onRecovery() {
             transitionTo(RobotState::RUNNING);
             break;
         }
+        case RobotState::FATAL:
+            // Recovered from fatal error (e.g. alarm cleared, escape successful)
+            // Caller must have re-enabled the robot before calling onRecovery()
+            std::cout << "[StateMachine] FATAL → READY (recovered)" << std::endl;
+            m_escalation.reset();
+            transitionTo(RobotState::READY);
+            break;
         default:
             break;
     }

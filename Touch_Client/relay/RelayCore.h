@@ -57,6 +57,9 @@ public:
     RobotStateMachine& stateMachine() { return m_stateMachine; }
     const RobotStateMachine& stateMachine() const { return m_stateMachine; }
 
+    // 心跳刷新（在所有启动初始化完成后调用，防止误判超时）
+    void resetHeartbeat() { m_lastHeartbeatMs = GetTickCount(); m_heartbeatStartMs = GetTickCount(); }
+
     // PING/PONG 延迟测量
     void pingRobot();
 
@@ -84,6 +87,7 @@ private:
     RobotStateMachine m_stateMachine;
     DWORD m_lastPingMs = 0;
     DWORD m_lastHeartbeatMs = 0;
+    DWORD m_heartbeatStartMs = 0;    // 心跳检查开始时间 (宽限期后开启)
     bool m_heartbeatLostReported = false;
     int m_nanFrameCount = 0;  // 连续 NaN 帧计数 (>=3 → FATAL)
 

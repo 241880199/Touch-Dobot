@@ -102,9 +102,20 @@ void step(AppState::ForceData& fd) {
     double fz = mapForceToTouch(fd.filtered[2]);
 
     // 4. Coordinate transform: Robot tool frame -> Touch device frame
+    //    Reaction force must OPPOSE operator's hand motion:
+    //    - When robot is pushed UP (+Fz), Touch pushes DOWN (-Y) to resist
+    //    - When robot is pushed SIDEWAYS (+Fy), Touch pushes OPPOSITE (+Z)
     fd.hapticOut[0] =  fx;   // Robot Fx -> Touch X
-    fd.hapticOut[1] =  fz;   // Robot Fz -> Touch Y
-    fd.hapticOut[2] = -fy;   // Robot -Fy -> Touch Z
+    fd.hapticOut[1] = -fz;   // Robot -Fz -> Touch Y (resist vertical motion)
+    fd.hapticOut[2] =  fy;   // Robot +Fy -> Touch Z (resist lateral motion)
+
+    // 5. Apply reflection gain (amplify for human perception)
+    //    Typical contact forces (5-30N) → clearly perceptible (0.4-2.5N at Touch)
+    //    Safety clamp at FORCE_MAX_TOUCH_N still applies in hapticCallback
+    double gain = Config::FORCE_REFLECTION_GAIN;
+    for (int i = 0; i < 3; i++) {
+        fd.hapticOut[i] *= gain;
+    }
 }
 
 void shutdown() {

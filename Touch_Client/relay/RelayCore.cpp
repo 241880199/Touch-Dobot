@@ -402,6 +402,11 @@ bool RelayCore::init() {
     }
 
     m_stateMachine.onEnableSuccess();
+
+    // 刷新心跳基准时间戳，避免 init() 耗时超过 HEARTBEAT_TIMEOUT_MS
+    // 导致 queryPose() 首次触发时立即误判心跳超时 → FATAL
+    m_lastHeartbeatMs = GetTickCount();
+
     return true;
 }
 
@@ -494,7 +499,12 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
     SafetyVerdict verdict = SafetyPredictor::instance().evaluate(clamped);
 
     // State machine: escalate on warning
-    if (verdict.errorCode != RobotErrorCode::OK) {
+    // NOTE: ERR_IK_NO_SOLUTION is from the auxiliary C++ IK (URDF model),
+    // NOT from the robot controller. The C++ URDF parameters do not match
+    // the CR3 controller's internal model. Do NOT escalate on this — the
+    // robot's own IK handles Cartesian→joint conversion independently.
+    if (verdict.errorCode != RobotErrorCode::OK
+        && verdict.errorCode != RobotErrorCode::ERR_IK_NO_SOLUTION) {
         Vec3 deltaVec(dx, dy, dz);
         RobotError error = SafetyPredictor::instance().lastError();
         m_stateMachine.onError(error, deltaVec);
@@ -661,6 +671,11 @@ void RelayCore::pollFeedback() {
 }
 
 void RelayCore::queryPose() {
+    static int dbgCount = 0;
+    if (++dbgCount <= 3 || dbgCount % 50 == 0) {
+        std::cerr << "[DBG] queryPose #" << dbgCount << " connected=" << isRobotConnected()
+                  << " hbAge=" << (GetTickCount() - m_lastHeartbeatMs) << "ms" << std::endl;
+    }
     if (!isRobotConnected()) return;
     robotDrainEnable();  // 排空残留避免读到其他命令的响应
     robotSendEnable("GetPose()");
@@ -713,19 +728,21 @@ void RelayCore::queryPose() {
         }
     }
 
-    // Health check: if no heartbeat for HEARTBEAT_TIMEOUT_MS, trigger disconnect
-    if (now - m_lastHeartbeatMs > (DWORD)Config::HEARTBEAT_TIMEOUT_MS) {
-        if (!m_heartbeatLostReported) {
-            m_heartbeatLostReported = true;
-            RobotError error;
-            error.code = RobotErrorCode::ERR_HEARTBEAT_LOST;
-            error.severity = Severity::FATAL;
-            error.timestampMs = GetTickCount64();
-            Vec3 zeroDelta = {0, 0, 0};
-            m_stateMachine.onError(error, zeroDelta);
+    // Health check: skip during 10s grace period after startup
+    if (now - m_heartbeatStartMs >= 10000) {
+        if (now - m_lastHeartbeatMs > (DWORD)Config::HEARTBEAT_TIMEOUT_MS) {
+            if (!m_heartbeatLostReported) {
+                m_heartbeatLostReported = true;
+                RobotError error;
+                error.code = RobotErrorCode::ERR_HEARTBEAT_LOST;
+                error.severity = Severity::FATAL;
+                error.timestampMs = GetTickCount64();
+                Vec3 zeroDelta = {0, 0, 0};
+                m_stateMachine.onError(error, zeroDelta);
+            }
+        } else {
+            m_heartbeatLostReported = false;
         }
-    } else {
-        m_heartbeatLostReported = false;
     }
 
     // Heartbeat update
@@ -733,6 +750,10 @@ void RelayCore::queryPose() {
 }
 
 void RelayCore::queryJointAngles() {
+    static int dbgCount = 0;
+    if (++dbgCount <= 3 || dbgCount % 50 == 0) {
+        std::cerr << "[DBG] queryJointAngles #" << dbgCount << " connected=" << isRobotConnected() << std::endl;
+    }
     if (!isRobotConnected()) return;
     robotDrainEnable();  // 排空残留
     robotSendEnable("GetAngle()");
@@ -759,20 +780,22 @@ void RelayCore::queryJointAngles() {
         }
     }
 
-    // Health check: if no heartbeat for HEARTBEAT_TIMEOUT_MS, trigger disconnect
+    // Health check: skip during 10s grace period after startup
     DWORD now = GetTickCount();
-    if (now - m_lastHeartbeatMs > (DWORD)Config::HEARTBEAT_TIMEOUT_MS) {
-        if (!m_heartbeatLostReported) {
-            m_heartbeatLostReported = true;
-            RobotError error;
-            error.code = RobotErrorCode::ERR_HEARTBEAT_LOST;
-            error.severity = Severity::FATAL;
-            error.timestampMs = GetTickCount64();
-            Vec3 zeroDelta = {0, 0, 0};
-            m_stateMachine.onError(error, zeroDelta);
+    if (now - m_heartbeatStartMs >= 10000) {
+        if (now - m_lastHeartbeatMs > (DWORD)Config::HEARTBEAT_TIMEOUT_MS) {
+            if (!m_heartbeatLostReported) {
+                m_heartbeatLostReported = true;
+                RobotError error;
+                error.code = RobotErrorCode::ERR_HEARTBEAT_LOST;
+                error.severity = Severity::FATAL;
+                error.timestampMs = GetTickCount64();
+                Vec3 zeroDelta = {0, 0, 0};
+                m_stateMachine.onError(error, zeroDelta);
+            }
+        } else {
+            m_heartbeatLostReported = false;
         }
-    } else {
-        m_heartbeatLostReported = false;
     }
     m_lastHeartbeatMs = GetTickCount();
 }
@@ -843,6 +866,16 @@ void RelayCore::checkAlarm() {
             } else {
                 std::cout << "[Relay] 脱困失败，按 'e' 重试或重启程序" << std::endl;
             }
+        } else if (mode != 9 && wasAlarm) {
+            // 报警已清除 (用户在机器人控制器上手动清除)
+            std::cout << "[Relay] 报警已清除 (mode=" << mode << ")，尝试恢复..." << std::endl;
+            app.isRobotInAlarm = false;
+            // Re-enable robot since FATAL callback disabled it
+            robotSendEnable("ClearError()");
+            Sleep(200);
+            robotSendEnable("EnableRobot(0.5,0,0,0)");
+            Sleep(200);
+            m_stateMachine.onRecovery();
         }
     }
 }

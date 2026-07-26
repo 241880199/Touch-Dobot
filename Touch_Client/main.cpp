@@ -76,6 +76,7 @@ void display() {
 }
 
 void idle() {
+    static int dbgCount = 0;
     if (!appState.isClosing) {
         glutPostRedisplay();
         // Poll force data at ~30Hz alongside feedback
@@ -83,6 +84,11 @@ void idle() {
         // Check haptic watchdog (only when not in --no-robot mode)
         if (!g_noRobot) {
             RelayCore::instance().checkHapticWatchdog();
+            // 安全网: 每帧刷新心跳，防止 GLUT 定时器延迟导致误判超时
+            RelayCore::instance().resetHeartbeat();
+        }
+        if (++dbgCount <= 5 || dbgCount % 200 == 0) {
+            std::cerr << "[DBG] idle #" << dbgCount << " noRobot=" << g_noRobot << std::endl;
         }
         Sleep(1);
     }
@@ -136,7 +142,12 @@ void keyboard(unsigned char key, int, int) {
     if (key == 'e' || key == 'E') {
         if (!g_noRobot) {
             std::cout << "\n[Main] 手动触发脱困..." << std::endl;
-            RelayCore::instance().triggerEscape();
+            if (RelayCore::instance().triggerEscape()) {
+                std::cout << "[Main] 脱困成功，恢复操作" << std::endl;
+                RelayCore::instance().stateMachine().onRecovery();
+            } else {
+                std::cout << "[Main] 脱困失败" << std::endl;
+            }
         }
     }
 }
@@ -220,6 +231,8 @@ int main(int argc, char* argv[]) {
     glutTimerFunc(500, jointAngleTimer, 0);
 
     // 8. 进入主循环
+    // 刷新心跳时间戳：init()、STL 加载等启动步骤可能耗时超过 HEARTBEAT_TIMEOUT_MS
+    RelayCore::instance().resetHeartbeat();
     std::cout << "\nSystem ready." << std::endl;
     std::cout << "  q/ESC: quit" << std::endl;
     if (!g_noTouch && !g_noRobot) {
