@@ -1085,8 +1085,17 @@ void RelayCore::reportPosition() {
     pos = app.devicePos;
     LeaveCriticalSection(&app.devicePosMutex);
 
+    double sx, sy, sz;
+    {
+        auto& appRef = appState;
+        EnterCriticalSection(&appRef.stylusOrientMutex);
+        sx = appRef.stylusOrient[0];
+        sy = appRef.stylusOrient[1];
+        sz = appRef.stylusOrient[2];
+        LeaveCriticalSection(&appRef.stylusOrientMutex);
+    }
     snprintf(buf, sizeof(buf), "P|%.2f,%.2f,%.2f,%.2f,%.2f,%.2f",
-        pos[0], pos[1], pos[2], 0.0, 0.0, 0.0);
+        pos[0], pos[1], pos[2], sx, sy, sz);
 
     int sent = sendRelayUpdate(buf);
     static int dbgCount = 0;

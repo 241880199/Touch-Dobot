@@ -29,6 +29,47 @@ HDCallbackCode HDCALLBACK hapticCallback(void* pUserData) {
     hduVector3Dd localDevicePos = app.devicePos;
     LeaveCriticalSection(&app.devicePosMutex);
 
+    // ===== 1b. 读取笔杆姿态 (HD_CURRENT_TRANSFORM → Euler ZYX) =====
+    {
+        hdGetDoublev(HD_CURRENT_TRANSFORM, app.transformMatrix);
+
+        // Column-major 4x4 matrix:
+        // | m0  m4  m8  m12 |   rotation 3x3:  [m0 m4 m8 ]
+        // | m1  m5  m9  m13 |                   [m1 m5 m9 ]
+        // | m2  m6  m10 m14 |                   [m2 m6 m10]
+        // | m3  m7  m11 m15 |
+        double* m = app.transformMatrix;
+
+        // Extract ZYX intrinsic Euler angles from rotation submatrix
+        // R = Rz(rz) * Ry(ry) * Rx(rx)
+        double sy = -m[2];  // -R[2][0]
+        if (sy > 1.0) sy = 1.0;
+        if (sy < -1.0) sy = -1.0;
+
+        double ry_rad = asin(sy);
+        double rx_rad, rz_rad;
+
+        if (fabs(cos(ry_rad)) > 1e-6) {
+            // Non-gimbal-lock case
+            rx_rad = atan2(m[6], m[10]);   // atan2(R[2][1], R[2][2])
+            rz_rad = atan2(m[1], m[0]);    // atan2(R[1][0], R[0][0])
+        } else {
+            // Gimbal lock: ry ≈ ±90°, rx and rz are coupled
+            rx_rad = atan2(-m[9], m[5]);   // atan2(-R[1][2], R[1][1])
+            rz_rad = 0.0;
+        }
+
+        double rx_deg = rx_rad * 180.0 / 3.14159265358979323846;
+        double ry_deg = ry_rad * 180.0 / 3.14159265358979323846;
+        double rz_deg = rz_rad * 180.0 / 3.14159265358979323846;
+
+        EnterCriticalSection(&app.stylusOrientMutex);
+        app.stylusOrient[0] = rx_deg;
+        app.stylusOrient[1] = ry_deg;
+        app.stylusOrient[2] = rz_deg;
+        LeaveCriticalSection(&app.stylusOrientMutex);
+    }
+
     // ===== 2. 坐标转换到 robot 系 =====
     Vec3 robotPos = convertTouchToRobot(localDevicePos);
 
@@ -57,14 +98,33 @@ HDCallbackCode HDCALLBACK hapticCallback(void* pUserData) {
         LeaveCriticalSection(&app.trailMutex);
     }
 
-    // ===== 5. 按钮 1 状态机 -> RelayCore =====
-    bool stateChanged = (button1 != app.lastButtonState);
-    if (stateChanged) {
+    // ===== 5. 按钮 1 状态机 -> RelayCore (位置) =====
+    bool b1Changed = (button1 != app.lastButtonState);
+    if (b1Changed) {
         app.lastButtonState = button1;
         if (button1) {
             relay.onButtonPress(robotPos);
         } else {
             relay.onButtonRelease();
+        }
+    }
+
+    // ===== 5b. 按钮 2 状态机 -> RelayCore (姿态) =====
+    static bool s_lastButton2 = false;
+    bool b2Changed = (button2 != s_lastButton2);
+    if (b2Changed) {
+        s_lastButton2 = button2;
+        if (button2) {
+            // Build Vec3 from current stylus Euler angles
+            double sx, sy, sz;
+            EnterCriticalSection(&app.stylusOrientMutex);
+            sx = app.stylusOrient[0];
+            sy = app.stylusOrient[1];
+            sz = app.stylusOrient[2];
+            LeaveCriticalSection(&app.stylusOrientMutex);
+            relay.onButton2Press(Vec3(sx, sy, sz));
+        } else {
+            relay.onButton2Release();
         }
     }
 
@@ -81,7 +141,7 @@ HDCallbackCode HDCALLBACK hapticCallback(void* pUserData) {
     {
         double totalForce[3] = { 0.0, 0.0, 0.0 };
 
-        if (button1) {
+        if (button1 || button2) {
             // 8a. 传感器力 (仅在非 stale 时)
             EnterCriticalSection(&app.forceDataMutex);
             if (!app.forceData.isStale) {
