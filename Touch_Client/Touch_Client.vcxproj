@@ -94,6 +94,8 @@
     <ClCompile Include="safety\SafetyPredictor.cpp" />
     <ClInclude Include="safety\ConstraintForce.h" />
     <ClCompile Include="safety\ConstraintForce.cpp" />
+    <ClInclude Include="safety\SelfCollision.h" />
+    <ClCompile Include="safety\SelfCollision.cpp" />
     <!-- relay -->
     <ClInclude Include="relay\IExtension.h" />
     <ClInclude Include="relay\CoordinateTransform.h" />

@@ -1,7 +1,9 @@
+#define _USE_MATH_DEFINES
 #include "RelayCore.h"
 #include "FeedbackParser.h"
 #include "SafetyBoundary.h"
 #include "../robot/RobotConnection.h"
+#include "../robot/Kinematics.h"
 #include "../core/AppState.h"
 #include "../config/Config.h"
 #include <algorithm>
@@ -10,6 +12,7 @@
 #include <windows.h>
 #include "../safety/SafetyPredictor.h"
 #include "../safety/RobotDiagnostics.h"
+#include "../safety/SelfCollision.h"
 #include "../force/ForcePipeline.h"
 #include "../force/ForceCompensation.h"
 #include "../force/ForceCalibration.h"
@@ -465,101 +468,97 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
         return;
     }
 
-    // 计算增量
+    // Compute position delta (for use outside orient mode only)
     double dx = current.x - m_lastTouchPos.x;
     double dy = current.y - m_lastTouchPos.y;
     double dz = current.z - m_lastTouchPos.z;
+    m_lastTouchPos = current;  // always update touch reference
 
-    // 更新 Touch 参考点
-    m_lastTouchPos = current;
+    Vec3 clamped = m_targetPos;  // safe default for orient-mode edge cases
 
-    // NaN/Inf guard: 连续 3 帧异常 → FATAL
-    if (std::isnan(dx) || std::isnan(dy) || std::isnan(dz) ||
-        std::isinf(dx) || std::isinf(dy) || std::isinf(dz)) {
-        m_nanFrameCount++;
-        if (m_nanFrameCount >= 3) {
-            RobotError error;
-            error.code = RobotErrorCode::ERR_EMERGENCY_STOP;
-            error.severity = Severity::FATAL;
-            error.timestampMs = GetTickCount64();
-            Vec3 zeroDelta = {0, 0, 0};
-            m_stateMachine.onError(error, zeroDelta);
+    if (!m_transmittingOrient) {
+        // ---- Position mode: compute delta, check safety, update target ----
+
+        // NaN/Inf guard: 连续 3 帧异常 → FATAL
+        if (std::isnan(dx) || std::isnan(dy) || std::isnan(dz) ||
+            std::isinf(dx) || std::isinf(dy) || std::isinf(dz)) {
+            m_nanFrameCount++;
+            if (m_nanFrameCount >= 3) {
+                RobotError error;
+                error.code = RobotErrorCode::ERR_EMERGENCY_STOP;
+                error.severity = Severity::FATAL;
+                error.timestampMs = GetTickCount64();
+                Vec3 zeroDelta = {0, 0, 0};
+                m_stateMachine.onError(error, zeroDelta);
+            }
+            LeaveCriticalSection(&m_basePointLock);
+            return;
         }
-        LeaveCriticalSection(&m_basePointLock);
-        return;
-    }
-    m_nanFrameCount = 0;  // 正常帧清零
+        m_nanFrameCount = 0;  // 正常帧清零
 
-    // 跳过微小增量 (Touch 噪声)
-    if (fabs(dx) < 0.05 && fabs(dy) < 0.05 && fabs(dz) < 0.05) {
-        LeaveCriticalSection(&m_basePointLock);
-        return;
-    }
-
-    // ===== 增量步长限制: 单步最大 3mm, 再乘以速度衰减因子 =====
-    static double s_speedMul = 1.0;  // 跨帧持久, 由 SafetyPredictor 更新
-    double len = sqrt(dx*dx + dy*dy + dz*dz);
-    // Apply state machine speed factor ON TOP of safety verdict
-    double effectiveSpeed = std::min(s_speedMul, m_stateMachine.speedFactor());
-    double maxStep = 4.5 * effectiveSpeed;
-    if (len > maxStep) {
-        double scale = maxStep / len;
-        dx *= scale; dy *= scale; dz *= scale;
-    }
-
-    // 计算候选位置 (先不更新 m_targetPos)
-    Vec3 candidate;
-    candidate.x = m_targetPos.x + dx;
-    candidate.y = m_targetPos.y + dy;
-    candidate.z = m_targetPos.z + dz;
-
-    // 安全边界钳位
-    Vec3 clamped = SafetyBoundary::clampToBoundary(candidate);
-
-    // ===== SafetyPredictor 预判 (先评估，后更新，防止边界漂移) =====
-    SafetyVerdict verdict = SafetyPredictor::instance().evaluate(clamped);
-
-    // State machine: escalate on warning
-    // NOTE: ERR_IK_NO_SOLUTION is from the auxiliary C++ IK (URDF model),
-    // NOT from the robot controller. The C++ URDF parameters do not match
-    // the CR3 controller's internal model. Do NOT escalate on this — the
-    // robot's own IK handles Cartesian→joint conversion independently.
-    if (verdict.errorCode != RobotErrorCode::OK
-        && verdict.errorCode != RobotErrorCode::ERR_IK_NO_SOLUTION
-        && verdict.errorCode != RobotErrorCode::ERR_JOINTLIMIT_WARN) {
-        Vec3 deltaVec(dx, dy, dz);
-        RobotError error = SafetyPredictor::instance().lastError();
-        m_stateMachine.onError(error, deltaVec);
-    } else {
-        // Check for reverse-motion de-escalation (immediate recovery)
-        Vec3 deltaVec(dx, dy, dz);
-        auto& esc = m_stateMachine.escalation();
-        if (esc.isEscalated() && esc.shouldDeescalate(deltaVec, esc.lastRejectDirection)) {
-            m_stateMachine.onRecovery();
+        // 跳过微小增量 (Touch 噪声)
+        if (fabs(dx) < 0.05 && fabs(dy) < 0.05 && fabs(dz) < 0.05) {
+            LeaveCriticalSection(&m_basePointLock);
+            return;
         }
-        m_stateMachine.escalation().onClear();
+
+        // ===== 增量步长限制: 单步最大 3mm, 再乘以速度衰减因子 =====
+        static double s_speedMul = 1.0;  // 跨帧持久, 由 SafetyPredictor 更新
+        double len = sqrt(dx*dx + dy*dy + dz*dz);
+        // Apply state machine speed factor ON TOP of safety verdict
+        double effectiveSpeed = std::min(s_speedMul, m_stateMachine.speedFactor());
+        double maxStep = 4.5 * effectiveSpeed;
+        if (len > maxStep) {
+            double scale = maxStep / len;
+            dx *= scale; dy *= scale; dz *= scale;
+        }
+
+        // 计算候选位置 (先不更新 m_targetPos)
+        Vec3 candidate;
+        candidate.x = m_targetPos.x + dx;
+        candidate.y = m_targetPos.y + dy;
+        candidate.z = m_targetPos.z + dz;
+
+        // 安全边界钳位
+        clamped = SafetyBoundary::clampToBoundary(candidate);
+
+        // ===== SafetyPredictor 预判 (先评估，后更新，防止边界漂移) =====
+        SafetyVerdict verdict = SafetyPredictor::instance().evaluate(clamped);
+
+        // State machine: escalate on warning
+        if (verdict.errorCode != RobotErrorCode::OK
+            && verdict.errorCode != RobotErrorCode::ERR_IK_NO_SOLUTION
+            && verdict.errorCode != RobotErrorCode::ERR_JOINTLIMIT_WARN) {
+            Vec3 deltaVec(dx, dy, dz);
+            RobotError error = SafetyPredictor::instance().lastError();
+            m_stateMachine.onError(error, deltaVec);
+        } else {
+            // Check for reverse-motion de-escalation (immediate recovery)
+            Vec3 deltaVec(dx, dy, dz);
+            auto& esc = m_stateMachine.escalation();
+            if (esc.isEscalated() && esc.shouldDeescalate(deltaVec, esc.lastRejectDirection)) {
+                m_stateMachine.onRecovery();
+            }
+            m_stateMachine.escalation().onClear();
+        }
+
+        // Check if state machine allows motion
+        if (!m_stateMachine.canMove()) {
+            LeaveCriticalSection(&m_basePointLock);
+            return;
+        }
+
+        if (verdict.action == SafetyVerdict::REJECT) {
+            std::cerr << "[Safety] REJECT: " << verdict.reason
+                      << " — candidate=(" << clamped.x << "," << clamped.y << "," << clamped.z << ")"
+                      << std::endl;
+            LeaveCriticalSection(&m_basePointLock);
+            return;  // 不更新 m_targetPos，下帧从同一位置重新计算
+        }
+
+        // 更新速度衰减因子 (用于下帧)
+        s_speedMul = (verdict.action == SafetyVerdict::WARN_SLOW) ? verdict.speedFactor : 1.0;
     }
-
-    // Check if state machine allows motion
-    if (!m_stateMachine.canMove()) {
-        LeaveCriticalSection(&m_basePointLock);
-        return;
-    }
-
-    if (verdict.action == SafetyVerdict::REJECT) {
-        std::cerr << "[Safety] REJECT: " << verdict.reason
-                  << " — candidate=(" << clamped.x << "," << clamped.y << "," << clamped.z << ")"
-                  << std::endl;
-        LeaveCriticalSection(&m_basePointLock);
-        return;  // 不更新 m_targetPos，下帧从同一位置重新计算
-    }
-
-    // 通过安全检查后才更新目标位置
-    m_targetPos = clamped;
-
-    // 更新速度衰减因子 (用于下帧)
-    s_speedMul = (verdict.action == SafetyVerdict::WARN_SLOW) ? verdict.speedFactor : 1.0;
-    LeaveCriticalSection(&m_basePointLock);
 
     // ===== 姿态增量计算 (Button 2 按下时) =====
     auto& app = appState;
@@ -609,10 +608,31 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
             if (drz > Config::ORIENT_MAX_STEP_DEG) drz = Config::ORIENT_MAX_STEP_DEG;
             if (drz < -Config::ORIENT_MAX_STEP_DEG) drz = -Config::ORIENT_MAX_STEP_DEG;
 
+            // ---- Axis remap: stylus frame → robot frame ----
+            // Build 3×3 rotation that maps Touch rotation axes to robot rotation axes.
+            // When calibration is enabled, use the calibrated rigid transform R.
+            // Fallback: hardcoded axis mapping matching convertTouchToRobot():
+            //   robot_X = touch_X   → [1, 0,  0]
+            //   robot_Y = -touch_Z  → [0, 0, -1]
+            //   robot_Z = touch_Y   → [0, 1,  0]
+            double R00, R01, R02, R10, R11, R12, R20, R21, R22;
+            if (Calibration::enabled) {
+                R00 = Calibration::R[0]; R01 = Calibration::R[1]; R02 = Calibration::R[2];
+                R10 = Calibration::R[3]; R11 = Calibration::R[4]; R12 = Calibration::R[5];
+                R20 = Calibration::R[6]; R21 = Calibration::R[7]; R22 = Calibration::R[8];
+            } else {
+                R00 = 1.0; R01 = 0.0; R02 =  0.0;
+                R10 = 0.0; R11 = 0.0; R12 = -1.0;
+                R20 = 0.0; R21 = 1.0; R22 =  0.0;
+            }
+            double robot_dRx = R00*drx + R01*dry + R02*drz;
+            double robot_dRy = R10*drx + R11*dry + R12*drz;
+            double robot_dRz = R20*drx + R21*dry + R22*drz;
+
             // Accumulate and clamp
-            m_targetOrient.x += drx;
-            m_targetOrient.y += dry;
-            m_targetOrient.z += drz;
+            m_targetOrient.x += robot_dRx;
+            m_targetOrient.y += robot_dRy;
+            m_targetOrient.z += robot_dRz;
             m_targetOrient = clampOrientToBounds(m_targetOrient);
         }
 
@@ -622,10 +642,110 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
         }  // end !NaN guard
     }
 
+    // ===== Position update (only when NOT in orientation mode) =====
+    // When m_transmittingOrient is true, the TCP position is frozen —
+    // we compute it below from the fixed wrist center + rotated offset.
+    if (!m_transmittingOrient) {
+        // 通过安全检查后才更新目标位置
+        m_targetPos = clamped;
+    }
+    LeaveCriticalSection(&m_basePointLock);
+
+    // ===== Compute ServoP position =====
+    double servoCmdX, servoCmdY, servoCmdZ;
+    if (m_transmittingOrient && m_orientValid) {
+        // Orientation mode: compute TCP from fixed wrist center + rotated offset.
+        // This keeps the "other end of the last arm" (J5/wrist) fixed in space
+        // while the TCP rotates around it.
+        double rx_deg = targetRx, ry_deg = targetRy, rz_deg = targetRz;
+        double rx = rx_deg * M_PI / 180.0;
+        double ry = ry_deg * M_PI / 180.0;
+        double rz = rz_deg * M_PI / 180.0;
+
+        // R = Rz(rz) * Ry(ry) * Rx(rx)
+        double crx = cos(rx), srx = sin(rx);
+        double cry = cos(ry), sry = sin(ry);
+        double crz = cos(rz), srz = sin(rz);
+
+        // Rotation matrix R = Rz * Ry * Rx
+        double R00 = crz*cry;
+        double R01 = crz*sry*srx - srz*crx;
+        double R02 = crz*sry*crx + srz*srx;
+        double R10 = srz*cry;
+        double R11 = srz*sry*srx + crz*crx;
+        double R12 = srz*sry*crx - crz*srx;
+        double R20 = -sry;
+        double R21 = cry*srx;
+        double R22 = cry*crx;
+
+        // Rotate TCP offset from wrist
+        double ox = m_tcpOffsetFromWrist.x;
+        double oy = m_tcpOffsetFromWrist.y;
+        double oz = m_tcpOffsetFromWrist.z;
+        double rotOx = R00*ox + R01*oy + R02*oz;
+        double rotOy = R10*ox + R11*oy + R12*oz;
+        double rotOz = R20*ox + R21*oy + R22*oz;
+
+        servoCmdX = m_wristCenterFixed.x + rotOx;
+        servoCmdY = m_wristCenterFixed.y + rotOy;
+        servoCmdZ = m_wristCenterFixed.z + rotOz;
+
+        // Clamp to safety boundary
+        Vec3 tcpCandidate(servoCmdX, servoCmdY, servoCmdZ);
+        Vec3 tcpClamped = SafetyBoundary::clampToBoundary(tcpCandidate);
+        servoCmdX = tcpClamped.x;
+        servoCmdY = tcpClamped.y;
+        servoCmdZ = tcpClamped.z;
+
+        // ===== Self-collision check for orientation mode =====
+        // During pure orientation, J1-J3 are approximately fixed (wrist center is fixed).
+        // Use current joint angles for J1-J3 positions, but substitute our computed
+        // J5 (fixed wrist) and J6 (rotated TCP) for the wrist assembly check.
+        {
+            double jointsSc[6];
+            {
+                EnterCriticalSection(&app.robotPoseMutex);
+                jointsSc[0] = app.robotActualPose.j1;
+                jointsSc[1] = app.robotActualPose.j2;
+                jointsSc[2] = app.robotActualPose.j3;
+                jointsSc[3] = app.robotActualPose.j4;
+                jointsSc[4] = app.robotActualPose.j5;
+                jointsSc[5] = app.robotActualPose.j6;
+                LeaveCriticalSection(&app.robotPoseMutex);
+            }
+
+            Vec3 fkPositions[7];
+            Kinematics::computeJointPositions(jointsSc, fkPositions);
+            // Override J5 and J6 with our orientation-mode computed positions
+            fkPositions[5] = m_wristCenterFixed;
+            fkPositions[6] = Vec3(servoCmdX, servoCmdY, servoCmdZ);
+
+            SelfCollision::Result sc = SelfCollision::check(fkPositions);
+            if (sc.reject) {
+                std::cerr << "[Safety] Self-collision REJECT: dist=" << sc.minDistMm
+                          << "mm (J" << sc.pairA << " vs J" << sc.pairB << " link)"
+                          << " — orientation step blocked" << std::endl;
+                return;  // skip this frame's ServoP
+            }
+            if (sc.warning) {
+                static int scWarnCount = 0;
+                if (++scWarnCount % 10 == 0) {  // throttle to every ~300ms
+                    std::cerr << "[Safety] Self-collision WARN: dist=" << sc.minDistMm
+                              << "mm (J" << sc.pairA << " vs J" << sc.pairB << " link)"
+                              << std::endl;
+                }
+            }
+        }
+    } else {
+        servoCmdX = clamped.x;
+        servoCmdY = clamped.y;
+        servoCmdZ = clamped.z;
+    }
+
     // ===== 构造并发送 ServoP =====
     char cmd[256];
     snprintf(cmd, sizeof(cmd), "ServoP(%.2f,%.2f,%.2f,%.2f,%.2f,%.2f)",
-        clamped.x, clamped.y, clamped.z,
+        servoCmdX, servoCmdY, servoCmdZ,
         targetRx, targetRy, targetRz);
 
     bool sent = robotSendMotion(cmd);
@@ -635,7 +755,8 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
     if (sendCount % 50 == 0) {
         std::cout << "[Relay] Motion sends: " << sendCount
                   << " ok, " << failCount << " fail"
-                  << "  target=(" << clamped.x << "," << clamped.y << "," << clamped.z << ")"
+                  << "  target=(" << servoCmdX << "," << servoCmdY << "," << servoCmdZ << ")"
+                  << " orient=(" << targetRx << "," << targetRy << "," << targetRz << ")"
                   << std::endl;
     }
 
@@ -656,9 +777,12 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
 
     // 更新目标位姿
     EnterCriticalSection(&app.robotPoseMutex);
-    app.robotTargetPose.x = clamped.x;
-    app.robotTargetPose.y = clamped.y;
-    app.robotTargetPose.z = clamped.z;
+    app.robotTargetPose.x = servoCmdX;
+    app.robotTargetPose.y = servoCmdY;
+    app.robotTargetPose.z = servoCmdZ;
+    app.robotTargetPose.rx = targetRx;
+    app.robotTargetPose.ry = targetRy;
+    app.robotTargetPose.rz = targetRz;
     LeaveCriticalSection(&app.robotPoseMutex);
 }
 
@@ -686,11 +810,17 @@ void RelayCore::onButtonPress(const Vec3& robotPos) {
 }
 
 void RelayCore::onButtonRelease() {
-    m_transmitting = false;
-    m_basePointSet = false;
-    m_lastTouchValid = false;
-    m_stateMachine.onButtonRelease();
-    std::cout << "[Relay] Button RELEASE — motion stopped" << std::endl;
+    // If orientation mode is still active (button2 held), keep transmitting
+    // for orientation control. Only fully stop when both modes are done.
+    if (!m_transmittingOrient) {
+        m_transmitting = false;
+        m_basePointSet = false;
+        m_lastTouchValid = false;
+        m_stateMachine.onButtonRelease();
+    }
+    std::cout << "[Relay] Button RELEASE"
+              << (m_transmittingOrient ? " (orientation still active)" : " — motion stopped")
+              << std::endl;
 }
 
 void RelayCore::onButton2Press(const Vec3& stylusOrient) {
@@ -701,16 +831,40 @@ void RelayCore::onButton2Press(const Vec3& stylusOrient) {
     // m_lastStylusOrient (incremental delta) in sendPosition().
     m_orientRefStylus = stylusOrient;
 
-    // Capture robot current orientation
+    // Capture robot current orientation and joint angles
+    double curRx, curRy, curRz;
+    double joints[6];
     {
         auto& app = appState;
         EnterCriticalSection(&app.robotPoseMutex);
         m_orientRefRobot = Vec3(app.robotActualPose.rx, app.robotActualPose.ry, app.robotActualPose.rz);
+        curRx = app.robotActualPose.rx;
+        curRy = app.robotActualPose.ry;
+        curRz = app.robotActualPose.rz;
+        joints[0] = app.robotActualPose.j1;
+        joints[1] = app.robotActualPose.j2;
+        joints[2] = app.robotActualPose.j3;
+        joints[3] = app.robotActualPose.j4;
+        joints[4] = app.robotActualPose.j5;
+        joints[5] = app.robotActualPose.j6;
         LeaveCriticalSection(&app.robotPoseMutex);
     }
 
+    // Compute wrist center (J5 position) and TCP offset via FK.
+    // During orientation-only mode, the wrist center stays FIXED and the TCP
+    // rotates around it, so the "other end of the last arm" doesn't move.
+    Vec3 jointPositions[7];
+    Kinematics::computeJointPositions(joints, jointPositions);
+    m_wristCenterFixed = jointPositions[5];       // J5 = wrist center
+    Vec3 tcpPos = jointPositions[6];               // J6 = TCP
+    m_tcpOffsetFromWrist = Vec3(
+        tcpPos.x - m_wristCenterFixed.x,
+        tcpPos.y - m_wristCenterFixed.y,
+        tcpPos.z - m_wristCenterFixed.z
+    );
+
     // Initialize accumulated target and last-frame stylus orientation
-    m_targetOrient = m_orientRefRobot;
+    m_targetOrient = Vec3(curRx, curRy, curRz);
     m_lastStylusOrient = stylusOrient;
     m_orientValid = true;
     m_transmittingOrient = true;
@@ -718,14 +872,8 @@ void RelayCore::onButton2Press(const Vec3& stylusOrient) {
     // If position mode is not already active, start transmission
     if (!m_transmitting) {
         m_stateMachine.onButtonPress();
-        // Seed position target from actual pose (same as button1 press)
-        {
-            auto& app = appState;
-            EnterCriticalSection(&app.robotPoseMutex);
-            Vec3 rawPos(app.robotActualPose.x, app.robotActualPose.y, app.robotActualPose.z);
-            LeaveCriticalSection(&app.robotPoseMutex);
-            m_targetPos = SafetyBoundary::clampToBoundary(rawPos);
-        }
+        // Seed position target from actual TCP pose (frozen during orientation mode)
+        m_targetPos = SafetyBoundary::clampToBoundary(tcpPos);
         m_transmitting = true;
         m_basePointSet = true;
     }
@@ -734,6 +882,8 @@ void RelayCore::onButton2Press(const Vec3& stylusOrient) {
     std::cout << "[Relay] Button2 PRESS — orient ref=("
               << m_orientRefStylus.x << "," << m_orientRefStylus.y << "," << m_orientRefStylus.z << ")"
               << " robot ref=(" << m_orientRefRobot.x << "," << m_orientRefRobot.y << "," << m_orientRefRobot.z << ")"
+              << " wrist_center=(" << m_wristCenterFixed.x << "," << m_wristCenterFixed.y << "," << m_wristCenterFixed.z << ")"
+              << " tcp_offset=(" << m_tcpOffsetFromWrist.x << "," << m_tcpOffsetFromWrist.y << "," << m_tcpOffsetFromWrist.z << ")"
               << std::endl;
 }
 
@@ -741,15 +891,29 @@ void RelayCore::onButton2Release() {
     m_transmittingOrient = false;
     m_orientValid = false;
 
-    // If position mode is also not active, stop all transmission
-    // (m_transmitting will be false if only button2 was held)
-    // Note: m_transmitting is checked independently — keep it set
-    // if button1 is still held. We use a separate check:
-    // if neither mode is active, stop transmission fully.
-    // The haptic callback will call onButtonRelease() separately
-    // when button1 is released. Here we only clear orient state.
-
-    std::cout << "[Relay] Button2 RELEASE — orientation control stopped" << std::endl;
+    // If button1 is NOT pressed (only button2 was active), stop all transmission.
+    // When button1 IS still held, keep m_transmitting active for position control.
+    if (!appState.lastButtonState.load()) {
+        m_transmitting = false;
+        m_basePointSet = false;
+        m_lastTouchValid = false;
+        m_stateMachine.onButtonRelease();
+        std::cout << "[Relay] Button2 RELEASE — all motion stopped" << std::endl;
+    } else {
+        // Button1 still held — re-sync m_targetPos to current robot TCP.
+        // During orientation mode, the TCP moved (rotated around wrist center),
+        // so m_targetPos is stale. Re-seed from actual pose to avoid a position jump.
+        EnterCriticalSection(&m_basePointLock);
+        {
+            auto& app = appState;
+            EnterCriticalSection(&app.robotPoseMutex);
+            Vec3 rawPos(app.robotActualPose.x, app.robotActualPose.y, app.robotActualPose.z);
+            LeaveCriticalSection(&app.robotPoseMutex);
+            m_targetPos = SafetyBoundary::clampToBoundary(rawPos);
+        }
+        LeaveCriticalSection(&m_basePointLock);
+        std::cout << "[Relay] Button2 RELEASE — orientation control stopped (button1 still held)" << std::endl;
+    }
 }
 
 static void logFeedback(const char* msg, const char* portLabel) {
