@@ -14,6 +14,8 @@
 #include "render/SceneRenderer.h"
 #include "safety/RobotDiagnostics.h"
 #include "calibration/CalibrationSolver.h"
+#include "force/ForceCalibration.h"
+#include "force/ForceCompensation.h"
 #include "robot/Kinematics.h"
 #include <cstdio>
 
@@ -57,6 +59,24 @@ void idle() {
         // Poll force data at ~30Hz alongside feedback (robot mode only)
         if (!g_noRobot) {
             RelayCore::instance().pollForce();
+
+            // Track force calibration state changes
+            static ForceCalibration::State lastCalibState = ForceCalibration::State::IDLE;
+            ForceCalibration::State curState = ForceCalibration::currentState();
+            if (curState != lastCalibState) {
+                lastCalibState = curState;
+                std::cout << "[Force] Calibration: " << ForceCalibration::statusText() << std::endl;
+                if (curState == ForceCalibration::State::DONE) {
+                    // Load saved results and apply to ForceCompensation
+                    double massKg, com[3], biasF[3], biasM[3], residualRms;
+                    if (ForceCalibration::loadFromFile("force_calib.json",
+                            massKg, com, biasF, biasM, residualRms)) {
+                        ForceCompensation::setCalibration(massKg, com, biasF, biasM);
+                        std::cout << "[Force] Calibration applied! mass=" << massKg
+                                  << "kg, residual=" << residualRms << "N" << std::endl;
+                    }
+                }
+            }
         }
         // Check haptic watchdog (only when not in --no-robot mode)
         if (!g_noRobot) {
@@ -123,6 +143,15 @@ void jointMarginTimer(int) {
     }
 }
 
+void connectionHealthTimer(int) {
+    if (!g_noRobot) {
+        RelayCore::instance().sendConnectionHealth();
+    }
+    if (!appState.isClosing) {
+        glutTimerFunc(1000, connectionHealthTimer, 0);
+    }
+}
+
 void keyboard(unsigned char key, int, int) {
     if (key == 'q' || key == 'Q' || key == 27) { // q 或 ESC
         std::cout << "\nShutting down..." << std::endl;
@@ -147,9 +176,26 @@ void keyboard(unsigned char key, int, int) {
         }
     }
 
-    // ===== 标定模式 =====
-    // 'c': 切换标定采集模式
+    // ===== Force Calibration ('c' key) =====
+    // 'c' when IDLE (not transmitting): start/abort force calibration
+    // 'c' when coord-calib mode is active: cancel coord calib
     if (key == 'c' || key == 'C') {
+        auto& relay = RelayCore::instance();
+
+        // If force calibration is running, 'c' aborts it
+        if (relay.isForceCalibrating()) {
+            relay.abortForceCalibration();
+            return;
+        }
+
+        // If idle, try to start force calibration
+        if (!g_noRobot && relay.startForceCalibration()) {
+            std::cout << "[Force] Move robot to each target orientation "
+                      << "and press SPACE to confirm." << std::endl;
+            return;
+        }
+
+        // Coordinate calibration mode toggle (fall through if force calib not started)
         if (Calibration::collectMode) {
             Calibration::cancelCollect();
             std::cout << "\n[CALIB] Mode OFF" << std::endl;
@@ -159,6 +205,13 @@ void keyboard(unsigned char key, int, int) {
                       << "Align Touch pen + robot to marker, press SPACE to record,"
                       << " 's' to solve, 'c' to exit" << std::endl;
         }
+        return;
+    }
+
+    // SPACE during force calibration: confirm current pose
+    if (key == ' ' && RelayCore::instance().isForceCalibrating()) {
+        ForceCalibration::confirmPose();
+        std::cout << "[Force] Pose confirmed, sampling..." << std::endl;
         return;
     }
 
@@ -467,6 +520,20 @@ int main(int argc, char* argv[]) {
         RelayCore::instance().initForceReader();
     }
 
+    // 4.6 加载力传感器标定文件
+    {
+        double massKg, com[3], biasF[3], biasM[3], residualRms;
+        if (ForceCalibration::loadFromFile("force_calib.json",
+                massKg, com, biasF, biasM, residualRms)) {
+            ForceCompensation::setCalibration(massKg, com, biasF, biasM);
+            std::cout << "[Force] Loaded force_calib.json (mass=" << massKg
+                      << "kg, residual=" << residualRms << "N)" << std::endl;
+        } else {
+            std::cout << "[Force] No calibration file — force compensation disabled. "
+                      << "Press 'c' when idle to calibrate." << std::endl;
+        }
+    }
+
     // 5. 初始化诊断日志
     RobotDiagnostics::instance().init(Config::DIAGNOSTIC_LOG_PATH);
 
@@ -488,6 +555,7 @@ int main(int argc, char* argv[]) {
     glutTimerFunc(500, jointAngleTimer, 0);
     glutTimerFunc(1000, safetyStatusTimer, 0);
     glutTimerFunc(1500, jointMarginTimer, 0);
+    glutTimerFunc(2000, connectionHealthTimer, 0);
 
     // 8. 进入主循环
     // 刷新心跳时间戳：init()、STL 加载等启动步骤可能耗时超过 HEARTBEAT_TIMEOUT_MS
