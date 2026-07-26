@@ -90,8 +90,10 @@ void idle() {
             keyboard((unsigned char)ch, 0, 0);
         }
 
-        // Poll force data at ~30Hz alongside feedback
-        RelayCore::instance().pollForce();
+        // Poll force data at ~30Hz alongside feedback (robot mode only)
+        if (!g_noRobot) {
+            RelayCore::instance().pollForce();
+        }
         // Check haptic watchdog (only when not in --no-robot mode)
         if (!g_noRobot) {
             RelayCore::instance().checkHapticWatchdog();

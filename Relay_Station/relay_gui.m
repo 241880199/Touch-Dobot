@@ -218,46 +218,49 @@ function relay_gui()
     function updateDisplay()
         if ~S.running, return; end
 
-        % 处理 TCP 数据
-        processNetworkData();
-
-        % 更新 3D 模型
-        update3DModel();
-
-        % 更新文本面板
-        updateTextPanels();
-
-        drawnow limitrate;
+        try
+            processNetworkData();
+            update3DModel();
+            updateTextPanels();
+            drawnow limitrate;
+        catch
+            % Prevent timer from crashing on transient UI errors
+        end
     end
 
     function processNetworkData()
-        % 从 Touch 客户端读取数据 (事件驱动: readline + terminator)
-        if isempty(S.server) || ~isvalid(S.server) || ~S.server.Connected
+        if isempty(S.server) || ~isvalid(S.server)
             return;
         end
 
         try
-            while S.server.NumBytesAvailable > 0
-                msg = strtrim(readline(S.server));
-                if isempty(msg), continue; end
+            nAvail = S.server.NumBytesAvailable;
+            while nAvail > 0
+                raw = readline(S.server);
+                if isempty(raw) || ismissing(raw), nAvail = S.server.NumBytesAvailable; continue; end
+                % Force to char vector - R2025b tcpserver returns string type
+                if isstring(raw), raw = char(raw); end
+                if ~ischar(raw), nAvail = S.server.NumBytesAvailable; continue; end
+                msg = strtrim(raw);
+                if isempty(msg), nAvail = S.server.NumBytesAvailable; continue; end
 
                 S.packet_count = S.packet_count + 1;
 
                 % 解析消息格式
-                if startsWith(msg, 'P|')  % Touch 位姿 → 机器人目标位置
+                if startsWith(msg, 'P|')
                     vals = sscanf(msg(3:end), '%f,%f,%f,%f,%f,%f');
                     if length(vals) == 6
                         S.touch_pos = vals';
                         S.robot_target = vals';
                     end
-                elseif startsWith(msg, 'C|')  % 指令 (v3.0: C++ 直连机械臂，此处仅记录日志)
+                elseif startsWith(msg, 'C|')
                     addCmdLog(msg(3:end));
-                elseif startsWith(msg, 'R|')  % 力数据
+                elseif startsWith(msg, 'R|')
                     vals = sscanf(msg(3:end), '%f,%f,%f');
                     if length(vals) == 3
                         S.force_raw = vals';
                     end
-                elseif startsWith(msg, 'F|')  % 6 轴力传感器数据: F|fx,fy,fz,mx,my,mz,stale
+                elseif startsWith(msg, 'F|')
                     vals = str2double(split(msg(3:end), ','));
                     if numel(vals) >= 7
                         S.force_raw = vals(1:3)';
@@ -265,22 +268,24 @@ function relay_gui()
                         S.force_moment = vals(4:6)';
                         S.force_stale = vals(7);
                     end
-                elseif startsWith(msg, 'J|')  % 关节角度 (来自 C++ 端)
+                elseif startsWith(msg, 'J|')
                     vals = sscanf(msg(3:end), '%f,%f,%f,%f,%f,%f');
                     if length(vals) == 6
                         S.joint_angles = vals';
                     end
-                elseif startsWith(msg, 'RP|')  % 机器人实际位姿 (来自 C++ GetPose)
+                elseif startsWith(msg, 'RP|')
                     vals = sscanf(msg(3:end), '%f,%f,%f,%f,%f,%f');
                     if length(vals) == 6
                         S.robot_pos = vals';
                     end
                 end
+
+                nAvail = S.server.NumBytesAvailable;
             end
         catch
         end
 
-        % 更新延迟
+        % 延迟统计
         t = toc(S.last_time);
         if t > 0.5
             S.touch_relay_delay = t * 1000 / max(S.packet_count, 1);
@@ -478,12 +483,12 @@ function relay_gui()
             ''};
         if S.force_stale
             lbl_force_raw.Text{3} = '*** FORCE SENSOR OFFLINE ***';
-            lbl_force_raw.ForegroundColor = [1.0 0.3 0.3];
+            lbl_force_raw.FontColor = [1.0 0.3 0.3];
             lbl_force_filt.Text{2} = '*** FORCE SENSOR OFFLINE ***';
-            lbl_force_filt.ForegroundColor = [1.0 0.3 0.3];
+            lbl_force_filt.FontColor = [1.0 0.3 0.3];
         else
-            lbl_force_raw.ForegroundColor = [0.6 0.65 0.7];
-            lbl_force_filt.ForegroundColor = [0.6 0.65 0.7];
+            lbl_force_raw.FontColor = [0.6 0.65 0.7];
+            lbl_force_filt.FontColor = [0.6 0.65 0.7];
         end
 
         % 坐标
