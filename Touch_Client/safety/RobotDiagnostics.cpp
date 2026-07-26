@@ -1,5 +1,6 @@
 #include "RobotDiagnostics.h"
 #include "../config/Config.h"
+#include "../relay/RelayCore.h"
 #include <windows.h>
 #include <ctime>
 #include <cstring>
@@ -103,6 +104,9 @@ void RobotDiagnostics::logError(const RobotError& error, double constraintMag,
     e.speedFactor = error.speedFactor;
     e.constraintForceMag = constraintMag;
     log(e);
+
+    RelayCore::instance().reportDiagnostic(
+        static_cast<int>(error.code), error.speedFactor, errorCodeName(error.code));
 }
 
 int RobotDiagnostics::errorCount(RobotErrorCode code) const {

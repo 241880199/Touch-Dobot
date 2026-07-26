@@ -46,6 +46,12 @@ public:
     void reportPosition();
     void reportCommand(const char* cmd);
 
+    void sendSafetyStatus();
+    void sendJointMargins();
+    void sendSingularity();
+    void sendCalibStatus();
+    void reportDiagnostic(int errorCode, double speedFactor, const char* reason);
+
     // 状态查询（供 Render 层读取）
     bool isTransmitting() const { return m_transmitting; }
 

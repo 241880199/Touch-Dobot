@@ -968,6 +968,60 @@ void RelayCore::reportCommand(const char* cmd) {
     sendRelayUpdate(buf);
 }
 
+void RelayCore::sendSafetyStatus() {
+    const auto& sm = m_stateMachine;
+    char buf[128];
+    snprintf(buf, sizeof(buf), "S|%d,%.2f,%d",
+        static_cast<int>(sm.currentState()),
+        sm.speedFactor(),
+        SafetyPredictor::instance().alarmCount());
+    sendRelayUpdate(buf);
+}
+
+void RelayCore::sendJointMargins() {
+    static const double jlims[6][2] = {
+        {-360,360},{-360,360},{-155,155},{-360,360},{-360,360},{-360,360}};
+    auto& app = appState;
+    EnterCriticalSection(&app.robotPoseMutex);
+    double jv[6]={app.robotActualPose.j1,app.robotActualPose.j2,
+        app.robotActualPose.j3,app.robotActualPose.j4,
+        app.robotActualPose.j5,app.robotActualPose.j6};
+    LeaveCriticalSection(&app.robotPoseMutex);
+    char buf[128];
+    snprintf(buf,sizeof(buf),"L|%.1f,%.1f,%.1f,%.1f,%.1f,%.1f",
+        fmin(fabs(jv[0]-jlims[0][0]),fabs(jlims[0][1]-jv[0])),
+        fmin(fabs(jv[1]-jlims[1][0]),fabs(jlims[1][1]-jv[1])),
+        fmin(fabs(jv[2]-jlims[2][0]),fabs(jlims[2][1]-jv[2])),
+        fmin(fabs(jv[3]-jlims[3][0]),fabs(jlims[3][1]-jv[3])),
+        fmin(fabs(jv[4]-jlims[4][0]),fabs(jlims[4][1]-jv[4])),
+        fmin(fabs(jv[5]-jlims[5][0]),fabs(jlims[5][1]-jv[5])));
+    sendRelayUpdate(buf);
+}
+
+void RelayCore::sendSingularity() {
+    auto& app = appState;
+    EnterCriticalSection(&app.robotPoseMutex);
+    double x=app.robotActualPose.x, y=app.robotActualPose.y;
+    LeaveCriticalSection(&app.robotPoseMutex);
+    double r_xy=sqrt(x*x+y*y);
+    char buf[64];
+    snprintf(buf,sizeof(buf),"G|%.1f,%d",r_xy,(r_xy<30.0)?1:0);
+    sendRelayUpdate(buf);
+}
+
+void RelayCore::sendCalibStatus() {
+    char buf[64];
+    snprintf(buf,sizeof(buf),"B|%d,%.2f",
+        Calibration::enabled?1:0, Calibration::enabled?Calibration::rmsError:-1.0);
+    sendRelayUpdate(buf);
+}
+
+void RelayCore::reportDiagnostic(int errorCode, double speedFactor, const char* reason) {
+    char buf[256];
+    snprintf(buf,sizeof(buf),"D|%d,%.2f,%.200s",errorCode,speedFactor,reason?reason:"");
+    sendRelayUpdate(buf);
+}
+
 // ===== ForceReader 管理 =====
 
 bool RelayCore::initForceReader() {
