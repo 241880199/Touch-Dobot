@@ -103,11 +103,19 @@ public:
 
     // ===== 力数据 =====
     struct ForceData {
-        double raw[6] = {0};        // Fx,Fy,Fz,Mx,My,Mz (N, Nm)
-        double filtered[6] = {0};   // Butterworth 低通滤波输出
-        double hapticOut[3] = {0};  // 已变换到 Touch 坐标系，haptic 线程直接读
-        bool isStale = true;        // 超过 200ms 无新数据
+        double raw[6] = {0};            // Fx,Fy,Fz,Mx,My,Mz (N, Nm) — 30004 原始数据
+        double compensated[6] = {0};    // 重力+惯性+零偏补偿后 (N, Nm)
+        double filtered[6] = {0};       // Butterworth 低通滤波输出
+        double hapticOut[3] = {0};      // 已变换到 Touch 坐标系，haptic 线程直接读
+        bool isStale = true;            // 超过 200ms 无新数据
         DWORD lastUpdateMs = 0;
+
+        // 标定参数 (由 ForceCalibration 求解, ForceCompensation 读取)
+        bool isCalibrated = false;
+        double calibMassKg = 0.0;           // 末端等效质量 (kg)
+        double calibComSensor[3] = {0};     // 质心在传感器坐标系 (m)
+        double calibBiasForce[3] = {0};     // 力零偏 (N)
+        double calibBiasTorque[3] = {0};    // 力矩零偏 (Nm)
     };
     ForceData forceData;
     CRITICAL_SECTION forceDataMutex;
