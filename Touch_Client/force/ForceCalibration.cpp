@@ -183,6 +183,7 @@ bool start() {
 }
 
 void abort() {
+    printf("[Force] Calibration ABORTED by user (state was: %s)\n", statusText());
     g_calibState = State::ABORTED;
 }
 
@@ -288,6 +289,7 @@ bool update(double dt, const double raw[6], const double pose[6]) {
             g_phaseTimer = 0.0;
 
             if (g_poseIndex >= Config::FORCE_CALIB_NUM_POSES) {
+                printf("[Force] All %d poses collected, entering SOLVE...\n", g_numCollected);
                 g_calibState = State::SOLVE;
             } else {
                 // Prompt for next pose
@@ -303,7 +305,11 @@ bool update(double dt, const double raw[6], const double pose[6]) {
     }
 
     case State::SOLVE: {
+        printf("[Force] SOLVE: %d poses collected, building %d x %d system...\n",
+               g_numCollected, g_numCollected * N_EQS_PER_POSE, N_UNKNOWNS);
+
         if (g_numCollected < 2) {
+            printf("[Force] SOLVE ABORTED: need >= 2 poses, have %d\n", g_numCollected);
             g_calibState = State::ABORTED;
             break;
         }
@@ -358,9 +364,12 @@ bool update(double dt, const double raw[6], const double pose[6]) {
         double x[N_UNKNOWNS];
         if (GaussSolver::solve(nRows, A, b, N_UNKNOWNS, x, g_solvedResidual)) {
             if (fabs(x[0]) < 1e-9) {
+                printf("[Force] SOLVE ABORTED: solved mass=%.6f near zero\n", x[0]);
                 std::cerr << "[Force] Calibration failed: solved mass near zero" << std::endl;
                 g_calibState = State::ABORTED;
             } else {
+                printf("[Force] SOLVE OK: mass=%.4f kg, residual=%.4f N\n",
+                       x[0], g_solvedResidual);
                 g_solvedMass = x[0];
                 g_solvedCom[0] = x[1] / x[0];  // r_com = p / m
                 g_solvedCom[1] = x[2] / x[0];
@@ -374,6 +383,7 @@ bool update(double dt, const double raw[6], const double pose[6]) {
                 g_calibState = State::VERIFY;
             }
         } else {
+            printf("[Force] SOLVE ABORTED: singular matrix (GaussSolver failed)\n");
             g_calibState = State::ABORTED; // singular matrix
         }
 
