@@ -9,8 +9,8 @@ function relay_gui()
     S.cmd_log = cell(50,1);  S.cmd_idx = 0;
     S.fb_log  = cell(50,1);  S.fb_idx  = 0;
     S.touch_pos    = [0 0 0 0 0 0];
-    S.robot_pos    = [300 0 200 0 0 0];
-    S.robot_target = [300 0 200 0 0 0];
+    S.robot_pos    = [0 0 0 0 0 0];
+    S.robot_target = [0 0 0 0 0 0];
     S.joint_angles = [0 0 0 0 0 0];
     S.force_raw    = [0 0 0];
     S.force_filt   = [0 0 0];
