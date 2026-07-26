@@ -231,9 +231,10 @@ function relay_gui()
             linkHg(i) = hgtransform(ax3d);
             linkPatch(i).Parent = linkHg(i);
         end
-        % 添加光源
-        light(ax3d, 'Position', [300 -300 400], 'Style', 'local');
     end
+
+    % 添加光源 (独立于 STL 加载状态, 确保场景始终有光照)
+    light(ax3d, 'Position', [300 -300 400], 'Style', 'local');
 
     % Touch 笔可视化对象
     touchPenBody = surface(ax3d, [], [], [], 'FaceColor', [0.35 0.38 0.42], ...
