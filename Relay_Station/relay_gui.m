@@ -25,6 +25,11 @@ function relay_gui()
     S.z_dist = 999;          S.singular = 0;
     S.calib_enabled = false; S.calib_rms = -1;
     S.diag_code = 0;         S.diag_spd = 1.0;  S.diag_reason = '';
+    S.conn_enable = 0;       S.conn_motion = 0;   S.conn_force = 0;
+    S.conn_ping = 0;         S.conn_uptime = 0;
+    % 力历史环形缓冲 (100 点 ≈ 3s @ 30Hz)
+    S.force_hist_fx = zeros(1,100); S.force_hist_fy = zeros(1,100);
+    S.force_hist_fz = zeros(1,100); S.force_hist_idx = 1;
     S.server = [];
     % 3D 场景对象 (Task 7)
     S.linkMesh     = {};    S.linkPatch = gobjects(1,0);  S.linkHg = gobjects(1,0);
@@ -60,7 +65,7 @@ function relay_gui()
     % ===== 外层网格: 2行 × 3列 =====
     g = uigridlayout(fig, [2 3]);
     g.RowHeight = {25, '1x'};            % 顶部 25px + 内容区 fill
-    g.ColumnWidth = {'1x', '1x', '1.6x'}; % 左:中:右 = 1:1:1.6
+    g.ColumnWidth = {'1x', '1.2x', '1.6x'}; % 左:中:右 = 1:1.2:1.6
     g.Padding = [2 2 2 2];
     g.RowSpacing = 2;
     g.ColumnSpacing = 2;
@@ -88,60 +93,47 @@ function relay_gui()
     lblConn = uilabel(glTop, 'Text', 'C++ Client: OFFLINE', ...
         'FontColor', clr.red, 'FontSize', 10, 'HorizontalAlignment', 'right', 'FontName', 'Consolas');
 
-    % ===== 左栏 (Col 1): 指令 + 反馈 =====
+    % ===== 左栏 (Col 1): 指令日志 (铺满全高) =====
     pnlLeft = uipanel(g, 'BackgroundColor', clr.bg_panel, 'BorderType', 'none');
     pnlLeft.Layout.Row = 2;  pnlLeft.Layout.Column = 1;
     glLeft = uigridlayout(pnlLeft, [2 1]);
-    glLeft.RowHeight = {'1x', '1x'};
-    glLeft.Padding = [1 1 1 1];  glLeft.RowSpacing = 2;
+    glLeft.RowHeight = {22, '1x'};
+    glLeft.Padding = [4 0 4 2];  glLeft.RowSpacing = 0;
     glLeft.BackgroundColor = clr.bg_panel;
 
-    % 指令面板
-    pnlCmd = uigridlayout(glLeft, [2 1]);
-    pnlCmd.RowHeight = {22, '1x'};
-    pnlCmd.Padding = [4 0 4 2];  pnlCmd.RowSpacing = 0;
-    pnlCmd.BackgroundColor = clr.bg_panel;
-    pnlCmd.Layout.Row = 1;  pnlCmd.Layout.Column = 1;
-
-    lblCmdTitle = uilabel(pnlCmd, 'Text', 'Touch -> Robot (Commands)', ...
+    lblCmdTitle = uilabel(glLeft, 'Text', 'Touch -> Robot (Commands)', ...
         'FontColor', clr.text_on, 'FontSize', 11, 'FontWeight', 'bold');
     lblCmdTitle.Layout.Row = 1;  lblCmdTitle.Layout.Column = 1;
 
-    lblCmd = uilabel(pnlCmd, 'Text', '(waiting for commands...)', ...
+    lblCmd = uilabel(glLeft, 'Text', '(waiting for commands...)', ...
         'FontColor', [0.30 0.85 0.50], 'FontSize', 9, ...
         'VerticalAlignment', 'top', 'FontName', 'Consolas');
     lblCmd.Layout.Row = 2;  lblCmd.Layout.Column = 1;
 
-    % 反馈面板
-    pnlFb = uigridlayout(glLeft, [2 1]);
-    pnlFb.RowHeight = {22, '1x'};
-    pnlFb.Padding = [4 0 4 2];  pnlFb.RowSpacing = 0;
-    pnlFb.BackgroundColor = clr.bg_panel;
-    pnlFb.Layout.Row = 2;  pnlFb.Layout.Column = 1;
-
-    lblFbTitle = uilabel(pnlFb, 'Text', 'Robot -> Relay (Feedback)', ...
-        'FontColor', clr.text_on, 'FontSize', 11, 'FontWeight', 'bold');
-    lblFbTitle.Layout.Row = 1;  lblFbTitle.Layout.Column = 1;
-
-    lblFb = uilabel(pnlFb, 'Text', '(waiting for feedback...)', ...
-        'FontColor', clr.text_dim, 'FontSize', 9, ...
-        'VerticalAlignment', 'top', 'FontName', 'Consolas');
-    lblFb.Layout.Row = 2;  lblFb.Layout.Column = 1;
-
-    % ===== 中栏 (Col 2): 力数据 =====
+    % ===== 中栏 (Col 2): 连接状态 + 力数据 + 力历史 =====
     pnlMid = uipanel(g, 'BackgroundColor', clr.bg_panel, 'BorderType', 'none');
     pnlMid.Layout.Row = 2;  pnlMid.Layout.Column = 2;
-    glMid = uigridlayout(pnlMid, [2 1]);
-    glMid.RowHeight = {'1x', '1x'};
+    glMid = uigridlayout(pnlMid, [4 1]);
+    glMid.RowHeight = {55, '1x', '1x', '1.2x'};
     glMid.Padding = [1 1 1 1];  glMid.RowSpacing = 2;
     glMid.BackgroundColor = clr.bg_panel;
 
-    % 原始力
+    % -- Row 1: Connection Monitor --
+    pnlConn = uigridlayout(glMid, [1 1]);
+    pnlConn.Padding = [4 2 4 2];
+    pnlConn.BackgroundColor = clr.bg_panel;
+    pnlConn.Layout.Row = 1;  pnlConn.Layout.Column = 1;
+    lblConnMon = uilabel(pnlConn, 'Text', '● Enable  ● Motion  ● Force   PING -- ms', ...
+        'FontColor', clr.text_dim, 'FontSize', 10, ...
+        'VerticalAlignment', 'center', 'FontName', 'Consolas');
+    lblConnMon.Layout.Row = 1;  lblConnMon.Layout.Column = 1;
+
+    % -- Row 2: 原始力 --
     pnlFR = uigridlayout(glMid, [2 1]);
     pnlFR.RowHeight = {22, '1x'};
     pnlFR.Padding = [4 0 4 2];  pnlFR.RowSpacing = 0;
     pnlFR.BackgroundColor = clr.bg_panel;
-    pnlFR.Layout.Row = 1;  pnlFR.Layout.Column = 1;
+    pnlFR.Layout.Row = 2;  pnlFR.Layout.Column = 1;
 
     lblFRTitle = uilabel(pnlFR, 'Text', 'Force Sensor (Raw · 30004)', ...
         'FontColor', clr.text_on, 'FontSize', 11, 'FontWeight', 'bold');
@@ -153,12 +145,12 @@ function relay_gui()
         'VerticalAlignment', 'top', 'FontName', 'Consolas');
     lblForceRaw.Layout.Row = 2;  lblForceRaw.Layout.Column = 1;
 
-    % 滤波力
+    % -- Row 3: 滤波力 --
     pnlFF = uigridlayout(glMid, [2 1]);
     pnlFF.RowHeight = {22, '1x'};
     pnlFF.Padding = [4 0 4 2];  pnlFF.RowSpacing = 0;
     pnlFF.BackgroundColor = clr.bg_panel;
-    pnlFF.Layout.Row = 2;  pnlFF.Layout.Column = 1;
+    pnlFF.Layout.Row = 3;  pnlFF.Layout.Column = 1;
 
     lblFFTitle = uilabel(pnlFF, 'Text', 'Force Output (Filtered -> Touch)', ...
         'FontColor', clr.text_on, 'FontSize', 11, 'FontWeight', 'bold');
@@ -169,6 +161,26 @@ function relay_gui()
         'FontColor', clr.text_dim, 'FontSize', 10, ...
         'VerticalAlignment', 'top', 'FontName', 'Consolas');
     lblForceFilt.Layout.Row = 2;  lblForceFilt.Layout.Column = 1;
+
+    % -- Row 4: 力历史迷你图 --
+    pnlFH = uigridlayout(glMid, [2 1]);
+    pnlFH.RowHeight = {22, '1x'};
+    pnlFH.Padding = [4 0 4 2];  pnlFH.RowSpacing = 0;
+    pnlFH.BackgroundColor = clr.bg_panel;
+    pnlFH.Layout.Row = 4;  pnlFH.Layout.Column = 1;
+
+    lblFHTitle = uilabel(pnlFH, 'Text', 'Force History (3s window)', ...
+        'FontColor', clr.text_on, 'FontSize', 11, 'FontWeight', 'bold');
+    lblFHTitle.Layout.Row = 1;  lblFHTitle.Layout.Column = 1;
+
+    axForceHist = uiaxes(pnlFH, 'BackgroundColor', clr.bg_axes3d, ...
+        'XColor', clr.text_dim, 'YColor', clr.text_dim, ...
+        'Box', 'on', 'GridLineStyle', ':');
+    axForceHist.Layout.Row = 2;  axForceHist.Layout.Column = 1;
+    hold(axForceHist, 'on');
+    xlim(axForceHist, [0 100]); ylim(axForceHist, [-15 15]);
+    axForceHist.XTick = [0 50 100]; axForceHist.XTickLabel = {'3s', '1.5s', '0s'};
+    ylabel(axForceHist, 'N');
 
     % ===== 右栏 (Col 3): 3D + 状态 + 安全 =====
     pnlRight = uipanel(g, 'BackgroundColor', clr.bg_panel, 'BorderType', 'none');
@@ -299,6 +311,16 @@ function relay_gui()
     S.eeMarkerActual = eeMarkerActual;
     S.eeMarkerTarget = eeMarkerTarget;
 
+    % Force history lines (direct line objects for performance)
+    alFx = line(axForceHist, 1:100, zeros(1,100), ...
+        'Color', [1.0 0.35 0.35], 'LineWidth', 1.2);
+    alFy = line(axForceHist, 1:100, zeros(1,100), ...
+        'Color', [0.35 0.95 0.45], 'LineWidth', 1.2);
+    alFz = line(axForceHist, 1:100, zeros(1,100), ...
+        'Color', [0.35 0.55 1.0], 'LineWidth', 1.2);
+    S.alFx = alFx;  S.alFy = alFy;  S.alFz = alFz;
+    S.axForceHist = axForceHist;
+
     % Precompute static geometries
     [S.cylX, S.cylY, S.cylZ] = cylinder([2 1.5], 8);
     S.cylZ = S.cylZ * 40;
@@ -360,6 +382,7 @@ function relay_gui()
             processNetworkData();
             update3DModel();
             updateTextPanels();
+            updateForceHistory();
             drawnow limitrate;
         catch ME
             fprintf('[Relay] ERROR in updateDisplay: %s\n', ME.message);
@@ -393,6 +416,11 @@ function relay_gui()
                     if numel(vals) >= 7
                         S.force_raw = vals(1:3)'; S.force_filt = vals(1:3)';
                         S.force_moment = vals(4:6)'; S.force_stale = vals(7);
+                        % Fill force history ring buffer
+                        S.force_hist_fx(S.force_hist_idx) = vals(1);
+                        S.force_hist_fy(S.force_hist_idx) = vals(2);
+                        S.force_hist_fz(S.force_hist_idx) = vals(3);
+                        S.force_hist_idx = mod(S.force_hist_idx, 100) + 1;
                     end
                 elseif startsWith(msg, 'J|')
                     vals = sscanf(msg(3:end), '%f,%f,%f,%f,%f,%f');
@@ -427,6 +455,13 @@ function relay_gui()
                         S.diag_code = str2double(parts{1});
                         S.diag_spd  = str2double(parts{2});
                         if numel(parts) >= 3, S.diag_reason = strjoin(parts(3:end), ','); end
+                    end
+                elseif startsWith(msg, 'H|')
+                    vals = sscanf(msg(3:end), '%d,%d,%d,%f,%d');
+                    if length(vals) == 5
+                        S.conn_enable = vals(1); S.conn_motion = vals(2);
+                        S.conn_force  = vals(3); S.conn_ping   = vals(4);
+                        S.conn_uptime = vals(5);
                     end
                 end
             end
@@ -510,14 +545,34 @@ function relay_gui()
         if isempty(lines), lblCmd.Text = '(waiting for commands...)';
         else, lblCmd.Text = lines; end
 
-        % -- 反馈日志 --
-        lines = {};
-        for i = 1:50
-            idx = mod(S.fb_idx - i + 50, 50) + 1;
-            if ~isempty(S.fb_log{idx}), lines{end+1} = S.fb_log{idx}; end
+        % -- 连接状态 --
+        portDot = @(ok) ternary(ok, '●', '○');
+        portClr = @(ok) ternary(ok, clr.green, clr.red);
+        enOk = S.conn_enable;  moOk = S.conn_motion;  foOk = S.conn_force;
+        pingStr = '--';
+        if S.conn_ping > 0
+            pingStr = sprintf('%.0f', S.conn_ping);
         end
-        if isempty(lines), lblFb.Text = '(waiting for feedback...)';
-        else, lblFb.Text = lines; end
+        if S.conn_ping < 20
+            pingClr = clr.green;
+        elseif S.conn_ping < 100
+            pingClr = clr.yellow;
+        else
+            pingClr = clr.red;
+        end
+        uptimeStr = sprintf('%02d:%02d:%02d', ...
+            floor(S.conn_uptime/3600), floor(mod(S.conn_uptime,3600)/60), mod(S.conn_uptime,60));
+        lblConnMon.Text = {...
+            sprintf('%s Enable  %s Motion  %s Force   PING %s ms', ...
+                portDot(enOk), portDot(moOk), portDot(foOk), pingStr); ...
+            sprintf('HB: %s    Uptime: %s', ...
+                ternary(enOk, 'OK', 'LOST'), uptimeStr)};
+        % Apply colors (only to the first line's port dots — use FontColor for whole thing)
+        if enOk && moOk
+            lblConnMon.FontColor = clr.text_dim;
+        else
+            lblConnMon.FontColor = clr.red;
+        end
 
         % -- 力数据 --
         fr = S.force_raw; ff = S.force_filt; mm = S.force_moment;
@@ -608,6 +663,29 @@ function relay_gui()
         lblDelay.Text = sprintf('Touch->Relay: %.1f ms', S.touch_relay_delay);
         lblState.Text = sprintf('[%s]  Spd: %.1fx', stateNames{st}, S.safety_speed);
         lblState.FontColor = stateColors{st};
+    end
+
+    function updateForceHistory()
+        % Reconstruct full 100-point timeline from ring buffer
+        idx = S.force_hist_idx;
+        if idx == 1 && S.force_hist_fx(100) == 0 && S.force_hist_fx(1) == 0
+            return;  % no data yet
+        end
+        order = [idx:100, 1:idx-1];
+        fx = S.force_hist_fx(order);
+        fy = S.force_hist_fy(order);
+        fz = S.force_hist_fz(order);
+
+        % Direct XData/YData assignment (fast)
+        set(S.alFx, 'YData', fx);
+        set(S.alFy, 'YData', fy);
+        set(S.alFz, 'YData', fz);
+
+        % Auto-scale Y axis
+        mx = max(max(abs(fx)), max(abs(fy)));
+        mx = max(mx, max(abs(fz)));
+        if mx < 0.5, mx = 5; end
+        ylim(S.axForceHist, [-mx*1.2, mx*1.2]);
     end
 
     function r = ternary(cond, tVal, fVal)

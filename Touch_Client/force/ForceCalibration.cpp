@@ -308,6 +308,21 @@ bool update(double dt, const double raw[6], const double pose[6]) {
         printf("[Force] SOLVE: %d poses collected, building %d x %d system...\n",
                g_numCollected, g_numCollected * N_EQS_PER_POSE, N_UNKNOWNS);
 
+        // DEBUG: print per-pose raw data and gravity vector
+        double gBase[3] = {0.0, 0.0, 9.81};
+        printf("[Force] --- Per-pose data ---\n");
+        for (int p = 0; p < g_numCollected; p++) {
+            double* R = g_poseR[p];
+            double gx = R[0]*gBase[0] + R[3]*gBase[1] + R[6]*gBase[2];
+            double gy = R[1]*gBase[0] + R[4]*gBase[1] + R[7]*gBase[2];
+            double gz = R[2]*gBase[0] + R[5]*gBase[1] + R[8]*gBase[2];
+            printf("[Force]   Pose %d: gTool=(%+.2f, %+.2f, %+.2f)  raw=(%+.3f, %+.3f, %+.3f, %+.4f, %+.4f, %+.4f)\n",
+                   p, gx, gy, gz,
+                   g_poseRaw[p][0], g_poseRaw[p][1], g_poseRaw[p][2],
+                   g_poseRaw[p][3], g_poseRaw[p][4], g_poseRaw[p][5]);
+        }
+        printf("[Force] --- End per-pose ---\n");
+
         if (g_numCollected < 2) {
             printf("[Force] SOLVE ABORTED: need >= 2 poses, have %d\n", g_numCollected);
             g_calibState = State::ABORTED;
@@ -317,7 +332,6 @@ bool update(double dt, const double raw[6], const double pose[6]) {
         int nRows = g_numCollected * N_EQS_PER_POSE;
         double* A = new double[nRows * N_UNKNOWNS]();
         double* b = new double[nRows]();
-        double gBase[3] = {0.0, 0.0, 9.81};
 
         for (int p = 0; p < g_numCollected; p++) {
             int baseRow = p * N_EQS_PER_POSE;
