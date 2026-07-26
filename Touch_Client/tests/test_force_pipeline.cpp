@@ -15,14 +15,14 @@ static int g_passed = 0, g_failed = 0;
 #define PASS() do { std::cout << "PASS" << std::endl; g_passed++; } while(0)
 #define CHECK(cond) do { if (!(cond)) { std::cout << "FAIL: " << #cond << std::endl; g_failed++; return; } } while(0)
 
-static void test_deadzone() {
-    TEST(deadzone);
+static void test_residual_deadzone() {
+    TEST(residual_deadzone);
     AppState::ForceData fd;
     ForcePipeline::init();
 
-    // Below deadzone → output zero
-    fd.raw[0] = 0.3; fd.raw[1] = -0.3; fd.raw[2] = 0.0;
-    fd.raw[3] = 0.0; fd.raw[4] = 0.0; fd.raw[5] = 0.0;
+    // Below residual deadzone (0.05N) → output zero
+    fd.compensated[0] = 0.03; fd.compensated[1] = -0.03; fd.compensated[2] = 0.0;
+    fd.compensated[3] = 0.0; fd.compensated[4] = 0.0; fd.compensated[5] = 0.0;
     fd.lastUpdateMs = GetTickCount();
     ForcePipeline::step(fd);
 
@@ -37,13 +37,15 @@ static void test_saturation() {
     AppState::ForceData fd;
     ForcePipeline::init();
 
-    // Way above full scale → clamp
-    fd.raw[0] = 500.0; fd.raw[1] = 0.0; fd.raw[2] = 0.0;
-    fd.raw[3] = 0.0; fd.raw[4] = 0.0; fd.raw[5] = 0.0;
+    // Way above full scale → clamp (gain is applied post-mapping, so check final hapticOut)
+    fd.compensated[0] = 500.0; fd.compensated[1] = 0.0; fd.compensated[2] = 0.0;
+    fd.compensated[3] = 0.0; fd.compensated[4] = 0.0; fd.compensated[5] = 0.0;
     fd.lastUpdateMs = GetTickCount();
     ForcePipeline::step(fd);
 
-    CHECK(fabs(fd.hapticOut[0]) <= Config::FORCE_MAX_TOUCH_N + 0.01);
+    double clampedMax = Config::FORCE_MAX_TOUCH_N * Config::FORCE_REFLECTION_GAIN;
+    CHECK(fabs(fd.hapticOut[0]) <= clampedMax + 0.01);
+    CHECK(fd.hapticOut[0] > 0.0); // positive input → positive output
     PASS();
 }
 
@@ -52,9 +54,9 @@ static void test_coord_transform() {
     AppState::ForceData fd;
     ForcePipeline::init();
 
-    // Input: Fx=10, Fy=20, Fz=30 (all well above deadzone)
-    fd.raw[0] = 10.0; fd.raw[1] = 20.0; fd.raw[2] = 30.0;
-    fd.raw[3] = 0.0; fd.raw[4] = 0.0; fd.raw[5] = 0.0;
+    // Input: Fx=10, Fy=20, Fz=30 (all well above residual deadzone)
+    fd.compensated[0] = 10.0; fd.compensated[1] = 20.0; fd.compensated[2] = 30.0;
+    fd.compensated[3] = 0.0; fd.compensated[4] = 0.0; fd.compensated[5] = 0.0;
     fd.lastUpdateMs = GetTickCount();
 
     // Run many steps to let Butterworth filter converge to steady state
@@ -62,13 +64,15 @@ static void test_coord_transform() {
         ForcePipeline::step(fd);
     }
 
-    // hapticOut: Fx→X, Fz→Y, -Fy→Z
-    // After convergence: hapticOut[0] = 10 * (3.3/200) = 0.165
-    CHECK(fabs(fd.hapticOut[0] - Config::FORCE_MAX_TOUCH_N/Config::FORCE_MAX_SENSOR_N * 10.0) < 0.01);
-    // hapticOut[1] should be from Fz=30
-    CHECK(fd.hapticOut[1] > 0.01);  // Fz=30 maps positive to Touch Y
-    // hapticOut[2] should be from -Fy=-20 (negative Touch Z)
-    CHECK(fd.hapticOut[2] < -0.01); // -Fy maps negative to Touch Z
+    // hapticOut: Fx→X, -Fz→Y, +Fy→Z, scaled by FORCE_REFLECTION_GAIN
+    // After convergence: hapticOut[0] = 10 * (3.3/200) * 5.0 = 0.825
+    double ratio = Config::FORCE_MAX_TOUCH_N / Config::FORCE_MAX_SENSOR_N;
+    double gain = Config::FORCE_REFLECTION_GAIN;
+    CHECK(fabs(fd.hapticOut[0] - ratio * 10.0 * gain) < 0.01);
+    // hapticOut[1] should be from -Fz = -30 (negative Touch Y)
+    CHECK(fd.hapticOut[1] < -0.01); // -Fz=30 maps negative to Touch Y
+    // hapticOut[2] should be from +Fy = +20 (positive Touch Z)
+    CHECK(fd.hapticOut[2] > 0.01);  // +Fy maps positive to Touch Z
     PASS();
 }
 
@@ -78,8 +82,8 @@ static void test_filter_convergence() {
     ForcePipeline::init();
 
     // Step input: 0 → 100N on Fx only
-    fd.raw[0] = 100.0; fd.raw[1] = 0.0; fd.raw[2] = 0.0;
-    fd.raw[3] = 0.0; fd.raw[4] = 0.0; fd.raw[5] = 0.0;
+    fd.compensated[0] = 100.0; fd.compensated[1] = 0.0; fd.compensated[2] = 0.0;
+    fd.compensated[3] = 0.0; fd.compensated[4] = 0.0; fd.compensated[5] = 0.0;
     fd.lastUpdateMs = GetTickCount();
 
     // Run many steps — filtered output should converge to input
@@ -108,7 +112,7 @@ static void test_stale_detection() {
 
 int main() {
     std::cout << "=== ForcePipeline Unit Tests ===" << std::endl;
-    test_deadzone();
+    test_residual_deadzone();
     test_saturation();
     test_coord_transform();
     test_filter_convergence();
