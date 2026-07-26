@@ -26,6 +26,11 @@ function relay_gui()
     S.calib_enabled = false; S.calib_rms = -1;
     S.diag_code = 0;         S.diag_spd = 1.0;  S.diag_reason = '';
     S.server = [];
+    % 3D 场景对象 (Task 7)
+    S.linkMesh     = {};    S.linkPatch = gobjects(1,0);  S.linkHg = gobjects(1,0);
+    S.stlLoaded    = false;
+    S.touchPenBody = [];    S.touchPenTip = [];
+    S.eeMarkerActual = [];  S.eeMarkerTarget = [];
 
     % ===== 加载配置 =====
     cfg = relay_config();
@@ -176,6 +181,80 @@ function relay_gui()
     lblSafety = uilabel(pnlSafety, 'Position', [6 -100 600 125], ...
         'Text', 'Safety: --', 'FontColor', clr.green, ...
         'FontSize', 10, 'VerticalAlignment', 'top', 'FontName', 'Consolas');
+
+    % ===== STL 模型加载 =====
+    stlDir = fullfile(scriptDir, '..', 'Touch_Client', 'models', 'cr3');
+    linkNames = {'base_link', 'Link1', 'Link2', 'Link3', 'Link4', 'Link5', 'Link6'};
+    linkMesh = cell(1, 7);
+    linkPatch = gobjects(1, 7);
+    linkHg = gobjects(1, 7);
+    stlLoaded = false;
+
+    for i = 1:7
+        stlPath = fullfile(stlDir, [linkNames{i} '.STL']);
+        linkMesh{i} = stl.loadBinaryStl(stlPath);
+        if linkMesh{i}.triangleCount > 0
+            stlLoaded = true;
+        end
+    end
+
+    % ===== 3D 场景初始化 =====
+    % 地面网格
+    [Xg, Yg] = meshgrid(0:50:500, -250:50:250);
+    Zg = zeros(size(Xg));
+    mesh(ax3d, Xg, Yg, Zg, 'FaceAlpha', 0.1, 'EdgeColor', [0.2 0.25 0.3], 'LineWidth', 0.5);
+
+    % 坐标系
+    quiver3(ax3d, 0,0,0, 80,0,0, 'r', 'LineWidth', 2, 'MaxHeadSize', 5);
+    quiver3(ax3d, 0,0,0, 0,80,0, 'g', 'LineWidth', 2, 'MaxHeadSize', 5);
+    quiver3(ax3d, 0,0,0, 0,0,80, 'b', 'LineWidth', 2, 'MaxHeadSize', 5);
+
+    % 安全边界线框
+    xL = [cfg.safe_x_min cfg.safe_x_max];
+    yL = [cfg.safe_y_min cfg.safe_y_max];
+    zL = [cfg.safe_z_min cfg.safe_z_max];
+    plot3(ax3d, xL([1 1 2 2 1]), yL([1 2 2 1 1]), zL([1 1 1 1 1]), 'y--', 'LineWidth', 1);
+    plot3(ax3d, xL([1 1 2 2 1]), yL([1 2 2 1 1]), zL([2 2 2 2 2]), 'y--', 'LineWidth', 1);
+    for ii = 1:2
+        for jj = 1:2
+            plot3(ax3d, [xL(ii) xL(ii)], [yL(jj) yL(jj)], zL, 'y--', 'LineWidth', 1);
+        end
+    end
+
+    % 创建 STL patch 对象 (如果加载成功) 否则 fallback 骨架模型
+    if stlLoaded
+        for i = 1:7
+            linkPatch(i) = patch(ax3d, 'Faces', linkMesh{i}.faces, ...
+                'Vertices', linkMesh{i}.vertices, ...
+                'FaceColor', [0.25 0.28 0.32], 'EdgeColor', 'none', ...
+                'FaceLighting', 'gouraud', 'AmbientStrength', 0.5);
+            linkHg(i) = hgtransform(ax3d);
+            linkPatch(i).Parent = linkHg(i);
+        end
+        % 添加光源
+        light(ax3d, 'Position', [300 -300 400], 'Style', 'local');
+    end
+
+    % Touch 笔可视化对象
+    touchPenBody = surface(ax3d, [], [], [], 'FaceColor', [0.35 0.38 0.42], ...
+        'EdgeColor', 'none', 'Visible', 'off');
+    touchPenTip = surface(ax3d, [], [], [], 'FaceColor', [1 0.15 0.1], ...
+        'EdgeColor', 'none', 'FaceAlpha', 0.9, 'Visible', 'off');
+    % 末端标记
+    eeMarkerActual = surface(ax3d, [], [], [], 'FaceColor', [0.2 0.85 0.35], ...
+        'EdgeColor', 'none', 'FaceAlpha', 0.8, 'Visible', 'off');
+    eeMarkerTarget = line(ax3d, 0, 0, 0, 'Color', 'r', 'Marker', 'o', ...
+        'MarkerSize', 10, 'LineWidth', 2, 'Visible', 'off');
+
+    % 持久化到 S 结构体供后续渲染使用
+    S.linkMesh = linkMesh;
+    S.linkPatch = linkPatch;
+    S.linkHg = linkHg;
+    S.stlLoaded = stlLoaded;
+    S.touchPenBody = touchPenBody;
+    S.touchPenTip = touchPenTip;
+    S.eeMarkerActual = eeMarkerActual;
+    S.eeMarkerTarget = eeMarkerTarget;
 
     % ===== 嵌套函数 =====
 
