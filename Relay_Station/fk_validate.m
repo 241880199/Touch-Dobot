@@ -41,7 +41,7 @@ function joints = computeFK(j1, j2, j3, j4, j5, j6)
     d2r = pi / 180;
 
     % URDF joint parameters (mm, radians)
-    j1_z  = 128.3;
+    j1_z  = 136.0;  % calibrated against real GetPose (+7.7mm)
     j3_x  = -274.0;
     j4_x  = -230.0;  j4_z = 128.3;
     j5_y  = -116.0;

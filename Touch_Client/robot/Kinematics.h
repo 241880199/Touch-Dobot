@@ -4,7 +4,7 @@
 namespace Kinematics {
 
     // ===== CR3 URDF 参数 (mm) — 对齐 MATLAB computeFK =====
-    const double J1_Z  = 128.3;   // 底座 → J2
+    const double J1_Z  = 136.0;   // 底座 → J2 (实机标定: +7.7mm)
     const double J3_X  = -274.0;  // J2 → J3 (大臂长)
     const double J4_X  = -230.0;  // J3 → J4 (小臂长)
     const double J4_Z  = 128.3;   // J4 Z 偏移

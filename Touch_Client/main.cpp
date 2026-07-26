@@ -15,10 +15,22 @@
 #include "render/HudOverlay.h"
 #include "safety/RobotDiagnostics.h"
 #include "calibration/CalibrationSolver.h"
+#include "robot/Kinematics.h"
+#include <cstdio>
 
 // ===== 运行模式 =====
 static bool g_noRobot = false;
 static bool g_noTouch = false;
+
+// ===== FK 实机验证状态 =====
+namespace FkValidate {
+    static const int MAX_POINTS = 20;
+    static bool mode = false;
+    static int count = 0;
+    static double joints[20][6];
+    static double actualPos[20][3];
+    static char labels[20][64];
+}
 
 // ===== GLUT 回调 =====
 
@@ -260,6 +272,156 @@ void keyboard(unsigned char key, int, int) {
         std::cout << "[CALIB] Saved to calibration.json" << std::endl;
 
         Calibration::cancelCollect();
+        return;
+    }
+
+    // ===== FK 实机验证模式 =====
+    // 'v': 切换 FK 验证采集模式
+    // Space: 记录 (关节角度 j1..j6, GetPose 实际位姿)
+    // 'f': 运行 FK 对比分析并输出报告
+
+    if (key == 'v' || key == 'V') {
+        if (!FkValidate::mode) {
+            FkValidate::mode = true;
+            FkValidate::count = 0;
+            std::cout << "\n[FK-VAL] Mode ON — move robot to different poses,"
+                      << " press SPACE to record, 'f' to analyze, 'v' to exit"
+                      << std::endl;
+        } else {
+            FkValidate::mode = false;
+            std::cout << "[FK-VAL] Mode OFF (" << FkValidate::count
+                      << " points discarded)" << std::endl;
+        }
+        return;
+    }
+
+    if (key == ' ' && FkValidate::mode) {
+        int idx = FkValidate::count;
+        if (idx >= FkValidate::MAX_POINTS) {
+            std::cout << "[FK-VAL] Max " << FkValidate::MAX_POINTS
+                      << " points reached, press 'f' to analyze" << std::endl;
+            return;
+        }
+
+        EnterCriticalSection(&appState.robotPoseMutex);
+        FkValidate::joints[idx][0] = appState.robotActualPose.j1;
+        FkValidate::joints[idx][1] = appState.robotActualPose.j2;
+        FkValidate::joints[idx][2] = appState.robotActualPose.j3;
+        FkValidate::joints[idx][3] = appState.robotActualPose.j4;
+        FkValidate::joints[idx][4] = appState.robotActualPose.j5;
+        FkValidate::joints[idx][5] = appState.robotActualPose.j6;
+        FkValidate::actualPos[idx][0] = appState.robotActualPose.x;
+        FkValidate::actualPos[idx][1] = appState.robotActualPose.y;
+        FkValidate::actualPos[idx][2] = appState.robotActualPose.z;
+        LeaveCriticalSection(&appState.robotPoseMutex);
+
+        snprintf(FkValidate::labels[idx], 64, "pose_%d", FkValidate::count);
+        FkValidate::count++;
+
+        std::cout << "[FK-VAL] Point " << FkValidate::count << " recorded: J=("
+                  << FkValidate::joints[idx][0] << "," << FkValidate::joints[idx][1] << ","
+                  << FkValidate::joints[idx][2] << "," << FkValidate::joints[idx][3] << ","
+                  << FkValidate::joints[idx][4] << "," << FkValidate::joints[idx][5] << ") "
+                  << "Pose=(" << FkValidate::actualPos[idx][0] << ","
+                  << FkValidate::actualPos[idx][1] << ","
+                  << FkValidate::actualPos[idx][2] << ")"
+                  << std::endl;
+        return;
+    }
+
+    if ((key == 'f' || key == 'F') && FkValidate::mode) {
+        if (FkValidate::count < 1) {
+            std::cout << "[FK-VAL] No points recorded" << std::endl;
+            return;
+        }
+
+        std::cout << "\n======================================================" << std::endl;
+        std::cout << "  FK Validation: C++ URDF FK vs Actual GetPose" << std::endl;
+        std::cout << "  Points: " << FkValidate::count << std::endl;
+        std::cout << "======================================================" << std::endl;
+        printf("\n%-7s | %9s %9s %9s | %9s %9s %9s | %8s\n",
+               "Point", "FK.x", "FK.y", "FK.z",
+               "Actual.x", "Actual.y", "Actual.z", "Err(mm)");
+        printf("--------|-----------|-----------|-----------|-----------|-----------|-----------|----------\n");
+
+        double maxErr = 0, sumErr = 0, sumSqErr = 0;
+        int maxIdx = 0;
+
+        for (int i = 0; i < FkValidate::count; i++) {
+            Vec3 fkPos = Kinematics::forwardPosition(FkValidate::joints[i]);
+            double dx = fkPos.x - FkValidate::actualPos[i][0];
+            double dy = fkPos.y - FkValidate::actualPos[i][1];
+            double dz = fkPos.z - FkValidate::actualPos[i][2];
+            double err = sqrt(dx * dx + dy * dy + dz * dz);
+
+            printf("%-7s | %9.2f %9.2f %9.2f | %9.2f %9.2f %9.2f | %8.2f\n",
+                   FkValidate::labels[i],
+                   fkPos.x, fkPos.y, fkPos.z,
+                   FkValidate::actualPos[i][0],
+                   FkValidate::actualPos[i][1],
+                   FkValidate::actualPos[i][2],
+                   err);
+
+            sumErr += err;
+            sumSqErr += err * err;
+            if (err > maxErr) { maxErr = err; maxIdx = i; }
+        }
+
+        double meanErr = sumErr / FkValidate::count;
+        double rmsErr = sqrt(sumSqErr / FkValidate::count);
+
+        std::cout << std::endl;
+        printf("  Max  error: %.2f mm  (point %d)\n", maxErr, maxIdx);
+        printf("  Mean error: %.2f mm\n", meanErr);
+        printf("  RMS  error: %.2f mm\n", rmsErr);
+        std::cout << std::endl;
+
+        if (maxErr < 5.0) {
+            std::cout << "  ✓ PASS — URDF parameters match real robot (error < 5mm)" << std::endl;
+        } else if (maxErr < 10.0) {
+            std::cout << "  ⚠ WARN — URDF parameters acceptable (error < 10mm)" << std::endl;
+        } else {
+            std::cout << "  ✗ FAIL — URDF parameters deviate significantly (> 10mm)" << std::endl;
+            std::cout << "    → Consider URDF parameter calibration" << std::endl;
+        }
+
+        // Save to JSON
+        FILE* fOut = fopen("fk_validation_result.json", "w");
+        if (fOut) {
+            fprintf(fOut, "{\n  \"points\": [\n");
+            for (int i = 0; i < FkValidate::count; i++) {
+                Vec3 fkPos = Kinematics::forwardPosition(FkValidate::joints[i]);
+                double dx = fkPos.x - FkValidate::actualPos[i][0];
+                double dy = fkPos.y - FkValidate::actualPos[i][1];
+                double dz = fkPos.z - FkValidate::actualPos[i][2];
+                double err = sqrt(dx * dx + dy * dy + dz * dz);
+
+                fprintf(fOut,
+                    "    {\"label\":\"%s\","
+                    "\"joints\":[%.10g,%.10g,%.10g,%.10g,%.10g,%.10g],"
+                    "\"fk_ee\":[%.4f,%.4f,%.4f],"
+                    "\"actual_ee\":[%.4f,%.4f,%.4f],"
+                    "\"error_mm\":%.4f}%s\n",
+                    FkValidate::labels[i],
+                    FkValidate::joints[i][0], FkValidate::joints[i][1],
+                    FkValidate::joints[i][2], FkValidate::joints[i][3],
+                    FkValidate::joints[i][4], FkValidate::joints[i][5],
+                    fkPos.x, fkPos.y, fkPos.z,
+                    FkValidate::actualPos[i][0],
+                    FkValidate::actualPos[i][1],
+                    FkValidate::actualPos[i][2],
+                    err,
+                    i < FkValidate::count - 1 ? "," : "");
+            }
+            fprintf(fOut, "  ],\n");
+            fprintf(fOut, "  \"summary\": {\"max_error_mm\":%.4f, \"mean_error_mm\":%.4f, \"rms_error_mm\":%.4f}\n",
+                    maxErr, meanErr, rmsErr);
+            fprintf(fOut, "}\n");
+            fclose(fOut);
+            std::cout << "  Results saved to fk_validation_result.json" << std::endl;
+        }
+
+        std::cout << "======================================================\n" << std::endl;
         return;
     }
 }

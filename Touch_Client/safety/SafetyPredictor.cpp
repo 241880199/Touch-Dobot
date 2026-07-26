@@ -108,8 +108,8 @@ SafetyVerdict SafetyPredictor::evaluate(const Vec3& target) {
     }
     if (!seedValid) memcpy(seed, m_lastJoints, 6 * sizeof(double));
 
-    // 关节限位预警 (距限位 <10° 时减速)
-    static const double JLIM_WARN_DEG = 10.0;
+    // 关节限位预警 (距限位 <5° 时减速)
+    static const double JLIM_WARN_DEG = 5.0;
     const double jlims[6][2] = {
         {-360, 360}, {-360, 360}, {-155, 155},
         {-360, 360}, {-360, 360}, {-360, 360}

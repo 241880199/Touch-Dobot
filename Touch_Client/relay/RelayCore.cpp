@@ -504,7 +504,8 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
     // the CR3 controller's internal model. Do NOT escalate on this — the
     // robot's own IK handles Cartesian→joint conversion independently.
     if (verdict.errorCode != RobotErrorCode::OK
-        && verdict.errorCode != RobotErrorCode::ERR_IK_NO_SOLUTION) {
+        && verdict.errorCode != RobotErrorCode::ERR_IK_NO_SOLUTION
+        && verdict.errorCode != RobotErrorCode::ERR_JOINTLIMIT_WARN) {
         Vec3 deltaVec(dx, dy, dz);
         RobotError error = SafetyPredictor::instance().lastError();
         m_stateMachine.onError(error, deltaVec);
