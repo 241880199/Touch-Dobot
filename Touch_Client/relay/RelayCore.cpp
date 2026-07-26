@@ -1066,6 +1066,21 @@ void RelayCore::reportDiagnostic(int errorCode, double speedFactor, const char* 
 
 // ===== ForceReader 管理 =====
 
+// Drag mode callback for ForceCalibration
+static void calibDragMode(bool enable) {
+    if (enable) {
+        robotSendEnable("SetCollideDrag(1)");
+        Sleep(100);
+        robotDrainEnable();
+        std::cout << "[Force] Drag mode ON — manually rotate end effector" << std::endl;
+    } else {
+        robotSendEnable("SetCollideDrag(0)");
+        Sleep(100);
+        robotDrainEnable();
+        std::cout << "[Force] Drag mode OFF — position locked" << std::endl;
+    }
+}
+
 bool RelayCore::initForceReader() {
     if (!isRobotConnected()) {
         std::cout << "[Force] Robot not connected, skipping ForceReader" << std::endl;
@@ -1073,6 +1088,7 @@ bool RelayCore::initForceReader() {
     }
     ForcePipeline::init();
     ForceCompensation::init();
+    ForceCalibration::setDragModeCallback(calibDragMode);
     m_forceThread = CreateThread(NULL, 0, forceReaderThread, NULL, 0, NULL);
     if (!m_forceThread) {
         std::cerr << "[Force] Failed to create ForceReader thread" << std::endl;

@@ -36,6 +36,10 @@ namespace ForceCalibration {
     // Toggle sampling: in MOVE -> start SAMPLE; in SAMPLE -> stop & advance
     void confirmPose();
 
+    // Callback: set drag mode (called when entering/leaving MOVE state, and on abort)
+    // Pass nullptr to clear
+    void setDragModeCallback(void (*cb)(bool enable));
+
     bool isRunning();
     bool isDone();
     State currentState();

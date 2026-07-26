@@ -125,6 +125,9 @@ static double g_solvedResidual = 0.0;
 // Calibration target orientations (relative to current pose, rotation-only)
 static double g_targetRxyz[6][3];  // {rx_deg, ry_deg, rz_deg} offsets for 6 poses
 
+// Drag mode callback (set by RelayCore)
+static void (*g_dragModeCb)(bool enable) = nullptr;
+
 namespace ForceCalibration {
 
 State currentState() { return g_calibState; }
@@ -181,14 +184,22 @@ bool start() {
     return true;
 }
 
+void setDragModeCallback(void (*cb)(bool)) {
+    g_dragModeCb = cb;
+}
+
 void abort() {
     printf("[Force] Calibration ABORTED by user (state was: %s)\n", statusText());
+    // Disable drag mode if active
+    if (g_dragModeCb) g_dragModeCb(false);
     g_calibState = State::ABORTED;
 }
 
 void confirmPose() {
     // Toggle: in MOVE -> start sampling; in SAMPLE -> stop & advance (min 0.5s)
     if (g_calibState == State::MOVE) {
+        // Disable drag mode before sampling (lock position)
+        if (g_dragModeCb) g_dragModeCb(false);
         g_calibState = State::SAMPLE;
         g_phaseTimer = 0.0;
         g_sampleCount = 0;
@@ -227,6 +238,8 @@ bool update(double dt, const double raw[6], const double pose[6]) {
                    g_targetRxyz[g_poseIndex][0], g_targetRxyz[g_poseIndex][1],
                    g_targetRxyz[g_poseIndex][2]);
             printf("[Force] Reposition robot -> ensure STILL -> press SPACE to START sampling\n");
+            // Enable drag mode for manual repositioning
+            if (g_dragModeCb) g_dragModeCb(true);
             g_calibState = State::MOVE;
         }
         break;
@@ -318,7 +331,8 @@ bool update(double dt, const double raw[6], const double pose[6]) {
                        g_poseIndex + 1, Config::FORCE_CALIB_NUM_POSES,
                        g_targetRxyz[g_poseIndex][0], g_targetRxyz[g_poseIndex][1],
                        g_targetRxyz[g_poseIndex][2]);
-                printf("[Force] Reposition robot, then press SPACE to sample.\n");
+                printf("[Force] Drag mode ON — reposition robot, then press SPACE to sample.\n");
+                if (g_dragModeCb) g_dragModeCb(true);
                 g_calibState = State::MOVE;
             }
         }
