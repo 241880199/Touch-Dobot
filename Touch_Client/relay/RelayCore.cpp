@@ -615,10 +615,13 @@ void RelayCore::onButtonRelease() {
 static void logFeedback(const char* msg, const char* portLabel) {
     auto& app = appState;
     EnterCriticalSection(&app.feedbackLogMutex);
-    snprintf(app.feedbackLog[app.feedbackLogIdx], sizeof(app.feedbackLog[0]),
+    int writeIdx = app.feedbackLogIdx;
+    snprintf(app.feedbackLog[writeIdx], sizeof(app.feedbackLog[0]),
         "[%s] %s", portLabel, msg);
     app.feedbackLogIdx = (app.feedbackLogIdx + 1) % AppState::LOG_SIZE;
     if (app.feedbackLogCount < AppState::LOG_SIZE) app.feedbackLogCount++;
+    // Relay to MATLAB GUI
+    RelayCore::instance().reportFeedback(app.feedbackLog[writeIdx]);
     LeaveCriticalSection(&app.feedbackLogMutex);
 }
 
@@ -965,6 +968,12 @@ void RelayCore::reportPosition() {
 void RelayCore::reportCommand(const char* cmd) {
     char buf[384];
     snprintf(buf, sizeof(buf), "C|%s", cmd);
+    sendRelayUpdate(buf);
+}
+
+void RelayCore::reportFeedback(const char* fbText) {
+    char buf[384];
+    snprintf(buf, sizeof(buf), "FB|%.350s", fbText);
     sendRelayUpdate(buf);
 }
 

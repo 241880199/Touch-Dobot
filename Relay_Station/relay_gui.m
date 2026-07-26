@@ -165,22 +165,36 @@ function relay_gui()
     xlim(ax3d, [0 500]); ylim(ax3d, [-250 250]); zlim(ax3d, [0 400]);
 
     % Robot State 面板
-    pnlState = uipanel(glRight, 'BackgroundColor', clr.bg_panel, 'BorderType', 'none');
+    pnlState = uigridlayout(glRight, [2 1]);
+    pnlState.RowHeight = {22, '1x'};
+    pnlState.Padding = [2 2 2 2];  pnlState.RowSpacing = 0;
+    pnlState.BackgroundColor = clr.bg_panel;
     pnlState.Layout.Row = 2;  pnlState.Layout.Column = 1;
+
     lblStateTitle = uilabel(pnlState, 'Text', 'Robot State', ...
-        'Position', [6 2 600 22], 'FontColor', clr.text_on, 'FontSize', 11, 'FontWeight', 'bold');
-    lblCoord = uilabel(pnlState, 'Position', [6 -100 600 125], ...
-        'Text', 'Initializing...', 'FontColor', [0.70 0.85 0.50], ...
-        'FontSize', 10, 'VerticalAlignment', 'top', 'FontName', 'Consolas');
+        'FontColor', clr.text_on, 'FontSize', 11, 'FontWeight', 'bold');
+    lblStateTitle.Layout.Row = 1;  lblStateTitle.Layout.Column = 1;
+
+    lblCoord = uilabel(pnlState, 'Text', 'Initializing...', ...
+        'FontColor', [0.70 0.85 0.50], 'FontSize', 10, ...
+        'VerticalAlignment', 'top', 'FontName', 'Consolas');
+    lblCoord.Layout.Row = 2;  lblCoord.Layout.Column = 1;
 
     % Safety 面板
-    pnlSafety = uipanel(glRight, 'BackgroundColor', clr.bg_panel, 'BorderType', 'none');
+    pnlSafety = uigridlayout(glRight, [2 1]);
+    pnlSafety.RowHeight = {22, '1x'};
+    pnlSafety.Padding = [2 2 2 2];  pnlSafety.RowSpacing = 0;
+    pnlSafety.BackgroundColor = clr.bg_panel;
     pnlSafety.Layout.Row = 3;  pnlSafety.Layout.Column = 1;
+
     lblSafeTitle = uilabel(pnlSafety, 'Text', 'Safety & Diagnostics', ...
-        'Position', [6 2 600 22], 'FontColor', clr.text_on, 'FontSize', 11, 'FontWeight', 'bold');
-    lblSafety = uilabel(pnlSafety, 'Position', [6 -100 600 125], ...
-        'Text', 'Safety: --', 'FontColor', clr.green, ...
-        'FontSize', 10, 'VerticalAlignment', 'top', 'FontName', 'Consolas');
+        'FontColor', clr.text_on, 'FontSize', 11, 'FontWeight', 'bold');
+    lblSafeTitle.Layout.Row = 1;  lblSafeTitle.Layout.Column = 1;
+
+    lblSafety = uilabel(pnlSafety, 'Text', 'Safety: --', ...
+        'FontColor', clr.green, 'FontSize', 10, ...
+        'VerticalAlignment', 'top', 'FontName', 'Consolas');
+    lblSafety.Layout.Row = 2;  lblSafety.Layout.Column = 1;
 
     % ===== STL 模型加载 =====
     stlDir = fullfile(scriptDir, '..', 'Touch_Client', 'models', 'cr3');
@@ -376,6 +390,9 @@ function relay_gui()
                     if length(vals) == 2
                         S.calib_enabled = (vals(1) == 1); S.calib_rms = vals(2);
                     end
+                elseif startsWith(msg, 'FB|')
+                    S.fb_idx = mod(S.fb_idx, 50) + 1;
+                    S.fb_log{S.fb_idx} = msg(4:end);
                 elseif startsWith(msg, 'D|')
                     parts = split(msg(3:end), ',');
                     if numel(parts) >= 2

@@ -45,6 +45,7 @@ public:
     int  sendRelayUpdate(const char* msg);
     void reportPosition();
     void reportCommand(const char* cmd);
+    void reportFeedback(const char* fbText);
 
     void sendSafetyStatus();
     void sendJointMargins();
