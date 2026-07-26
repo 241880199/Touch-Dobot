@@ -14,8 +14,6 @@
 #include "render/SceneRenderer.h"
 #include "safety/RobotDiagnostics.h"
 #include "calibration/CalibrationSolver.h"
-#include "force/ForceCalibration.h"
-#include "force/ForceCompensation.h"
 #include "robot/Kinematics.h"
 #include <cstdio>
 
@@ -59,19 +57,6 @@ void idle() {
         // Poll force data at ~30Hz alongside feedback (robot mode only)
         if (!g_noRobot) {
             RelayCore::instance().pollForce();
-
-            // Track force calibration state changes
-            static ForceCalibration::State lastCalibState = ForceCalibration::State::IDLE;
-            ForceCalibration::State curState = ForceCalibration::currentState();
-            if (curState != lastCalibState) {
-                lastCalibState = curState;
-                std::cout << "[Force] Calibration: " << ForceCalibration::statusText() << std::endl;
-                if (curState == ForceCalibration::State::DONE) {
-                    // Results already applied by ForceCalibration::update() SOLVE phase.
-                    // Just print confirmation.
-                    std::cout << "[Force] Calibration results saved to force_calib.json" << std::endl;
-                }
-            }
         }
         // Check haptic watchdog (only when not in --no-robot mode)
         if (!g_noRobot) {
@@ -171,25 +156,9 @@ void keyboard(unsigned char key, int, int) {
         }
     }
 
-    // ===== Force Calibration ('c' key) =====
-    // 'c' when IDLE (not transmitting): start/abort force calibration
-    // 'c' when coord-calib mode is active: cancel coord calib
+    // ===== 标定模式 =====
+    // 'c': 切换标定采集模式
     if (key == 'c' || key == 'C') {
-        auto& relay = RelayCore::instance();
-
-        // If force calibration is running, 'c' aborts it
-        if (relay.isForceCalibrating()) {
-            relay.abortForceCalibration();
-            return;
-        }
-
-        // If idle, try to start force calibration
-        if (!g_noRobot && relay.startForceCalibration()) {
-            std::cout << "[Force] TARE: keep robot still (2s), then drag to move for mass cal." << std::endl;
-            return;
-        }
-
-        // Coordinate calibration mode toggle (fall through if force calib not started)
         if (Calibration::collectMode) {
             Calibration::cancelCollect();
             std::cout << "\n[CALIB] Mode OFF" << std::endl;
@@ -199,12 +168,6 @@ void keyboard(unsigned char key, int, int) {
                       << "Align Touch pen + robot to marker, press SPACE to record,"
                       << " 's' to solve, 'c' to exit" << std::endl;
         }
-        return;
-    }
-
-    // SPACE during force calibration: start/stop sampling
-    if (key == ' ' && RelayCore::instance().isForceCalibrating()) {
-        ForceCalibration::confirmPose();
         return;
     }
 
@@ -511,19 +474,6 @@ int main(int argc, char* argv[]) {
     // 4.5 启动力传感器实时读取 (30004, 125Hz)
     if (!g_noRobot) {
         RelayCore::instance().initForceReader();
-    }
-
-    // 4.6 加载力传感器标定文件
-    {
-        double massKg, biasF[3], biasM[3];
-        if (ForceCalibration::loadFromFile("force_calib.json", massKg, biasF, biasM)) {
-            double comZero[3] = {0};
-            ForceCompensation::setCalibration(massKg, comZero, biasF, biasM);
-            std::cout << "[Force] Loaded force_calib.json (mass=" << massKg
-                      << "kg, bias=" << biasF[0] << "," << biasF[1] << "," << biasF[2] << "N)" << std::endl;
-        } else {
-            std::cout << "[Force] No calibration file — press 'c' when idle to calibrate." << std::endl;
-        }
     }
 
     // 5. 初始化诊断日志

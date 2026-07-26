@@ -33,13 +33,6 @@ public:
     void pollForce();
     void shutdownForceReader();
 
-    // 力传感器标定
-    bool startForceCalibration();
-    void abortForceCalibration();
-    bool isForceCalibrating() const;
-    bool isForceCalibrationDone() const;
-    const char* forceCalibStatus() const;
-
     // 奇异脱困 (可在运行中手动触发)
     bool triggerEscape();
 
