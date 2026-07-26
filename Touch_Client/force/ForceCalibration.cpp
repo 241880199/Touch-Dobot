@@ -21,6 +21,7 @@ static const int MAX_MOTION_SAMPLES = 300;  // ~10s at 30Hz
 static int    g_motionCount = 0;
 static double g_motionRaw[300][6];   // raw force at each frame
 static double g_motionPos[300][3];   // position (mm) at each frame
+static double g_motionRxyz[300][3];  // orientation Rx,Ry,Rz (deg) at each frame
 
 // Results
 static double g_massKg = 0.0;
@@ -160,6 +161,9 @@ bool update(double dt, const double raw[6], const double pose[6]) {
             g_motionPos[g_motionCount][0] = pose[0];
             g_motionPos[g_motionCount][1] = pose[1];
             g_motionPos[g_motionCount][2] = pose[2];
+            g_motionRxyz[g_motionCount][0] = pose[3];
+            g_motionRxyz[g_motionCount][1] = pose[4];
+            g_motionRxyz[g_motionCount][2] = pose[5];
             g_motionCount++;
         }
         break;
@@ -174,46 +178,64 @@ bool update(double dt, const double raw[6], const double pose[6]) {
         }
 
         // Compute acceleration from position (2nd-order central diff, mm→m)
-        // Use a simple 5-point ring for each axis
+        // CRITICAL: acceleration is in base frame, force is in sensor frame.
+        // Rotate acceleration into sensor frame before fitting F = m*a.
         double sumFa = 0.0, sumA2 = 0.0;
         int used = 0;
 
-        // 5-point position history for central-difference acceleration
+        // 5-point position + orientation history
         double px[5] = {0}, py[5] = {0}, pz[5] = {0};
+        double rx[5] = {0}, ry[5] = {0}, rz[5] = {0};
         int pi = 0, pn = 0;
 
         for (int k = 0; k < g_motionCount; k++) {
-            // Position history (mm)
             px[pi] = g_motionPos[k][0];
             py[pi] = g_motionPos[k][1];
             pz[pi] = g_motionPos[k][2];
+            rx[pi] = g_motionRxyz[k][0];
+            ry[pi] = g_motionRxyz[k][1];
+            rz[pi] = g_motionRxyz[k][2];
             pi = (pi + 1) % 5;
             if (pn < 5) pn++;
 
             if (pn < 5) continue;
 
-            // Central-difference acceleration: a[k-2] = (p[k] - 2*p[k-1] + p[k-3]) / dt²
             int i0 = (pi - 1 + 5) % 5;  // newest
-            int i1 = (pi - 2 + 5) % 5;
+            int i1 = (pi - 2 + 5) % 5;  // middle
             int i2 = (pi - 3 + 5) % 5;
-            int i3 = (pi - 4 + 5) % 5;
-            int imid = (pi - 2 + 5) % 5; // middle point
 
-            // 3-point stencil centered at i1 (2 steps back)
-            double ax = (px[i0] - 2.0 * px[i1] + px[i2]) / (dt * dt) * 0.001; // mm→m
-            double ay = (py[i0] - 2.0 * py[i1] + py[i2]) / (dt * dt) * 0.001;
-            double az = (pz[i0] - 2.0 * pz[i1] + pz[i2]) / (dt * dt) * 0.001;
+            // 3-point stencil acceleration in BASE frame (m/s²)
+            double ax_b = (px[i0] - 2.0 * px[i1] + px[i2]) / (dt * dt) * 0.001;
+            double ay_b = (py[i0] - 2.0 * py[i1] + py[i2]) / (dt * dt) * 0.001;
+            double az_b = (pz[i0] - 2.0 * pz[i1] + pz[i2]) / (dt * dt) * 0.001;
+
+            // Rotate acceleration: a_sensor = R_base→sensor * a_base
+            // R_base→sensor = (Rz*Ry*Rx)^T  for the MIDDLE sample's orientation
+            double rxx = rx[i1] * M_PI / 180.0;
+            double ryy = ry[i1] * M_PI / 180.0;
+            double rzz = rz[i1] * M_PI / 180.0;
+            double cx = cos(rxx), sx = sin(rxx);
+            double cy = cos(ryy), sy = sin(ryy);
+            double cz = cos(rzz), sz = sin(rzz);
+            // R = Rz*Ry*Rx
+            double R00 = cz*cy, R01 = cz*sy*sx - sz*cx, R02 = cz*sy*cx + sz*sx;
+            double R10 = sz*cy, R11 = sz*sy*sx + cz*cx, R12 = sz*sy*cx - cz*sx;
+            double R20 = -sy,   R21 = cy*sx,              R22 = cy*cx;
+            // a_sensor = R^T * a_base
+            double ax = R00*ax_b + R10*ay_b + R20*az_b;
+            double ay = R01*ax_b + R11*ay_b + R21*az_b;
+            double az = R02*ax_b + R12*ay_b + R22*az_b;
 
             double aMag = sqrt(ax*ax + ay*ay + az*az);
-            if (aMag < 0.05) continue;  // skip near-static samples
+            if (aMag < 0.05) continue;  // skip near-static
 
-            // Compensated force at this sample (raw - bias)
+            // Force in sensor frame (raw - bias)
             double fx = g_motionRaw[i1][0] - g_biasForce[0];
             double fy = g_motionRaw[i1][1] - g_biasForce[1];
             double fz = g_motionRaw[i1][2] - g_biasForce[2];
             double fMag = sqrt(fx*fx + fy*fy + fz*fz);
 
-            // Accumulate: F = m*a → m ≈ Σ(F·a) / Σ(a·a)
+            // F = m*a → m ≈ Σ(|F|·|a|) / Σ(|a|²)
             sumFa += fMag * aMag;
             sumA2 += aMag * aMag;
             used++;
