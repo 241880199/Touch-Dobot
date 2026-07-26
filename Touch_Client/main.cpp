@@ -208,10 +208,9 @@ void keyboard(unsigned char key, int, int) {
         return;
     }
 
-    // SPACE during force calibration: confirm current pose
+    // SPACE during force calibration: start/stop sampling
     if (key == ' ' && RelayCore::instance().isForceCalibrating()) {
         ForceCalibration::confirmPose();
-        std::cout << "[Force] Pose confirmed, sampling..." << std::endl;
         return;
     }
 

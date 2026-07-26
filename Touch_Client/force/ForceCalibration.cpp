@@ -143,9 +143,8 @@ const char* statusText() {
     switch (g_calibState) {
         case State::IDLE:    return "Idle";
         case State::TARE:    return "Taring...";
-        case State::MOVE:    return "Moving to pose...";
-        case State::SETTLE:  return "Settling...";
-        case State::SAMPLE:  return "Sampling...";
+        case State::MOVE:    return "Waiting (SPACE to sample)";
+        case State::SAMPLE:  return "Sampling... (SPACE to stop)";
         case State::SOLVE:   return "Solving...";
         case State::VERIFY:  return "Verifying...";
         case State::DONE:    return "Calibration complete";
@@ -188,7 +187,18 @@ void abort() {
 }
 
 void confirmPose() {
-    g_poseConfirmed = true;
+    // Toggle: in MOVE -> start sampling; in SAMPLE -> stop & advance (min 0.5s)
+    if (g_calibState == State::MOVE) {
+        g_calibState = State::SAMPLE;
+        g_phaseTimer = 0.0;
+        g_sampleCount = 0;
+        printf("[Force] Sampling started — press SPACE when done (min 0.5s)\n");
+    } else if (g_calibState == State::SAMPLE && g_phaseTimer >= Config::FORCE_CALIB_SAMPLE_TIME_S) {
+        g_poseConfirmed = true;  // signal to stop + advance
+    } else if (g_calibState == State::SAMPLE) {
+        printf("[Force] Min %.1fs not reached yet (%.2fs elapsed), keep sampling...\n",
+               Config::FORCE_CALIB_SAMPLE_TIME_S, g_phaseTimer);
+    }
 }
 
 bool update(double dt, const double raw[6], const double pose[6]) {
@@ -216,38 +226,42 @@ bool update(double dt, const double raw[6], const double pose[6]) {
                    g_poseIndex + 1, Config::FORCE_CALIB_NUM_POSES,
                    g_targetRxyz[g_poseIndex][0], g_targetRxyz[g_poseIndex][1],
                    g_targetRxyz[g_poseIndex][2]);
-            printf("[Force] Reposition robot, then press SPACE to confirm.\n");
+            printf("[Force] Reposition robot -> ensure STILL -> press SPACE to START sampling\n");
             g_calibState = State::MOVE;
         }
         break;
     }
 
     case State::MOVE: {
-        // MVP: Manual mode — user repositions robot, presses SPACE to confirm.
-        // State machine waits for external signal (set via confirmPose()).
-        // Auto-advance timer as fallback.
+        // Manual mode: user positions robot, SPACE starts sampling (via confirmPose())
+        // confirmPose() sets state directly to SAMPLE — nothing to do here
         g_phaseTimer += dt;
-        // Check for external confirmation
-        if (g_poseConfirmed || g_phaseTimer >= Config::FORCE_CALIB_MOVE_TIMEOUT_S) {
-            g_poseConfirmed = false;
+        if (g_phaseTimer >= Config::FORCE_CALIB_MOVE_TIMEOUT_S) {
+            // Timeout fallback: advance to next pose
+            printf("[Force] MOVE timeout (%.0fs), skipping pose %d\n",
+                   Config::FORCE_CALIB_MOVE_TIMEOUT_S, g_poseIndex + 1);
+            g_poseIndex++;
             g_phaseTimer = 0.0;
-            g_calibState = State::SETTLE;
-        }
-        break;
-    }
-
-    case State::SETTLE: {
-        g_phaseTimer += dt;
-        if (g_phaseTimer >= Config::FORCE_CALIB_SETTLE_TIME_S) {
-            g_phaseTimer = 0.0;
-            g_sampleCount = 0;
-            g_calibState = State::SAMPLE;
+            if (g_poseIndex >= Config::FORCE_CALIB_NUM_POSES) {
+                if (g_numCollected >= 2) {
+                    g_calibState = State::SOLVE;
+                } else {
+                    printf("[Force] SOLVE ABORTED: need >= 2 poses, have %d\n", g_numCollected);
+                    g_calibState = State::ABORTED;
+                }
+            } else {
+                printf("[Force] Pose %d/%d: offset Rx=%.0f Ry=%.0f Rz=%.0f deg\n",
+                       g_poseIndex + 1, Config::FORCE_CALIB_NUM_POSES,
+                       g_targetRxyz[g_poseIndex][0], g_targetRxyz[g_poseIndex][1],
+                       g_targetRxyz[g_poseIndex][2]);
+                printf("[Force] Reposition robot, then press SPACE to sample.\n");
+            }
         }
         break;
     }
 
     case State::SAMPLE: {
-        // Record raw data for median
+        // Continuously record raw data until user presses SPACE (with min time guard)
         if (g_sampleCount < 125) {
             for (int i = 0; i < 6; i++) {
                 g_sampleBuf[g_sampleCount][i] = raw[i];
@@ -255,14 +269,17 @@ bool update(double dt, const double raw[6], const double pose[6]) {
             g_sampleCount++;
         }
         g_phaseTimer += dt;
-        if (g_phaseTimer >= Config::FORCE_CALIB_SAMPLE_TIME_S) {
+
+        // Stop signal from confirmPose() sets g_poseConfirmed
+        if (g_poseConfirmed) {
+            g_poseConfirmed = false;
+
             // Compute per-channel median
             double median[6];
             for (int ch = 0; ch < 6; ch++) {
                 double vals[125];
                 int n = g_sampleCount > 0 ? g_sampleCount : 1;
                 for (int k = 0; k < n; k++) vals[k] = g_sampleBuf[k][ch];
-                // Simple median: sort copy
                 std::sort(vals, vals + n);
                 median[ch] = (n % 2) ? vals[n / 2] : (vals[n / 2 - 1] + vals[n / 2]) / 2.0;
             }
@@ -284,20 +301,24 @@ bool update(double dt, const double raw[6], const double pose[6]) {
             R[3] = sz * cy;  R[4] = sz * sy * sx + cz * cx;  R[5] = sz * sy * cx - cz * sx;
             R[6] = -sy;      R[7] = cy * sx;                   R[8] = cy * cx;
 
+            printf("[Force] Pose %d sampled: %d points, median=(%+.3f, %+.3f, %+.3f)\n",
+                   g_numCollected + 1, g_sampleCount,
+                   median[0], median[1], median[2]);
+
             g_numCollected++;
             g_poseIndex++;
             g_phaseTimer = 0.0;
+            g_sampleCount = 0;
 
             if (g_poseIndex >= Config::FORCE_CALIB_NUM_POSES) {
                 printf("[Force] All %d poses collected, entering SOLVE...\n", g_numCollected);
                 g_calibState = State::SOLVE;
             } else {
-                // Prompt for next pose
                 printf("[Force] Pose %d/%d: offset Rx=%.0f Ry=%.0f Rz=%.0f deg\n",
                        g_poseIndex + 1, Config::FORCE_CALIB_NUM_POSES,
                        g_targetRxyz[g_poseIndex][0], g_targetRxyz[g_poseIndex][1],
                        g_targetRxyz[g_poseIndex][2]);
-                printf("[Force] Reposition robot, then press SPACE to confirm.\n");
+                printf("[Force] Reposition robot, then press SPACE to sample.\n");
                 g_calibState = State::MOVE;
             }
         }

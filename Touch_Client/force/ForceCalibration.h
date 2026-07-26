@@ -19,9 +19,8 @@ namespace ForceCalibration {
     enum class State {
         IDLE,
         TARE,      // 2s still collection for initial bias estimate
-        MOVE,      // Moving to target orientation
-        SETTLE,    // 0.5s wait for vibration decay
-        SAMPLE,    // 0.5s data collection
+        MOVE,      // Waiting for user to position robot
+        SAMPLE,    // User-triggered sampling (SPACE to start, SPACE to stop, min 0.5s)
         SOLVE,     // Normal equations -> extract params
         VERIFY,    // Check residual
         DONE,      // Success
@@ -34,7 +33,7 @@ namespace ForceCalibration {
     // Abort immediately (called from safety handlers or user interrupt)
     void abort();
 
-    // Confirm current pose reached (user presses SPACE in manual MOVE mode)
+    // Toggle sampling: in MOVE -> start SAMPLE; in SAMPLE -> stop & advance
     void confirmPose();
 
     bool isRunning();
