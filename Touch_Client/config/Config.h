@@ -83,6 +83,14 @@ namespace Config {
     const double FORCE_BIAS_EMA_ALPHA = 0.01;             // 零偏 EMA 更新率 (仅静止态)
     const double FORCE_ACC_FILTER_CUTOFF_HZ = 10.0;       // 加速度估计低通截止 (Hz)
 
+    // ========== 姿态控制参数 ==========
+    const double ORIENT_MAX_STEP_DEG = 3.0;          // 单步最大角度增量 (degrees)
+    const double ORIENT_DEADZONE_DEG = 0.05;         // 姿态死区 (degrees)
+    const double ORIENT_GAIN = 1.0;                  // 姿态增益 (可调灵敏度)
+    const double SAFE_RX_MIN = -180.0, SAFE_RX_MAX = 180.0;  // Roll 安全限位
+    const double SAFE_RY_MIN = -90.0,  SAFE_RY_MAX = 90.0;   // Pitch 安全限位
+    const double SAFE_RZ_MIN = -180.0, SAFE_RZ_MAX = 180.0;  // Yaw 安全限位
+
     // ========== 虚拟约束力参数 ==========
     const double CONSTRAINT_BOUNDARY_RANGE      = 50.0;   // 安全边界感应距离 (mm)
     const double CONSTRAINT_BOUNDARY_MAX_FORCE  = 2.0;    // 安全边界最大约束力 (N)
