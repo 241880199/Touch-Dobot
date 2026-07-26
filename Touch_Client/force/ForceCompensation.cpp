@@ -5,8 +5,11 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
+#include <windows.h>
 
 // ===== Internal state =====
+static CRITICAL_SECTION g_calibMutex;
+static bool g_mutexInit = false;
 static bool g_isCalibrated = false;
 static double g_massKg = 0.0;
 static double g_comSensor[3] = {0};
@@ -151,6 +154,10 @@ bool MotionEstimator::isStill() const {
 namespace ForceCompensation {
 
 void init() {
+    if (!g_mutexInit) {
+        InitializeCriticalSection(&g_calibMutex);
+        g_mutexInit = true;
+    }
     g_isCalibrated = false;
     g_massKg = 0.0;
     for (int i = 0; i < 3; i++) {
@@ -164,6 +171,7 @@ void init() {
 void setCalibration(double massKg, const double comSensor[3],
                     const double biasForce[3], const double biasTorque[3])
 {
+    EnterCriticalSection(&g_calibMutex);
     g_massKg = massKg;
     for (int i = 0; i < 3; i++) {
         g_comSensor[i] = comSensor[i];
@@ -171,6 +179,7 @@ void setCalibration(double massKg, const double comSensor[3],
         g_biasTorque[i] = biasTorque[i];
     }
     g_isCalibrated = true;
+    LeaveCriticalSection(&g_calibMutex);
 }
 
 bool isCalibrated() {
@@ -191,69 +200,94 @@ void step(AppState::ForceData& fd, const double poseRxyz[6]) {
 
     if (!g_isCalibrated) return;
 
-    // 3. Compute rotation matrix from Euler angles
+    // 3. Snapshot calibration globals under mutex
+    EnterCriticalSection(&g_calibMutex);
+    double mass = g_massKg;
+    double com[3] = {g_comSensor[0], g_comSensor[1], g_comSensor[2]};
+    double bF[3] = {g_biasForce[0], g_biasForce[1], g_biasForce[2]};
+    double bM[3] = {g_biasTorque[0], g_biasTorque[1], g_biasTorque[2]};
+    bool calib = g_isCalibrated;
+    LeaveCriticalSection(&g_calibMutex);
+
+    if (!calib) return; // setCalibration cleared calibration mid-flight
+
+    // 4. Compute rotation matrix from Euler angles
     double R[9];
     eulerToRotation(poseRxyz[3], poseRxyz[4], poseRxyz[5], R);
 
-    // 4. Gravity in tool frame: g_tool = R^T * (0, 0, -9.81)
-    double gBase[3] = {0.0, 0.0, -9.81};
+    // 5. Gravity in tool frame: g_tool = R^T * (0, 0, +9.81)
+    //    (sensor sees positive Z when supporting a hanging tool)
+    double gBase[3] = {0.0, 0.0, 9.81};
     double gTool[3];
     matTransposeMulVec(R, gBase, gTool);
 
-    // Gravity force as measured by the sensor (reaction: tool exerts -m*g on sensor)
+    // Gravity force: sensor reads +m*g support force when tool hangs
+    // (same direction as gTool — not a reaction force)
     double Fg[3];
-    Fg[0] = -g_massKg * gTool[0];
-    Fg[1] = -g_massKg * gTool[1];
-    Fg[2] = -g_massKg * gTool[2];
+    Fg[0] = mass * gTool[0];
+    Fg[1] = mass * gTool[1];
+    Fg[2] = mass * gTool[2];
 
     // Gravity torque: r_com x Fg
     double Mg[3];
-    cross(g_comSensor, Fg, Mg);
+    cross(com, Fg, Mg);
 
-    // 5. Inertia force (only if moving)
+    // 6. Inertia force (only if moving)
     double Fi[3] = {0, 0, 0};
     if (!g_motion.isStill()) {
         double vel[3], acc[3];
         g_motion.getState(vel, acc);
-        Fi[0] = g_massKg * acc[0];
-        Fi[1] = g_massKg * acc[1];
-        Fi[2] = g_massKg * acc[2];
+        Fi[0] = mass * acc[0];
+        Fi[1] = mass * acc[1];
+        Fi[2] = mass * acc[2];
     }
 
-    // 6. Compensate: compensated = raw - bias - gravity - inertia
-    fd.compensated[0] = fd.raw[0] - g_biasForce[0] - Fg[0] - Fi[0];
-    fd.compensated[1] = fd.raw[1] - g_biasForce[1] - Fg[1] - Fi[1];
-    fd.compensated[2] = fd.raw[2] - g_biasForce[2] - Fg[2] - Fi[2];
-    fd.compensated[3] = fd.raw[3] - g_biasTorque[0] - Mg[0];
-    fd.compensated[4] = fd.raw[4] - g_biasTorque[1] - Mg[1];
-    fd.compensated[5] = fd.raw[5] - g_biasTorque[2] - Mg[2];
+    // 7. Compensate: compensated = raw - bias - gravity - inertia
+    fd.compensated[0] = fd.raw[0] - bF[0] - Fg[0] - Fi[0];
+    fd.compensated[1] = fd.raw[1] - bF[1] - Fg[1] - Fi[1];
+    fd.compensated[2] = fd.raw[2] - bF[2] - Fg[2] - Fi[2];
+    fd.compensated[3] = fd.raw[3] - bM[0] - Mg[0];
+    fd.compensated[4] = fd.raw[4] - bM[1] - Mg[1];
+    fd.compensated[5] = fd.raw[5] - bM[2] - Mg[2];
 
-    // 7. Online EMA bias update (only when still — slow drift tracking)
+    // 8. Online EMA bias update (only when still — slow drift tracking)
     if (g_motion.isStill()) {
         double alpha = Config::FORCE_BIAS_EMA_ALPHA;
-        // Force bias: track residual (raw - gravity as "expected zero")
-        g_biasForce[0] += alpha * (fd.raw[0] - Fg[0] - g_biasForce[0]);
-        g_biasForce[1] += alpha * (fd.raw[1] - Fg[1] - g_biasForce[1]);
-        g_biasForce[2] += alpha * (fd.raw[2] - Fg[2] - g_biasForce[2]);
-        // Torque bias
-        g_biasTorque[0] += alpha * (fd.raw[3] - Mg[0] - g_biasTorque[0]);
-        g_biasTorque[1] += alpha * (fd.raw[4] - Mg[1] - g_biasTorque[1]);
-        g_biasTorque[2] += alpha * (fd.raw[5] - Mg[2] - g_biasTorque[2]);
+        // Update local copy, then write back under mutex
+        bF[0] += alpha * (fd.raw[0] - Fg[0] - bF[0]);
+        bF[1] += alpha * (fd.raw[1] - Fg[1] - bF[1]);
+        bF[2] += alpha * (fd.raw[2] - Fg[2] - bF[2]);
+        bM[0] += alpha * (fd.raw[3] - Mg[0] - bM[0]);
+        bM[1] += alpha * (fd.raw[4] - Mg[1] - bM[1]);
+        bM[2] += alpha * (fd.raw[5] - Mg[2] - bM[2]);
+
+        EnterCriticalSection(&g_calibMutex);
+        g_biasForce[0] = bF[0];
+        g_biasForce[1] = bF[1];
+        g_biasForce[2] = bF[2];
+        g_biasTorque[0] = bM[0];
+        g_biasTorque[1] = bM[1];
+        g_biasTorque[2] = bM[2];
+        LeaveCriticalSection(&g_calibMutex);
     }
 
-    // 8. Update calib params in ForceData for HUD display / MATLAB relay
+    // 9. Update calib params in ForceData for HUD display / MATLAB relay
     fd.isCalibrated = true;
-    fd.calibMassKg = g_massKg;
+    fd.calibMassKg = mass;
     for (int i = 0; i < 3; i++) {
-        fd.calibComSensor[i] = g_comSensor[i];
-        fd.calibBiasForce[i] = g_biasForce[i];
-        fd.calibBiasTorque[i] = g_biasTorque[i];
+        fd.calibComSensor[i] = com[i];
+        fd.calibBiasForce[i] = bF[i];
+        fd.calibBiasTorque[i] = bM[i];
     }
 }
 
 void shutdown() {
     g_isCalibrated = false;
     g_motion.reset();
+    if (g_mutexInit) {
+        DeleteCriticalSection(&g_calibMutex);
+        g_mutexInit = false;
+    }
 }
 
 } // namespace ForceCompensation

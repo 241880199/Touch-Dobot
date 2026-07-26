@@ -311,7 +311,7 @@ bool update(double dt, const double raw[6], const double pose[6]) {
         int nRows = g_numCollected * N_EQS_PER_POSE;
         double* A = new double[nRows * N_UNKNOWNS]();
         double* b = new double[nRows]();
-        double gBase[3] = {0.0, 0.0, -9.81};
+        double gBase[3] = {0.0, 0.0, 9.81};
 
         for (int p = 0; p < g_numCollected; p++) {
             int baseRow = p * N_EQS_PER_POSE;
