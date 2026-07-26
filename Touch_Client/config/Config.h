@@ -60,7 +60,7 @@ namespace Config {
     const int FORCE_EFFECTIVE_SAMPLE_RATE = 125; // 传感器数据采样率 (Hz)
     const int FORCE_FILTER_CUTOFF = 30;          // Butterworth 截止频率 (Hz)
     const int FORCE_STALE_MS = 200;              // 数据超时阈值 (ms)
-    const double FORCE_RESIDUAL_DEADZONE_N = 0.20; // 补偿后残余死区 (N) — 略大于运动噪声±0.17N
+    const double FORCE_RESIDUAL_DEADZONE_N = 0.20; // 补偿后死区 (N) — 略高于运动噪声 0.17N
     const double FORCE_MAX_SENSOR_N = 200.0;     // 传感器量程 (N)
     const double FORCE_MAX_TOUCH_N = 3.3;        // Touch 最大安全力 (N)
     const double FORCE_REFLECTION_GAIN = 5.0;    // 力反射增益 — 放大传感器力到可感知范围
