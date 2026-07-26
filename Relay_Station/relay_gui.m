@@ -191,7 +191,7 @@ function relay_gui()
     hold(ax3d, 'on'); axis(ax3d, 'equal');
     ax3d.Layout.Row = 1;  ax3d.Layout.Column = 1;
     ax3d.View = [60 25];
-    xlim(ax3d, [-350 400]); ylim(ax3d, [-400 400]); zlim(ax3d, [-50 650]);
+    xlim(ax3d, [-350 400]); ylim(ax3d, [-400 400]); zlim(ax3d, [-50 800]);
 
     % Robot State 面板
     pnlState = uigridlayout(glRight, [2 1]);
@@ -267,12 +267,11 @@ function relay_gui()
     % 创建 STL patch 对象 (如果加载成功) 否则 fallback 骨架模型
     if stlLoaded
         for i = 1:7
-            linkPatch(i) = patch(ax3d, 'Faces', linkMesh{i}.faces, ...
+            linkHg(i) = hgtransform(ax3d);
+            linkPatch(i) = patch(linkHg(i), 'Faces', linkMesh{i}.faces, ...
                 'Vertices', linkMesh{i}.vertices, ...
                 'FaceColor', [0.25 0.28 0.32], 'EdgeColor', 'none', ...
                 'FaceLighting', 'gouraud', 'AmbientStrength', 0.5);
-            linkHg(i) = hgtransform(ax3d);
-            linkPatch(i).Parent = linkHg(i);
         end
     end
 
