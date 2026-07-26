@@ -200,11 +200,11 @@ void step(AppState::ForceData& fd, const double poseRxyz[6]) {
     double gTool[3];
     matTransposeMulVec(R, gBase, gTool);
 
-    // Gravity force in sensor frame
+    // Gravity force as measured by the sensor (reaction: tool exerts -m*g on sensor)
     double Fg[3];
-    Fg[0] = g_massKg * gTool[0];
-    Fg[1] = g_massKg * gTool[1];
-    Fg[2] = g_massKg * gTool[2];
+    Fg[0] = -g_massKg * gTool[0];
+    Fg[1] = -g_massKg * gTool[1];
+    Fg[2] = -g_massKg * gTool[2];
 
     // Gravity torque: r_com x Fg
     double Mg[3];
