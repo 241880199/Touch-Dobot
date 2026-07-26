@@ -70,7 +70,7 @@ static inline double deadzone(double val, double threshold) {
 
 static inline double mapForceToTouch(double sensorForce) {
     // Deadzone
-    double v = deadzone(sensorForce, Config::FORCE_DEADZONE_N);
+    double v = deadzone(sensorForce, Config::FORCE_RESIDUAL_DEADZONE_N);
     // Linear mapping: 200N sensor -> 3.3N Touch
     double ratio = Config::FORCE_MAX_TOUCH_N / Config::FORCE_MAX_SENSOR_N;
     double out = v * ratio;
