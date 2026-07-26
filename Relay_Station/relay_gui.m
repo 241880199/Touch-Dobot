@@ -257,6 +257,16 @@ function relay_gui()
     S.eeMarkerActual = eeMarkerActual;
     S.eeMarkerTarget = eeMarkerTarget;
 
+    % ===== 更新定时器 (20Hz) =====
+    tmr = timer('Period', 0.05, 'ExecutionMode', 'fixedRate', ...
+                'TimerFcn', @(~,~) updateDisplay(), ...
+                'ErrorFcn', @(~,~) disp('Timer error'));
+
+    % ===== 启动 =====
+    initNetwork();
+    start(tmr);
+    fprintf('[Relay] GUI ready.\n');
+
     % ===== 嵌套函数 =====
 
     function onResize()
@@ -265,10 +275,58 @@ function relay_gui()
 
     function onClose()
         S.running = false;
-        if ~isempty(S.server) && isvalid(S.server)
-            delete(S.server);
-        end
+        stop(tmr); delete(tmr);
+        if ~isempty(S.server) && isvalid(S.server), delete(S.server); end
         delete(fig);
         disp('[Relay] GUI closed.');
     end
+
+    % ===== 网络初始化 =====
+    function initNetwork()
+        try
+            S.server = tcpserver(cfg.listen_ip, cfg.relay_port);
+            S.server.Timeout = cfg.timeout;
+            S.server.ConnectionChangedFcn = @onServerConnection;
+            fprintf('[Relay] TCP server listening on %s:%d\n', cfg.listen_ip, cfg.relay_port);
+        catch e
+            fprintf('[Relay] ERROR starting server: %s\n', e.message);
+        end
+    end
+
+    function onServerConnection(src, ~)
+        if src.Connected
+            fprintf('[Relay] Touch client connected\n');
+            lblConn.Text = 'C++ Client: CONNECTED';
+            lblConn.FontColor = clr.green;
+        else
+            fprintf('[Relay] Touch client disconnected\n');
+            lblConn.Text = 'C++ Client: OFFLINE';
+            lblConn.FontColor = clr.red;
+        end
+    end
+
+    % ===== 主更新循环 =====
+    function updateDisplay()
+        if ~S.running, return; end
+        try
+            processNetworkData();
+            update3DModel();
+            updateTextPanels();
+            drawnow limitrate;
+        catch
+        end
+    end
+
+    function processNetworkData()
+        % TODO: Task 9 — 从 TCP 读取并解析 Touch 数据包
+    end
+
+    function update3DModel()
+        % TODO: Task 10 — FK + STL 变换
+    end
+
+    function updateTextPanels()
+        % TODO: Task 11 — 更新文本面板
+    end
+
 end
