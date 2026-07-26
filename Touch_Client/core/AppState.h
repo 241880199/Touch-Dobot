@@ -35,6 +35,8 @@ public:
     // ===== 姿态（预留接口） =====
     double targetRx = 0.0, targetRy = 0.0, targetRz = 0.0;
     double transformMatrix[16] = { 0 };  // HD_CURRENT_TRANSFORM 预留
+    double stylusOrient[3] = { 0.0, 0.0, 0.0 };  // 笔杆姿态 ZYX Euler (Rx,Ry,Rz in degrees)
+    CRITICAL_SECTION stylusOrientMutex;
 
     // ===== 机械臂 TCP 双端口 =====
     SOCKET robotEnableSocket = INVALID_SOCKET;
