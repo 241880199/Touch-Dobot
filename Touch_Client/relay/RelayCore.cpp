@@ -11,6 +11,8 @@
 #include "../safety/SafetyPredictor.h"
 #include "../safety/RobotDiagnostics.h"
 #include "../force/ForcePipeline.h"
+#include "../force/ForceCompensation.h"
+#include "../force/ForceCalibration.h"
 
 // ===== ForceReader 线程: 阻塞读取 30004 实时力数据 (125Hz) =====
 static DWORD WINAPI forceReaderThread(LPVOID) {
@@ -1025,6 +1027,37 @@ void RelayCore::sendCalibStatus() {
     sendRelayUpdate(buf);
 }
 
+void RelayCore::sendConnectionHealth() {
+    // Track process start time on first call
+    if (m_processStartMs == 0) {
+        m_processStartMs = GetTickCount();
+    }
+
+    auto& app = appState;
+    bool enableOk = app.isRobotConnected.load();
+
+    // Motion port: same socket lifecycle as enable
+    bool motionOk = enableOk;
+
+    // Force port: consider connected if data isn't stale
+    bool forceOk = false;
+    EnterCriticalSection(&app.forceDataMutex);
+    forceOk = !app.forceData.isStale;
+    LeaveCriticalSection(&app.forceDataMutex);
+
+    float pingMs = app.latencyMs.load();
+    DWORD uptimeS = (GetTickCount() - m_processStartMs) / 1000;
+
+    char buf[128];
+    snprintf(buf, sizeof(buf), "H|%d,%d,%d,%.1f,%u",
+        enableOk ? 1 : 0,
+        motionOk ? 1 : 0,
+        forceOk ? 1 : 0,
+        pingMs,
+        uptimeS);
+    sendRelayUpdate(buf);
+}
+
 void RelayCore::reportDiagnostic(int errorCode, double speedFactor, const char* reason) {
     char buf[256];
     snprintf(buf,sizeof(buf),"D|%d,%.2f,%.200s",errorCode,speedFactor,reason?reason:"");
@@ -1039,6 +1072,7 @@ bool RelayCore::initForceReader() {
         return false;
     }
     ForcePipeline::init();
+    ForceCompensation::init();
     m_forceThread = CreateThread(NULL, 0, forceReaderThread, NULL, 0, NULL);
     if (!m_forceThread) {
         std::cerr << "[Force] Failed to create ForceReader thread" << std::endl;
@@ -1048,34 +1082,58 @@ bool RelayCore::initForceReader() {
 }
 
 void RelayCore::pollForce() {
-    // Rate limiter: ~30Hz (filter design assumes 120Hz sample rate, ~4x cutoff)
     static DWORD lastPollMs = 0;
     DWORD now = GetTickCount();
     if (now - lastPollMs < 33) return;
     lastPollMs = now;
 
     auto& app = appState;
+
+    // Read current pose for compensation
+    double pose[6] = {0};
+    EnterCriticalSection(&app.robotPoseMutex);
+    pose[0] = app.robotActualPose.x;
+    pose[1] = app.robotActualPose.y;
+    pose[2] = app.robotActualPose.z;
+    pose[3] = app.robotActualPose.rx;
+    pose[4] = app.robotActualPose.ry;
+    pose[5] = app.robotActualPose.rz;
+    LeaveCriticalSection(&app.robotPoseMutex);
+
     EnterCriticalSection(&app.forceDataMutex);
 
-    // Staleness check: if no data for > FORCE_STALE_MS, zero out all outputs
+    // Staleness check
     if (app.forceData.lastUpdateMs > 0 &&
         (now - app.forceData.lastUpdateMs) > static_cast<DWORD>(Config::FORCE_STALE_MS)) {
         app.forceData.isStale = true;
         for (int i = 0; i < 6; i++) app.forceData.filtered[i] = 0.0;
+        for (int i = 0; i < 6; i++) app.forceData.compensated[i] = 0.0;
         for (int i = 0; i < 3; i++) app.forceData.hapticOut[i] = 0.0;
     }
 
+    // Run calibration state machine if active (uses raw data directly)
+    if (ForceCalibration::isRunning()) {
+        ForceCalibration::update(0.033, app.forceData.raw, pose);
+        if (ForceCalibration::isDone()) {
+            // Apply results handled in idle() / keyboard callback
+        }
+    }
+
+    // Run compensation (uses calibrated params if available)
+    ForceCompensation::step(app.forceData, pose);
+
+    // Run pipeline on compensated data
     ForcePipeline::step(app.forceData);
 
-    // Build F| protocol message — send all zeros when stale
+    // Build F| protocol message
     char buf[128];
     if (app.forceData.isStale) {
         snprintf(buf, sizeof(buf), "F|0.00,0.00,0.00,0.00,0.00,0.00,1");
     } else {
         snprintf(buf, sizeof(buf), "F|%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%d",
-            app.forceData.filtered[0], app.forceData.filtered[1],
-            app.forceData.filtered[2], app.forceData.filtered[3],
-            app.forceData.filtered[4], app.forceData.filtered[5],
+            app.forceData.compensated[0], app.forceData.compensated[1],
+            app.forceData.compensated[2], app.forceData.compensated[3],
+            app.forceData.compensated[4], app.forceData.compensated[5],
             app.forceData.isStale ? 1 : 0);
     }
     LeaveCriticalSection(&app.forceDataMutex);
@@ -1091,4 +1149,42 @@ void RelayCore::shutdownForceReader() {
     }
     robotCloseRealtime();
     ForcePipeline::shutdown();
+    ForceCompensation::shutdown();
+}
+
+// ===== 力传感器标定控制 =====
+
+bool RelayCore::startForceCalibration() {
+    if (m_transmitting) {
+        std::cout << "[Force] Cannot calibrate while transmitting — release button first" << std::endl;
+        return false;
+    }
+    if (!isRobotConnected()) {
+        std::cout << "[Force] Robot not connected, cannot calibrate" << std::endl;
+        return false;
+    }
+    auto& app = appState;
+    if (app.isRobotInAlarm.load()) {
+        std::cout << "[Force] Robot in alarm, cannot calibrate" << std::endl;
+        return false;
+    }
+    std::cout << "[Force] Starting calibration sweep..." << std::endl;
+    return ForceCalibration::start();
+}
+
+void RelayCore::abortForceCalibration() {
+    ForceCalibration::abort();
+    std::cout << "[Force] Calibration aborted" << std::endl;
+}
+
+bool RelayCore::isForceCalibrating() const {
+    return ForceCalibration::isRunning();
+}
+
+bool RelayCore::isForceCalibrationDone() const {
+    return ForceCalibration::isDone();
+}
+
+const char* RelayCore::forceCalibStatus() const {
+    return ForceCalibration::statusText();
 }

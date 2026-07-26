@@ -33,6 +33,13 @@ public:
     void pollForce();
     void shutdownForceReader();
 
+    // 力传感器标定
+    bool startForceCalibration();
+    void abortForceCalibration();
+    bool isForceCalibrating() const;
+    bool isForceCalibrationDone() const;
+    const char* forceCalibStatus() const;
+
     // 奇异脱困 (可在运行中手动触发)
     bool triggerEscape();
 
@@ -51,6 +58,7 @@ public:
     void sendJointMargins();
     void sendSingularity();
     void sendCalibStatus();
+    void sendConnectionHealth();
     void reportDiagnostic(int errorCode, double speedFactor, const char* reason);
 
     // 状态查询（供 Render 层读取）
@@ -95,6 +103,7 @@ private:
     DWORD m_lastPingMs = 0;
     DWORD m_lastHeartbeatMs = 0;
     DWORD m_heartbeatStartMs = 0;    // 心跳检查开始时间 (宽限期后开启)
+    DWORD m_processStartMs = 0;      // 进程启动时间戳 (用于计算 uptime)
     bool m_heartbeatLostReported = false;
     int m_nanFrameCount = 0;  // 连续 NaN 帧计数 (>=3 → FATAL)
 
