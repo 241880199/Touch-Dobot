@@ -257,6 +257,12 @@ function relay_gui()
     S.eeMarkerActual = eeMarkerActual;
     S.eeMarkerTarget = eeMarkerTarget;
 
+    % Precompute static geometries
+    [S.cylX, S.cylY, S.cylZ] = cylinder([2 1.5], 8);
+    S.cylZ = S.cylZ * 40;
+    [S.sphereX, S.sphereY, S.sphereZ] = sphere(12);
+    [S.sphere8X, S.sphere8Y, S.sphere8Z] = sphere(8);
+
     % ===== 更新定时器 (20Hz) =====
     tmr = timer('Period', 0.05, 'ExecutionMode', 'fixedRate', ...
                 'TimerFcn', @(~,~) updateDisplay(), ...
@@ -313,7 +319,8 @@ function relay_gui()
             update3DModel();
             updateTextPanels();
             drawnow limitrate;
-        catch
+        catch ME
+            fprintf('[Relay] ERROR in updateDisplay: %s\n', ME.message);
         end
     end
 
@@ -378,7 +385,8 @@ function relay_gui()
                     end
                 end
             end
-        catch
+        catch ME
+            fprintf('[Relay] ERROR in processNetworkData: %s\n', ME.message);
         end
         % 延迟统计
         t = toc(S.last_time);
@@ -400,6 +408,8 @@ function relay_gui()
         else
             % Fallback: 骨架模型 (复用原 computeFK 逻辑)
             joints = fk.robotFk(ja(1),ja(2),ja(3),ja(4),ja(5),ja(6));
+            % NOTE: Fallback path uses delete+redraw per frame.
+            % Acceptable for infrequent use; optimize with persistent objects if needed.
             % 清除旧的 fallback 对象 (简化处理: 每帧重绘)
             delete(findobj(ax3d, 'Tag', 'fallback'));
             for i = 1:6
@@ -420,13 +430,10 @@ function relay_gui()
         % Touch 笔可视化
         tp = S.touch_pos;
         if any(tp(1:3) ~= 0)
-            [cx, cy, cz] = cylinder([2 1.5], 8);
-            cz = cz * 40;
-            set(touchPenBody, 'XData', cx+tp(1), 'YData', cy+tp(2), ...
-                'ZData', cz+tp(3), 'Visible', 'on');
-            [sx, sy, sz] = sphere(12);
-            set(touchPenTip, 'XData', sx*4+tp(1), 'YData', sy*4+tp(2), ...
-                'ZData', sz*4+tp(3), 'Visible', 'on');
+            set(touchPenBody, 'XData', S.cylX+tp(1), 'YData', S.cylY+tp(2), ...
+                'ZData', S.cylZ+tp(3), 'Visible', 'on');
+            set(touchPenTip, 'XData', S.sphereX*4+tp(1), 'YData', S.sphereY*4+tp(2), ...
+                'ZData', S.sphereZ*4+tp(3), 'Visible', 'on');
         else
             set(touchPenBody, 'Visible', 'off');
             set(touchPenTip, 'Visible', 'off');
@@ -435,9 +442,8 @@ function relay_gui()
         % 末端标记
         rp = S.robot_pos;
         if any(rp(1:3) ~= 0)
-            [sx, sy, sz] = sphere(8);
-            set(eeMarkerActual, 'XData', sx*8+rp(1), 'YData', sy*8+rp(2), ...
-                'ZData', sz*8+rp(3), 'Visible', 'on');
+            set(eeMarkerActual, 'XData', S.sphere8X*8+rp(1), 'YData', S.sphere8Y*8+rp(2), ...
+                'ZData', S.sphere8Z*8+rp(3), 'Visible', 'on');
         else
             set(eeMarkerActual, 'Visible', 'off');
         end
@@ -518,7 +524,9 @@ function relay_gui()
         [minM, worstJ] = min(S.joint_margins);
         if minM < 15
             safetyLines{2} = sprintf('J%d near limit: %.1f deg margin', worstJ, minM);
-            lblSafety.FontColor = clr.orange;
+            if st < 3  % don't downgrade FATAL/DEGRADE red/orange to joint orange
+                lblSafety.FontColor = clr.orange;
+            end
         else
             safetyLines{2} = sprintf('Joints: OK (min margin %.0f deg)', minM);
         end
