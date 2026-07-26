@@ -6,6 +6,7 @@
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
+#include <iostream>
 #include <algorithm>
 
 static const int N_UNKNOWNS = 10;  // m, p_x, p_y, p_z, Fx0, Fy0, Fz0, Mx0, My0, Mz0
@@ -98,7 +99,6 @@ bool GaussSolver::solve(int nRows, const double A[], const double b[],
 // ===== Calibration state =====
 
 static ForceCalibration::State g_calibState = ForceCalibration::State::IDLE;
-static bool g_abortFlag = false;
 static bool g_poseConfirmed = false;  // set by confirmPose() to advance MOVE->SETTLE
 static int g_poseIndex = 0;
 static double g_phaseTimer = 0.0;
@@ -157,7 +157,6 @@ const char* statusText() {
 bool start() {
     if (g_calibState != State::IDLE) return false;
     g_calibState = State::TARE;
-    g_abortFlag = false;
     g_poseIndex = 0;
     g_phaseTimer = 0.0;
     g_tareCount = 0;
@@ -184,7 +183,6 @@ bool start() {
 }
 
 void abort() {
-    g_abortFlag = true;
     g_calibState = State::ABORTED;
 }
 
@@ -195,12 +193,7 @@ void confirmPose() {
 bool update(double dt, const double raw[6], const double pose[6]) {
     if (g_calibState == State::IDLE || g_calibState == State::DONE ||
         g_calibState == State::ABORTED) {
-        return false;
-    }
-
-    if (g_abortFlag) {
-        g_calibState = State::ABORTED;
-        return true; // done (aborted)
+        return (g_calibState == State::DONE || g_calibState == State::ABORTED);
     }
 
     // pose = {X, Y, Z, Rx, Ry, Rz}  (mm, deg)
@@ -342,39 +335,44 @@ bool update(double dt, const double raw[6], const double pose[6]) {
             A[(baseRow + 2) * N_UNKNOWNS + 6] = 1.0;
             b[baseRow + 2] = g_poseRaw[p][2];
 
-            // Torque eqns: M = gTool x p + M0
-            // Mx: gy*pz - gz*py + Mx0
-            A[(baseRow + 3) * N_UNKNOWNS + 2] = -gz;   // -gz * py
-            A[(baseRow + 3) * N_UNKNOWNS + 3] =  gy;   //  gy * pz
+            // Torque eqns: M = p x gTool + M0
+            // Mx: p_y*gz - p_z*gy + Mx0  =>  col2=+gz, col3=-gy
+            A[(baseRow + 3) * N_UNKNOWNS + 2] =  gz;   //  gz * py
+            A[(baseRow + 3) * N_UNKNOWNS + 3] = -gy;   // -gy * pz
             A[(baseRow + 3) * N_UNKNOWNS + 7] = 1.0;
             b[baseRow + 3] = g_poseRaw[p][3];
 
-            // My: gz*px - gx*pz + My0
-            A[(baseRow + 4) * N_UNKNOWNS + 1] =  gz;   //  gz * px
-            A[(baseRow + 4) * N_UNKNOWNS + 3] = -gx;   // -gx * pz
+            // My: p_z*gx - p_x*gz + My0  =>  col1=-gz, col3=+gx
+            A[(baseRow + 4) * N_UNKNOWNS + 1] = -gz;   // -gz * px
+            A[(baseRow + 4) * N_UNKNOWNS + 3] =  gx;   //  gx * pz
             A[(baseRow + 4) * N_UNKNOWNS + 8] = 1.0;
             b[baseRow + 4] = g_poseRaw[p][4];
 
-            // Mz: gx*py - gy*px + Mz0
-            A[(baseRow + 5) * N_UNKNOWNS + 1] = -gy;   // -gy * px
-            A[(baseRow + 5) * N_UNKNOWNS + 2] =  gx;   //  gx * py
+            // Mz: p_x*gy - p_y*gx + Mz0  =>  col1=+gy, col2=-gx
+            A[(baseRow + 5) * N_UNKNOWNS + 1] =  gy;   //  gy * px
+            A[(baseRow + 5) * N_UNKNOWNS + 2] = -gx;   // -gx * py
             A[(baseRow + 5) * N_UNKNOWNS + 9] = 1.0;
             b[baseRow + 5] = g_poseRaw[p][5];
         }
 
         double x[N_UNKNOWNS];
         if (GaussSolver::solve(nRows, A, b, N_UNKNOWNS, x, g_solvedResidual)) {
-            g_solvedMass = x[0];
-            g_solvedCom[0] = x[1] / x[0];  // r_com = p / m
-            g_solvedCom[1] = x[2] / x[0];
-            g_solvedCom[2] = x[3] / x[0];
-            g_solvedBiasF[0] = x[4];
-            g_solvedBiasF[1] = x[5];
-            g_solvedBiasF[2] = x[6];
-            g_solvedBiasM[0] = x[7];
-            g_solvedBiasM[1] = x[8];
-            g_solvedBiasM[2] = x[9];
-            g_calibState = State::VERIFY;
+            if (fabs(x[0]) < 1e-9) {
+                std::cerr << "[Force] Calibration failed: solved mass near zero" << std::endl;
+                g_calibState = State::ABORTED;
+            } else {
+                g_solvedMass = x[0];
+                g_solvedCom[0] = x[1] / x[0];  // r_com = p / m
+                g_solvedCom[1] = x[2] / x[0];
+                g_solvedCom[2] = x[3] / x[0];
+                g_solvedBiasF[0] = x[4];
+                g_solvedBiasF[1] = x[5];
+                g_solvedBiasF[2] = x[6];
+                g_solvedBiasM[0] = x[7];
+                g_solvedBiasM[1] = x[8];
+                g_solvedBiasM[2] = x[9];
+                g_calibState = State::VERIFY;
+            }
         } else {
             g_calibState = State::ABORTED; // singular matrix
         }
