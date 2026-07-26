@@ -21,6 +21,8 @@ public:
     void sendPosition(const hduVector3Dd& devicePos);
     void onButtonPress(const Vec3& robotPos);
     void onButtonRelease();
+    void onButton2Press(const Vec3& stylusOrient);
+    void onButton2Release();
 
     // Robot → Touch 反向数据流 (每帧调用)
     void pollFeedback();
@@ -32,6 +34,13 @@ public:
     bool initForceReader();
     void pollForce();
     void shutdownForceReader();
+
+    // 力传感器标定
+    bool startForceCalibration();
+    void abortForceCalibration();
+    bool isForceCalibrating() const;
+    bool isForceCalibrationDone() const;
+    const char* forceCalibStatus() const;
 
     // 奇异脱困 (可在运行中手动触发)
     bool triggerEscape();
@@ -82,6 +91,15 @@ private:
     Vec3 m_targetPos;           // 累加式机器人目标位置
     Vec3 m_lastTouchPos;        // 上一帧 Touch 位置 (robot系), 用于增量计算
     bool   m_lastTouchValid = false;
+
+    // ===== 姿态控制 (Button 2) =====
+    Vec3 m_targetOrient;          // 累加式姿态目标 (Rx, Ry, Rz in degrees)
+    Vec3 m_lastStylusOrient;      // 上一帧笔杆姿态, 用于增量计算
+    Vec3 m_orientRefStylus;       // 按下瞬间的笔杆参考姿态
+    Vec3 m_orientRefRobot;        // 按下瞬间的末端参考姿态
+    bool  m_orientValid = false;
+    bool  m_transmittingOrient = false;
+
     CRITICAL_SECTION m_basePointLock;
     std::vector<IExtension*> m_extensions;
 
