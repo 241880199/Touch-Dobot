@@ -14,6 +14,25 @@
 #include "../force/ForceCompensation.h"
 #include "../force/ForceCalibration.h"
 
+// ===== 姿态安全边界钳位 =====
+static Vec3 clampOrientToBounds(const Vec3& target) {
+    Vec3 clamped = target;
+    bool warned = false;
+
+    if (target.x < Config::SAFE_RX_MIN) { clamped.x = Config::SAFE_RX_MIN; warned = true; }
+    if (target.x > Config::SAFE_RX_MAX) { clamped.x = Config::SAFE_RX_MAX; warned = true; }
+    if (target.y < Config::SAFE_RY_MIN) { clamped.y = Config::SAFE_RY_MIN; warned = true; }
+    if (target.y > Config::SAFE_RY_MAX) { clamped.y = Config::SAFE_RY_MAX; warned = true; }
+    if (target.z < Config::SAFE_RZ_MIN) { clamped.z = Config::SAFE_RZ_MIN; warned = true; }
+    if (target.z > Config::SAFE_RZ_MAX) { clamped.z = Config::SAFE_RZ_MAX; warned = true; }
+
+    if (warned) {
+        std::cerr << "[Safety] Orientation target out of bounds, clamped. Original: ("
+                  << target.x << "," << target.y << "," << target.z << ")" << std::endl;
+    }
+    return clamped;
+}
+
 // ===== ForceReader 线程: 阻塞读取 30004 实时力数据 (125Hz) =====
 static DWORD WINAPI forceReaderThread(LPVOID) {
     auto& app = appState;
@@ -542,12 +561,66 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
     s_speedMul = (verdict.action == SafetyVerdict::WARN_SLOW) ? verdict.speedFactor : 1.0;
     LeaveCriticalSection(&m_basePointLock);
 
-    // ===== 构造并发送 ServoP =====
+    // ===== 姿态增量计算 (Button 2 按下时) =====
     auto& app = appState;
+    double targetRx = app.robotBaseRx;
+    double targetRy = app.robotBaseRy;
+    double targetRz = app.robotBaseRz;
+
+    if (m_transmittingOrient && m_orientValid) {
+        // Read current stylus orientation (thread-safe)
+        double stylusRx, stylusRy, stylusRz;
+        EnterCriticalSection(&app.stylusOrientMutex);
+        stylusRx = app.stylusOrient[0];
+        stylusRy = app.stylusOrient[1];
+        stylusRz = app.stylusOrient[2];
+        LeaveCriticalSection(&app.stylusOrientMutex);
+
+        Vec3 current(stylusRx, stylusRy, stylusRz);
+
+        // Compute incremental delta from stylus rotation change
+        double drx = current.x - m_lastStylusOrient.x;
+        double dry = current.y - m_lastStylusOrient.y;
+        double drz = current.z - m_lastStylusOrient.z;
+
+        // Update reference for next frame
+        m_lastStylusOrient = current;
+
+        // Deadzone filter
+        if (fabs(drx) >= Config::ORIENT_DEADZONE_DEG ||
+            fabs(dry) >= Config::ORIENT_DEADZONE_DEG ||
+            fabs(drz) >= Config::ORIENT_DEADZONE_DEG) {
+
+            // Apply gain
+            drx *= Config::ORIENT_GAIN;
+            dry *= Config::ORIENT_GAIN;
+            drz *= Config::ORIENT_GAIN;
+
+            // Step cap
+            if (drx > Config::ORIENT_MAX_STEP_DEG) drx = Config::ORIENT_MAX_STEP_DEG;
+            if (drx < -Config::ORIENT_MAX_STEP_DEG) drx = -Config::ORIENT_MAX_STEP_DEG;
+            if (dry > Config::ORIENT_MAX_STEP_DEG) dry = Config::ORIENT_MAX_STEP_DEG;
+            if (dry < -Config::ORIENT_MAX_STEP_DEG) dry = -Config::ORIENT_MAX_STEP_DEG;
+            if (drz > Config::ORIENT_MAX_STEP_DEG) drz = Config::ORIENT_MAX_STEP_DEG;
+            if (drz < -Config::ORIENT_MAX_STEP_DEG) drz = -Config::ORIENT_MAX_STEP_DEG;
+
+            // Accumulate and clamp
+            m_targetOrient.x += drx;
+            m_targetOrient.y += dry;
+            m_targetOrient.z += drz;
+            m_targetOrient = clampOrientToBounds(m_targetOrient);
+        }
+
+        targetRx = m_targetOrient.x;
+        targetRy = m_targetOrient.y;
+        targetRz = m_targetOrient.z;
+    }
+
+    // ===== 构造并发送 ServoP =====
     char cmd[256];
     snprintf(cmd, sizeof(cmd), "ServoP(%.2f,%.2f,%.2f,%.2f,%.2f,%.2f)",
         clamped.x, clamped.y, clamped.z,
-        app.robotBaseRx, app.robotBaseRy, app.robotBaseRz);
+        targetRx, targetRy, targetRz);
 
     bool sent = robotSendMotion(cmd);
     static int sendCount = 0, failCount = 0;
@@ -612,6 +685,61 @@ void RelayCore::onButtonRelease() {
     m_lastTouchValid = false;
     m_stateMachine.onButtonRelease();
     std::cout << "[Relay] Button RELEASE — motion stopped" << std::endl;
+}
+
+void RelayCore::onButton2Press(const Vec3& stylusOrient) {
+    EnterCriticalSection(&m_basePointLock);
+    // Capture stylus reference orientation at press moment
+    m_orientRefStylus = stylusOrient;
+
+    // Capture robot current orientation
+    {
+        auto& app = appState;
+        EnterCriticalSection(&app.robotPoseMutex);
+        m_orientRefRobot = Vec3(app.robotActualPose.rx, app.robotActualPose.ry, app.robotActualPose.rz);
+        LeaveCriticalSection(&app.robotPoseMutex);
+    }
+
+    // Initialize accumulated target and last-frame stylus orientation
+    m_targetOrient = m_orientRefRobot;
+    m_lastStylusOrient = stylusOrient;
+    m_orientValid = true;
+    m_transmittingOrient = true;
+
+    // If position mode is not already active, start transmission
+    if (!m_transmitting) {
+        m_stateMachine.onButtonPress();
+        // Seed position target from actual pose (same as button1 press)
+        {
+            auto& app = appState;
+            EnterCriticalSection(&app.robotPoseMutex);
+            Vec3 rawPos(app.robotActualPose.x, app.robotActualPose.y, app.robotActualPose.z);
+            LeaveCriticalSection(&app.robotPoseMutex);
+            m_targetPos = SafetyBoundary::clampToBoundary(rawPos);
+        }
+        m_transmitting = true;
+    }
+    LeaveCriticalSection(&m_basePointLock);
+
+    std::cout << "[Relay] Button2 PRESS — orient ref=("
+              << m_orientRefStylus.x << "," << m_orientRefStylus.y << "," << m_orientRefStylus.z << ")"
+              << " robot ref=(" << m_orientRefRobot.x << "," << m_orientRefRobot.y << "," << m_orientRefRobot.z << ")"
+              << std::endl;
+}
+
+void RelayCore::onButton2Release() {
+    m_transmittingOrient = false;
+    m_orientValid = false;
+
+    // If position mode is also not active, stop all transmission
+    // (m_transmitting will be false if only button2 was held)
+    // Note: m_transmitting is checked independently — keep it set
+    // if button1 is still held. We use a separate check:
+    // if neither mode is active, stop transmission fully.
+    // The haptic callback will call onButtonRelease() separately
+    // when button1 is released. Here we only clear orient state.
+
+    std::cout << "[Relay] Button2 RELEASE — orientation control stopped" << std::endl;
 }
 
 static void logFeedback(const char* msg, const char* portLabel) {
