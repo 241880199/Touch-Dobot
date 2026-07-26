@@ -77,33 +77,36 @@ HDCallbackCode HDCALLBACK hapticCallback(void* pUserData) {
     relay.reportPosition();
 
     // ===== 8. 力反馈渲染 (传感器力 + 虚拟约束力) =====
+    // 仅按钮1按下时渲染力反馈，松开时清零
     {
         double totalForce[3] = { 0.0, 0.0, 0.0 };
 
-        // 8a. 传感器力 (仅在非 stale 时)
-        EnterCriticalSection(&app.forceDataMutex);
-        if (!app.forceData.isStale) {
-            totalForce[0] = app.forceData.hapticOut[0];
-            totalForce[1] = app.forceData.hapticOut[1];
-            totalForce[2] = app.forceData.hapticOut[2];
+        if (button1) {
+            // 8a. 传感器力 (仅在非 stale 时)
+            EnterCriticalSection(&app.forceDataMutex);
+            if (!app.forceData.isStale) {
+                totalForce[0] = app.forceData.hapticOut[0];
+                totalForce[1] = app.forceData.hapticOut[1];
+                totalForce[2] = app.forceData.hapticOut[2];
+            }
+            LeaveCriticalSection(&app.forceDataMutex);
+
+            // 8b. 虚拟约束力
+            double constraint[3] = {0};
+            SafetyPredictor::instance().computeConstraintForce(robotPos, constraint);
+            totalForce[0] += constraint[0];
+            totalForce[1] += constraint[1];
+            totalForce[2] += constraint[2];
+
+            // 8c. 总力 clamp
+            double maxF = Config::FORCE_MAX_TOUCH_N;
+            if (totalForce[0] > maxF) totalForce[0] = maxF;
+            if (totalForce[0] < -maxF) totalForce[0] = -maxF;
+            if (totalForce[1] > maxF) totalForce[1] = maxF;
+            if (totalForce[1] < -maxF) totalForce[1] = -maxF;
+            if (totalForce[2] > maxF) totalForce[2] = maxF;
+            if (totalForce[2] < -maxF) totalForce[2] = -maxF;
         }
-        LeaveCriticalSection(&app.forceDataMutex);
-
-        // 8b. 虚拟约束力 (始终渲染，独立于传感器/机械臂状态)
-        double constraint[3] = {0};
-        SafetyPredictor::instance().computeConstraintForce(robotPos, constraint);
-        totalForce[0] += constraint[0];
-        totalForce[1] += constraint[1];
-        totalForce[2] += constraint[2];
-
-        // 8c. 总力 clamp
-        double maxF = Config::FORCE_MAX_TOUCH_N;
-        if (totalForce[0] > maxF) totalForce[0] = maxF;
-        if (totalForce[0] < -maxF) totalForce[0] = -maxF;
-        if (totalForce[1] > maxF) totalForce[1] = maxF;
-        if (totalForce[1] < -maxF) totalForce[1] = -maxF;
-        if (totalForce[2] > maxF) totalForce[2] = maxF;
-        if (totalForce[2] < -maxF) totalForce[2] = -maxF;
 
         hdSetDoublev(HD_CURRENT_FORCE, totalForce);
 
@@ -114,8 +117,8 @@ HDCallbackCode HDCALLBACK hapticCallback(void* pUserData) {
             if (mag > 0.01) {  // only print when there's meaningful force
                 std::cerr << "[Haptic] Force applied: (" << totalForce[0] << ", "
                           << totalForce[1] << ", " << totalForce[2] << ") N  mag=" << mag
-                          << "  constraint=(" << constraint[0] << "," << constraint[1] << "," << constraint[2]
-                          << ")  stale=" << app.forceData.isStale << std::endl;
+                          << "  stale=" << app.forceData.isStale
+                          << "  button1=" << button1 << std::endl;
             }
         }
     }
