@@ -250,7 +250,7 @@ void step(AppState::ForceData& fd, const double poseRxyz[6]) {
     fd.compensated[4] = fd.raw[4] - bM[1] - Mg[1];
     fd.compensated[5] = fd.raw[5] - bM[2] - Mg[2];
 
-    // 8. Online EMA bias update (only when still — slow drift tracking)
+    // 8. Online EMA bias update (only when still)
     if (g_motion.isStill()) {
         double alpha = Config::FORCE_BIAS_EMA_ALPHA;
         // Update local copy, then write back under mutex

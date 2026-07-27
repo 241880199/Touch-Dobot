@@ -81,8 +81,6 @@ namespace Config {
     const double FORCE_MOTION_VEL_THRESH_MS = 0.002;      // 静止判定: 速度阈值 (m/s)
     const double FORCE_MOTION_ACC_THRESH_MSS = 0.005;     // 静止判定: 加速度阈值 (m/s²)
     const double FORCE_BIAS_EMA_ALPHA = 0.01;             // 零偏 EMA 更新率 (仅静止态)
-    const double FORCE_BIAS_EMA_ALPHA_FAST = 0.10;       // 启动快速收敛 α (τ≈0.33s)
-    const int    FORCE_STARTUP_FAST_SAMPLES = 90;         // 启动快速阶段采样数 (~3s @30Hz, ~9τ)
     const double FORCE_ACC_FILTER_CUTOFF_HZ = 10.0;       // 加速度估计低通截止 (Hz)
 
     // ========== 姿态控制参数 ==========
@@ -96,12 +94,12 @@ namespace Config {
     // ========== 虚拟约束力参数 ==========
     const double CONSTRAINT_BOUNDARY_RANGE      = 50.0;   // 安全边界感应距离 (mm)
     const double CONSTRAINT_BOUNDARY_MAX_FORCE  = 2.0;    // 安全边界最大约束力 (N)
-    const double CONSTRAINT_SINGULAR_RANGE      = 150.0;  // 圆柱奇异感应距离 (mm) — 提前预警
-    const double CONSTRAINT_SINGULAR_MAX_FORCE  = 3.3;    // 圆柱奇异最大约束力 (N) — Touch 最大输出
+    const double CONSTRAINT_SINGULAR_RANGE      = 80.0;   // 圆柱奇异感应距离 (mm) — 提前预警
+    const double CONSTRAINT_SINGULAR_MAX_FORCE  = 2.5;    // 圆柱奇异最大约束力 (N) — Touch 最大输出
     const double CONSTRAINT_ALARM_HISTORY_RANGE    = 80.0; // 报警历史感应距离 (mm)
     const double CONSTRAINT_ALARM_HISTORY_MAX_FORCE = 1.5; // 报警历史最大约束力 (N)
-    const double CONSTRAINT_WORKSPACE_EDGE_START     = 500.0; // 工作空间边缘感应起点 (mm) — 提前预警
-    const double CONSTRAINT_WORKSPACE_EDGE_MAX_FORCE = 2.0;   // 工作空间边缘最大约束力 (N)
+    const double CONSTRAINT_WORKSPACE_EDGE_START     = 550.0; // 工作空间边缘感应起点 (mm) — 提前预警
+    const double CONSTRAINT_WORKSPACE_EDGE_MAX_FORCE = 1.0;   // 工作空间边缘最大约束力 (N)
 
     // ===== Singularity Avoidance (零空间优化) =====
     // Shoulder safety
