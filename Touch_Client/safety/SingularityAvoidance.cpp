@@ -5,6 +5,7 @@
 #include "../config/Config.h"
 #include <cmath>
 #include <cstdio>
+#include <utility>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -94,6 +95,16 @@ static void svd3x3(double A[3][3], double sigma[3], double V[3][3]) {
     sigma[0] = sqrt(eig[0]);
     sigma[1] = sqrt(eig[1]);
     sigma[2] = sqrt(eig[2]);
+
+    // Sort descending (bubble sort, 3 elements) — Jacobi does not guarantee order
+    for (int i = 0; i < 2; i++) {
+        for (int j = i + 1; j < 3; j++) {
+            if (sigma[i] < sigma[j]) {
+                std::swap(sigma[i], sigma[j]);
+                for (int k = 0; k < 3; k++) std::swap(V[k][i], V[k][j]);
+            }
+        }
+    }
 }
 
 // ===== Internal: 6x6 symmetric Jacobi (same as Kinematics.cpp, returns eigenvectors) =====
@@ -149,6 +160,16 @@ static void svd6x6(double J[6][6], double sigma[6], double V[6][6]) {
     double eig[6];
     jacobi6x6(JTJ, eig, V);
     for (int i = 0; i < 6; i++) sigma[i] = sqrt(eig[i]);
+
+    // Sort descending (bubble sort, 6 elements) — Jacobi does not guarantee order
+    for (int i = 0; i < 5; i++) {
+        for (int j = i + 1; j < 6; j++) {
+            if (sigma[i] < sigma[j]) {
+                std::swap(sigma[i], sigma[j]);
+                for (int k = 0; k < 6; k++) std::swap(V[k][i], V[k][j]);
+            }
+        }
+    }
 }
 
 // ===== Internal: 3x6 null-space projector =====
@@ -485,7 +506,7 @@ Vec3 dampOrientationMotion(const Vec3& targetOrient, const Vec3& deltaOrient,
                 double dx_dqi = J_full[0][i];
                 double dy_dqi = J_full[1][i];
                 double dr_dqi = (positions[2].x * dx_dqi + positions[2].y * dy_dqi) / (r_elbow + 1e-12);
-                g[i] += 5.0 * dr * dr_dqi;  // amplified weight for orient mode
+                g[i] += Config::SINGAVOID_ORIENT_FORCE_AMP * Config::SINGAVOID_W_SHOULDER * dr * dr_dqi;  // amplified weight for orient mode
             }
         }
 
@@ -536,7 +557,7 @@ Vec3 dampOrientationMotion(const Vec3& targetOrient, const Vec3& deltaOrient,
         }
 
         // Critical warning
-        if (r_elbow < 50.0) {
+        if (r_elbow < Config::SINGAVOID_SHOULDER_CRITICAL_R * 0.5) {
             sendWarning(2, "shoulder",
                 "TCP位置距Z轴过近，姿态模式下存在肩关节奇异风险",
                 "建议松开按钮2，先移动TCP远离底座再旋转姿态",
