@@ -99,8 +99,6 @@ private:
     Vec3 m_lastStylusOrient;      // 上一帧笔杆姿态, 用于增量计算
     Vec3 m_orientRefStylus;       // 按下瞬间的笔杆参考姿态
     Vec3 m_orientRefRobot;        // 按下瞬间的末端参考姿态
-    Vec3 m_wristCenterFixed;      // 按下瞬间的腕部中心 (J5 位置, 固定不动)
-    Vec3 m_tcpOffsetFromWrist;    // 按下瞬间 TCP→J5 偏移向量 (robot 系)
     bool  m_orientValid = false;
     bool  m_transmittingOrient = false;
 

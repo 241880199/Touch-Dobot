@@ -230,6 +230,121 @@ evaluate_done:
     return m_lastVerdict;
 }
 
+// ===== position-only evaluation (no IK, for orientation mode) =====
+
+SafetyVerdict SafetyPredictor::evaluatePositionOnly(const Vec3& target) {
+    // Layer 1: hard boundaries (O(1), no IK needed)
+    // NaN/Inf guard
+    if (std::isnan(target.x) || std::isnan(target.y) || std::isnan(target.z) ||
+        std::isinf(target.x) || std::isinf(target.y) || std::isinf(target.z)) {
+        m_lastVerdict.action = SafetyVerdict::REJECT;
+        m_lastVerdict.errorCode = RobotErrorCode::ERR_EMERGENCY_STOP;
+        m_lastVerdict.reason = "NaN/Inf target position";
+        m_lastVerdict.speedFactor = 0.0;
+        goto evalpos_done;
+    }
+
+    // Workspace radius
+    {
+        double dist = sqrt(target.x * target.x + target.y * target.y);
+        if (dist > WORKSPACE_RADIUS) {
+            m_lastVerdict.action = SafetyVerdict::REJECT;
+            m_lastVerdict.errorCode = RobotErrorCode::ERR_WORKSPACE_RADIUS;
+            m_lastVerdict.reason = "exceeds workspace radius (620mm)";
+            m_lastVerdict.speedFactor = 0.0;
+            goto evalpos_done;
+        }
+    }
+
+    // Z-axis range
+    if (target.z < 0 || target.z > MAX_Z) {
+        m_lastVerdict.action = SafetyVerdict::REJECT;
+        m_lastVerdict.errorCode = RobotErrorCode::ERR_Z_RANGE;
+        m_lastVerdict.reason = "Z-axis out of range (0~795mm)";
+        m_lastVerdict.speedFactor = 0.0;
+        goto evalpos_done;
+    }
+
+    // Safety boundary
+    {
+        Vec3 clamped = SafetyBoundary::clampToBoundary(target);
+        if (clamped.x != target.x || clamped.y != target.y || clamped.z != target.z) {
+            m_lastVerdict.action = SafetyVerdict::REJECT;
+            m_lastVerdict.errorCode = RobotErrorCode::ERR_SAFETY_BOUNDARY;
+            m_lastVerdict.reason = "exceeds safety boundary";
+            m_lastVerdict.speedFactor = 0.0;
+            goto evalpos_done;
+        }
+    }
+
+    // Cylindrical singularity (geometric, no IK)
+    {
+        double r_xy = sqrt(target.x * target.x + target.y * target.y);
+        if (r_xy < 30.0) {
+            m_lastVerdict.action = SafetyVerdict::WARN_SLOW;
+            m_lastVerdict.errorCode = RobotErrorCode::ERR_CYLINDRICAL_SING;
+            m_lastVerdict.reason = "cylindrical singularity: too close to Z axis (<30mm)";
+            m_lastVerdict.speedFactor = SINGULARITY_SPEED;
+            goto evalpos_done;
+        }
+        if (r_xy < 80.0) {
+            m_lastVerdict.action = SafetyVerdict::WARN_SLOW;
+            m_lastVerdict.errorCode = RobotErrorCode::ERR_CYLINDRICAL_WARN;
+            m_lastVerdict.reason = "approaching cylindrical singularity (<80mm from Z axis)";
+            m_lastVerdict.speedFactor = 0.6;
+            goto evalpos_done;
+        }
+    }
+
+    // Layer 4: alarm history blacklist (position-only, no IK dependency)
+    {
+        double minDist = nearestAlarmDistance(target);
+        if (minDist < ALARM_DANGER_R) {
+            m_lastVerdict.action = SafetyVerdict::WARN_SLOW;
+            m_lastVerdict.errorCode = RobotErrorCode::ERR_ALARM_HISTORY;
+            m_lastVerdict.reason = "near historical alarm point (<30mm)";
+            m_lastVerdict.speedFactor = ALARM_DANGER_SPEED;
+            goto evalpos_done;
+        }
+        if (minDist < ALARM_WARN_R) {
+            m_lastVerdict.action = SafetyVerdict::WARN_SLOW;
+            m_lastVerdict.errorCode = RobotErrorCode::ERR_ALARM_HISTORY;
+            m_lastVerdict.reason = "near historical alarm zone (<80mm)";
+            m_lastVerdict.speedFactor = ALARM_WARN_SPEED;
+            goto evalpos_done;
+        }
+    }
+
+    // Pass
+    m_lastVerdict.action = SafetyVerdict::ALLOW;
+    m_lastVerdict.errorCode = RobotErrorCode::OK;
+    m_lastVerdict.reason = nullptr;
+    m_lastVerdict.speedFactor = 1.0;
+
+evalpos_done:
+    EnterCriticalSection(&m_lock);
+    ConstraintForce::computeTotalForce(target, m_alarmList, m_lastVerdict.constraintForce);
+    m_lastError.code = m_lastVerdict.errorCode;
+    m_lastError.severity = getSeverity(m_lastVerdict.errorCode);
+    m_lastError.timestampMs = GetTickCount64();
+    m_lastError.targetPosition = target;
+    {
+        auto& app = appState;
+        EnterCriticalSection(&app.robotPoseMutex);
+        m_lastError.currentJoints[0] = app.robotActualPose.j1;
+        m_lastError.currentJoints[1] = app.robotActualPose.j2;
+        m_lastError.currentJoints[2] = app.robotActualPose.j3;
+        m_lastError.currentJoints[3] = app.robotActualPose.j4;
+        m_lastError.currentJoints[4] = app.robotActualPose.j5;
+        m_lastError.currentJoints[5] = app.robotActualPose.j6;
+        LeaveCriticalSection(&app.robotPoseMutex);
+    }
+    m_lastError.speedFactor = m_lastVerdict.speedFactor;
+    LeaveCriticalSection(&m_lock);
+
+    return m_lastVerdict;
+}
+
 // ===== constraint force =====
 
 void SafetyPredictor::computeConstraintForce(const Vec3& target, double out[3]) {

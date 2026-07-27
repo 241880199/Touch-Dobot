@@ -724,7 +724,6 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
             std::cerr << "[Safety] Orient TCP REJECT: " << ov.reason
                       << " — tcp=(" << servoCmdX << "," << servoCmdY << "," << servoCmdZ << ")"
                       << std::endl;
-            LeaveCriticalSection(&m_basePointLock);
             return;
         }
 
@@ -773,9 +772,17 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
         clamped.x = m_targetPos.x + dampedPos.x;
         clamped.y = m_targetPos.y + dampedPos.y;
         clamped.z = m_targetPos.z + dampedPos.z;
-        targetRx += dampedOrient.x;
-        targetRy += dampedOrient.y;
-        targetRz += dampedOrient.z;
+
+        // Update servoCmd after Mode 3 modifies clamped (Bug 2 fix)
+        servoCmdX = clamped.x;
+        servoCmdY = clamped.y;
+        servoCmdZ = clamped.z;
+
+        // Bug 3 fix: undo Mode 2's orientation contribution, apply Mode 3's combined damping.
+        // Mode 2 already added 'damped' to targetRx, so we subtract it before adding 'dampedOrient'.
+        targetRx = targetRx - damped.x + dampedOrient.x;
+        targetRy = targetRy - damped.y + dampedOrient.y;
+        targetRz = targetRz - damped.z + dampedOrient.z;
     }
 
     // ===== 构造并发送 ServoP =====

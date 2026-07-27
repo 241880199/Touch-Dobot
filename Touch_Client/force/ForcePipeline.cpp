@@ -83,7 +83,7 @@ static inline double mapForceToTouch(double sensorForce) {
 void step(AppState::ForceData& fd) {
     // 1. Butterworth filter
     for (int i = 0; i < 6; i++) {
-        fd.filtered[i] = g_filters[i].step(fd.raw[i]);
+        fd.filtered[i] = g_filters[i].step(fd.compensated[i]);
     }
 
     // 2. Gradient limit (protect against sensor spike)

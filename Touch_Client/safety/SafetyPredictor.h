@@ -36,6 +36,9 @@ public:
     // 主入口: 评估目标位姿是否安全 (每帧 ServoP 前调用)
     SafetyVerdict evaluate(const Vec3& target);
 
+    // 仅位置检查 (无 IK): 用于姿态模式 — 不依赖 URDF 模型
+    SafetyVerdict evaluatePositionOnly(const Vec3& target);
+
     // 报警黑名单管理
     void addAlarmRecord(const AppState::RobotPose& pose);
     double nearestAlarmDistance(const Vec3& target) const;
