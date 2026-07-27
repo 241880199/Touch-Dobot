@@ -181,7 +181,17 @@ HDCallbackCode HDCALLBACK hapticCallback(void* pUserData) {
                 LeaveCriticalSection(&appState.orientForceMutex);
             }
 
-            // 8d. 总力 clamp
+            // 8d. Orient directional repulsion force (Phase 2: wrist alignment warning)
+            if (button2 && appState.hasOrientRepulsion) {
+                EnterCriticalSection(&appState.orientRepulsionMutex);
+                totalForce[0] += appState.orientRepulsionForce[0];
+                totalForce[1] += appState.orientRepulsionForce[1];
+                totalForce[2] += appState.orientRepulsionForce[2];
+                appState.hasOrientRepulsion = false;
+                LeaveCriticalSection(&appState.orientRepulsionMutex);
+            }
+
+            // 8e. 总力 clamp
             double maxF = Config::FORCE_MAX_TOUCH_N;
             if (totalForce[0] > maxF) totalForce[0] = maxF;
             if (totalForce[0] < -maxF) totalForce[0] = -maxF;
