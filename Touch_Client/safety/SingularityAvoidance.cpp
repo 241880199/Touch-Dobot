@@ -502,99 +502,80 @@ Vec3 dampOrientationMotion(const Vec3& targetOrient, const Vec3& deltaOrient,
         }
     }
 
-    // ===== Layer 2: TCP position micro-adjust for shoulder safety (Phase 2: early trigger) =====
+    // ===== Layer 2: Direct Cartesian TCP push for shoulder safety (Phase 3) =====
+    // Bypass null-space projection — push TCP radially outward in XY plane.
+    // This directly increases elbow r_xy, unlike the old joint-gradient approach
+    // where ~80% of the gradient was filtered out by the orientation null-space projector.
     Vec3 positions[7];
     Kinematics::computeJointPositions(currentJoints, positions);
     double r_elbow = sqrt(positions[2].x*positions[2].x + positions[2].y*positions[2].y);
 
-    if (r_elbow < Config::SINGAVOID_SHOULDER_SAFE_R) {  // Phase 2: 120mm (was 50mm)
-        // Build orientation Jacobian (rows 3-5)
-        double J_o[3][6];
-        for (int i = 0; i < 3; i++)
-            for (int j = 0; j < 6; j++)
-                J_o[i][j] = J_full[3 + i][j];
+    if (r_elbow < Config::SINGAVOID_SHOULDER_SAFE_R) {  // 120mm
+        // Radial outward direction (XY plane) — pushes elbow away from Z-axis
+        double pushDirX = (r_elbow > 0.01) ? positions[2].x / r_elbow : 1.0;
+        double pushDirY = (r_elbow > 0.01) ? positions[2].y / r_elbow : 0.0;
 
-        // Null-space projector for orientation task
-        double N[6][6];
-        nullSpaceProjectorOrient(const_cast<const double(*)[6]>(J_o), N);
+        double pushMag, forceMag;
 
-        // Compute shoulder repulsion gradient
-        double g[6] = {0};
-        {
-            double eps = 1.0;
-            double dr = 1.0 / ((r_elbow + eps) * (r_elbow + eps));
-            // Phase 2: amplified weight for orient mode
-            double amp = Config::SINGAVOID_ORIENT_FORCE_AMP;  // 2.5 (Phase 2)
-            for (int i = 0; i < 3; i++) {  // J1+J2+J3 affect elbow xy
-                double dx_dqi = J_full[0][i];
-                double dy_dqi = J_full[1][i];
-                double dr_dqi = (positions[2].x * dx_dqi + positions[2].y * dy_dqi) / (r_elbow + 1e-12);
-                g[i] += amp * Config::SINGAVOID_W_SHOULDER * dr * dr_dqi;
-            }
+        if (r_elbow >= Config::SINGAVOID_DUAL_SING_ELBOW_THR) {
+            // Yellow zone [80, 120): gentle push + light Touch repulsion
+            double t = (Config::SINGAVOID_SHOULDER_SAFE_R - r_elbow)
+                     / (Config::SINGAVOID_SHOULDER_SAFE_R - Config::SINGAVOID_DUAL_SING_ELBOW_THR);
+            pushMag  = t * 3.0;   // 0 → 3 mm/frame
+            forceMag = t * 1.5;   // 0 → 1.5 N
+        } else if (r_elbow >= Config::SINGAVOID_SHOULDER_CRITICAL_R) {
+            // Orange zone [50, 80): active push + strong Touch repulsion
+            double t = (Config::SINGAVOID_DUAL_SING_ELBOW_THR - r_elbow)
+                     / (Config::SINGAVOID_DUAL_SING_ELBOW_THR - Config::SINGAVOID_SHOULDER_CRITICAL_R);
+            pushMag  = 3.0 + t * 2.0;   // 3 → 5 mm/frame
+            forceMag = 1.5 + t * 1.5;   // 1.5 → 3.0 N
+        } else {
+            // Red zone < 50mm: maximum intervention
+            pushMag  = Config::SINGAVOID_MAX_POS_ADJUST;        // 5mm/frame
+            forceMag = Config::SINGAVOID_SINGULAR_FORCE_MAX_N;  // 3.0 N
         }
 
-        // Phase 2: dual-singularity coupling — double gradient when both wrist and shoulder at risk
+        // Apply TCP push — direct Cartesian, no null-space projection
+        tcpAdjustOut.x = pushDirX * pushMag;
+        tcpAdjustOut.y = pushDirY * pushMag;
+        tcpAdjustOut.z = 0.0;
+
+        // Touch radial repulsion (adds to wrist repulsion from Layer 1)
+        repulsionOut.x += pushDirX * forceMag;
+        repulsionOut.y += pushDirY * forceMag;
+
+        // Dual-singularity: amplify by 1.5× when both wrist and shoulder at risk
         if (cond_wrist > Config::SINGAVOID_DUAL_SING_COND_THR &&
             r_elbow < Config::SINGAVOID_DUAL_SING_ELBOW_THR) {
-            for (int i = 0; i < 6; i++) g[i] *= 2.0;
+            tcpAdjustOut.x *= 1.5;
+            tcpAdjustOut.y *= 1.5;
+            repulsionOut.x *= 1.5;
+            repulsionOut.y *= 1.5;
+            // Re-cap TCP adjust
+            double newMag = sqrt(tcpAdjustOut.x*tcpAdjustOut.x +
+                                tcpAdjustOut.y*tcpAdjustOut.y);
+            if (newMag > Config::SINGAVOID_MAX_POS_ADJUST) {
+                double scale = Config::SINGAVOID_MAX_POS_ADJUST / newMag;
+                tcpAdjustOut.x *= scale;
+                tcpAdjustOut.y *= scale;
+            }
             sendWarning(2, "dual_singular",
-                "腕部+肩部双重奇异风险，梯度已加倍",
+                "腕部+肩部双重奇异风险，推力已增强",
                 "建议松开按钮2，先移动TCP远离底座，再旋转",
                 cond_wrist, r_elbow);
         }
 
-        // Project into null space
-        double g_null[6] = {0};
-        for (int i = 0; i < 6; i++)
-            for (int j = 0; j < 6; j++)
-                g_null[i] += N[i][j] * g[j];
-
-        // Apply to a local copy of joint angles
-        double q[6];
-        for (int i = 0; i < 6; i++) q[i] = currentJoints[i];
-        double alpha = Config::SINGAVOID_GRAD_STEP;  // 0.3 (Phase 2)
-        for (int i = 0; i < 6; i++) q[i] += alpha * g_null[i];
-
-        // Clamp joints
-        double lims[6][2] = {
-            {-360, 360}, {-360, 360}, {-155, 155},
-            {-360, 360}, {-360, 360}, {-360, 360}
-        };
-        for (int i = 0; i < 6; i++) {
-            if (q[i] < lims[i][0]) q[i] = lims[i][0];
-            if (q[i] > lims[i][1]) q[i] = lims[i][1];
-        }
-
-        // FK for new TCP position
-        Vec3 newTcp = Kinematics::forwardPosition(q);
-        tcpAdjustOut.x = newTcp.x - currentTcp.x;
-        tcpAdjustOut.y = newTcp.y - currentTcp.y;
-        tcpAdjustOut.z = newTcp.z - currentTcp.z;
-
-        // Cap to MAX_POS_ADJUST
-        double adjMag = sqrt(tcpAdjustOut.x*tcpAdjustOut.x +
-                             tcpAdjustOut.y*tcpAdjustOut.y +
-                             tcpAdjustOut.z*tcpAdjustOut.z);
-        if (adjMag > Config::SINGAVOID_MAX_POS_ADJUST) {
-            double scale = Config::SINGAVOID_MAX_POS_ADJUST / adjMag;
-            tcpAdjustOut.x *= scale;
-            tcpAdjustOut.y *= scale;
-            tcpAdjustOut.z *= scale;
-        }
-
-        if (adjMag > 3.0) {
-            sendWarning(0, "tcp_adjust",
-                "TCP已自动微调以保持安全构型",
-                "当前位置安全，无需手动操作",
-                adjMag, 0.0);
-        }
-
-        // Critical warning (below the original 50mm threshold)
+        // Warnings
         if (r_elbow < Config::SINGAVOID_SHOULDER_CRITICAL_R) {
             sendWarning(2, "shoulder",
-                "TCP位置距Z轴过近，姿态模式下存在肩关节奇异风险",
-                "建议松开按钮2，先移动TCP远离底座再旋转姿态",
-                r_elbow, 0.0);
+                "TCP距Z轴过近，已最大力度外推",
+                "建议松开按钮2，先移动TCP远离底座再旋转",
+                r_elbow, pushMag);
+        } else if (r_elbow < Config::SINGAVOID_DUAL_SING_ELBOW_THR) {
+            sendWarning(1, "shoulder",
+                "肘部接近Z轴，TCP正在主动外推",
+                "请配合向外移动TCP，避免继续靠近底座",
+                r_elbow, pushMag);
         }
     }
 

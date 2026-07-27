@@ -174,9 +174,12 @@ static bool test_repulsion_direction_correct() {
     return true;  // structural correctness — direction validated on hardware
 }
 
-// Test 9: dampOrientationMotion — no repulsion when cond < 20 (Phase 2)
-static bool test_repulsion_zero_in_safe_zone() {
-    // Well-conditioned config: all joints at mid-range
+// Test 9: dampOrientationMotion — repulsion is finite when wrist is safe (Phase 3)
+// Note: shoulder repulsion (Layer 2) may still fire if r_elbow < 120mm,
+// which depends on the joint config. This test uses a well-conditioned wrist
+// (J5=60°) and verifies that repulsion is finite and bounded (≤ 3.3N clamp).
+static bool test_repulsion_finite_safe_wrist() {
+    // Well-conditioned config: all joints at mid-range, wrist safe
     double q[6] = {30, 20, -30, 45, 60, -30};
     Vec3 targetOrient(10, 20, 30);
     Vec3 delta(2.0, -1.0, 1.5);
@@ -187,9 +190,19 @@ static bool test_repulsion_zero_in_safe_zone() {
         targetOrient, delta, currentTcp, q, tcpAdj, repulsion);
 
     double repMag = sqrt(repulsion.x*repulsion.x + repulsion.y*repulsion.y + repulsion.z*repulsion.z);
-    printf("  Test9: repulsion_mag=%.6f (expect 0)\n", repMag);
-    if (repMag > 0.001) {
-        printf("  FAIL: repulsion in safe zone\n");
+    printf("  Test9: repulsion_mag=%.3f (expect finite, ≤ 3.3N)\n", repMag);
+    // Repulsion may be non-zero from shoulder push (Layer 2) even when wrist is safe.
+    // Verify it's finite/bounded — not NaN/Inf and within Touch 3.3N clamp.
+    if (std::isnan(repMag) || std::isinf(repMag) || repMag > 3.5) {
+        printf("  FAIL: repulsion out of bounds\n");
+        return false;
+    }
+    // Verify delta passes through (no wrist damping at safe J5=60°)
+    double dampMag = sqrt(damped.x*damped.x + damped.y*damped.y + damped.z*damped.z);
+    double deltaMag = sqrt(delta.x*delta.x + delta.y*delta.y + delta.z*delta.z);
+    if (fabs(dampMag - deltaMag) > 0.1) {
+        printf("  FAIL: wrist damping applied in safe zone (dampMag=%.3f vs deltaMag=%.3f)\n",
+               dampMag, deltaMag);
         return false;
     }
     return true;
@@ -304,7 +317,7 @@ int main() {
     if (test_repulsion_direction_correct()) passed++;
     else printf("  FAILED\n");
 
-    if (test_repulsion_zero_in_safe_zone()) passed++;
+    if (test_repulsion_finite_safe_wrist()) passed++;
     else printf("  FAILED\n");
 
     if (test_shoulder_early_trigger()) passed++;
