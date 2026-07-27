@@ -18,6 +18,12 @@ namespace ConstraintForce {
     // ampFactor: 1.0 = 正常, 1.5 = 姿态模式增强
     void computeSingularForce(const Vec3& target, double out[3], double ampFactor);
 
+    // 方向性奇异斥力 — 沿指定方向施加 (姿态模式腕部对齐预警)
+    // direction: 任务空间斥力方向 (应已归一化)
+    // magnitude: 斥力大小 (N), clamped to [0, SINGAVOID_SINGULAR_FORCE_MAX_N]
+    // out[3]: 输出力向量 (N)
+    void computeOrientationSingularForce(const Vec3& direction, double magnitude, double out[3]);
+
     // 报警历史排斥力 — 远离报警点
     // dist < 80mm → 0→1.5N 反比
     void computeAlarmHistoryForce(const Vec3& target,
