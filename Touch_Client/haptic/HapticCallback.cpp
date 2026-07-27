@@ -153,14 +153,35 @@ HDCallbackCode HDCALLBACK hapticCallback(void* pUserData) {
             }
             LeaveCriticalSection(&app.forceDataMutex);
 
-            // 8b. 虚拟约束力
+            // 8b. 虚拟约束力 — 距离驱动: 越靠近危险区域力越大
+            // 位置模式: 基于 Touch 笔尖位置
+            // 姿态模式: 基于机器人实际 TCP 位置
             double constraint[3] = {0};
-            SafetyPredictor::instance().computeConstraintForce(robotPos, constraint);
+            {
+                Vec3 forceRef = robotPos;
+                if (!button1 && button2) {
+                    // Orientation-only: use robot actual TCP for constraint reference
+                    EnterCriticalSection(&app.robotPoseMutex);
+                    forceRef = Vec3(app.robotActualPose.x, app.robotActualPose.y, app.robotActualPose.z);
+                    LeaveCriticalSection(&app.robotPoseMutex);
+                }
+                SafetyPredictor::instance().computeConstraintForce(forceRef, constraint);
+            }
             totalForce[0] += constraint[0];
             totalForce[1] += constraint[1];
             totalForce[2] += constraint[2];
 
-            // 8c. 总力 clamp
+            // 8c. Orient extra force (singularity avoidance constraint amplification)
+            if (appState.hasOrientExtraForce) {
+                EnterCriticalSection(&appState.orientForceMutex);
+                totalForce[0] += appState.orientExtraForce[0];
+                totalForce[1] += appState.orientExtraForce[1];
+                totalForce[2] += appState.orientExtraForce[2];
+                appState.hasOrientExtraForce = false;
+                LeaveCriticalSection(&appState.orientForceMutex);
+            }
+
+            // 8d. 总力 clamp
             double maxF = Config::FORCE_MAX_TOUCH_N;
             if (totalForce[0] > maxF) totalForce[0] = maxF;
             if (totalForce[0] < -maxF) totalForce[0] = -maxF;

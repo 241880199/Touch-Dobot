@@ -123,6 +123,11 @@ public:
     };
     ForceData forceData;
     CRITICAL_SECTION forceDataMutex;
+
+    // Orient mode extra constraint force (Thread-safe: orientForceMutex)
+    double orientExtraForce[3];
+    bool   hasOrientExtraForce;
+    CRITICAL_SECTION orientForceMutex;
 };
 
 extern AppState appState;

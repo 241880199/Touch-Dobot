@@ -18,6 +18,9 @@ AppState::AppState() {
     InitializeCriticalSection(&feedbackLogMutex);
     InitializeCriticalSection(&forceDataMutex);
     InitializeCriticalSection(&stylusOrientMutex);
+    InitializeCriticalSection(&orientForceMutex);
+    orientExtraForce[0] = orientExtraForce[1] = orientExtraForce[2] = 0.0;
+    hasOrientExtraForce = false;
 
     // 大数组用 ZeroMemory 避免 in-class initializer 与 MSVC 的兼容问题
     ZeroMemory(commandLog, sizeof(commandLog));
@@ -39,6 +42,7 @@ AppState::~AppState() {
     DeleteCriticalSection(&feedbackLogMutex);
     DeleteCriticalSection(&forceDataMutex);
     DeleteCriticalSection(&stylusOrientMutex);
+    DeleteCriticalSection(&orientForceMutex);
     WSACleanup();
 }
 
