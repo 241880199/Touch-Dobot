@@ -1,11 +1,9 @@
 #include "SingularityAvoidance.h"
 #include "../robot/Kinematics.h"
-// RelayCore.h NOT included — we define TEST_SINGAVOID to stub it out
-// (included here for the non-test sendWarning path; TEST_SINGAVOID builds skip RelayCore linkage)
+// RelayCore.h included for sendWarning — TEST_SINGAVOID builds stub it out
 #include "../relay/RelayCore.h"
 #include "../config/Config.h"
 #include <cmath>
-#include <cstring>
 #include <cstdio>
 
 #ifndef M_PI
@@ -329,25 +327,300 @@ static Vec3 extractEulerFromTransform(double T[4][4]) {
     return out;
 }
 
-// ===== Public stub implementations =====
-// Full implementations will be added in Tasks 4, 5, 6
+// ===== Public interfaces =====
 
 Vec3 optimizeOrientation(const Vec3& targetPos, const double currentJoints[6]) {
-    return Vec3(0, 0, 0);
+    // Step 1: Position IK with DLS
+    double q[6];
+    if (!Kinematics::inverse(targetPos, currentJoints, q)) {
+        // IK failed — return zero Vec3 to signal "use fallback"
+        return Vec3(0, 0, 0);
+    }
+
+    // Step 2: Null-space iteration
+    for (int iter = 0; iter < Config::SINGAVOID_NULLSPACE_ITER; iter++) {
+        // Recompute position Jacobian (rows 0-2)
+        double J_full[6][6];
+        Kinematics::jacobian(q, J_full);
+        double J_p[3][6];
+        for (int i = 0; i < 3; i++)
+            for (int j = 0; j < 6; j++)
+                J_p[i][j] = J_full[i][j];
+
+        // Null-space projector
+        double N[6][6];
+        nullSpaceProjector3x6(const_cast<const double(*)[6]>(J_p), N);
+
+        // Safety gradient
+        double g[6];
+        computeSafetyGradient(q, g);
+
+        // Project gradient into null space
+        double g_null[6] = {0};
+        for (int i = 0; i < 6; i++)
+            for (int j = 0; j < 6; j++)
+                g_null[i] += N[i][j] * g[j];
+
+        // Apply step
+        double alpha = Config::SINGAVOID_GRAD_STEP;
+        double mag = 0.0;
+        for (int i = 0; i < 6; i++) mag += g_null[i] * g_null[i];
+        mag = sqrt(mag);
+        if (mag < 1e-4) break;  // converged
+
+        for (int i = 0; i < 6; i++) q[i] += alpha * g_null[i];
+
+        // Clamp to joint limits
+        double lims[6][2] = {
+            {-360, 360}, {-360, 360}, {-155, 155},
+            {-360, 360}, {-360, 360}, {-360, 360}
+        };
+        for (int i = 0; i < 6; i++) {
+            if (q[i] < lims[i][0]) q[i] = lims[i][0];
+            if (q[i] > lims[i][1]) q[i] = lims[i][1];
+        }
+    }
+
+    // Step 3: FK to get orientation
+    double T[4][4];
+    Kinematics::composeTransform(q, T);
+    Vec3 orient = extractEulerFromTransform(T);
+
+    // Step 4: Check if shoulder is dangerously close — send warning
+    Vec3 positions[7];
+    Kinematics::computeJointPositions(q, positions);
+    double r_elbow = sqrt(positions[2].x*positions[2].x + positions[2].y*positions[2].y);
+    if (r_elbow < Config::SINGAVOID_SHOULDER_CRITICAL_R) {
+        sendWarning(1, "shoulder",
+            "肘部距Z轴过近，零空间优化中",
+            "建议反向拉动TCP远离底座，当前自动调整中",
+            r_elbow, 0.0);
+    }
+
+    return orient;
 }
 
 Vec3 dampOrientationMotion(const Vec3& targetOrient, const Vec3& deltaOrient,
                            const Vec3& currentTcp, const double currentJoints[6],
                            Vec3& tcpAdjustOut) {
     tcpAdjustOut = Vec3(0, 0, 0);
-    return deltaOrient;
+
+    // ===== Layer 1: Wrist singularity damping =====
+    double J_full[6][6];
+    Kinematics::jacobian(currentJoints, J_full);
+
+    // Extract wrist Jacobian: orientation rows x J4/J5/J6 columns
+    double J_w[3][3];
+    for (int i = 0; i < 3; i++) {
+        J_w[i][0] = J_full[3 + i][3];  // J4
+        J_w[i][1] = J_full[3 + i][4];  // J5
+        J_w[i][2] = J_full[3 + i][5];  // J6
+    }
+
+    double sigma[3], V[3][3];
+    svd3x3(J_w, sigma, V);
+
+    double cond_wrist = (sigma[2] > 1e-12) ? sigma[0] / sigma[2] : 1e9;
+
+    Vec3 dampedDelta = deltaOrient;
+
+    if (cond_wrist > Config::SINGAVOID_COND_WRIST_WARN) {
+        // Damping factor
+        double beta;
+        if (cond_wrist >= Config::SINGAVOID_COND_WRIST_REJECT) {
+            beta = 0.0;
+        } else if (cond_wrist >= Config::SINGAVOID_COND_WRIST_DAMP) {
+            beta = 0.2;
+        } else {
+            beta = 0.5;
+        }
+
+        // v_min = column of V corresponding to sigma[2] (smallest singular value)
+        // This is the most singular direction in J4/J5/J6 joint space
+        double v_min[3] = {V[0][2], V[1][2], V[2][2]};
+
+        // Project user delta onto v_min
+        double proj = deltaOrient.x*v_min[0] + deltaOrient.y*v_min[1] + deltaOrient.z*v_min[2];
+        double p_x = proj * v_min[0];
+        double p_y = proj * v_min[1];
+        double p_z = proj * v_min[2];
+
+        // Damp parallel component, keep perpendicular
+        dampedDelta.x = (deltaOrient.x - p_x) + beta * p_x;
+        dampedDelta.y = (deltaOrient.y - p_y) + beta * p_y;
+        dampedDelta.z = (deltaOrient.z - p_z) + beta * p_z;
+
+        // Send warning
+        if (beta < 0.5) {
+            sendWarning(beta == 0.0 ? 2 : 1, "wrist",
+                "腕部J5接近对正点，旋转已阻尼",
+                "请减慢绕此方向的姿态旋转，避免J5完全对正",
+                cond_wrist, beta);
+        }
+    }
+
+    // ===== Layer 2: TCP position micro-adjust for shoulder safety =====
+    Vec3 positions[7];
+    Kinematics::computeJointPositions(currentJoints, positions);
+    double r_elbow = sqrt(positions[2].x*positions[2].x + positions[2].y*positions[2].y);
+
+    if (r_elbow < Config::SINGAVOID_SHOULDER_CRITICAL_R) {
+        // Build orientation Jacobian (rows 3-5)
+        double J_o[3][6];
+        for (int i = 0; i < 3; i++)
+            for (int j = 0; j < 6; j++)
+                J_o[i][j] = J_full[3 + i][j];
+
+        // Null-space projector for orientation task
+        double N[6][6];
+        nullSpaceProjectorOrient(const_cast<const double(*)[6]>(J_o), N);
+
+        // Compute shoulder repulsion gradient (amplified)
+        double g[6] = {0};
+        // Same shoulder gradient as computeSafetyGradient but with higher weight
+        {
+            double eps = 1.0;
+            double dr = 1.0 / ((r_elbow + eps) * (r_elbow + eps));
+            for (int i = 0; i < 3; i++) {  // J1+J2+J3 affect elbow xy
+                double dx_dqi = J_full[0][i];
+                double dy_dqi = J_full[1][i];
+                double dr_dqi = (positions[2].x * dx_dqi + positions[2].y * dy_dqi) / (r_elbow + 1e-12);
+                g[i] += 5.0 * dr * dr_dqi;  // amplified weight for orient mode
+            }
+        }
+
+        // Project into null space
+        double g_null[6] = {0};
+        for (int i = 0; i < 6; i++)
+            for (int j = 0; j < 6; j++)
+                g_null[i] += N[i][j] * g[j];
+
+        // Apply to a local copy of joint angles
+        double q[6];
+        for (int i = 0; i < 6; i++) q[i] = currentJoints[i];
+        double alpha = Config::SINGAVOID_GRAD_STEP;
+        for (int i = 0; i < 6; i++) q[i] += alpha * g_null[i];
+
+        // Clamp joints
+        double lims[6][2] = {
+            {-360, 360}, {-360, 360}, {-155, 155},
+            {-360, 360}, {-360, 360}, {-360, 360}
+        };
+        for (int i = 0; i < 6; i++) {
+            if (q[i] < lims[i][0]) q[i] = lims[i][0];
+            if (q[i] > lims[i][1]) q[i] = lims[i][1];
+        }
+
+        // FK for new TCP position
+        Vec3 newTcp = Kinematics::forwardPosition(q);
+        tcpAdjustOut.x = newTcp.x - currentTcp.x;
+        tcpAdjustOut.y = newTcp.y - currentTcp.y;
+        tcpAdjustOut.z = newTcp.z - currentTcp.z;
+
+        // Cap to MAX_POS_ADJUST
+        double adjMag = sqrt(tcpAdjustOut.x*tcpAdjustOut.x +
+                             tcpAdjustOut.y*tcpAdjustOut.y +
+                             tcpAdjustOut.z*tcpAdjustOut.z);
+        if (adjMag > Config::SINGAVOID_MAX_POS_ADJUST) {
+            double scale = Config::SINGAVOID_MAX_POS_ADJUST / adjMag;
+            tcpAdjustOut.x *= scale;
+            tcpAdjustOut.y *= scale;
+            tcpAdjustOut.z *= scale;
+        }
+
+        if (adjMag > 3.0) {
+            sendWarning(0, "tcp_adjust",
+                "TCP已自动微调以保持安全构型",
+                "当前位置安全，无需手动操作",
+                adjMag, 0.0);
+        }
+
+        // Critical warning
+        if (r_elbow < 50.0) {
+            sendWarning(2, "shoulder",
+                "TCP位置距Z轴过近，姿态模式下存在肩关节奇异风险",
+                "建议松开按钮2，先移动TCP远离底座再旋转姿态",
+                r_elbow, 0.0);
+        }
+    }
+
+    return dampedDelta;
 }
 
 void dampFullCommand(const Vec3& userDeltaPos, const Vec3& userDeltaOrient,
                      const double currentJoints[6],
                      Vec3& dampedDeltaPos, Vec3& dampedDeltaOrient) {
-    dampedDeltaPos = userDeltaPos;
-    dampedDeltaOrient = userDeltaOrient;
+
+    // Build full 6-DOF user delta
+    double userDelta6D[6] = {
+        userDeltaPos.x, userDeltaPos.y, userDeltaPos.z,
+        userDeltaOrient.x, userDeltaOrient.y, userDeltaOrient.z
+    };
+
+    // Compute full Jacobian and SVD
+    double J[6][6];
+    Kinematics::jacobian(currentJoints, J);
+    double sigma[6], V[6][6];
+    svd6x6(J, sigma, V);
+
+    double cond = (sigma[5] > 1e-12) ? sigma[0] / sigma[5] : 1e9;
+
+    if (cond < Config::SINGAVOID_COND_FULL_WARN) {
+        // Safe — pass through unchanged
+        dampedDeltaPos = userDeltaPos;
+        dampedDeltaOrient = userDeltaOrient;
+        return;
+    }
+
+    // Compute U = J * V * diag(1/sigma) — left singular vectors in task space
+    double U[6][6] = {{0}};
+    for (int i = 0; i < 6; i++) {
+        double invSigma = (sigma[i] > 1e-12) ? 1.0 / sigma[i] : 0.0;
+        for (int r = 0; r < 6; r++)
+            for (int c = 0; c < 6; c++)
+                U[r][i] += J[r][c] * V[c][i] * invSigma;
+    }
+
+    // Build damped delta
+    double damped[6] = {0};
+    double threshold = Config::SINGAVOID_SINGULAR_RATIO;
+
+    for (int i = 0; i < 6; i++) {
+        double ratio = (sigma[0] > 1e-12) ? sigma[i] / sigma[0] : 0.0;
+
+        if (ratio >= threshold) {
+            // This direction is well-conditioned — pass through
+            double proj = 0.0;
+            for (int k = 0; k < 6; k++) proj += U[k][i] * userDelta6D[k];
+            for (int k = 0; k < 6; k++) damped[k] += proj * U[k][i];
+        } else {
+            // This direction is near-singular — damp
+            double beta = ratio / threshold;  // 0 at ratio=0, 1 at ratio=threshold
+            double proj = 0.0;
+            for (int k = 0; k < 6; k++) proj += U[k][i] * userDelta6D[k];
+            for (int k = 0; k < 6; k++) damped[k] += beta * proj * U[k][i];
+
+            if (beta < 0.5) {
+                // Identify which Cartesian DOF is most affected
+                int dominantAxis = 0;
+                double maxAbs = fabs(U[0][i]);
+                for (int k = 1; k < 6; k++)
+                    if (fabs(U[k][i]) > maxAbs) { maxAbs = fabs(U[k][i]); dominantAxis = k; }
+
+                const char* dirNames[6] = {"X平移","Y平移","Z平移","Rx旋转","Ry旋转","Rz旋转"};
+                char msg[128], sug[128];
+                int dampPct = (int)((1.0 - beta) * 100);
+                snprintf(msg, sizeof(msg), "全控模式%s方向阻尼%d%%",
+                         dirNames[dominantAxis], dampPct);
+                snprintf(sug, sizeof(sug), "底座上方请避免大幅%s，或先拉远TCP",
+                         dominantAxis < 3 ? "横向移动" : "旋转");
+                sendWarning(1, "full_damp", msg, sug, dampPct, cond);
+            }
+        }
+    }
+
+    dampedDeltaPos.x = damped[0]; dampedDeltaPos.y = damped[1]; dampedDeltaPos.z = damped[2];
+    dampedDeltaOrient.x = damped[3]; dampedDeltaOrient.y = damped[4]; dampedDeltaOrient.z = damped[5];
 }
 
 } // namespace SingularityAvoidance
