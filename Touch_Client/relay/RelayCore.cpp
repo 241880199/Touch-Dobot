@@ -669,11 +669,11 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
                 LeaveCriticalSection(&app.robotPoseMutex);
             }
 
-            Vec3 tcpAdj;
+            Vec3 tcpAdj, repulsionOut;
             Vec3 currentTcp(clamped.x, clamped.y, clamped.z);
 
             damped = SingularityAvoidance::dampOrientationMotion(
-                m_targetOrient, robotDelta, currentTcp, curJoints, tcpAdj);
+                m_targetOrient, robotDelta, currentTcp, curJoints, tcpAdj, repulsionOut);
 
             // Apply damped orientation delta
             m_targetOrient.x += damped.x;

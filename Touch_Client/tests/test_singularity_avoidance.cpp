@@ -72,10 +72,10 @@ static bool test_damp_safe_orientation() {
     Vec3 targetOrient(10, 20, 30);
     Vec3 delta(2.0, -1.0, 1.5);
     Vec3 currentTcp(300, 200, 400);
-    Vec3 tcpAdj;
+    Vec3 tcpAdj, repulsion;
 
     Vec3 damped = SingularityAvoidance::dampOrientationMotion(
-        targetOrient, delta, currentTcp, q, tcpAdj);
+        targetOrient, delta, currentTcp, q, tcpAdj, repulsion);
 
     printf("  Test4: delta_in=(%.2f,%.2f,%.2f) delta_out=(%.2f,%.2f,%.2f) tcpAdj=(%.2f,%.2f,%.2f)\n",
            delta.x, delta.y, delta.z, damped.x, damped.y, damped.z,
@@ -91,10 +91,10 @@ static bool test_damp_wrist_singular() {
     Vec3 targetOrient(0, 0, 0);
     Vec3 delta(5.0, 5.0, 5.0);  // large orientation delta
     Vec3 currentTcp(300, 200, 400);
-    Vec3 tcpAdj;
+    Vec3 tcpAdj, repulsion;
 
     Vec3 damped = SingularityAvoidance::dampOrientationMotion(
-        targetOrient, delta, currentTcp, q, tcpAdj);
+        targetOrient, delta, currentTcp, q, tcpAdj, repulsion);
 
     double magIn = sqrt(delta.x*delta.x + delta.y*delta.y + delta.z*delta.z);
     double magOut = sqrt(damped.x*damped.x + damped.y*damped.y + damped.z*damped.z);

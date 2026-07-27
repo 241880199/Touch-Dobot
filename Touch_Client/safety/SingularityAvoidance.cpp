@@ -422,10 +422,11 @@ Vec3 optimizeOrientation(const Vec3& targetPos, const double currentJoints[6]) {
 
 Vec3 dampOrientationMotion(const Vec3& targetOrient, const Vec3& deltaOrient,
                            const Vec3& currentTcp, const double currentJoints[6],
-                           Vec3& tcpAdjustOut) {
+                           Vec3& tcpAdjustOut, Vec3& repulsionOut) {
     tcpAdjustOut = Vec3(0, 0, 0);
+    repulsionOut = Vec3(0, 0, 0);
 
-    // ===== Layer 1: Wrist singularity damping =====
+    // ===== Layer 1: Wrist singularity damping (Phase 2: continuous) =====
     double J_full[6][6];
     Kinematics::jacobian(currentJoints, J_full);
 
@@ -444,22 +445,30 @@ Vec3 dampOrientationMotion(const Vec3& targetOrient, const Vec3& deltaOrient,
 
     Vec3 dampedDelta = deltaOrient;
 
-    if (cond_wrist > Config::SINGAVOID_COND_WRIST_WARN) {
-        // Damping factor
-        double beta;
-        if (cond_wrist >= Config::SINGAVOID_COND_WRIST_REJECT) {
-            beta = 0.0;
-        } else if (cond_wrist >= Config::SINGAVOID_COND_WRIST_DAMP) {
-            beta = 0.2;
-        } else {
-            beta = 0.5;
-        }
+    if (cond_wrist >= Config::SINGAVOID_COND_WRIST_EARLY) {
+        // Continuous damping: t = normalized proximity to block zone
+        double t = (cond_wrist - Config::SINGAVOID_COND_WRIST_EARLY)
+                 / (Config::SINGAVOID_COND_WRIST_BLOCK - Config::SINGAVOID_COND_WRIST_EARLY);
+        if (t > 1.0) t = 1.0;
+        double beta = 1.0 - t * t;  // quadratic: gentle onset, rapid near danger
 
         // v_min = column of V corresponding to sigma[2] (smallest singular value)
         // This is the most singular direction in J4/J5/J6 joint space
         double v_min[3] = {V[0][2], V[1][2], V[2][2]};
 
-        // Project user delta onto v_min
+        // Map singular direction to task space: u_min = J_w * v_min (3D rotation vector)
+        double u_min[3];
+        u_min[0] = J_w[0][0]*v_min[0] + J_w[0][1]*v_min[1] + J_w[0][2]*v_min[2];
+        u_min[1] = J_w[1][0]*v_min[0] + J_w[1][1]*v_min[1] + J_w[1][2]*v_min[2];
+        u_min[2] = J_w[2][0]*v_min[0] + J_w[2][1]*v_min[1] + J_w[2][2]*v_min[2];
+
+        // Normalize u_min
+        double uMag = sqrt(u_min[0]*u_min[0] + u_min[1]*u_min[1] + u_min[2]*u_min[2]);
+        if (uMag > 1e-12) {
+            u_min[0] /= uMag; u_min[1] /= uMag; u_min[2] /= uMag;
+        }
+
+        // Project user delta onto v_min (joint-space singular direction)
         double proj = deltaOrient.x*v_min[0] + deltaOrient.y*v_min[1] + deltaOrient.z*v_min[2];
         double p_x = proj * v_min[0];
         double p_y = proj * v_min[1];
@@ -470,21 +479,35 @@ Vec3 dampOrientationMotion(const Vec3& targetOrient, const Vec3& deltaOrient,
         dampedDelta.y = (deltaOrient.y - p_y) + beta * p_y;
         dampedDelta.z = (deltaOrient.z - p_z) + beta * p_z;
 
+        // Directional repulsion: oppose user's rotation into danger
+        // Project user delta onto u_min (task-space direction of the singular rotation)
+        double projU = deltaOrient.x*u_min[0] + deltaOrient.y*u_min[1] + deltaOrient.z*u_min[2];
+        if (projU > 0.0) {
+            // User is rotating toward danger — apply opposing force
+            double speedFactor = (fabs(projU) < 5.0) ? fabs(projU) / 5.0 : 1.0;
+            double repMag = (1.0 - beta) * Config::SINGAVOID_SINGULAR_FORCE_MAX_N * speedFactor;
+            repulsionOut.x = -u_min[0] * repMag;
+            repulsionOut.y = -u_min[1] * repMag;
+            repulsionOut.z = -u_min[2] * repMag;
+        }
+
         // Send warning
-        if (beta < 0.5) {
-            sendWarning(beta == 0.0 ? 2 : 1, "wrist",
-                "腕部J5接近对正点，旋转已阻尼",
-                "请减慢绕此方向的姿态旋转，避免J5完全对正",
-                cond_wrist, beta);
+        if (beta < 0.9) {
+            int level = (beta < 0.2) ? 2 : 1;
+            int dampPct = (int)((1.0 - beta) * 100);
+            char msg[128], sug[128];
+            snprintf(msg, sizeof(msg), "腕部接近奇异位姿，旋转已阻尼%d%%", dampPct);
+            snprintf(sug, sizeof(sug), "请减速绕此方向旋转，避免J5对正");
+            sendWarning(level, "wrist", msg, sug, cond_wrist, beta * 100.0);
         }
     }
 
-    // ===== Layer 2: TCP position micro-adjust for shoulder safety =====
+    // ===== Layer 2: TCP position micro-adjust for shoulder safety (Phase 2: early trigger) =====
     Vec3 positions[7];
     Kinematics::computeJointPositions(currentJoints, positions);
     double r_elbow = sqrt(positions[2].x*positions[2].x + positions[2].y*positions[2].y);
 
-    if (r_elbow < Config::SINGAVOID_SHOULDER_CRITICAL_R) {
+    if (r_elbow < Config::SINGAVOID_SHOULDER_SAFE_R) {  // Phase 2: 120mm (was 50mm)
         // Build orientation Jacobian (rows 3-5)
         double J_o[3][6];
         for (int i = 0; i < 3; i++)
@@ -495,18 +518,29 @@ Vec3 dampOrientationMotion(const Vec3& targetOrient, const Vec3& deltaOrient,
         double N[6][6];
         nullSpaceProjectorOrient(const_cast<const double(*)[6]>(J_o), N);
 
-        // Compute shoulder repulsion gradient (amplified)
+        // Compute shoulder repulsion gradient
         double g[6] = {0};
-        // Same shoulder gradient as computeSafetyGradient but with higher weight
         {
             double eps = 1.0;
             double dr = 1.0 / ((r_elbow + eps) * (r_elbow + eps));
+            // Phase 2: amplified weight for orient mode
+            double amp = Config::SINGAVOID_ORIENT_FORCE_AMP;  // 2.5 (Phase 2)
             for (int i = 0; i < 3; i++) {  // J1+J2+J3 affect elbow xy
                 double dx_dqi = J_full[0][i];
                 double dy_dqi = J_full[1][i];
                 double dr_dqi = (positions[2].x * dx_dqi + positions[2].y * dy_dqi) / (r_elbow + 1e-12);
-                g[i] += Config::SINGAVOID_ORIENT_FORCE_AMP * Config::SINGAVOID_W_SHOULDER * dr * dr_dqi;  // amplified weight for orient mode
+                g[i] += amp * Config::SINGAVOID_W_SHOULDER * dr * dr_dqi;
             }
+        }
+
+        // Phase 2: dual-singularity coupling — double gradient when both wrist and shoulder at risk
+        if (cond_wrist > Config::SINGAVOID_DUAL_SING_COND_THR &&
+            r_elbow < Config::SINGAVOID_DUAL_SING_ELBOW_THR) {
+            for (int i = 0; i < 6; i++) g[i] *= 2.0;
+            sendWarning(2, "dual_singular",
+                "腕部+肩部双重奇异风险，梯度已加倍",
+                "建议松开按钮2，先移动TCP远离底座，再旋转",
+                cond_wrist, r_elbow);
         }
 
         // Project into null space
@@ -518,7 +552,7 @@ Vec3 dampOrientationMotion(const Vec3& targetOrient, const Vec3& deltaOrient,
         // Apply to a local copy of joint angles
         double q[6];
         for (int i = 0; i < 6; i++) q[i] = currentJoints[i];
-        double alpha = Config::SINGAVOID_GRAD_STEP;
+        double alpha = Config::SINGAVOID_GRAD_STEP;  // 0.3 (Phase 2)
         for (int i = 0; i < 6; i++) q[i] += alpha * g_null[i];
 
         // Clamp joints
@@ -555,8 +589,8 @@ Vec3 dampOrientationMotion(const Vec3& targetOrient, const Vec3& deltaOrient,
                 adjMag, 0.0);
         }
 
-        // Critical warning
-        if (r_elbow < Config::SINGAVOID_SHOULDER_CRITICAL_R * 0.5) {
+        // Critical warning (below the original 50mm threshold)
+        if (r_elbow < Config::SINGAVOID_SHOULDER_CRITICAL_R) {
             sendWarning(2, "shoulder",
                 "TCP位置距Z轴过近，姿态模式下存在肩关节奇异风险",
                 "建议松开按钮2，先移动TCP远离底座再旋转姿态",
@@ -615,7 +649,7 @@ void dampFullCommand(const Vec3& userDeltaPos, const Vec3& userDeltaOrient,
             for (int k = 0; k < 6; k++) damped[k] += proj * U[k][i];
         } else {
             // This direction is near-singular — damp
-            double beta = ratio / threshold;  // 0 at ratio=0, 1 at ratio=threshold
+            double beta = (ratio * ratio) / (threshold * threshold);  // Phase 2: quadratic for smoother onset
             double proj = 0.0;
             for (int k = 0; k < 6; k++) proj += U[k][i] * userDelta6D[k];
             for (int k = 0; k < 6; k++) damped[k] += beta * proj * U[k][i];
