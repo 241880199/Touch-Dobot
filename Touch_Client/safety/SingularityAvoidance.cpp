@@ -279,32 +279,30 @@ static void computeSafetyGradient(const double q[6], double g[6]) {
 
     // --- Elbow bend: keep J3 centered ---
     double j3 = q[2];
-    double j3Mid = Config::SINGAVOID_ELBOW_MID_ANGLE * M_PI / 180.0;
-    double j3Range = 155.0 * M_PI / 180.0;
+    double j3Mid = Config::SINGAVOID_ELBOW_MID_ANGLE;  // 0.0 degrees
+    double j3Range = 155.0;                             // 155 degrees (J3 limit)
     // Normalized distance from center: 0 at center, 1 at limit
-    double j3Norm = (j3 - j3Mid) / j3Range;
+    double j3Norm = (j3 - j3Mid) / j3Range;             // e.g., -60/155 = -0.39
     // Gradient: -2 * normalized * (1/j3Range) -- pushes toward center
     g[2] += Config::SINGAVOID_W_ELBOW * (-2.0 * j3Norm / j3Range);
 
     // --- Joint limit repulsion ---
-    double limsRad[6][2] = {
-        {-360*M_PI/180, 360*M_PI/180}, {-360*M_PI/180, 360*M_PI/180},
-        {-155*M_PI/180, 155*M_PI/180}, {-360*M_PI/180, 360*M_PI/180},
-        {-360*M_PI/180, 360*M_PI/180}, {-360*M_PI/180, 360*M_PI/180}
+    double limsDeg[6][2] = {
+        {-360.0, 360.0}, {-360.0, 360.0}, {-155.0, 155.0},
+        {-360.0, 360.0}, {-360.0, 360.0}, {-360.0, 360.0}
     };
-    double marginDeg = Config::SINGAVOID_JOINT_WARN_MARGIN;
-    double marginRad = marginDeg * M_PI / 180.0;
+    double marginDeg = Config::SINGAVOID_JOINT_WARN_MARGIN;  // 10.0 degrees
     for (int i = 0; i < 6; i++) {
-        double dLo = q[i] - limsRad[i][0];
-        double dHi = limsRad[i][1] - q[i];
-        if (dLo < marginRad && dLo > 0) {
+        double dLo = q[i] - limsDeg[i][0];
+        double dHi = limsDeg[i][1] - q[i];
+        if (dLo < marginDeg && dLo > 0) {
             // Repel upward: g_i > 0 means increase q_i
-            double m = dLo / marginRad;  // 0 = at limit, 1 = at warn boundary
-            g[i] += Config::SINGAVOID_W_JOINT * (1.0 / (m * marginRad + 0.01));
+            double m = dLo / marginDeg;  // 0 = at limit, 1 = at warn boundary
+            g[i] += Config::SINGAVOID_W_JOINT * (1.0 / (m * marginDeg + 0.01));
         }
-        if (dHi < marginRad && dHi > 0) {
-            double m = dHi / marginRad;
-            g[i] -= Config::SINGAVOID_W_JOINT * (1.0 / (m * marginRad + 0.01));
+        if (dHi < marginDeg && dHi > 0) {
+            double m = dHi / marginDeg;
+            g[i] -= Config::SINGAVOID_W_JOINT * (1.0 / (m * marginDeg + 0.01));
         }
     }
 
@@ -323,12 +321,13 @@ static void computeSafetyGradient(const double q[6], double g[6]) {
             // Simplified: push J5 away from 0deg (+-180deg)
             // J5 near 0: push positive; J5 near +-180deg: push toward 0
             double j5 = q[4];
-            while (j5 > M_PI) j5 -= 2*M_PI;
-            while (j5 < -M_PI) j5 += 2*M_PI;
-            if (fabs(j5) < 0.3)  // within ~17deg of 0
+            // Normalize to [-180, 180] degrees
+            while (j5 > 180.0) j5 -= 360.0;
+            while (j5 < -180.0) j5 += 360.0;
+            if (fabs(j5) < 17.0)  // 17 degrees from 0 = wrist near singular
                 g[4] += Config::SINGAVOID_W_WRIST * (j5 > 0 ? -1.0 : 1.0);
-            else if (fabs(fabs(j5) - M_PI) < 0.3)  // near +-180deg
-                g[4] += Config::SINGAVOID_W_WRIST * (fabs(j5) > M_PI/2 ? -1.0 : 1.0);
+            else if (fabs(fabs(j5) - 180.0) < 17.0)  // near ±180°
+                g[4] += Config::SINGAVOID_W_WRIST * (fabs(j5) > 90.0 ? -1.0 : 1.0);
         }
     }
 }

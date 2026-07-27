@@ -120,7 +120,7 @@ namespace Config {
     const double SINGAVOID_SINGULAR_RATIO       = 0.05;   // σᵢ/σ₁ 阻尼触发比
     // Null-space optimization
     const int    SINGAVOID_NULLSPACE_ITER       = 15;     // 最大零空间迭代轮数
-    const double SINGAVOID_GRAD_STEP            = 0.1;    // 梯度步长 (rad)
+    const double SINGAVOID_GRAD_STEP            = 0.1;    // 梯度步长 (deg) — applied to degree-based q
     // Gradient weights (should sum to ~10)
     const double SINGAVOID_W_SHOULDER           = 3.0;    // 肩关节安全权重
     const double SINGAVOID_W_ELBOW              = 2.0;    // 肘关节弯曲权重
