@@ -14,6 +14,10 @@ namespace ConstraintForce {
     // r_xy < 80mm → 0→2.5N 二次增长
     void computeSingularForce(const Vec3& target, double out[3]);
 
+    // 圆柱奇异排斥力 (带放大系数 — 姿态模式下使用)
+    // ampFactor: 1.0 = 正常, 1.5 = 姿态模式增强
+    void computeSingularForce(const Vec3& target, double out[3], double ampFactor);
+
     // 报警历史排斥力 — 远离报警点
     // dist < 80mm → 0→1.5N 反比
     void computeAlarmHistoryForce(const Vec3& target,

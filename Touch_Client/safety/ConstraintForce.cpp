@@ -63,6 +63,27 @@ void computeSingularForce(const Vec3& target, double out[3]) {
     }
 }
 
+// ===== 圆柱奇异力 (带放大系数) =====
+void computeSingularForce(const Vec3& target, double out[3], double ampFactor) {
+    out[0] = out[1] = out[2] = 0.0;
+
+    double r_xy = sqrt(target.x * target.x + target.y * target.y);
+    double range = Config::CONSTRAINT_SINGULAR_RANGE;
+    double maxF  = Config::CONSTRAINT_SINGULAR_MAX_FORCE * ampFactor;
+
+    if (r_xy >= range) return;
+
+    double ratio = 1.0 - (r_xy / range);
+    double f = ratio * ratio * maxF;
+
+    if (r_xy > 1e-12) {
+        double inv = 1.0 / r_xy;
+        out[0] = target.x * inv * f;
+        out[1] = target.y * inv * f;
+        out[2] = 0.0;
+    }
+}
+
 // ===== 报警历史力 =====
 void computeAlarmHistoryForce(const Vec3& target,
     const std::vector<AlarmRecord>& alarms, double out[3])
