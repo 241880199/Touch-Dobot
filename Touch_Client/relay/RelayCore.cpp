@@ -563,9 +563,16 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
 
     // ===== 姿态计算 (优化或用户控制) =====
     auto& app = appState;
-    double targetRx = app.robotBaseRx;
-    double targetRy = app.robotBaseRy;
-    double targetRz = app.robotBaseRz;
+    // Default to robot's current actual orientation (not startup base),
+    // so IK failure or mode switch doesn't snap back to a stale pose.
+    double targetRx, targetRy, targetRz;
+    {
+        EnterCriticalSection(&app.robotPoseMutex);
+        targetRx = app.robotActualPose.rx;
+        targetRy = app.robotActualPose.ry;
+        targetRz = app.robotActualPose.rz;
+        LeaveCriticalSection(&app.robotPoseMutex);
+    }
 
     // Mode 1: Position-only (button1, no button2) — optimize orientation
     if (appState.lastButtonState && !m_transmittingOrient) {
@@ -586,7 +593,7 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
             targetRy = optOrient.y;
             targetRz = optOrient.z;
         }
-        // else: IK failed, keep base orientation as fallback
+        // else: IK failed — keep current actual orientation (no snap-back)
     }
 
     Vec3 damped(0.0, 0.0, 0.0);  // orientation delta for cross-mode sharing
