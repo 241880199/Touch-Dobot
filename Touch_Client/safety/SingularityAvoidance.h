@@ -11,16 +11,18 @@ namespace SingularityAvoidance {
 // (caller should fall back to current orientation).
 Vec3 optimizeOrientation(const Vec3& targetPos, const double currentJoints[6]);
 
-// ===== Mode 2: Orientation control → damped delta + TCP micro-adjust =====
+// ===== Mode 2: Orientation control → damped delta + TCP micro-adjust + directional repulsion =====
 // Given the current accumulated orientation target, the user's orientation
 // delta (in robot-frame degrees), the frozen TCP position, and current
 // joint angles, produce:
 //   - return value: damped orientation delta (may be smaller than input)
 //   - tcpAdjustOut: TCP position micro-adjustment (mm), zero if safe
+//   - repulsionOut: task-space directional repulsion force (N), zero if safe
+//     This force opposes the user's rotation toward the wrist singular direction.
 // Also sends W| warnings when damping or adjustment is active.
 Vec3 dampOrientationMotion(const Vec3& targetOrient, const Vec3& deltaOrient,
                            const Vec3& currentTcp, const double currentJoints[6],
-                           Vec3& tcpAdjustOut);
+                           Vec3& tcpAdjustOut, Vec3& repulsionOut);
 
 // ===== Mode 3: Combined position+orientation → selective damping =====
 // Given the user's 6-DOF delta (position + orientation) and current joint
