@@ -128,6 +128,12 @@ public:
     double orientExtraForce[3];
     bool   hasOrientExtraForce;
     CRITICAL_SECTION orientForceMutex;
+
+    // Orient mode directional repulsion force — Phase 2 (Thread-safe: orientRepulsionMutex)
+    // Written by RelayCore::sendPosition (30Hz), read by haptic callback (1kHz)
+    double orientRepulsionForce[3];
+    bool   hasOrientRepulsion;
+    CRITICAL_SECTION orientRepulsionMutex;
 };
 
 extern AppState appState;
