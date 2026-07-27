@@ -103,8 +103,8 @@ namespace Config {
 
     // ===== Singularity Avoidance (零空间优化) =====
     // Shoulder safety
-    const double SINGAVOID_SHOULDER_SAFE_R     = 120.0;  // 肘部安全 r_xy (mm) — 低于此触发零空间优化
-    const double SINGAVOID_SHOULDER_CRITICAL_R  = 50.0;   // 肘部危险 r_xy (mm) — 姿态模式下触发 TCP 微调
+    const double SINGAVOID_SHOULDER_SAFE_R     = 120.0;  // 肘部安全 r_xy (mm) — 低于此触发零空间优化 + 姿态模式 TCP 微调
+    const double SINGAVOID_SHOULDER_CRITICAL_R  = 50.0;   // 肘部危险 r_xy (mm) — 姿态模式下触发临界警告
     // Elbow safety
     const double SINGAVOID_ELBOW_MID_ANGLE      = 0.0;    // J3 最佳位置 (deg) — 零空间吸引子中心
     // Joint limit repulsion
@@ -129,7 +129,6 @@ namespace Config {
     const double SINGAVOID_ORIENT_FORCE_AMP     = 2.5;    // 姿态模式下奇异斥力放大倍数 (Phase 2: 1.5→2.5)
     // Directional repulsion (Phase 2 new)
     const double SINGAVOID_SINGULAR_FORCE_MAX_N = 3.0;    // 方向性斥力上限 (N)
-    const double SINGAVOID_WRIST_ALIGN_REPEL    = 60.0;   // 腕部对齐斥力触发条件数
     // Dual-singularity detection (Phase 2 new)
     const double SINGAVOID_DUAL_SING_COND_THR   = 60.0;   // 腕部条件数阈值 — 双重奇异检测
     const double SINGAVOID_DUAL_SING_ELBOW_THR  = 80.0;   // 肘部 r_xy 阈值 — 双重奇异检测

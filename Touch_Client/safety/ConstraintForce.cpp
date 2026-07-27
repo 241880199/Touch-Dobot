@@ -152,21 +152,6 @@ void computeWorkspaceEdgeForce(const Vec3& target, double out[3]) {
     }
 }
 
-// ===== 方向性奇异斥力 (Phase 2) =====
-void computeOrientationSingularForce(const Vec3& direction, double magnitude, double out[3]) {
-    if (magnitude <= 0.0) {
-        out[0] = out[1] = out[2] = 0.0;
-        return;
-    }
-
-    double maxMag = Config::SINGAVOID_SINGULAR_FORCE_MAX_N;
-    if (magnitude > maxMag) magnitude = maxMag;
-
-    out[0] = direction.x * magnitude;
-    out[1] = direction.y * magnitude;
-    out[2] = direction.z * magnitude;
-}
-
 // ===== 总力叠加 =====
 void computeTotalForce(const Vec3& target,
     const std::vector<AlarmRecord>& alarms, double out[3])

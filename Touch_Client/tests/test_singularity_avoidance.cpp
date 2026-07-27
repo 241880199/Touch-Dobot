@@ -252,8 +252,8 @@ static bool test_dual_singular_warning() {
     return true;
 }
 
-// Test 12: dampOrientationMotion — gradient step produces measurable TCP adjustment (Phase 2)
-static bool test_gradient_step_effective() {
+// Test 12: dampOrientationMotion — stress/no-crash test for gradient step (Phase 2)
+static bool test_gradient_step_no_crash() {
     // Config where elbow is at ~80mm from Z-axis (within SAFE_R but not critical)
     double q[6] = {8, 75, -90, 15, 30, -25};
     Vec3 targetOrient(0, 0, 0);
@@ -265,10 +265,10 @@ static bool test_gradient_step_effective() {
         targetOrient, delta, currentTcp, q, tcpAdj, repulsion);
 
     double adjMag = sqrt(tcpAdj.x*tcpAdj.x + tcpAdj.y*tcpAdj.y + tcpAdj.z*tcpAdj.z);
-    printf("  Test12: tcpAdj mag=%.3f mm (grad_step=%.2f)\n", adjMag, Config::SINGAVOID_GRAD_STEP);
-    // Gradient step of 0.3° should produce measurable (>0.01mm) adjustment
-    // when elbow is within 120mm of Z-axis (not critical, but within safe range)
-    (void)adjMag;  // stress test — just verify no crash and finite output
+    printf("  Test12: tcpAdj mag=%.3f mm (grad_step=%.2f, stress test)\n", adjMag, Config::SINGAVOID_GRAD_STEP);
+    // Stress test — just verify no crash and finite output when
+    // elbow is within 120mm of Z-axis (not critical, but within safe range)
+    (void)adjMag;  // no-crash stress test
     if (std::isnan(adjMag) || std::isinf(adjMag)) {
         printf("  FAIL: NaN/Inf TCP adjustment\n");
         return false;
@@ -313,7 +313,7 @@ int main() {
     if (test_dual_singular_warning()) passed++;
     else printf("  FAILED\n");
 
-    if (test_gradient_step_effective()) passed++;
+    if (test_gradient_step_no_crash()) passed++;
     else printf("  FAILED\n");
 
     printf("\n=== %d/%d tests passed ===\n", passed, total);
