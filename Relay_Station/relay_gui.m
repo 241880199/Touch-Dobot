@@ -400,6 +400,8 @@ function relay_gui()
                 if isempty(raw) || ismissing(raw), continue; end
                 if isstring(raw), raw = char(raw); end
                 if ~ischar(raw), continue; end
+                % Decode UTF-8 from C++ (/utf-8 flag) to MATLAB Unicode
+                raw = native2unicode(uint8(raw), 'UTF-8');
                 msg = strtrim(raw);
                 if isempty(msg), continue; end
 
