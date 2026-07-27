@@ -690,6 +690,16 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
                 clamped.y += tcpAdj.y;
                 clamped.z += tcpAdj.z;
             }
+
+            // Phase 2: write directional repulsion force to AppState for haptic callback
+            {
+                EnterCriticalSection(&app.orientRepulsionMutex);
+                app.orientRepulsionForce[0] = repulsionOut.x;
+                app.orientRepulsionForce[1] = repulsionOut.y;
+                app.orientRepulsionForce[2] = repulsionOut.z;
+                app.hasOrientRepulsion = true;
+                LeaveCriticalSection(&app.orientRepulsionMutex);
+            }
         }
 
         targetRx = m_targetOrient.x;
