@@ -1,7 +1,7 @@
 # Singularity Avoidance via Null-Space Optimization
 
 **Date:** 2026-07-27
-**Status:** Design (pending review)
+**Status:** Phase 2 optimization (pending review)
 **Branch:** master
 **Scope:** Touch_Client (C++) + Relay_Station (MATLAB)
 
@@ -161,19 +161,23 @@ Layer 1: Wrist Singularity Damping
    J_w^T * J_w → eigenvalues → σ₁ ≥ σ₂ ≥ σ₃
    cond_wrist = σ₁ / σ₃
 
-3. Classify and damp:
+3. Continuous damping (replaced 3-tier, Phase 2):
 
-   Condition          | β (damping) | Action
-   -------------------|-------------|--------------------------
-   cond < 50          | 1.0         | Full tracking
-   50 ≤ cond < 100    | 0.5         | Moderate damping + warning
-   100 ≤ cond < 200   | 0.2         | Heavy damping + force repulsion
-   cond ≥ 200         | 0.0         | Block dangerous axis entirely
+   t = clamp((cond − 20) / (150 − 20), 0.0, 1.0)
+   β = 1.0 − t²                               // quadratic: gentle onset, rapid near danger
 
    v_min = eigenvector of σ₃ (most singular direction in J4/J5/J6 space)
-   Δθ_parallel = (Δθ · v_min) * v_min       ← dangerous
-   Δθ_perp     = Δθ - Δθ_parallel           ← safe
+   u_min = normalize(J_w * v_min)              // map to task-space rotation direction
+
+   Δθ_parallel = (Δθ · v_min) * v_min          ← damped direction
+   Δθ_perp     = Δθ − Δθ_parallel              ← passes through
    Δθ_damped   = Δθ_perp + β * Δθ_parallel
+
+   Directional repulsion force (new, Phase 2):
+   proj = dot(deltaOrient, u_min)              // user rotation into danger
+   if proj > 0 and cond > 20:
+       repMag = (1.0 − β) * SINGULAR_FORCE_MAX_N * min(proj / 5.0, 1.0)
+       repulsionForce = repMag * (−u_min)      // oppose dangerous rotation
 
 4. Send warning if β < 1.0:
    W|1,wrist,J5接近对正点(X.X°),请减慢绕此方向的姿态旋转,cond,β
@@ -390,7 +394,7 @@ end
 
 Top-bar status label also reflects highest active warning level.
 
-## Key Parameters
+## Key Parameters (Phase 1 — superseded, see Phase 2 below)
 
 | Parameter | Value | Description |
 |-----------|-------|-------------|
@@ -462,17 +466,169 @@ test_singularity_avoidance.exe
 
 - No changes to the robot-side Dobot controller firmware
 - No changes to the C++ FK/IK URDF model (uses existing Kinematics APIs)
-- No changes to the haptic rendering pipeline (HapticCallback.cpp)
 - `escapeSingularity()` retained as-unauthorized fallback only
+
+---
+
+## Phase 2: Optimization (2026-07-27)
+
+**Problem from hardware testing:** Button 2 (orientation-only mode) still
+frequently enters singular configurations. Root causes identified:
+
+1. Damping thresholds too high — cond=50 before any intervention
+2. Coarse 3-tier damping (0.5/0.2/0.0) creates jarring transitions
+3. Shoulder safety only triggers at r_elbow < 50mm (critical) in orientation mode, not at 120mm (safe)
+4. No haptic feedback for wrist alignment danger (Touch only has XYZ force, no torque)
+5. Gradient step too small (0.1°/iter) for effective null-space reconfiguration
+6. Safety gradient weights need amplification after null-space projection attenuation
+
+### Changes
+
+#### 1. Continuous Damping (replaces 3-tier)
+
+```
+Old:  cond<50→β=1.0, 50≤cond<100→β=0.5, 100≤cond<200→β=0.2, cond≥200→β=0.0
+New:  cond<20→β=1.0, 20≤cond<150→β=1.0−(t²) where t=(cond−20)/(150−20)
+                 cond≥150→β≈0.0 (smooth approach to zero)
+```
+
+Rationale: Quadratic decay (β = 1.0 − t²) provides gentle onset and rapid
+drop near the danger zone. No discontinuous jumps.
+
+#### 2. Directional Haptic Repulsion (new)
+
+Since Touch only outputs 3D translation force, we map the wrist singular
+direction into task space and apply a force opposing the user's rotation:
+
+```
+u_min = normalize(J_w * v_min)     // singular direction in task space (3D rotation)
+proj  = dot(userDeltaOrient, u_min) // how much user rotates into danger
+if proj > 0 and cond > 20:
+    repulsionForce = (1.0 − β) * SINGULAR_FORCE_MAX_N * smoothstep(proj/5.0) * (−u_min)
+```
+
+This creates the sensation of "pushing against a spring" when rotating
+toward a singular wrist configuration. The force direction is opposite to
+the dangerous rotation, scaled by both proximity to singularity (β) and
+rotation speed (proj).
+
+#### 3. Enhanced Null-Space Gradient
+
+| Change | Old | New | Why |
+|--------|-----|-----|-----|
+| Gradient step | 0.1°/iter | 0.3°/iter | Insufficient reconfiguration at old value |
+| Max iterations | 15 | 20 | More convergence headroom |
+| Shoulder trigger (orient mode) | r_elbow < 50mm | r_elbow < 120mm | Match safe threshold, not just critical |
+| Shoulder weight | 3.0 | 4.0 | Compensate null-space projection attenuation |
+| Wrist-shoulder coupling | None | Double gradient when cond>60 AND r_elbow<80mm | Address dual-singularity scenarios |
+| Orient force amp | 1.5× | 2.5× | Stronger haptic signal in orientation mode |
+
+#### 4. SVD Full-Command Damping (combined mode)
+
+| Change | Old | New |
+|--------|-----|-----|
+| Trigger threshold | cond > 30 | cond > 15 |
+| Damping function | linear: ratio/threshold | quadratic: ratio²/threshold² |
+
+#### 5. New Files & Interfaces
+
+| File | Change | Detail |
+|------|--------|--------|
+| `safety/SingularityAvoidance.h` | Modify | `dampOrientationMotion` returns `repulsionOut` Vec3 |
+| `safety/SingularityAvoidance.cpp` | Refactor | Continuous damping, directional repulsion, enhanced gradient |
+| `safety/ConstraintForce.h` | Add | `computeOrientationSingularForce()` declaration |
+| `safety/ConstraintForce.cpp` | Add | Directional repulsion force computation |
+| `core/AppState.h` | Add | `orientRepulsionForce[3]`, `hasOrientRepulsion`, mutex |
+| `relay/RelayCore.cpp` | Modify | Pass repulsion force to AppState after `dampOrientationMotion` |
+| `haptic/HapticCallback.cpp` | Modify | Read and superimpose `orientRepulsionForce` onto Touch output |
+| `config/Config.h` | Modify | Updated thresholds + 2 new params |
+| `tests/test_singularity_avoidance.cpp` | Add | 6 new test cases |
+
+### Data Flow
+
+```
+HapticCallback (1kHz, stylus rotation delta)
+    │
+    ▼
+RelayCore::sendPosition (30Hz)
+    │ dampOrientationMotion(deltaOrient, joints)
+    │   ├── returns dampedDelta ──→ ServoP command
+    │   └── returns repulsionForce ──→ AppState.orientRepulsionForce
+    │
+    ▼
+HapticCallback (1kHz, next frame)
+    │ reads AppState.orientRepulsionForce
+    │ superimposes onto totalForce[3]
+    │ hdSetDoublev(HD_CURRENT_FORCE, totalForce)
+    │
+    ▼
+Touch device — user feels directional resistance
+```
+
+### Updated Key Parameters
+
+| Parameter | Old Value | New Value | Description |
+|-----------|-----------|-----------|-------------|
+| SHOULDER_SAFE_R | 120 mm | 120 mm | (unchanged) |
+| SHOULDER_CRITICAL_R | 50 mm | 50 mm | (unchanged) |
+| ELBOW_MID_ANGLE | 0° | 0° | (unchanged) |
+| JOINT_WARN_MARGIN | 10° | 10° | (unchanged) |
+| MAX_POS_ADJUST | 5 mm | 5 mm | (unchanged) |
+| COND_WRIST_WARN | 50 | **20** | Early warning onset |
+| COND_WRIST_DAMP | 100 | **deleted** | Replaced by continuous function |
+| COND_WRIST_REJECT | 200 | **150** | Near-block zone |
+| COND_FULL_WARN | 30 | **15** | Earlier combined-mode damping |
+| SINGULAR_RATIO | 0.05 | 0.05 | (unchanged) |
+| NULLSPACE_ITERATIONS | 15 | **20** | More convergence |
+| NULLSPACE_ALPHA (GRAD_STEP) | 0.1 | **0.3** | Stronger gradient steps |
+| w1 (shoulder) | 3.0 | **4.0** | Compensate projection attenuation |
+| w2 (elbow) | 2.0 | 2.0 | (unchanged) |
+| w3 (joint_limits) | 5.0 | 5.0 | (unchanged) |
+| w4 (wrist) | 1.0 | 1.0 | (unchanged) |
+| ORIENT_FORCE_AMP | 1.5 | **2.5** | Stronger singular force in orient mode |
+| **NEW** SINGULAR_FORCE_MAX_N | — | **3.0 N** | Max directional repulsion force |
+| **NEW** WRIST_ALIGN_REPEL_RANGE | — | **60** | cond threshold for max repulsion |
+
+### New Test Cases
+
+| Test | Validation |
+|------|-----------|
+| `test_continuous_damping_monotonic` | β decreases smoothly from 1.0 to 0.0 as cond increases 20→150 |
+| `test_repulsion_direction_correct` | When J5≈0°, u_min aligns with wrist rotation axis; repulsion opposes user rotation |
+| `test_repulsion_zero_in_safe_zone` | cond<20 → repulsionForce = (0,0,0) |
+| `test_shoulder_early_trigger` | r_elbow<120mm activates TCP micro-adjust in orient mode |
+| `test_dual_singular_warning` | cond>60 AND r_elbow<80mm sends dual-singular warning |
+| `test_gradient_step_effective` | 0.3°/iter produces measurable (>1mm) null-space TCP adjustment |
+
+### Safety Impact
+
+All changes are **within the existing safety envelope**:
+- Damping is conservative (never amplifies motion)
+- Repulsion force capped at 3N → total Touch force ≤ 8N clamp
+- Gradient step 0.3°/frame = 9°/s, well within robot velocity limits
+- Existing 4-layer SafetyPredictor remains active as safety net
+
+### Risks
+
+| Risk | Mitigation |
+|------|-----------|
+| cond=20 threshold too sensitive (false damping) | β=1.0 at cond=20 (no actual damping, only repulsion force ramps from 0) |
+| Directional repulsion pushes wrong way | Unit test validates u_min direction against known singular configs |
+| Gradient instability at 0.3°/step | Per-frame single step (not iterative), 9°/s max joint velocity |
+| Touch force clipping masks repulsion | computeTotalForce clamp is global; repulsion+radial ≤ 8N |
 
 ## Open Questions
 
-1. Weight tuning (w1–w4): Initial values based on arm geometry analysis.
-   May need adjustment during integration testing on real hardware.
+1. Weight tuning (w1–w4): Updated values based on arm geometry analysis + null-space
+   attenuation. May need further adjustment during integration testing on real hardware.
 
-2. Null-space iteration count: 15 rounds is a starting point. If optimization
-   converges faster, we can early-exit. If too slow, we can reduce.
+2. Continuous damping curve: Quadratic (β = 1−t²) is the initial choice. If it feels
+   too aggressive near cond=20 or too weak near cond=120, can switch to cubic or
+   other smoothstep variants based on operator feedback.
 
-3. Orientation mode TCP adjustment: 5mm cap is conservative. If the arm
-   frequently needs >5mm to escape shoulder singularity, the cap may be
-   raised to 8mm with user notification.
+3. Directional repulsion gain: `SINGULAR_FORCE_MAX_N = 3.0N` is a starting point.
+   May need tuning: too weak → operator ignores it; too strong → interferes with
+   normal operation.
+
+4. Orientation mode TCP adjustment cap: 5mm is retained. If the arm frequently
+   needs >5mm to escape shoulder singularity, raise to 8mm with user notification.
