@@ -111,23 +111,28 @@ namespace Config {
     const double SINGAVOID_JOINT_WARN_MARGIN    = 10.0;   // 关节限位警告裕度 (deg) — 零空间斥力触发距离
     // TCP micro-adjust
     const double SINGAVOID_MAX_POS_ADJUST       = 5.0;    // 姿态模式 TCP 微调上限 (mm)
-    // Wrist damping (orientation mode)
-    const double SINGAVOID_COND_WRIST_WARN      = 50.0;   // 腕部条件数警告阈值
-    const double SINGAVOID_COND_WRIST_DAMP      = 100.0;  // 腕部条件数强阻尼阈值
-    const double SINGAVOID_COND_WRIST_REJECT    = 200.0;  // 腕部条件数阻断阈值
+    // Wrist damping (orientation mode) — Phase 2: continuous curve
+    const double SINGAVOID_COND_WRIST_EARLY     = 20.0;   // 腕部早期预警阈值 — 开始触觉斥力
+    const double SINGAVOID_COND_WRIST_BLOCK     = 150.0;  // 腕部阻断阈值 — β→0
     // Combined mode damping
-    const double SINGAVOID_COND_FULL_WARN       = 30.0;   // 全控模式条件数警告阈值
+    const double SINGAVOID_COND_FULL_WARN       = 15.0;   // 全控模式条件数警告阈值 (Phase 2: 30→15)
     const double SINGAVOID_SINGULAR_RATIO       = 0.05;   // σᵢ/σ₁ 阻尼触发比
     // Null-space optimization
-    const int    SINGAVOID_NULLSPACE_ITER       = 15;     // 最大零空间迭代轮数
-    const double SINGAVOID_GRAD_STEP            = 0.1;    // 梯度步长 (deg) — applied to degree-based q
-    // Gradient weights (should sum to ~10)
-    const double SINGAVOID_W_SHOULDER           = 3.0;    // 肩关节安全权重
+    const int    SINGAVOID_NULLSPACE_ITER       = 20;     // 最大零空间迭代轮数 (Phase 2: 15→20)
+    const double SINGAVOID_GRAD_STEP            = 0.3;    // 梯度步长 (deg) — Phase 2: 0.1→0.3
+    // Gradient weights (should sum to ~12)
+    const double SINGAVOID_W_SHOULDER           = 4.0;    // 肩关节安全权重 (Phase 2: 3.0→4.0)
     const double SINGAVOID_W_ELBOW              = 2.0;    // 肘关节弯曲权重
     const double SINGAVOID_W_JOINT              = 5.0;    // 关节限位权重
     const double SINGAVOID_W_WRIST              = 1.0;    // 腕部对称权重
     // Orient mode constraint force amplification
-    const double SINGAVOID_ORIENT_FORCE_AMP     = 1.5;    // 姿态模式下奇异斥力放大倍数
+    const double SINGAVOID_ORIENT_FORCE_AMP     = 2.5;    // 姿态模式下奇异斥力放大倍数 (Phase 2: 1.5→2.5)
+    // Directional repulsion (Phase 2 new)
+    const double SINGAVOID_SINGULAR_FORCE_MAX_N = 3.0;    // 方向性斥力上限 (N)
+    const double SINGAVOID_WRIST_ALIGN_REPEL    = 60.0;   // 腕部对齐斥力触发条件数
+    // Dual-singularity detection (Phase 2 new)
+    const double SINGAVOID_DUAL_SING_COND_THR   = 60.0;   // 腕部条件数阈值 — 双重奇异检测
+    const double SINGAVOID_DUAL_SING_ELBOW_THR  = 80.0;   // 肘部 r_xy 阈值 — 双重奇异检测
 
     // ========== 连接健康监控参数 ==========
     const int HEARTBEAT_TIMEOUT_MS  = 500;    // 心跳超时 (ms)
