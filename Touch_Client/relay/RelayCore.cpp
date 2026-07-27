@@ -640,6 +640,13 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
             if (drz > Config::ORIENT_MAX_STEP_DEG) drz = Config::ORIENT_MAX_STEP_DEG;
             if (drz < -Config::ORIENT_MAX_STEP_DEG) drz = -Config::ORIENT_MAX_STEP_DEG;
 
+            // Flip rotation sign: Touch stylus rotation direction → Dobot RPY convention.
+            // Touch Euler angles (ZYX intrinsic) increase counter-clockwise looking
+            // along the positive axis, but Dobot RPY follows the opposite convention.
+            drx = -drx;
+            dry = -dry;
+            drz = -drz;
+
             // ---- Axis remap: stylus frame → robot frame ----
             // Build 3×3 rotation that maps Touch rotation axes to robot rotation axes.
             // When calibration is enabled, use the calibrated rigid transform R.
