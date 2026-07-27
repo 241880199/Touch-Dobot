@@ -25,6 +25,7 @@ function relay_gui()
     S.z_dist = 999;          S.singular = 0;
     S.calib_enabled = false; S.calib_rms = -1;
     S.diag_code = 0;         S.diag_spd = 1.0;  S.diag_reason = '';
+    S.warnings = {};          S.warning_count = 0; S.warn_max_level = 0;
     S.conn_enable = 0;       S.conn_motion = 0;   S.conn_force = 0;
     S.conn_ping = 0;         S.conn_uptime = 0;
     % 力历史环形缓冲 (100 点 ≈ 3s @ 30Hz)
@@ -463,6 +464,31 @@ function relay_gui()
                         S.conn_force  = vals(3); S.conn_ping   = vals(4);
                         S.conn_uptime = vals(5);
                     end
+                elseif startsWith(msg, 'W|')
+                    parts = split(msg(3:end), ',');
+                    if numel(parts) >= 4
+                        w.level = str2double(parts{1});
+                        w.type = char(parts{2});
+                        w.message = char(parts{3});
+                        w.suggestion = char(parts{4});
+                        if numel(parts) >= 5
+                            w.param1 = str2double(parts{5});
+                        else
+                            w.param1 = 0;
+                        end
+                        if numel(parts) >= 6
+                            w.param2 = str2double(parts{6});
+                        else
+                            w.param2 = 0;
+                        end
+                        S.warn_max_level = max(S.warn_max_level, w.level);
+                        if S.warning_count >= 20
+                            S.warning_count = 1;  % wrap ring buffer
+                        else
+                            S.warning_count = S.warning_count + 1;
+                        end
+                        S.warnings{S.warning_count} = w;
+                    end
                 end
             end
         catch ME
@@ -657,12 +683,46 @@ function relay_gui()
             safetyLines{5} = 'Diagnostics: (no errors)';
         end
 
-        lblSafety.Text = safetyLines;
-
-        % -- 延迟 + 状态 --
+        % -- 延迟 + 状态 (must precede warning override so it can take effect) --
         lblDelay.Text = sprintf('Touch->Relay: %.1f ms', S.touch_relay_delay);
         lblState.Text = sprintf('[%s]  Spd: %.1fx', stateNames{st}, S.safety_speed);
         lblState.FontColor = stateColors{st};
+
+        % -- Warnings (singularity avoidance) --
+        if S.warning_count > 0 && S.warn_max_level > 0
+            % Show up to 3 most recent warnings
+            startIdx = max(1, S.warning_count - 2);
+            for wi = startIdx:S.warning_count
+                w = S.warnings{wi};
+                if w.level == 2
+                    prefix = '⬤ CRITICAL';
+                    wColor = clr.red;
+                elseif w.level == 1
+                    prefix = '⬤ WARN';
+                    wColor = clr.orange;
+                else
+                    prefix = '✔ INFO';
+                    wColor = clr.blue;
+                end
+                safetyLines{end+1} = sprintf('%s: %s', prefix, w.message);
+                safetyLines{end+1} = sprintf('     → %s', w.suggestion);
+            end
+
+            % Top-bar state override for warnings
+            if S.warn_max_level == 2
+                lblState.Text = '[⚠ SINGULAR RISK]';
+                lblState.FontColor = clr.red;
+            elseif S.warn_max_level == 1
+                lblState.Text = '[⚠ CAUTION]';
+                lblState.FontColor = clr.orange;
+            end
+        end
+
+        % Decay warnings: clear warn_max_level each refresh cycle
+        % (C++ re-sends warnings each frame while condition persists)
+        S.warn_max_level = 0;
+
+        lblSafety.Text = safetyLines;
     end
 
     function updateForceHistory()
