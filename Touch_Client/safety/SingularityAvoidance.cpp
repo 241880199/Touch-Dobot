@@ -656,6 +656,45 @@ void dampFullCommand(const Vec3& userDeltaPos, const Vec3& userDeltaOrient,
 
     dampedDeltaPos.x = damped[0]; dampedDeltaPos.y = damped[1]; dampedDeltaPos.z = damped[2];
     dampedDeltaOrient.x = damped[3]; dampedDeltaOrient.y = damped[4]; dampedDeltaOrient.z = damped[5];
-}
+
+    // ===== Shoulder safety for combined mode (Phase 3) =====
+    // Same radial-outward Cartesian push as dampOrientationMotion Layer 2.
+    // Without this, button 1+2 combined mode has no shoulder protection at all.
+    {
+        Vec3 positions[7];
+        Kinematics::computeJointPositions(currentJoints, positions);
+        double r_elbow = sqrt(positions[2].x*positions[2].x + positions[2].y*positions[2].y);
+
+        if (r_elbow < Config::SINGAVOID_SHOULDER_SAFE_R) {
+            double pushDirX = (r_elbow > 0.01) ? positions[2].x / r_elbow : 1.0;
+            double pushDirY = (r_elbow > 0.01) ? positions[2].y / r_elbow : 0.0;
+
+            double pushMag;
+            if (r_elbow >= Config::SINGAVOID_DUAL_SING_ELBOW_THR) {
+                double t = (Config::SINGAVOID_SHOULDER_SAFE_R - r_elbow)
+                         / (Config::SINGAVOID_SHOULDER_SAFE_R - Config::SINGAVOID_DUAL_SING_ELBOW_THR);
+                pushMag = t * 3.0;
+            } else if (r_elbow >= Config::SINGAVOID_SHOULDER_CRITICAL_R) {
+                double t = (Config::SINGAVOID_DUAL_SING_ELBOW_THR - r_elbow)
+                         / (Config::SINGAVOID_DUAL_SING_ELBOW_THR - Config::SINGAVOID_SHOULDER_CRITICAL_R);
+                pushMag = 3.0 + t * 2.0;
+            } else {
+                pushMag = Config::SINGAVOID_MAX_POS_ADJUST;
+            }
+
+            // Add outward push to position delta (counteracts inward movement)
+            dampedDeltaPos.x += pushDirX * pushMag;
+            dampedDeltaPos.y += pushDirY * pushMag;
+
+            if (r_elbow < Config::SINGAVOID_SHOULDER_CRITICAL_R) {
+                sendWarning(2, "shoulder",
+                    "全控模式：TCP距Z轴过近，已外推",
+                    "建议先拉远TCP再继续操作",
+                    r_elbow, pushMag);
+            }
+        }
+    }
+
+} // dampFullCommand
 
 } // namespace SingularityAvoidance
