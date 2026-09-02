@@ -154,6 +154,7 @@ namespace Config {
 
     // ========== 诊断日志参数 ==========
     constexpr const char* DIAGNOSTIC_LOG_PATH = "robot_diagnostics.log";
+    constexpr const char* FORCE_LOG_PATH = "force_demo_log.csv"; // 力反馈演示落盘路径
 
     // ========== 发送队列参数 ==========
     const int MAX_QUEUE_SIZE = 5;            // 队列容量上限（满时丢弃旧数据）

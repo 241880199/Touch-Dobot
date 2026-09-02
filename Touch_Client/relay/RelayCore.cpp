@@ -17,6 +17,7 @@
 #include "../force/ForcePipeline.h"
 #include "../force/ForceCompensation.h"
 #include "../force/ForceCalibration.h"
+#include "../force/ForceLogger.h"
 #include "../safety/SingularityAvoidance.h"
 
 // ===== 姿态安全边界钳位 =====
@@ -1502,6 +1503,9 @@ bool RelayCore::initForceReader() {
     ForcePipeline::init();
     ForceCompensation::init();
     ForceCalibration::setDragModeCallback(calibDragMode);
+    if (!ForceLogger::open(Config::FORCE_LOG_PATH)) {
+        std::cerr << "[Force] Failed to open force log " << Config::FORCE_LOG_PATH << std::endl;
+    }
     m_forceThread = CreateThread(NULL, 0, forceReaderThread, NULL, 0, NULL);
     if (!m_forceThread) {
         std::cerr << "[Force] Failed to create ForceReader thread" << std::endl;
@@ -1569,6 +1573,11 @@ void RelayCore::pollForce() {
             app.forceData.filtered[5],
             app.forceData.isStale ? 1 : 0);
     }
+
+    // 落盘到 CSV (演示对照实验用, 含 ff_enabled 标志列)
+    ForceLogger::log(now, app.forceData.filtered, pose,
+                     appState.forceFeedbackEnabled ? 1 : 0);
+
     LeaveCriticalSection(&app.forceDataMutex);
 
     sendRelayUpdate(buf);
@@ -1581,6 +1590,7 @@ void RelayCore::shutdownForceReader() {
         m_forceThread = NULL;
     }
     robotCloseRealtime();
+    ForceLogger::close();
     ForcePipeline::shutdown();
     ForceCompensation::shutdown();
 }

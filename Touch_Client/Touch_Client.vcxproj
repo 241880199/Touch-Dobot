@@ -131,6 +131,8 @@
     <ClCompile Include="force\ForceCompensation.cpp" />
     <ClInclude Include="force\ForceCalibration.h" />
     <ClCompile Include="force\ForceCalibration.cpp" />
+    <ClInclude Include="force\ForceLogger.h" />
+    <ClCompile Include="force\ForceLogger.cpp" />
     <!-- calibration -->
     <ClInclude Include="calibration\CalibrationSolver.h" />
     <ClCompile Include="calibration\CalibrationSolver.cpp" />
