@@ -32,6 +32,7 @@ function relay_gui()
     S.force_hist_fx = zeros(1,100); S.force_hist_fy = zeros(1,100);
     S.force_hist_fz = zeros(1,100); S.force_hist_idx = 1;
     S.server = [];
+    S.ff_enabled = true;      % 力反馈开关状态 (A组=true / B组=false)
     % 3D 场景对象 (Task 7)
     S.linkMesh     = {};    S.linkPatch = gobjects(1,0);  S.linkHg = gobjects(1,0);
     S.stlLoaded    = false;
@@ -147,8 +148,8 @@ function relay_gui()
     lblForceRaw.Layout.Row = 2;  lblForceRaw.Layout.Column = 1;
 
     % -- Row 3: 滤波力 --
-    pnlFF = uigridlayout(glMid, [2 1]);
-    pnlFF.RowHeight = {22, '1x'};
+    pnlFF = uigridlayout(glMid, [3 1]);
+    pnlFF.RowHeight = {22, 26, '1x'};
     pnlFF.Padding = [4 0 4 2];  pnlFF.RowSpacing = 0;
     pnlFF.BackgroundColor = clr.bg_panel;
     pnlFF.Layout.Row = 3;  pnlFF.Layout.Column = 1;
@@ -157,11 +158,26 @@ function relay_gui()
         'FontColor', clr.text_on, 'FontSize', 11, 'FontWeight', 'bold');
     lblFFTitle.Layout.Row = 1;  lblFFTitle.Layout.Column = 1;
 
+    % 力反馈开关 (A/B 对照实验)
+    pnlFFToggle = uigridlayout(pnlFF, [1 2]);
+    pnlFFToggle.ColumnWidth = {'1x', 60};
+    pnlFFToggle.Padding = [0 0 0 0];  pnlFFToggle.RowSpacing = 0;  pnlFFToggle.ColumnSpacing = 4;
+    pnlFFToggle.BackgroundColor = clr.bg_panel;
+    pnlFFToggle.Layout.Row = 2;  pnlFFToggle.Layout.Column = 1;
+
+    lblFFToggle = uilabel(pnlFFToggle, 'Text', 'Force Feedback (A/B switch)', ...
+        'FontColor', clr.text_dim, 'FontSize', 9);
+    lblFFToggle.Layout.Row = 1;  lblFFToggle.Layout.Column = 1;
+
+    swFF = uiswitch(pnlFFToggle, 'Items', {'OFF', 'ON'}, 'Value', 'ON', ...
+        'ValueChangedFcn', @(~,~) onForceFeedbackToggle(swFF.Value));
+    swFF.Layout.Row = 1;  swFF.Layout.Column = 2;
+
     lblForceFilt = uilabel(pnlFF, 'Text', {'Filtered force for haptic feedback...', '', ...
         'Fx:   0.00 N   Fy:   0.00 N   Fz:   0.00 N'}, ...
         'FontColor', clr.text_dim, 'FontSize', 10, ...
         'VerticalAlignment', 'top', 'FontName', 'Consolas');
-    lblForceFilt.Layout.Row = 2;  lblForceFilt.Layout.Column = 1;
+    lblForceFilt.Layout.Row = 3;  lblForceFilt.Layout.Column = 1;
 
     % -- Row 4: 力历史迷你图 --
     pnlFH = uigridlayout(glMid, [2 1]);
@@ -373,6 +389,25 @@ function relay_gui()
             fprintf('[Relay] Touch client disconnected\n');
             lblConn.Text = 'C++ Client: OFFLINE';
             lblConn.FontColor = clr.red;
+        end
+    end
+
+    function onForceFeedbackToggle(newVal)
+        S.ff_enabled = strcmp(newVal, 'ON');
+        if S.ff_enabled
+            sendToClient('FF|1');
+        else
+            sendToClient('FF|0');
+        end
+    end
+
+    function sendToClient(cmd)
+        if ~isempty(S.server) && isvalid(S.server) && S.server.Connected
+            try
+                write(S.server, uint8([cmd newline]), 'uint8');
+            catch e
+                fprintf('[Relay] ERROR sending to client: %s\n', e.message);
+            end
         end
     end
 
