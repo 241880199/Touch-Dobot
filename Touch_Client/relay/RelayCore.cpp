@@ -1,6 +1,7 @@
 #define _USE_MATH_DEFINES
 #include "RelayCore.h"
 #include "FeedbackParser.h"
+#include "RelayCommandParser.h"
 #include "SafetyBoundary.h"
 #include "../robot/RobotConnection.h"
 #include "../robot/Kinematics.h"
@@ -1342,6 +1343,53 @@ void RelayCore::reportFeedback(const char* fbText) {
     char buf[384];
     snprintf(buf, sizeof(buf), "FB|%.350s", fbText);
     sendRelayUpdate(buf);
+}
+
+void RelayCore::dispatchRelayCommand(const char* line) {
+    using R = RelayCommandParser::Command;
+    switch (RelayCommandParser::parse(line)) {
+    case R::ForceFeedbackOn:
+        appState.forceFeedbackEnabled = true;
+        std::cout << "[Relay] Force feedback ENABLED (MATLAB command)" << std::endl;
+        break;
+    case R::ForceFeedbackOff:
+        appState.forceFeedbackEnabled = false;
+        std::cout << "[Relay] Force feedback DISABLED (MATLAB command)" << std::endl;
+        break;
+    case R::None:
+    default:
+        break;
+    }
+}
+
+void RelayCore::pollRelayCommands() {
+    EnterCriticalSection(&m_relaySocketMutex);
+    SOCKET sock = m_relaySocket;
+    LeaveCriticalSection(&m_relaySocketMutex);
+    if (sock == INVALID_SOCKET) return;
+
+    // 非阻塞检查可读数据
+    fd_set readfds;
+    FD_ZERO(&readfds);
+    FD_SET(sock, &readfds);
+    timeval tv = { 0, 0 };
+    if (select(0, &readfds, nullptr, nullptr, &tv) <= 0) return;
+
+    char tmp[256];
+    int n = recv(sock, tmp, sizeof(tmp), 0);
+    if (n <= 0) return;
+
+    // 追加到接收缓冲, 逐行分发
+    for (int i = 0; i < n; ++i) {
+        char c = tmp[i];
+        if (c == '\n') {
+            m_relayRecvBuf[m_relayRecvLen] = '\0';
+            dispatchRelayCommand(m_relayRecvBuf);
+            m_relayRecvLen = 0;
+        } else if (c != '\r' && m_relayRecvLen < (int)sizeof(m_relayRecvBuf) - 1) {
+            m_relayRecvBuf[m_relayRecvLen++] = c;
+        }
+    }
 }
 
 void RelayCore::sendSafetyStatus() {

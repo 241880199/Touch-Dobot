@@ -50,6 +50,9 @@ void idle() {
     if (!appState.isClosing) {
         glutPostRedisplay();
 
+        // MATLAB → C++ 反向命令轮询 (力反馈开关等)
+        RelayCore::instance().pollRelayCommands();
+
         // 控制台键盘轮询 (标定模式等操作不依赖 GLUT 窗口焦点)
         if (_kbhit()) {
             int ch = _getch();

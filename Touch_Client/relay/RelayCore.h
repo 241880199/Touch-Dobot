@@ -63,6 +63,9 @@ public:
     void sendConnectionHealth();
     void reportDiagnostic(int errorCode, double speedFactor, const char* reason);
 
+    // MATLAB → C++ 反向命令 (每帧调用, 非阻塞)
+    void pollRelayCommands();
+
     // 状态查询（供 Render 层读取）
     bool isTransmitting() const { return m_transmitting; }
 
@@ -108,6 +111,12 @@ private:
     // MATLAB relay connection
     SOCKET m_relaySocket = INVALID_SOCKET;
     CRITICAL_SECTION m_relaySocketMutex;
+
+    // 反向命令接收缓冲 (行式协议, 逐行切分)
+    char m_relayRecvBuf[256];
+    int  m_relayRecvLen = 0;
+    void dispatchRelayCommand(const char* line);
+
     DWORD m_lastRelayUpdate = 0;
     DWORD m_lastServoTime = 0;      // ServoP 发送频率控制
     HANDLE m_forceThread = NULL;
