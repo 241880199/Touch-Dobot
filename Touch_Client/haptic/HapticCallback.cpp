@@ -143,7 +143,7 @@ HDCallbackCode HDCALLBACK hapticCallback(void* pUserData) {
     {
         double totalForce[3] = { 0.0, 0.0, 0.0 };
 
-        if (button1 || button2) {
+        if (app.forceFeedbackEnabled && (button1 || button2)) {
             // 8a. 传感器力 (仅在非 stale 时)
             EnterCriticalSection(&app.forceDataMutex);
             if (!app.forceData.isStale) {

@@ -105,6 +105,11 @@ public:
     int feedbackLogCount = 0;
     CRITICAL_SECTION feedbackLogMutex;
 
+    // ===== 力反馈开关 (MATLAB relay_gui 反向命令控制) =====
+    // true=渲染力反馈, false=力归零(位置跟随保持)。
+    // 由 RelayCore::pollRelayCommands 写入 (主线程), haptic 回调线程读取 (1kHz)。
+    std::atomic<bool> forceFeedbackEnabled{ true };
+
     // ===== 力数据 =====
     struct ForceData {
         double raw[6] = {0};            // Fx,Fy,Fz,Mx,My,Mz (N, Nm) — 30004 原始数据
