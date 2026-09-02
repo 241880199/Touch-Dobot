@@ -201,6 +201,18 @@ HDCallbackCode HDCALLBACK hapticCallback(void* pUserData) {
             if (totalForce[2] < -maxF) totalForce[2] = -maxF;
         }
 
+        if (!app.forceFeedbackEnabled) {
+            // FF disabled: clear any pending one-shot orient flags so a stale
+            // force doesn't fire once on re-enable.
+            EnterCriticalSection(&appState.orientForceMutex);
+            appState.hasOrientExtraForce = false;
+            LeaveCriticalSection(&appState.orientForceMutex);
+
+            EnterCriticalSection(&appState.orientRepulsionMutex);
+            appState.hasOrientRepulsion = false;
+            LeaveCriticalSection(&appState.orientRepulsionMutex);
+        }
+
         hdSetDoublev(HD_CURRENT_FORCE, totalForce);
 
         // Debug: print force values every ~2s (at 1kHz callback, every 2000th call)
