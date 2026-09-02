@@ -17,4 +17,20 @@ namespace TcpCalibration {
     // 纯函数: 应用 TCP 偏移, 求笔尖世界坐标。
     // pose: 法兰位姿 [x,y,z,rx,ry,rz]; toolOffset: 法兰系偏移; tipOut: 输出笔尖坐标
     void apply(const double pose[6], const double toolOffset[3], double tipOut[3]);
+
+    // ===== 标定状态 (存 tcp_calib.json) =====
+    extern bool enabled;
+    extern double offset[3];
+    extern double rmsError;
+
+    // ===== 采集状态 (笔尖对准固定点, 多姿态记录) =====
+    extern bool collectMode;
+    extern int  collectCount;
+    static const int MAX_COLLECT_POSES = 50;
+    extern double collectPose[MAX_COLLECT_POSES][6];
+
+    bool load(const char* filepath);
+    bool save(const char* filepath);
+    void startCollect();
+    void cancelCollect();
 }

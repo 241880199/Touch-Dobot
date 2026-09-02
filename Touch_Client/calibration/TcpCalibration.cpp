@@ -1,7 +1,19 @@
 #include "TcpCalibration.h"
 #include <cmath>
+#include <cstdio>
+#include <cstring>
+#include <cstdlib>
 
 namespace TcpCalibration {
+    // ===== 全局标定状态 =====
+    bool enabled = false;
+    double offset[3] = {0, 0, 0};
+    double rmsError = 0.0;
+
+    bool collectMode = false;
+    int  collectCount = 0;
+    double collectPose[MAX_COLLECT_POSES][6] = {{0}};
+
     void rpyToMatrix(double rx, double ry, double rz, double R[9]) {
         double crx = cos(rx), srx = sin(rx);
         double cry = cos(ry), sry = sin(ry);
@@ -103,5 +115,56 @@ namespace TcpCalibration {
         }
         rmsOut = sqrt(sumSq / (n - 1));
         return true;
+    }
+
+    bool load(const char* filepath) {
+        FILE* f = fopen(filepath, "r");
+        if (!f) return false;
+        char buf[1024];
+        size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+        fclose(f);
+        if (n == 0) return false;
+        buf[n] = '\0';
+
+        const char* p = strstr(buf, "\"offset\"");
+        if (!p) return false;
+        p = strchr(p, '[');
+        if (!p) return false;
+        p++;
+        for (int i = 0; i < 3; i++) {
+            char* end = nullptr;
+            offset[i] = strtod(p, &end);
+            if (end == p) return false;
+            p = end;
+            while (*p == ',' || *p == ' ' || *p == '\n' || *p == '\r' || *p == '\t') p++;
+        }
+        p = strstr(buf, "\"rmsError\"");
+        if (p) {
+            p = strchr(p, ':');
+            if (p) rmsError = strtod(p + 1, nullptr);
+        }
+        enabled = true;
+        return true;
+    }
+
+    bool save(const char* filepath) {
+        FILE* f = fopen(filepath, "w");
+        if (!f) return false;
+        fprintf(f, "{\n");
+        fprintf(f, "  \"offset\": [%.6g, %.6g, %.6g],\n", offset[0], offset[1], offset[2]);
+        fprintf(f, "  \"rmsError\": %.6g\n", rmsError);
+        fprintf(f, "}\n");
+        fclose(f);
+        return true;
+    }
+
+    void startCollect() {
+        collectMode = true;
+        collectCount = 0;
+    }
+
+    void cancelCollect() {
+        collectMode = false;
+        collectCount = 0;
     }
 }

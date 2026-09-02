@@ -14,6 +14,7 @@
 #include "render/SceneRenderer.h"
 #include "safety/RobotDiagnostics.h"
 #include "calibration/CalibrationSolver.h"
+#include "calibration/TcpCalibration.h"
 #include "force/ForceCalibration.h"
 #include "force/ForceCompensation.h"
 #include "robot/Kinematics.h"
@@ -205,6 +206,22 @@ void keyboard(unsigned char key, int, int) {
         return;
     }
 
+    // ===== TCP 偏移标定 ('t' key) =====
+    // 't': 切换 TCP 标定采集模式 (笔尖对准固定点, 多姿态记录法兰位姿)
+    if (key == 't' || key == 'T') {
+        if (TcpCalibration::collectMode) {
+            TcpCalibration::cancelCollect();
+            std::cout << "\n[TCP-CALIB] Mode OFF" << std::endl;
+        } else {
+            if (Calibration::collectMode) Calibration::cancelCollect(); // 与坐标标定互斥
+            TcpCalibration::startCollect();
+            std::cout << "\n[TCP-CALIB] Mode ON — "
+                      << "Keep pen TIP at a fixed point, reorient arm, "
+                      << "press SPACE to record a pose, 's' to solve, 't' to exit" << std::endl;
+        }
+        return;
+    }
+
     // SPACE during force calibration: start/stop sampling
     if (key == ' ' && RelayCore::instance().isForceCalibrating()) {
         ForceCalibration::confirmPose();
@@ -244,6 +261,28 @@ void keyboard(unsigned char key, int, int) {
         std::cout << "[CALIB] Point " << Calibration::collectCount << " recorded:"
                   << " Touch(" << rawTouch[0] << "," << rawTouch[1] << "," << rawTouch[2] << ")"
                   << " -> Robot(" << rx << "," << ry << "," << rz << ")"
+                  << std::endl;
+        return;
+    }
+
+    // Space during TCP calibration: 记录法兰位姿 (笔尖对准固定点)
+    if (key == ' ' && TcpCalibration::collectMode) {
+        int idx = TcpCalibration::collectCount;
+        if (idx >= TcpCalibration::MAX_COLLECT_POSES) {
+            std::cout << "[TCP-CALIB] Max " << TcpCalibration::MAX_COLLECT_POSES << " poses reached" << std::endl;
+            return;
+        }
+        EnterCriticalSection(&appState.robotPoseMutex);
+        double p[6] = {
+            appState.robotActualPose.x, appState.robotActualPose.y, appState.robotActualPose.z,
+            appState.robotActualPose.rx, appState.robotActualPose.ry, appState.robotActualPose.rz
+        };
+        LeaveCriticalSection(&appState.robotPoseMutex);
+
+        for (int i = 0; i < 6; i++) TcpCalibration::collectPose[idx][i] = p[i];
+        TcpCalibration::collectCount++;
+        std::cout << "[TCP-CALIB] Pose " << TcpCalibration::collectCount << " recorded: ("
+                  << p[0] << "," << p[1] << "," << p[2] << "," << p[3] << "," << p[4] << "," << p[5] << ")"
                   << std::endl;
         return;
     }
@@ -294,6 +333,29 @@ void keyboard(unsigned char key, int, int) {
         RelayCore::instance().sendCalibStatus();
 
         Calibration::cancelCollect();
+        return;
+    }
+
+    // 's' during TCP calibration: 求解 TCP 偏移并保存
+    if ((key == 's' || key == 'S') && TcpCalibration::collectMode) {
+        if (TcpCalibration::collectCount < 3) {
+            std::cout << "[TCP-CALIB] Need at least 3 poses, have "
+                      << TcpCalibration::collectCount << std::endl;
+            return;
+        }
+        double off[3]; double rms;
+        if (!TcpCalibration::solve(TcpCalibration::collectPose, TcpCalibration::collectCount, off, rms)) {
+            std::cout << "[TCP-CALIB] Solver failed — keep tip fixed, vary orientation" << std::endl;
+            return;
+        }
+        for (int i = 0; i < 3; i++) TcpCalibration::offset[i] = off[i];
+        TcpCalibration::rmsError = rms;
+        TcpCalibration::enabled = true;
+        TcpCalibration::save("tcp_calib.json");
+        std::cout << "\n[TCP-CALIB] Solved! TCP offset = [" << off[0] << ", " << off[1] << ", " << off[2]
+                  << "] mm, RMS = " << rms << " mm" << std::endl;
+        std::cout << "[TCP-CALIB] Saved to tcp_calib.json" << std::endl;
+        TcpCalibration::cancelCollect();
         return;
     }
 
@@ -542,6 +604,15 @@ int main(int argc, char* argv[]) {
         RelayCore::instance().sendCalibStatus();
     } else {
         std::cout << "[Calib] No calibration file, using default axis mapping" << std::endl;
+    }
+
+    // 6.6 加载 TCP 偏移标定 (如存在)
+    if (TcpCalibration::load("tcp_calib.json")) {
+        std::cout << "[TCP] Loaded tcp_calib.json (offset="
+                  << TcpCalibration::offset[0] << "," << TcpCalibration::offset[1] << "," << TcpCalibration::offset[2]
+                  << "mm, RMS=" << TcpCalibration::rmsError << "mm)" << std::endl;
+    } else {
+        std::cout << "[TCP] No tcp_calib.json — press 't' to calibrate TCP offset" << std::endl;
     }
 
     // 7. 启动定时器
