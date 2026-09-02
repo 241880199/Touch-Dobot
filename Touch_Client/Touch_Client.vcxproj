@@ -137,6 +137,8 @@
     <ClInclude Include="calibration\CalibrationSolver.h" />
     <ClCompile Include="calibration\CalibrationSolver.cpp" />
     <ClCompile Include="calibration\CalibrationIO.cpp" />
+    <ClInclude Include="calibration\TcpCalibration.h" />
+    <ClCompile Include="calibration\TcpCalibration.cpp" />
     <!-- main -->
     <ClCompile Include="main.cpp" />
   </ItemGroup>
