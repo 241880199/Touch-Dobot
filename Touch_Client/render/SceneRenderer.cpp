@@ -188,48 +188,6 @@ void drawTrail() {
     LeaveCriticalSection(&app.trailMutex);
 }
 
-void drawHud() {
-    int winW = glutGet(GLUT_WINDOW_WIDTH);
-    int winH = glutGet(GLUT_WINDOW_HEIGHT);
-    if (winW <= 0 || winH <= 0) return;
-
-    // 切换到正交投影 (屏幕坐标: 左下角原点), 用于 2D 文本
-    glMatrixMode(GL_PROJECTION);
-    glPushMatrix();
-    glLoadIdentity();
-    glOrtho(0, winW, 0, winH, -1, 1);
-
-    glMatrixMode(GL_MODELVIEW);
-    glPushMatrix();
-    glLoadIdentity();
-
-    // 禁用深度测试, 确保 HUD 文本绘制在最上层
-    glDisable(GL_DEPTH_TEST);
-
-    // 实时读取力反馈开关 (MATLAB relay_gui 反向命令写入, 主线程)
-    bool enabled = appState.forceFeedbackEnabled.load();
-    const char* text = enabled ? "Force Feedback: ON" : "Force Feedback: OFF";
-    if (enabled) {
-        glColor3f(0.2f, 0.9f, 0.4f);   // 绿色: 开启
-    } else {
-        glColor3f(0.95f, 0.3f, 0.3f);  // 红色: 关闭
-    }
-
-    // 左上角显示 (留 12px 边距)
-    glRasterPos2f(12.0f, (float)winH - 24.0f);
-    for (const char* c = text; *c != '\0'; ++c) {
-        glutBitmapCharacter(GLUT_BITMAP_HELVETICA_12, *c);
-    }
-
-    glEnable(GL_DEPTH_TEST);
-
-    // 恢复矩阵, 避免破坏下一帧 3D 视图
-    glMatrixMode(GL_PROJECTION);
-    glPopMatrix();
-    glMatrixMode(GL_MODELVIEW);
-    glPopMatrix();
-}
-
 void draw3D() {
     drawFloor();
     drawBoundary();
@@ -270,9 +228,6 @@ void draw3D() {
 
     // 轨迹 (仅按钮按下时记录)
     drawTrail();
-
-    // 屏幕空间 HUD (力反馈状态等), 需在 3D 绘制完成后绘制
-    drawHud();
 }
 
 } // namespace SceneRenderer
