@@ -106,6 +106,8 @@
     <!-- ProtocolAdapter inlined into RelayCore -->
     <ClInclude Include="relay\FeedbackParser.h" />
     <ClCompile Include="relay\FeedbackParser.cpp" />
+    <ClInclude Include="relay\RelayCommandParser.h" />
+    <ClCompile Include="relay\RelayCommandParser.cpp" />
     <ClInclude Include="relay\RelayCore.h" />
     <ClCompile Include="relay\RelayCore.cpp" />
     <!-- render -->
