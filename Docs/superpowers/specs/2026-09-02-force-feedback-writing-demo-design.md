@@ -91,7 +91,8 @@ Touch-Dobot v3.0 系统的软件实现已基本完成（力反馈、力补偿、
 - 用于对照实验：A 组开、B 组关。
 - 需新增 **MATLAB → C++ 反向命令**（复用 :8888 TCP 连接写回，或新增连接）：MATLAB 控件点击 → 发命令 → C++ 解析 → 切换力反馈状态。
 - 关闭时 `HapticCallback` 不调用 `hdSetDoublev(HD_CURRENT_FORCE)`（力归零），位置跟随保持。
-- C++ 侧 HUD 同步显示当前力反馈状态。
+- 力反馈状态在 **MATLAB relay_gui 界面**同步显示（`swFF` 开关控件本身即显示 ON/OFF）。
+- C++ 3D 窗口保持隐藏、不渲染（自提交 `12b9f43` 起，`display()` 精简为 clear+swap+pollFeedback，`draw3D()` 无调用者）——可视化全部集成在 MATLAB，C++ 侧不重复显示力反馈状态。
 
 ### 4.2 力数据落盘记录（新增/扩展）
 
