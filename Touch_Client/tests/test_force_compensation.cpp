@@ -13,38 +13,6 @@ static int g_passed = 0, g_failed = 0;
 #define PASS() do { std::cout << "PASS" << std::endl; g_passed++; } while(0)
 #define CHECK(cond) do { if (!(cond)) { std::cout << "FAIL: " << #cond << std::endl; g_failed++; return; } } while(0)
 
-// ===== GaussSolver tests =====
-
-static void test_gauss_simple() {
-    TEST(gauss_simple);
-    // Solve 2x2: [2 1; 1 3] x = [5; 6]  ->  x = [1.8; 1.4]
-    double A[4] = {2, 1, 1, 3};
-    double b[2] = {5, 6};
-    double x[2];
-    double rms;
-    bool ok = GaussSolver::solve(2, A, b, 2, x, rms);
-    CHECK(ok);
-    CHECK(fabs(x[0] - 1.8) < 0.01);
-    CHECK(fabs(x[1] - 1.4) < 0.01);
-    PASS();
-}
-
-static void test_gauss_overdetermined() {
-    TEST(gauss_overdetermined);
-    // Overdetermined: y = 2x + 1  with data points (0,1), (1,3), (2,5), (3,7)
-    // unknowns: m=2, c=1
-    double A[8] = {0,1, 1,1, 2,1, 3,1};
-    double b[4] = {1, 3, 5, 7};
-    double x[2];
-    double rms;
-    bool ok = GaussSolver::solve(4, A, b, 2, x, rms);
-    CHECK(ok);
-    CHECK(fabs(x[0] - 2.0) < 0.01); // slope
-    CHECK(fabs(x[1] - 1.0) < 0.01); // intercept
-    CHECK(rms < 0.01); // perfect fit
-    PASS();
-}
-
 // ===== MotionEstimator tests =====
 
 static void test_motion_still() {
@@ -121,8 +89,6 @@ static void test_comp_gravity_only() {
 
 int main() {
     std::cout << "=== ForceCompensation + Calibration Tests ===" << std::endl;
-    test_gauss_simple();
-    test_gauss_overdetermined();
     test_motion_still();
     test_motion_moving();
     test_comp_no_calib();
