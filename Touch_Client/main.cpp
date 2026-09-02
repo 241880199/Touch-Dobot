@@ -40,8 +40,35 @@ void keyboard(unsigned char key, int, int);  // forward decl for console polling
 
 void display() {
     if (appState.isClosing) return;
+
+    // 清屏 (深色背景)
+    glClearColor(0.1f, 0.12f, 0.18f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glEnable(GL_DEPTH_TEST);
+
+    // ===== 3D 场景渲染 (全窗口) =====
+    int winW = glutGet(GLUT_WINDOW_WIDTH);
+    int winH = glutGet(GLUT_WINDOW_HEIGHT);
+    glViewport(0, 0, winW, winH);
+
+    // 等距 3D 透视投影 — 右手坐标系 (X右 Y前 Z上)
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    double aspect = (double)winW / (double)winH;
+    gluPerspective(35.0, aspect, 10.0, 5000.0);
+
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+    // 等距视角: 从右前上方观察, 以基座附近为中心
+    gluLookAt(650, -650, 450,   // eye: 右前上方角落
+              150,    0, 200,   // center: 基座上方 (工作空间中心)
+                0,    0,   1);  // up: Z 向上
+
+    SceneRenderer::draw3D();
+
     glutSwapBuffers();
+
+    // 非阻塞反馈处理 (无机械臂时跳过)
     if (!g_noRobot) {
         RelayCore::instance().pollFeedback();
     }
@@ -534,7 +561,6 @@ int main(int argc, char* argv[]) {
     glutInitWindowSize(Config::WINDOW_W, Config::WINDOW_H);
     glutInitWindowPosition(100, 100);
     glutCreateWindow("Touch-Dobot Digital Twin");
-    glutHideWindow();
 
     glutDisplayFunc(display);
     glutIdleFunc(idle);
