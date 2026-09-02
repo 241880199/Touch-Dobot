@@ -1574,11 +1574,16 @@ void RelayCore::pollForce() {
             app.forceData.isStale ? 1 : 0);
     }
 
-    // 落盘到 CSV (演示对照实验用, 含 ff_enabled 标志列)
-    ForceLogger::log(now, app.forceData.filtered, pose,
-                     appState.forceFeedbackEnabled ? 1 : 0);
+    // Copy filtered forces into a local before releasing the lock so the
+    // log write (stdio buffering / disk) doesn't hold forceDataMutex across I/O.
+    double filtered[6];
+    for (int i = 0; i < 6; i++) filtered[i] = app.forceData.filtered[i];
 
     LeaveCriticalSection(&app.forceDataMutex);
+
+    // 落盘到 CSV (演示对照实验用, 含 ff_enabled 标志列)
+    ForceLogger::log(now, filtered, pose,
+                     appState.forceFeedbackEnabled ? 1 : 0);
 
     sendRelayUpdate(buf);
 }
