@@ -47,7 +47,7 @@ RING_BOLT_R  = 20;   // 2×M4 螺栓孔心距中心 (mm)
 RING_BOLT_D  = 4.5;  // M4 螺栓过孔 (mm)
 
 /* ===== 滑动导向块 ===== */
-BLOCK_W      = 88;   // 块宽 (mm) — 方形板, 覆盖对角线两光轴(±32@22.5°)与其耳座
+BLOCK_W      = 88;   // 块宽 (mm) — 方形板, 覆盖对角线两光轴(±33@22.5°)与其耳座
 BLOCK_D      = 88;   // 块深 (mm) — 与宽同, 做成方形以避开对角线干涉
 BLOCK_H      = 20;   // 块高 (mm)
 BLOCK_LOCK_D = 4.2;  // 锁高 M4 螺丝过孔 (mm)
@@ -87,5 +87,61 @@ module top_flange() {
 /* ===== 件选择 (PART 数值) ===== */
 PART = 1; // 1=assembly 2=flange 3=block 4=tiebar 5=collet_s 6=collet_m 7=collet_l 8=ring
 
-// 其余模块在后续 Task 中定义; 此处先只渲染法兰
+// ===== 光轴占位 (装配视图用, 非打印件) =====
+module guide_rod() {
+    cylinder(d = ROD_D, h = ROD_L);
+}
+
+// ===== 滑动导向块: 两光轴过孔 + 中央夹头座 + 锁高螺孔 + 锁紧环螺栓孔 =====
+module slide_block() {
+    // 中央夹头座: 头段 Φ24 滑配, 挡圈 Φ28 沉孔落在块顶面
+    socket_d = COLLET_HEAD_D + 0.5;      // 24.5
+    flange_d = COLLET_FLANGE_D + 0.5;    // 28.5
+    difference() {
+        union() {
+            // 主体: z ∈ [-BLOCK_H, 0]
+            translate([-BLOCK_W/2, -BLOCK_D/2, -BLOCK_H])
+                cube([BLOCK_W, BLOCK_D, BLOCK_H]);
+            // 两光轴套筒: 外径 ROD_D+8, 沿柱向加高
+            for (a = [ROD_ANG, ROD_ANG + 180])
+                rotate([0, 0, a])
+                    translate([ROD_R, 0, -BLOCK_H])
+                        cylinder(d = ROD_D + 8, h = BLOCK_H);
+        }
+        // 两光轴滑配孔 (Φ8.3)
+        for (a = [ROD_ANG, ROD_ANG + 180])
+            rotate([0, 0, a])
+                translate([ROD_R, 0, -BLOCK_H - 1])
+                    cylinder(d = ROD_D + 0.3, h = BLOCK_H + 2);
+        // 中央夹头座 (上下贯通, 笔从下穿过)
+        cylinder(d = socket_d, h = BLOCK_H + 1, center = true);
+        // 夹头挡圈沉孔 (顶面下 2mm)
+        translate([0, 0, -2]) cylinder(d = flange_d, h = 3);
+        // 锁高 M4 螺孔: 沿径向顶住其中一根光轴 (开在 +X 侧)
+        rotate([0, 0, ROD_ANG])
+            translate([ROD_R + ROD_D/2 - 1, 0, -BLOCK_H/2])
+                rotate([0, 90, 0])
+                    cylinder(d = BLOCK_LOCK_D, h = ROD_D + 4);
+        // 2×M4 锁紧环螺栓孔: 自底面上钻 (锁紧环从下方用螺栓拉紧)
+        for (dx = [-RING_BOLT_R, RING_BOLT_R])
+            translate([dx, 0, -BLOCK_H - 1])
+                cylinder(d = RING_BOLT_D, h = 12);
+    }
+}
+
+// ===== 底部横梁: 连接两光轴下端, 成门架 =====
+module tie_bar() {
+    bar_h = 10;
+    difference() {
+        translate([-BLOCK_W/2, -BLOCK_D/2, 0])
+            cube([BLOCK_W, BLOCK_D, bar_h]);
+        for (a = [ROD_ANG, ROD_ANG + 180])
+            rotate([0, 0, a])
+                translate([ROD_R, 0, -1])
+                    cylinder(d = ROD_D + 0.3, h = bar_h + 2);
+    }
+}
+
+if (PART == 3) slide_block();
+if (PART == 4) tie_bar();
 if (PART == 2) top_flange();
