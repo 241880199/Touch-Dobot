@@ -142,6 +142,60 @@ module tie_bar() {
     }
 }
 
+// ===== 三瓣自定心夹头: 头段(挡圈) + 三瓣锥面工作段, 中央通孔 =====
+module split_collet(bore_d) {
+    difference() {
+        union() {
+            // 头段: z ∈ [-COLLET_HEAD_L, 0]
+            translate([0, 0, -COLLET_HEAD_L])
+                cylinder(d = COLLET_HEAD_D, h = COLLET_HEAD_L);
+            // 挡圈: 顶面薄盘, 落在块顶
+            translate([0, 0, -2])
+                cylinder(d = COLLET_FLANGE_D, h = 2);
+            // 三瓣工作段: 下宽上窄锥体, z ∈ [-(HEAD+FINGER), -HEAD]
+            translate([0, 0, -COLLET_HEAD_L - COLLET_FINGER_L])
+                cylinder(d1 = COLLET_FINGER_BOT, d2 = COLLET_FINGER_TOP, h = COLLET_FINGER_L);
+        }
+        // 中央通孔 (笔杆): 贯穿头段+三瓣全高 (从三瓣底端 z=-HEAD-FINGER 顶到 z=+2)
+        translate([0, 0, -COLLET_HEAD_L - COLLET_FINGER_L])
+            cylinder(d = bore_d, h = COLLET_HEAD_L + COLLET_FINGER_L + 2);
+        // 三瓣缝: 沿周向 120° 均布的单条径向缝, 自中心至外缘贯穿工作段, 不切头段/挡圈
+        for (i = [0 : FINGERS - 1]) {
+            rotate([0, 0, i * 360/FINGERS])
+                translate([COLLET_FINGER_BOT/4, 0, -COLLET_HEAD_L - COLLET_FINGER_L/2])
+                    cube([COLLET_FINGER_BOT/2 + 1, 0.8, COLLET_FINGER_L], center = true);
+        }
+    }
+}
+
+// ===== 锁紧环: 内锥(上小下大) + 2×M4 过孔, 自下套上三瓣、螺栓拉向块 =====
+module clamp_ring() {
+    ear_d = RING_BOLT_D + 8;  // 螺栓耳直径: Φ4.5 过孔两侧各留 ~4mm 壁
+    difference() {
+        union() {
+            // 锥环主体
+            cylinder(d = RING_OD, h = RING_L);
+            // 两螺栓耳: 环体外径 RING_OD 只到 R16, 螺栓孔在 RING_BOLT_R=R20, 外伸耳承载 M4 过孔
+            for (dx = [-RING_BOLT_R, RING_BOLT_R])
+                translate([dx, 0, 0])
+                    cylinder(d = ear_d, h = RING_L);
+        }
+        // 内锥: 上端小径 (RING_ID_TOP), 下端大径 (RING_ID_BOT)
+        translate([0, 0, -0.01])
+            cylinder(d1 = RING_ID_BOT, d2 = RING_ID_TOP, h = RING_L + 0.02);
+        // 2×M4 螺栓过孔
+        for (dx = [-RING_BOLT_R, RING_BOLT_R])
+            translate([dx, 0, -1])
+                cylinder(d = RING_BOLT_D, h = RING_L + 2);
+    }
+}
+
+// 件选择
+if (PART == 5) split_collet(COLLET_BORE_S);
+if (PART == 6) split_collet(COLLET_BORE_M);
+if (PART == 7) split_collet(COLLET_BORE_L);
+if (PART == 8) clamp_ring();
+
 if (PART == 3) slide_block();
 if (PART == 4) tie_bar();
 if (PART == 2) top_flange();
