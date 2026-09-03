@@ -7,7 +7,7 @@ BC_D      = 50;   // 4×M6 分度圆直径 (mm)
 DOWEL_R   = 25;   // 2×Φ6 销孔径向距离 (mm)
 DOWEL_ANG = 45;   // 销孔相对 X/Y 轴角度 (deg)
 BOSS_D    = 32;   // Φ31.5 凸台过孔直径 (mm), 留 0.5 余量
-BOSS_H    = 7;    // 凸台高度 (mm) = 31.5(总高) - 24.5(法兰安装高)
+BOSS_H    = 7;    // 凸台高度 (mm) = 31.5(总高) - 24.5(法兰安装高) (仅文档, 不参与几何)
 M6_CLEAR  = 6.5;  // M6 螺栓过孔 (mm)
 DOWEL_D   = 6.0;  // Φ6 销配合孔 (mm)
 FLANGE_T  = 6;    // 法兰板厚 (mm) — 凸台凸出 1mm, 笔尾干净顶到
@@ -34,8 +34,8 @@ COLLET_HEAD_D    = 24;   // 夹头头段外径 (mm)
 COLLET_HEAD_L    = 8;    // 夹头头段长度 (mm)
 COLLET_FLANGE_D  = 28;   // 夹头顶部挡圈外径 (mm)
 COLLET_FINGER_L  = 16;   // 三瓣工作段长度 (mm)
-COLLET_FINGER_TOP= 22;   // 三瓣顶端外径 (mm)
-COLLET_FINGER_BOT= 25;   // 三瓣底端外径 (mm) — 下宽上窄, 压环上移即收紧
+COLLET_FINGER_TOP= 25;   // 三瓣顶端(与头段连接处)外径 (mm) — 上宽, 压环上移收紧
+COLLET_FINGER_BOT= 22;   // 三瓣底端(自由端)外径 (mm) — 下窄, 便于压环套入
 FINGERS = 3;             // 瓣数
 
 /* ===== 锁紧环 (锥面压环) ===== */
@@ -113,11 +113,14 @@ module slide_block() {
             rotate([0, 0, a])
                 translate([ROD_R, 0, -BLOCK_H - 1])
                     cylinder(d = ROD_D + 0.3, h = BLOCK_H + 2);
-        // 中央夹头座 (上下贯通, 笔从下穿过)
-        cylinder(d = socket_d, h = BLOCK_H + 1, center = true);
+        // 中央夹头座 (上下贯通, 笔从下穿过) — 通孔贯穿块体全高, 否则夹头三瓣与笔杆被块体挡住
+        translate([0, 0, -BLOCK_H - 1])
+            cylinder(d = socket_d, h = BLOCK_H + 2);
         // 夹头挡圈沉孔 (顶面下 2mm)
         translate([0, 0, -2]) cylinder(d = flange_d, h = 3);
         // 锁高 M4 螺孔: 沿径向顶住其中一根光轴 (开在 +X 侧)
+        //   translate 的 -1 使孔心自 ROD_R+ROD_D/2 内移 1mm, 让 Φ4.2 孔咬进光轴孔壁(与 Φ8.3 贯通),
+        //   顶丝才能顶到光轴杆身; 切勿改回 +1(孔心外移则孔与光轴孔不贯通, 顶丝悬空锁不住)
         rotate([0, 0, ROD_ANG])
             translate([ROD_R + ROD_D/2 - 1, 0, -BLOCK_H/2])
                 rotate([0, 90, 0])
@@ -152,7 +155,7 @@ module split_collet(bore_d) {
             // 挡圈: 顶面薄盘, 落在块顶
             translate([0, 0, -2])
                 cylinder(d = COLLET_FLANGE_D, h = 2);
-            // 三瓣工作段: 下宽上窄锥体, z ∈ [-(HEAD+FINGER), -HEAD]
+            // 三瓣工作段: 下窄上宽锥体, z ∈ [-(HEAD+FINGER), -HEAD]
             translate([0, 0, -COLLET_HEAD_L - COLLET_FINGER_L])
                 cylinder(d1 = COLLET_FINGER_BOT, d2 = COLLET_FINGER_TOP, h = COLLET_FINGER_L);
         }
@@ -160,10 +163,11 @@ module split_collet(bore_d) {
         translate([0, 0, -COLLET_HEAD_L - COLLET_FINGER_L])
             cylinder(d = bore_d, h = COLLET_HEAD_L + COLLET_FINGER_L + 2);
         // 三瓣缝: 沿周向 120° 均布的单条径向缝, 自中心至外缘贯穿工作段, 不切头段/挡圈
+        max_d = max(COLLET_FINGER_TOP, COLLET_FINGER_BOT);
         for (i = [0 : FINGERS - 1]) {
             rotate([0, 0, i * 360/FINGERS])
-                translate([COLLET_FINGER_BOT/4, 0, -COLLET_HEAD_L - COLLET_FINGER_L/2])
-                    cube([COLLET_FINGER_BOT/2 + 1, 0.8, COLLET_FINGER_L], center = true);
+                translate([max_d/4, 0, -COLLET_HEAD_L - COLLET_FINGER_L/2])
+                    cube([max_d/2 + 1, 0.8, COLLET_FINGER_L], center = true);
         }
     }
 }
@@ -206,7 +210,7 @@ module assembly() {
     // 锁紧环: 包在三瓣手指段 (z∈[-174,-158]) 而非头段
     translate([0, 0, block_z - COLLET_HEAD_L - RING_L]) clamp_ring();
     // 笔占位: 从纸面(≈-260) 顶到凸台面(≈-1)
-    translate([0, 0, -260]) cylinder(d = 11, h = 259);
+    translate([0, 0, -260]) cylinder(d = (PEN_MIN_D + PEN_MAX_D)/2, h = 259);
 }
 
 // 件选择
