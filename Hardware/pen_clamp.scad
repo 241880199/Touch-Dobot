@@ -190,7 +190,27 @@ module clamp_ring() {
     }
 }
 
+// ===== 装配视图: 法兰 + 双光轴 + 底部横梁 + 块 + 夹头 + 锁紧环 + 笔占位 =====
+module assembly() {
+    top_flange();
+    // 双光轴: guide_rod 局部 +z 朝上, 故整体下移 ROD_L 使其自耳座向下垂 (z∈[-EAR_LEN-ROD_L, -EAR_LEN])
+    for (a = [ROD_ANG, ROD_ANG + 180])
+        rotate([0, 0, a]) translate([ROD_R, 0, -EAR_LEN - ROD_L])
+            guide_rod();
+    // 底部横梁: 连接两光轴下端, 成门架
+    translate([0, 0, -EAR_LEN - ROD_L]) tie_bar();
+    // 块与夹头放在代表高度: 夹持点离传感器 ~150mm
+    block_z = -150;
+    translate([0, 0, block_z]) slide_block();
+    translate([0, 0, block_z]) split_collet(COLLET_BORE_M);
+    // 锁紧环: 包在三瓣手指段 (z∈[-174,-158]) 而非头段
+    translate([0, 0, block_z - COLLET_HEAD_L - RING_L]) clamp_ring();
+    // 笔占位: 从纸面(≈-260) 顶到凸台面(≈-1)
+    translate([0, 0, -260]) cylinder(d = 11, h = 259);
+}
+
 // 件选择
+if (PART == 1) assembly();
 if (PART == 5) split_collet(COLLET_BORE_S);
 if (PART == 6) split_collet(COLLET_BORE_M);
 if (PART == 7) split_collet(COLLET_BORE_L);
