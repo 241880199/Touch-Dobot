@@ -40,12 +40,12 @@ module top_flange() {
 
 // ===== 夹持主体: V 型槽 + 侧向顶紧螺丝 =====
 module clamp_body() {
-    body_d = PEN_MAX_D + 2*WALL + CLAMP_SCREW_D + 4;
+    body_d = 40;  // 主体外径 (mm) — 须大于 BOSS_D(32), 才能与法兰板底面(Φ32~Φ68 环带)搭接
     difference() {
         union() {
-            // 主体圆柱 (自法兰板下沿向下延伸)
+            // 主体圆柱 (自法兰板下沿向下延伸, 顶部上探 1mm 与法兰板搭接成一体)
             translate([0, 0, -SLEEVE_LEN])
-                cylinder(d = body_d, h = SLEEVE_LEN);
+                cylinder(d = body_d, h = SLEEVE_LEN + 1);
         }
         // 中心笔杆通孔 (略大于最大笔径, 靠 V 槽 + 螺丝夹紧)
         translate([0, 0, -SLEEVE_LEN - 1])
@@ -57,13 +57,12 @@ module clamp_body() {
                     linear_extrude(height = SLEEVE_LEN + 2)
                         polygon(points = [[0, -body_d/2 - 1], [0, body_d/2 + 1], [-body_d, 0]]);
     }
-    // 侧向顶紧螺丝孔 (水平贯穿到笔孔, 与 V 槽对侧)
-    rotate([0, 0, 0])
-        translate([-(body_d/2 - CLAMP_SCREW_D - 1), 0, -SLEEVE_LEN/2])
-            rotate([0, 90, 0])
-                cylinder(d = CLAMP_SCREW_D, h = body_d - 2*CLAMP_SCREW_D - 2);
+    // 侧向顶紧螺丝孔 (自 -X 外壁水平贯穿到笔孔, 与 +X 侧 V 槽对侧; M4 攻丝或嵌铜螺母)
+    translate([-body_d/2, 0, -SLEEVE_LEN/2])
+        rotate([0, 90, 0])
+            cylinder(d = CLAMP_SCREW_D, h = body_d/2 - PEN_MAX_D/2 - 0.5);
 }
 
 // ===== 装配 =====
 top_flange();
-translate([0, 0, -FLANGE_T]) clamp_body();
+clamp_body();
