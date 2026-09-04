@@ -31,12 +31,13 @@ COLLET_BORE_S = 8;     // 档1 孔径: 适配 6-10mm 笔
 COLLET_BORE_M = 11.5;  // 档2 孔径: 适配 10-13mm 笔
 COLLET_BORE_L = 14.5;  // 档3 孔径: 适配 13-16mm 笔
 COLLET_HEAD_D    = 24;   // 夹头头段外径 (mm)
-COLLET_HEAD_L    = 8;    // 夹头头段长度 (mm)
+COLLET_HEAD_L    = 20;   // 夹头头段长度 (mm) — 须=块高 BLOCK_H, 使三瓣整段垂到块下供锁紧环套夹
 COLLET_FLANGE_D  = 28;   // 夹头顶部挡圈外径 (mm)
 COLLET_FINGER_L  = 16;   // 三瓣工作段长度 (mm)
 COLLET_FINGER_TOP= 25;   // 三瓣顶端(与头段连接处)外径 (mm) — 上宽, 压环上移收紧
 COLLET_FINGER_BOT= 22;   // 三瓣底端(自由端)外径 (mm) — 下窄, 便于压环套入
 FINGERS = 3;             // 瓣数
+FINGER_GAP = 2.0;        // 三瓣缝宽 (mm) — 决定可收紧量 3·gap/π; 2.0 使各档覆盖到最细笔且打印不粘连
 
 /* ===== 锁紧环 (锥面压环) ===== */
 RING_OD      = 32;   // 环外径 (mm)
@@ -167,7 +168,7 @@ module split_collet(bore_d) {
         for (i = [0 : FINGERS - 1]) {
             rotate([0, 0, i * 360/FINGERS])
                 translate([max_d/4, 0, -COLLET_HEAD_L - COLLET_FINGER_L/2])
-                    cube([max_d/2 + 1, 0.8, COLLET_FINGER_L], center = true);
+                    cube([max_d/2 + 1, FINGER_GAP, COLLET_FINGER_L], center = true);
         }
     }
 }
@@ -207,7 +208,7 @@ module assembly() {
     block_z = -150;
     translate([0, 0, block_z]) slide_block();
     translate([0, 0, block_z]) split_collet(COLLET_BORE_M);
-    // 锁紧环: 包在三瓣手指段 (z∈[-174,-158]) 而非头段
+    // 锁紧环: 包在三瓣手指段 (z∈[-182,-170], 头段=20 使手指整段在块底 z=-170 之下) 而非头段
     translate([0, 0, block_z - COLLET_HEAD_L - RING_L]) clamp_ring();
     // 笔占位: 从纸面(≈-260) 顶到凸台面(≈-1)
     translate([0, 0, -260]) cylinder(d = (PEN_MIN_D + PEN_MAX_D)/2, h = 259);
