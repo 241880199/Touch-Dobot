@@ -48,10 +48,10 @@ RING_BOLT_R  = 20;   // 2×M4 螺栓孔心距中心 (mm)
 RING_BOLT_D  = 4.5;  // M4 螺栓过孔 (mm)
 
 /* ===== 滑动导向块 ===== */
-BLOCK_W      = 88;   // 块宽 (mm) — 方形板, 覆盖对角线两光轴(±33@22.5°)与其耳座
-BLOCK_D      = 88;   // 块深 (mm) — 与宽同, 做成方形以避开对角线干涉
+BLOCK_W      = 84;   // 块宽 (mm) — 矩形, 覆盖对角线两光轴(±33@22.5°)与其 Φ16 耳座(外缘 X≈±38.5)
+BLOCK_D      = 48;   // 块深 (mm) — 光轴 Y 向只到 ±20.6, 48 足够(原 88×88 方形 Y 向浪费 ~23mm/侧)
 BLOCK_H      = 20;   // 块高 (mm)
-BLOCK_LOCK_D = 4.2;  // 锁高 M4 螺丝过孔 (mm)
+BLOCK_LOCK_D = 4.5;  // 锁高 M4 过孔 (mm) — 4.5 匹配 M4 热熔嵌件, 与块底螺栓孔一致
 
 $fn = 96;
 
@@ -119,13 +119,13 @@ module slide_block() {
             cylinder(d = socket_d, h = BLOCK_H + 2);
         // 夹头挡圈沉孔 (顶面下 2mm)
         translate([0, 0, -2]) cylinder(d = flange_d, h = 3);
-        // 锁高 M4 螺孔: 沿径向顶住其中一根光轴 (开在 +X 侧)
-        //   translate 的 -1 使孔心自 ROD_R+ROD_D/2 内移 1mm, 让 Φ4.2 孔咬进光轴孔壁(与 Φ8.3 贯通),
-        //   顶丝才能顶到光轴杆身; 切勿改回 +1(孔心外移则孔与光轴孔不贯通, 顶丝悬空锁不住)
-        rotate([0, 0, ROD_ANG])
-            translate([ROD_R + ROD_D/2 - 1, 0, -BLOCK_H/2])
-                rotate([0, 90, 0])
-                    cylinder(d = BLOCK_LOCK_D, h = ROD_D + 4);
+        // 锁高 M4 螺孔: 沿 +X 从块侧面钻入, 在 +22.5° 光轴的 Y 位置顶住杆身锁高。
+        //   原径向孔沿 22.5° 从 r=30 到 42, 但块侧面沿 22.5° 在 r≈45, 孔埋块内不可达 → 改轴向 +X 直达块面
+        lock_y   = ROD_R * sin(ROD_ANG);                       // 光轴中心 Y = 12.63
+        lock_len = BLOCK_W/2 - ROD_R*cos(ROD_ANG) + ROD_D/2;  // 从 +X 面钻到刚过光轴内缘
+        translate([BLOCK_W/2 - lock_len/2, lock_y, -BLOCK_H/2])
+            rotate([0, 90, 0])
+                cylinder(d = BLOCK_LOCK_D, h = lock_len);
         // 2×M4 锁紧环螺栓孔: 自底面上钻 (锁紧环从下方用螺栓拉紧)
         for (dx = [-RING_BOLT_R, RING_BOLT_R])
             translate([dx, 0, -BLOCK_H - 1])
