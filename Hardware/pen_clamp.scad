@@ -51,7 +51,11 @@ RING_BOLT_D  = 4.5;  // M4 螺栓过孔 (mm)
 BLOCK_W      = 84;   // 块宽 (mm) — 矩形, 覆盖对角线两光轴(±33@22.5°)与其 Φ16 耳座(外缘 X≈±38.5)
 BLOCK_D      = 48;   // 块深 (mm) — 光轴 Y 向只到 ±20.6, 48 足够(原 88×88 方形 Y 向浪费 ~23mm/侧)
 BLOCK_H      = 20;   // 块高 (mm)
-BLOCK_LOCK_D = 4.5;  // 锁高 M4 过孔 (mm) — 4.5 匹配 M4 热熔嵌件, 与块底螺栓孔一致
+BLOCK_LOCK_D = 4.5;  // 锁高 M4 过孔 (mm)
+
+/* ===== M4 六角螺母嵌槽 (去热熔) ===== */
+M4_NUT_AF = 7.0;   // 六角槽对边 (mm) — 与 M4 螺母 s=7 等值, 打印缩水呈过盈卡住
+M4_NUT_H  = 3.5;   // 六角槽深 (mm) — 螺母 m=3.2 + 0.3
 
 $fn = 96;
 
@@ -93,6 +97,11 @@ module guide_rod() {
     cylinder(d = ROD_D, h = ROD_L);
 }
 
+// ===== M4 六角螺母嵌槽: 六角棱柱 (对边 af, 高 h), 底在 z=0 向上 =====
+module hex_nut_pocket(af = M4_NUT_AF, h = M4_NUT_H) {
+    cylinder(r = af / sqrt(3), h = h, $fn = 6);
+}
+
 // ===== 滑动导向块: 两光轴过孔 + 中央夹头座 + 锁高螺孔 + 锁紧环螺栓孔 =====
 module slide_block() {
     // 中央夹头座: 头段 Φ24 滑配, 挡圈 Φ28 沉孔落在块顶面
@@ -126,10 +135,17 @@ module slide_block() {
         translate([BLOCK_W/2 - lock_len/2, lock_y, -BLOCK_H/2])
             rotate([0, 90, 0])
                 cylinder(d = BLOCK_LOCK_D, h = lock_len);
-        // 2×M4 锁紧环螺栓孔: 自底面上钻 (锁紧环从下方用螺栓拉紧)
-        for (dx = [-RING_BOLT_R, RING_BOLT_R])
+        // 锁高 M4 六角螺母槽: +X 面开口 (沿 -X 沉入块内 3.5)
+        translate([BLOCK_W/2, lock_y, -BLOCK_H/2])
+            rotate([0, -90, 0])
+                hex_nut_pocket();
+        // 2×M4 锁紧环螺栓孔: 通孔贯穿块高 + 块底面六角螺母槽 (开口朝下)
+        for (dx = [-RING_BOLT_R, RING_BOLT_R]) {
             translate([dx, 0, -BLOCK_H - 1])
-                cylinder(d = RING_BOLT_D, h = 12);
+                cylinder(d = RING_BOLT_D, h = BLOCK_H + 2);
+            translate([dx, 0, -BLOCK_H])
+                hex_nut_pocket();
+        }
     }
 }
 
