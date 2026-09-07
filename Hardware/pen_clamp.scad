@@ -189,7 +189,7 @@ module split_collet(bore_d) {
     }
 }
 
-// ===== 锁紧环: 内锥(上小下大) + 2×M4 过孔, 自下套上三瓣、螺栓拉向块 =====
+// ===== 锁紧环: 内锥(下窄上宽) + 2×M4 过孔, 自下套上三瓣、螺栓拉向块 =====
 module clamp_ring() {
     ear_d = RING_BOLT_D + 8;  // 螺栓耳直径: Φ4.5 过孔两侧各留 ~4mm 壁
     difference() {
@@ -201,7 +201,7 @@ module clamp_ring() {
                 translate([dx, 0, 0])
                     cylinder(d = ear_d, h = RING_L);
         }
-        // 内锥: 上端小径 (RING_ID_TOP), 下端大径 (RING_ID_BOT)
+        // 内锥: 上端大径 (RING_ID_TOP), 下端小径 (RING_ID_BOT)
         translate([0, 0, -0.01])
             cylinder(d1 = RING_ID_BOT, d2 = RING_ID_TOP, h = RING_L + 0.02);
         // 2×M4 螺栓过孔
@@ -224,7 +224,7 @@ module assembly() {
     block_z = -150;
     translate([0, 0, block_z]) slide_block();
     translate([0, 0, block_z]) split_collet(COLLET_BORE_M);
-    // 锁紧环: 包在三瓣手指段 (z∈[-182,-170], 头段=20 使手指整段在块底 z=-170 之下) 而非头段
+    // 锁紧环: 包在三瓣手指段 (z∈[-176,-170], 头段=20 使手指整段在块底 z=-170 之下) 而非头段
     translate([0, 0, block_z - COLLET_HEAD_L - RING_L]) clamp_ring();
     // 笔占位: 从纸面(≈-260) 顶到凸台面(≈-1)
     translate([0, 0, -260]) cylinder(d = (PEN_MIN_D + PEN_MAX_D)/2, h = 259);
