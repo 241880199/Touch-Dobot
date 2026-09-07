@@ -41,9 +41,9 @@ FINGER_GAP = 2.0;        // 三瓣缝宽 (mm) — 决定可收紧量 3·gap/π; 
 
 /* ===== 锁紧环 (锥面压环) ===== */
 RING_OD      = 32;   // 环外径 (mm)
-RING_L       = 12;   // 环高 (mm)
-RING_ID_TOP  = 22.5; // 环内锥上端 (小) 直径 (mm)
-RING_ID_BOT  = 25.5; // 环内锥下端 (大) 直径 (mm)
+RING_L       = 6;    // 环高 (mm) — 缩短换夹紧行程 (锥面平行后 16-6=10mm)
+RING_ID_BOT  = COLLET_FINGER_BOT + 0.2;  // 环内锥下端 (小) 直径 — 套过自由端 Φ22 留 0.2
+RING_ID_TOP  = RING_ID_BOT + (COLLET_FINGER_TOP - COLLET_FINGER_BOT) * RING_L / COLLET_FINGER_L;  // 环内锥上端 (大) — 与三瓣锥平行
 RING_BOLT_R  = 20;   // 2×M4 螺栓孔心距中心 (mm)
 RING_BOLT_D  = 4.5;  // M4 螺栓过孔 (mm)
 
