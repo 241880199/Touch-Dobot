@@ -118,11 +118,17 @@ public:
         double hapticOut[3] = {0};      // 已变换到 Touch 坐标系，haptic 线程直接读
         bool isStale = true;            // 超过 200ms 无新数据
         DWORD lastUpdateMs = 0;
-        // 30004 帧里回读的负载参数 (Load @1168): [0]=kg, [1..3]=质心 X/Y/Z (mm)。
-        // 由 ForceReader 线程每帧刷新 (与 raw[] 同一个锁)。用途: 判断【机械臂是否真的
-        // 采纳】了下发的 EnableRobot 负载 —— 使能口的回包只能说明命令语法对了。
-        // 消费者见 RelayCore::probePayloadResidual 开头的回读核对。
-        double payloadEcho[4] = {0};
+        // 【已删: payloadEcho[4]】—— 30004 帧里 Load @1168 的负载回读镜像。它唯一的使用者
+        // 是符号探针 (RelayCore::probePayloadResidual) 的"机械臂有没有采纳候选负载"核对,
+        // 探针已废除。读取线程启动时那一次性的负载回读核对改为就近从帧里读, 不再往这里落。
+
+        // 30004 帧里的 TCPForce @720 = "TCP力值 (通过关节电流计算)" —— 与 raw[] 读的
+        // ActualTCPForce @576 = "TCP传感器力值" 是【两个不同的量】。
+        // @576 是传感器自己的读数 (物理量, 不受控制器怎么想的影响);
+        // @720 是从关节力矩反推的, 应当反映控制器使用的负载模型。
+        // 实测(2026-09-18): 改 EnableRobot 的负载, @576 纹丝不动 —— 说明负载标定
+        // 一直在量一个与被配置负载无关的量。此字段用于对比确认。
+        double tcpForce[6] = {0};
 
         // 标定参数 (由 ForceCalibration 求解, ForceCompensation 读取)
         bool isCalibrated = false;

@@ -36,6 +36,15 @@ namespace ForceCompensation {
     void setCalibration(double massKg, const double comSensor[3],
                         const double biasForce[3], const double biasTorque[3]);
 
+    // 只换质量/质心, 零偏保持不变。供负载标定把【残余】写进来:
+    // 机械臂内部那份负载参数改不动(TCP 侧试过 EnableRobot/Payload/LoadSwitch, 全程无响应),
+    // 所以它补偿不干净的那一份由我们在这里减掉 —— 拟合出的 dm/dp 就是那一份本身。
+    // comSensor 单位【米】, 与 setCalibration 一致。
+    void setMassCom(double massKg, const double comSensor[3]);
+
+    // 取出当前零偏 (供把新质量落盘时复用)
+    void currentBias(double biasForce[3], double biasTorque[3]);
+
     // Check if calibration is active
     bool isCalibrated();
 

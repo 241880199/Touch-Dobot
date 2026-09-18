@@ -64,17 +64,15 @@ static DWORD WINAPI forceReaderThread(LPVOID) {
                 break;  // reconnect loop
             }
 
+            // 一次性回读: 机械臂实际上在用哪份负载参数 (下发成功 ≠ 机械臂采纳;
+            // EnableRobot 的返回码只能说明语法对了)。
             // 30004 布局: Load @1168 (1×double), CenterX/Y/Z @1176~1199 (3×double)。
-            // 指针换算只做这一次 —— 同一帧下面的两处消费者 (一次性回读 + 每帧落 forceData)
-            // 共用它, 协议偏移只此一处。
-            const double* loadEchoPtr = reinterpret_cast<const double*>(buf + 1168);
-
-            // 一次性回读: 机械臂是否真的接受了我们下发的负载参数
-            // (下发成功 ≠ 机械臂采纳; EnableRobot 的返回码只能说明语法对了)
-            static bool payloadEchoed = false;
-            if (!payloadEchoed) {
-                payloadEchoed = true;
-                const double* echo = loadEchoPtr;
+            // ⚠ 现在只报不判: 实机实测那份负载从 TCP 口根本改不动 (见 applyPayloadToRobot),
+            //   所以"与下发的值不符"是常态, 不影响标定 —— 真正生效的是本地补偿。
+            static bool loadEchoReported = false;
+            if (!loadEchoReported) {
+                loadEchoReported = true;
+                const double* echo = reinterpret_cast<const double*>(buf + 1168);
                 bool sane = echo[0] >= 0.0 && echo[0] <= 5.0
                          && fabs(echo[1]) <= 500.0 && fabs(echo[2]) <= 500.0
                          && fabs(echo[3]) <= 500.0;
@@ -86,10 +84,12 @@ static DWORD WINAPI forceReaderThread(LPVOID) {
                              "[Relay] 机械臂实际负载: load=%.3f kg  center=(%.1f, %.1f, %.1f) mm",
                              echo[0], echo[1], echo[2], echo[3]);
                     if (fabs(echo[0] - mWant) > 0.01 || fabs(echo[3] - cWant[2]) > 1.0) {
-                        std::cerr << msg << "\n[Relay] !! 与下发的 "
+                        std::cout << msg << "\n[Relay] · 与客户端的 "
                                   << mWant << " kg / (" << cWant[0] << "," << cWant[1] << ","
-                                  << cWant[2] << ") mm 不符 — 负载参数可能没生效"
-                                  << std::endl;
+                                  << cWant[2] << ") mm 不一致 — 这是【正常】的: 机械臂内部那份"
+                                  << "负载从 TCP 口改不动" << std::endl;
+                        std::cout << "[Relay]   重力/惯性补偿由 ForceCompensation 在本地做"
+                                  << " (见 applyPayloadToRobot 上的实测记录)" << std::endl;
                     } else {
                         std::cout << msg << std::endl;
                     }
@@ -98,14 +98,13 @@ static DWORD WINAPI forceReaderThread(LPVOID) {
 
             // Parse ActualTCPForce at offset 576 (6 doubles, 48 bytes)
             double* forcePtr = reinterpret_cast<double*>(buf + 576);
-            // 同一帧里的负载回读 (loadEchoPtr, 见上面那次换算) —— 和 raw[] 一起落到
-            // forceData, 让主线程能核对机械臂是否采纳了下发的候选负载。
+            // 同一帧里的 TCPForce @720 —— 与 @576 是两个不同的量 (见 AppState.h 的说明)。
+            // 实测改 EnableRobot 的负载时 @576 不变, 所以两路都留着, 供以后对比/诊断。
+            double* tcpForcePtr = reinterpret_cast<double*>(buf + 720);
             EnterCriticalSection(&app.forceDataMutex);
             for (int i = 0; i < 6; i++) {
                 app.forceData.raw[i] = forcePtr[i];
-            }
-            for (int i = 0; i < 4; i++) {
-                app.forceData.payloadEcho[i] = loadEchoPtr[i];
+                app.forceData.tcpForce[i] = tcpForcePtr[i];
             }
             app.forceData.lastUpdateMs = GetTickCount();
             app.forceData.isStale = false;
@@ -155,6 +154,11 @@ static bool enableRobotWithPayload() {
     return robotSendEnable(cmd);
 }
 
+// 把内存里的生效负载重发给机械臂 (EnableRobot)。
+// ⚠ 实机实测(2026-09-18): 机械臂内部的负载参数从 TCP 口【改不动】—— EnableRobot(load,..) /
+//   Payload() / LoadSwitch(1) 三条通道全无响应。所以这一发【不是】标定的必要步骤, 也【不是】
+//   标定结果生效的途径: 真正生效的是 [本地补偿] (ForceCompensation 减掉残余量 dm/dp)。
+//   留着它只是让机械臂侧的显示值与我们对齐, 失败也不算错 (调用方按"参考"报)。
 bool RelayCore::applyPayloadToRobot() {
     if (!isRobotConnected()) {
         std::cout << "[Payload] 机械臂未连接, 无法下发" << std::endl;
@@ -168,118 +172,6 @@ bool RelayCore::applyPayloadToRobot() {
         std::cerr << "[Payload] 下发失败 — 重启客户端会用新值重试" << std::endl;
     }
     return ok;
-}
-
-bool RelayCore::probePayloadResidual(double massKg, const double comMm[3], double& residualNm) {
-    if (!isRobotConnected()) return false;
-
-    char cmd[128];
-    snprintf(cmd, sizeof(cmd), "EnableRobot(%.3f,%.1f,%.1f,%.1f)",
-             massKg, comMm[0], comMm[1], comMm[2]);
-    // 实机排查用: 把"发的什么"打出来。两个候选量出同一个残余时, 第一件要确认的事就是
-    // 命令到底出没出去 —— 只有 [Probe] 的这些行能回答。(发之前打, 不是发之后。)
-    std::cout << "[Probe] 下发 " << cmd << std::endl;
-    if (!robotSendEnable(cmd)) {
-        std::cout << "[Probe] 候选负载下发失败 (使能口不可用) — 本次测量作废" << std::endl;
-        return false;
-    }
-    Sleep(Config::SIGN_PROBE_SETTLE_MS);
-
-    // ===== 回读确认: 机械臂是否真的采纳了这次候选 =====
-    // robotSendEnable() 的成功只说明命令语法对了 / 使能口可用 —— 说明不了控制器采纳了新的
-    // load/com。所以下发后回读 30004 帧里的负载 (Load @1168, 读取线程每帧刷进
-    // forceData.payloadEcho)。少了这一步, 一个忽略 EnableRobot 的机械臂会让两次探针
-    // 量到同一份数据, 操作员只看到"分不开", 完全猜不到真实原因。
-    {
-        double echo[4] = {0, 0, 0, 0};
-        EnterCriticalSection(&appState.forceDataMutex);
-        for (int i = 0; i < 4; i++) echo[i] = appState.forceData.payloadEcho[i];
-        LeaveCriticalSection(&appState.forceDataMutex);
-        // 先判回读本身是否可信 (与 stream 启动时那次一次性核对同一套界限), 免得把
-        // "回读不可用"误报成"机械臂没采纳"。
-        // 四个字段【全 0】不是"合法的 0 负载"而是"读不到": payloadEcho 的初值就是全 0,
-        // 30004 断流/读取线程一帧都没送过时它一直是这个值。没有哪个会被采纳的负载能是
-        // 四个 0 (质量 0 的负载 EnableRobot 根本不成立) —— 所以全 0 单独拎出来归到
-        // "回读不可用", 否则它会一路走到下面的比较里, 让操作员去查一个不存在的
-        // "机械臂忽略 EnableRobot"的问题。
-        const bool echoAllZero = (echo[0] == 0.0 && echo[1] == 0.0
-                               && echo[2] == 0.0 && echo[3] == 0.0);
-        const bool echoSane = !echoAllZero
-                           && (echo[0] >= 0.0 && echo[0] <= 5.0)
-                           && fabs(echo[1]) <= 500.0 && fabs(echo[2]) <= 500.0
-                           && fabs(echo[3]) <= 500.0;
-        const bool adopted = echoSane
-            && fabs(echo[0] - massKg) <= 0.01
-            && fabs(echo[1] - comMm[0]) <= 1.0
-            && fabs(echo[2] - comMm[1]) <= 1.0
-            && fabs(echo[3] - comMm[2]) <= 1.0;
-        // 回读无条件打一行 (连没采纳的那些也打): 操作员要靠它区分
-        // "命令没出去" / "出去了但机器人说的还是旧值" / "值采纳了但补偿没变"。
-        printf("[Probe] 回读 load=%.3f center=(%.1f,%.1f,%.1f)\n",
-               echo[0], echo[1], echo[2], echo[3]);
-        if (!adopted) {
-            char want[96];
-            snprintf(want, sizeof(want), "%.3f kg / (%.1f, %.1f, %.1f) mm",
-                     massKg, comMm[0], comMm[1], comMm[2]);
-            if (echoAllZero) {
-                std::cerr << "[Probe] 30004 回读【不可用】: 负载四个字段全 0 (= payloadEcho 初值, "
-                          << "读取线程一帧都没送到) — 30004 断了或是没在收数据。"
-                          << "读不到就无法确认机械臂是否采纳, 本次测量作废" << std::endl;
-            } else if (!echoSane) {
-                std::cerr << "[Probe] 30004 回读的负载不可信 (load=" << echo[0]
-                          << " cx=" << echo[1] << " cy=" << echo[2] << " cz=" << echo[3]
-                          << ") — 读不到就无法确认机械臂是否采纳, 本次测量作废" << std::endl;
-            } else {
-                std::cerr << "[Probe] 机械臂【没有采纳】本次候选负载: 下发 " << want
-                          << ", 回读 " << echo[0] << " kg / (" << echo[1] << ", "
-                          << echo[2] << ", " << echo[3] << ") mm — 本次测量作废" << std::endl;
-            }
-            return false;
-        }
-    }
-
-    // 【为什么读 raw 而不是 filtered】本函数跑在 GLUT idle() 线程里, 而 filtered[] 只由
-    // pollForce() 更新, pollForce() 的唯一调用点就是 idle() 本身。下面 Sleep 的这段时间
-    // 主线程被占住, pollForce 一次都不会跑 —— filtered[] 是【冻结】的, 两个候选读到的是
-    // 同一个值, 探针什么都裁决不了。
-    // raw[] 是 30004 读取线程按 ~125 Hz 独立写入的 (另一个线程, 与主循环无关), 而且它本身
-    // 就是机械臂按当前 EnableRobot 负载参数补偿【之后】的净力读数 —— 正是随候选改变的那个量。
-    // 【注意 raw[] 不是零均值的】它里面含一个姿态常数的传感器零偏 b (恒定的那一部分从不被
-    // 这里减掉)。所以本函数只返回一个【模长】, 调用方必须判两个候选的【差值】而不是判胜者的
-    // 绝对值 —— 理由和门限的算法见 Config.h 的 SIGN_PROBE_MIN_MARGIN_NM 注释。(别把它
-    // "改进"回 filtered, 那会读到冻住的数据。)
-    const DWORD t0 = GetTickCount();
-    double sum[3] = {0, 0, 0};
-    int n = 0;
-    DWORD lastMs = 0;
-    while (GetTickCount() - t0 < (DWORD)Config::SIGN_PROBE_AVG_MS) {
-        AppState::ForceData fd;
-        EnterCriticalSection(&appState.forceDataMutex);
-        fd = appState.forceData;
-        LeaveCriticalSection(&appState.forceDataMutex);
-        // 去重: 这里的轮询(10ms)比 30004 快, 同一份数据会被反复读到 —— 累加多次均值不变,
-        // 但 n 会虚高, "样本太少"的判据就失效了。同一 lastUpdateMs 只算一次。
-        // 探针中途断流(读取线程掉线)也由这条 + 下面的 n<5 兜住: 读数不再更新 -> n 涨不上去。
-        // 上面那个 isStale 只在【进探针之前】就已经过期时有意义 —— 它不可能在探针期间被置位,
-        // 因为置位它的 pollForce() 跑在被本函数阻塞的同一个线程上。它不是这里的护栏。
-        if (!fd.isStale && fd.lastUpdateMs != lastMs) {
-            lastMs = fd.lastUpdateMs;
-            sum[0] += fd.raw[3]; sum[1] += fd.raw[4]; sum[2] += fd.raw[5];
-            n++;
-        }
-        Sleep(10);
-    }
-    if (n < 5) {                             // 数据太少(或 30004 断流), 不下结论
-        std::cerr << "[Probe] 采样窗口内有效数据不足 (n=" << n
-                  << ") — 30004 可能断流, 本次测量作废" << std::endl;
-        return false;
-    }
-    const double m0 = sum[0] / n, m1 = sum[1] / n, m2 = sum[2] / n;
-    residualNm = sqrt(m0 * m0 + m1 * m1 + m2 * m2);
-    // 每次探针最后打一行残余, 与上面"回读"那行配着看 —— 回读变了而残余没变, 就是
-    // "值采纳了但补偿没跟上来"(或补偿用的根本是另一份参数)。
-    printf("[Probe] 残余 |ΔM| = %.4f N·m (n=%d)\n", residualNm, n);
-    return true;
 }
 
 RelayCore& RelayCore::instance() {

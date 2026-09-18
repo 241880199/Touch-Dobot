@@ -45,19 +45,10 @@ public:
     bool isForceCalibrationDone() const;
     const char* forceCalibStatus() const;
 
-    // 末端负载标定后重新下发 EnableRobot(load,cx,cy,cz)
+    // 把内存里的生效负载重发给机械臂 —— 只让机械臂侧的显示值跟上来。
+    // ⚠ 不是标定的必要步骤: 实机实测(2026-09-18) 机械臂内部负载从 TCP 口改不动
+    //   (EnableRobot / Payload / LoadSwitch 全无响应), 真正生效的是本地补偿。
     bool applyPayloadToRobot();
-
-    // 用给定负载重新使能, 等稳定后返回当前姿态的残余力矩模长 (N·m)。
-    // 符号裁决用: 同一静止姿态下依次探两个候选, 谁留下的力矩残余小谁对。
-    // 调用方必须保证机械臂【不动】(两次探针在同一姿态比较才有意义)。
-    // 读数取 30004 的 forceData.raw[] —— 不是 filtered[]。原因见 RelayCore.cpp 实现里
-    // 的说明 (filtered 由主线程更新, 而本函数阻塞的就是主线程)。
-    // 【返回值是个模长, 里面含一个姿态常数的传感器零偏】所以调用方判两个候选的【差值】,
-    // 不要判胜者的绝对值 —— 理由见 Config.h 的 SIGN_PROBE_MIN_MARGIN_NM。
-    // 返回 false 的四种原因: 机械臂未连接 (静默) / 候选下发失败 / 机械臂没采纳这次候选 /
-    // 采样窗口内有效数据不足 —— 后三种都会打一行 [Probe] 提示。
-    bool probePayloadResidual(double massKg, const double comMm[3], double& residualNm);
 
     // 奇异脱困 (可在运行中手动触发)
     bool triggerEscape();
@@ -101,6 +92,14 @@ public:
 
     // 心跳刷新（在所有启动初始化完成后调用，防止误判超时）
     void resetHeartbeat() { m_lastHeartbeatMs = GetTickCount(); m_heartbeatStartMs = GetTickCount(); }
+
+    // 只刷新心跳时间戳, 【不】动启动宽限期 —— 供"故意阻塞主线程"的操作(如负载探针)
+    // 在阻塞结束后声明自己还活着。
+    // 为什么必须这么做: 心跳检查在 pollFeedback() 里, 而 pollFeedback() 和那些操作跑在
+    // 同一个 GLUT 线程上 —— 阻塞期间它根本不会跑, 于是恢复后第一帧就撞见过期的心跳,
+    // 误报 ERR_HEARTBEAT_LOST(FATAL, 会下使能)。实测: 探针阻塞 ~2s, 必然触发。
+    // 不能用 resetHeartbeat(): 它会把启动宽限期一起重置, 每次探针都白送 10s 不检查心跳。
+    void touchHeartbeat() { m_lastHeartbeatMs = GetTickCount(); }
 
     // PING/PONG 延迟测量
     void pingRobot();

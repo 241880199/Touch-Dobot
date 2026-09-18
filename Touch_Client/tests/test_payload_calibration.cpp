@@ -128,9 +128,9 @@ static void test_sign_convention() {
     PASS();
 }
 
-// 两个候选的【物理】质心横跨法兰平面: 一个在下方 (物理), 一个在上方 (非物理)。
-// 解算器不再自行选边 (signAmbiguous 实测前恒为 true) —— 符号由实机探针裁决,
-// 所以传入的 signZ 只影响 comMm 临时值, 左右不了候选。
+// 符号的两种解释算出的【物理】质心横跨法兰平面: 一个在下方 (物理), 一个在上方 (非物理)。
+// 这正是"数据定不了符号"的由来 —— 从前靠实机探针裁决, 探针已废除 (符号不再被任何判据或
+// 下发依赖, 见 PayloadCalibration.h)。传入的 signZ 只影响 comMm 的折算, 左右不了 cTrueZ。
 static void test_candidates_bracket_flange() {
     TEST(candidates_bracket_flange);
     // 配置 0.660kg / com +80.4mm; 真值 0.409kg / com +67.9mm
@@ -140,11 +140,10 @@ static void test_candidates_bracket_flange() {
     synthesize(0.409, cTrue, 0.660, cCfg, +1.0, F, M);   // 机械臂按 +1 解释
 
     PayloadCalibration::Result r;
-    // 故意传入【错误】的 signZ=-1: 解算器不再据此纠正什么
+    // 故意传入【错误】的 signZ=-1: 解算器不据此纠正什么, 只按它折算 comMm
     CHECK(PayloadCalibration::solve(g_poses, F, M, NP, 0.660, cCfg, -1.0, r));
-    CHECK(r.cTrueZ[0] > 0.0);      // 候选 +1: 法兰下方, 物理
-    CHECK(r.cTrueZ[1] < 0.0);      // 候选 -1: 法兰上方, 非物理
-    CHECK(r.signAmbiguous);        // 解算器无法自行定案
+    CHECK(r.cTrueZ[0] > 0.0);      // +1 解释: 法兰下方, 物理
+    CHECK(r.cTrueZ[1] < 0.0);      // -1 解释: 法兰上方, 非物理
     PASS();
 }
 
@@ -245,8 +244,9 @@ static void test_save_load_roundtrip() {
     r.comMm[0] = 0.0; r.comMm[1] = 0.0; r.comMm[2] = 80.4;
     r.rmsForceN = 0.021; r.rmsMomentNm = 0.0013; r.poses = 6;
 
-    // applyResult() 用求解器选定的 signZ 覆写 comSignZ, 所以这里直接给 r.signZ。
-    r.signZ = -1.0;                              // → comSignZ = -1
+    // comSignZ 是【持久化的显示约定】, 不再是求解结果的一部分: applyResult() 不碰它
+    // (从前它被求解器/探针"定案", 现在没人定这个案了), 所以这里直接设生效值。
+    PayloadCalibration::comSignZ = -1.0;
     PayloadCalibration::applyResult(r);
     CHECK(PayloadCalibration::save(path));
 
@@ -308,31 +308,30 @@ static void test_effective_falls_back_to_seed() {
     PASS();
 }
 
-// 两个候选都必须算对: 每个候选 = "按该符号解释时的物理质心"折算回下发值。
-// 符号本身由实机实测裁决, 解算器只负责把两种解释都给全。
-static void test_both_candidates_computed() {
-    TEST(both_candidates_computed);
+// 符号约定只影响报出的【绝对】读数, 不影响拟合结果 —— 这现在是本模块赖以成立的性质:
+// 本地补偿只用 dm/dp, 而它们与传入的 signZ 无关 (符号不进 buildRows)。
+// (取代了原来的 both_candidates_computed: 它测的是"两个候选的下发值", 候选机制已废除。)
+static void test_fit_is_sign_independent() {
+    TEST(fit_is_sign_independent);
     double cTrue[3] = {0.3, 0.3, 67.9};
     double cCfg[3]  = {0.0, 0.0, 80.4};
     double F[NP][3], M[NP][3];
     synthesize(0.409, cTrue, 0.660, cCfg, +1.0, F, M);
 
-    PayloadCalibration::Result r;
-    CHECK(PayloadCalibration::solve(g_poses, F, M, NP, 0.660, cCfg, +1.0, r));
-    // 独立算一遍 dp_z (= p_true − p_cfg), 别照抄被测代码
-    const double dpZ    = (0.409 * 67.9 - 0.660 * 80.4) / 1000.0;
-    // 候选 k=0 (s=+1): 机械臂按 +1 用过 comCfg → cSend_z = (p_cfg(+1) + dp)/m = +67.9
-    const double pCfgZ0 = 0.660 * 80.4 / 1000.0;
-    CHECK(fabs(r.comCand[0][2] - (pCfgZ0 + dpZ) / 0.409 * 1000.0) < 1e-9);
-    CHECK(fabs(r.comCand[0][2] - 67.9) < 1e-6);
-    // 候选 k=1 (s=-1): 【p_cfg 里要带符号】——
-    // cSend_z = (p_cfg(-1) + dp)/m / (-1), 其中 p_cfg(-1) = m_cfg·(-cz)/1000。
-    // 少写这个负号就会误以为候选是 -67.9; 实际是 +191.58 (= cTrueZ[1] / (-1))。
-    const double pCfgZ1 = 0.660 * (-80.4) / 1000.0;
-    CHECK(fabs(r.comCand[1][2] - (pCfgZ1 + dpZ) / 0.409 * 1000.0 / (-1.0)) < 1e-9);
-    CHECK(fabs(r.comCand[1][2] - 191.581663) < 1e-5);
-    // solve() 不再自行定案
-    CHECK(r.signAmbiguous);
+    PayloadCalibration::Result rA, rB;
+    CHECK(PayloadCalibration::solve(g_poses, F, M, NP, 0.660, cCfg, +1.0, rA));
+    CHECK(PayloadCalibration::solve(g_poses, F, M, NP, 0.660, cCfg, -1.0, rB));
+
+    // 本地补偿要用的量: 两种约定下必须逐位相同
+    CHECK(fabs(rA.dm - rB.dm) < 1e-12);
+    CHECK(fabs(rA.massKg - rB.massKg) < 1e-12);
+    CHECK(fabs(rA.dp[0] - rB.dp[0]) < 1e-12);
+    CHECK(fabs(rA.dp[2] - rB.dp[2]) < 1e-12);
+    CHECK(fabs(rA.rmsForceN - rB.rmsForceN) < 1e-12);
+    // 只有【报出的绝对质心】跟着约定变: X/Y 与符号无关, Z 不同
+    CHECK(fabs(rA.comMm[0] - rB.comMm[0]) < 1e-12);
+    CHECK(fabs(rA.comMm[1] - rB.comMm[1]) < 1e-12);
+    CHECK(fabs(rA.comMm[2] - rB.comMm[2]) > 1.0);
     PASS();
 }
 
@@ -350,7 +349,7 @@ int main() {
     test_save_load_roundtrip();
     test_save_includes_timestamp();
     test_effective_falls_back_to_seed();
-    test_both_candidates_computed();
+    test_fit_is_sign_independent();
     std::cout << "\n" << g_passed << " passed, " << g_failed << " failed" << std::endl;
     return g_failed ? 1 : 0;
 }

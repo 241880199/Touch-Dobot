@@ -182,6 +182,26 @@ void setCalibration(double massKg, const double comSensor[3],
     LeaveCriticalSection(&g_calibMutex);
 }
 
+// 只换质量/质心, 零偏不动 —— 见头文件里为什么需要它。
+// 注意 massKg 是【残余】质量, 可以带符号: 本地做的是 compensated = raw - mass·gTool,
+// 所以 mass = 拟合出的残余系数 k (= P_robot - m_true) 正好把机械臂漏补的那一份减掉。
+void setMassCom(double massKg, const double comSensor[3]) {
+    EnterCriticalSection(&g_calibMutex);
+    g_massKg = massKg;
+    for (int i = 0; i < 3; i++) g_comSensor[i] = comSensor[i];
+    g_isCalibrated = true;   // 质量/质心与零偏本来就分开存, 不碰后者
+    LeaveCriticalSection(&g_calibMutex);
+}
+
+void currentBias(double biasForce[3], double biasTorque[3]) {
+    EnterCriticalSection(&g_calibMutex);
+    for (int i = 0; i < 3; i++) {
+        biasForce[i]  = g_biasForce[i];
+        biasTorque[i] = g_biasTorque[i];
+    }
+    LeaveCriticalSection(&g_calibMutex);
+}
+
 bool isCalibrated() {
     return g_isCalibrated;
 }

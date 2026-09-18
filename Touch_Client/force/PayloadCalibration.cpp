@@ -113,10 +113,9 @@ namespace PayloadCalibration {
         double dp[3] = {A[1][4], A[2][4], A[3][4]};   // kg·m
 
         // ===== 换算绝对值 =====
-        // signZ 不进 buildRows, 所以两种符号的拟合残差【完全相同】——
-        // 数据本身区分不了符号, 只能把两种解释都给全 (下面的 comCand)。
-        // 这里仍把两个候选的【物理】质心 Z 算出来供人复核 (判据必须看物理值,
-        // 不能看下发值 —— cSend = cTrue/signZ 在两种符号下都可能是正的)。
+        // signZ 不进 buildRows, 所以两种符号的拟合残差【完全相同】—— 数据本身区分不了符号
+        // (见 Result::cTrueZ)。它只影响这里折算出来的绝对质心 Z, 而绝对质心现在只是记录/
+        // 显示用 (本地补偿用 dm/dp), 所以不必也不该在解算器里"选边"。
         double mTrue = mCfg + dm;
         if (!(mTrue > 0.01) || mTrue > 5.0) return false;   // 非物理
 
@@ -126,28 +125,8 @@ namespace PayloadCalibration {
             const double pCfgZ = mCfg * (comCfg[2] * s) / 1000.0;
             cTrueZ[k] = (pCfgZ + dp[2]) / mTrue * 1000.0;
         }
-        // ===== 两个候选都算出来, 不在解算器里选 =====
-        // 符号不在数据里 (它只进入 p_cfg 的换算, 在 Δp 的差值里被消掉), 所以解算器
-        // 只能把两种解释都给全, 由调用方在实机上各下发一次、看谁留下的力矩残余小。
-        double sChosen = signZ;              // 临时值; 由调用方定案
-        bool   ambiguous = true;             // 实测前恒为"未定案"
 
-        for (int k = 0; k < 2; k++) {
-            const double s = (k == 0) ? 1.0 : -1.0;
-            double cEffK[3] = {comCfg[0], comCfg[1], comCfg[2] * s};
-            double pCfgK[3] = {mCfg * cEffK[0] / 1000.0, mCfg * cEffK[1] / 1000.0,
-                               mCfg * cEffK[2] / 1000.0};
-            for (int i = 0; i < 3; i++) {
-                double cSend = (pCfgK[i] + dp[i]) / mTrue * 1000.0;
-                if (i == 2 && s != 0.0) cSend /= s;
-                // 量程按【每个候选】逐项查: 真正下发哪个候选要等实机探针裁决之后才知道,
-                // 只看占位值会误杀一个根本不会用的候选、也会放行一个超量程的定案候选。
-                if (fabs(cSend) > 500.0) return false;      // 超出 EnableRobot 的 ±500 量程
-                out.comCand[k][i] = cSend;
-            }
-        }
-
-        double cEff[3] = {comCfg[0], comCfg[1], comCfg[2] * sChosen};
+        double cEff[3] = {comCfg[0], comCfg[1], comCfg[2] * signZ};
         double pCfg[3] = {mCfg * cEff[0] / 1000.0,
                           mCfg * cEff[1] / 1000.0,
                           mCfg * cEff[2] / 1000.0};         // kg·m
@@ -155,19 +134,20 @@ namespace PayloadCalibration {
 
         out.dm = dm;
         out.massKg = mTrue;
-        out.signZ = sChosen;
+        out.dp[0] = dp[0];
+        out.dp[1] = dp[1];
+        out.dp[2] = dp[2];
         out.cTrueZ[0] = cTrueZ[0];
         out.cTrueZ[1] = cTrueZ[1];
-        out.signAmbiguous = ambiguous;
         for (int i = 0; i < 3; i++) {
             double cTrue = pTrue[i] / mTrue * 1000.0;       // 物理质心 (mm)
-            // 占位值: 按传入的 signZ 折算, 使机械臂的 c_eff 恰好等于 cTrue。真下发的值由
-            // 实机探针选出的候选决定, 所以这里【不】是结论 —— 定案后也没有人会来覆写它。
-            double cSend = (i == 2 && sChosen != 0.0) ? cTrue / sChosen : cTrue;
+            // 按传入的约定折算: 使机械臂的 c_eff 恰好等于 cTrue。
+            double cSend = (i == 2 && signZ != 0.0) ? cTrue / signZ : cTrue;
+            // 量程只查这个真正会被报出/写盘的值 —— 从前是逐候考查的 (那时会下发), 现在
+            // 只有一个值, 也就只该由它决定成败。
+            if (fabs(cSend) > 500.0) return false;          // 超出 EnableRobot 的 ±500 量程
             out.comMm[i] = cSend;
             out.dc[i] = cSend - comCfg[i];
-            // 量程不在这里查: comMm 现在只是占位值 (按传入的 signZ 折算), 真正会被下发的
-            // 是 comCand[chosen][*], 已在上面的候选循环里逐项查过。
         }
         // ===== 拟合残差 |A·x − b| (不是数据本身的量级) =====
         double x[4] = {A[0][4], A[1][4], A[2][4], A[3][4]};
@@ -201,36 +181,23 @@ namespace PayloadCalibration {
         }
     }
 
+    // 把求解结果记成生效值 (仅内存)。【不碰 comSignZ】—— 它是持久化的显示约定, 不是
+    // 求解器的输出: 数据定不了符号, 也没有探针去实测它, 谁都不该"定"这个案。
     void applyResult(const Result& r) {
         enabled = true;
         massKg = r.massKg;
         for (int i = 0; i < 3; i++) comMm[i] = r.comMm[i];
-        comSignZ = r.signZ;
-        rmsForceN = r.rmsForceN;
-        rmsMomentNm = r.rmsMomentNm;
-        poses = r.poses;
-    }
-
-    // 实机探针选定候选后定案: 0 = 符号约定 +1, 1 = 符号约定 -1。
-    // comCand[chosen] 本身就是该符号下的下发值, 所以直接生效, 不需要再折算。
-    // 【不回写 Result】(曾经 const_cast 写过 comMm/signZ/signAmbiguous): Result 是求解器的
-    // 输出, 定案是调用方的事, 写回去既要用 const_cast 强改调用方的对象, 又没法把 dc 一起改对
-    // (dc = 下发值 − 原配置值, 而原配置值只有 solve 收得到) —— 只改 comMm 不改 dc 的 Result
-    // 自相矛盾。调用方要报定案值, 直接读它自己选中的 r.comCand[chosen]。
-    void applyResult(const Result& r, int chosen) {
-        if (chosen != 0 && chosen != 1) return;      // 无效选择: 不动生效值
-        const double sChosen = (chosen == 0) ? 1.0 : -1.0;
-
-        enabled = true;
-        massKg = r.massKg;
-        for (int i = 0; i < 3; i++) comMm[i] = r.comCand[chosen][i];
-        comSignZ = sChosen;
         rmsForceN = r.rmsForceN;
         rmsMomentNm = r.rmsMomentNm;
         poses = r.poses;
     }
 
     // ===== 持久化 =====
+    // ⚠ com_sign_z 现在【只是信息性的】, 仍然写出来只为两件事:
+    //   (1) 随文件记住 com_mm 的 Z 是按哪种解释折算的, 免得重启后语义漂移;
+    //   (2) load()/旧文件格式不用动。
+    // 它的取值不再是"实测裁决出来的符号": 数据定不了符号 (两种解释残差完全相同), 实机探针
+    // 也已废除 —— 没有任何判据、下发或本地补偿依赖它。别拿这个字段当结论读。
     bool save(const char* filepath) {
         FILE* f = fopen(filepath, "w");
         if (!f) return false;
@@ -242,7 +209,7 @@ namespace PayloadCalibration {
         fprintf(f, "  \"rms_force_n\": %.6g,\n", rmsForceN);
         fprintf(f, "  \"rms_moment_nm\": %.6g,\n", rmsMomentNm);
         fprintf(f, "  \"poses\": %d,\n", poses);
-        fprintf(f, "  \"com_sign_z\": %.1f\n", comSignZ);
+        fprintf(f, "  \"com_sign_z\": %.1f\n", comSignZ);   // 信息性, 见上 — 不是结论
         fprintf(f, "}\n");
         fclose(f);
         return true;
@@ -292,6 +259,7 @@ namespace PayloadCalibration {
         rmsMomentNm = p ? strtod(p, nullptr) : 0.0;
         p = jsonFind(buf, "\"poses\"");
         poses = p ? atoi(p) : 0;
+        // 信息性字段 (见 save 的说明): 只为让 com_mm 的 Z 有一个确定的解释, 缺了也无妨。
         p = jsonFind(buf, "\"com_sign_z\"");
         comSignZ = (p && strtod(p, nullptr) < 0.0) ? -1.0 : 1.0;
 

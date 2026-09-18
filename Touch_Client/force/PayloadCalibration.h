@@ -1,10 +1,16 @@
 #pragma once
 
-// 末端负载标定 (质量 + 质心) —— 由实机多姿态空载数据解出 EnableRobot 的负载参数。
+// 末端负载标定 (质量 + 质心) —— 由实机多姿态空载数据解出【机械臂没补干净的那一份】。
 //
 // 背景: 机械臂内部按 EnableRobot(load,cx,cy,cz) 做重力/惯性补偿, 30004 的
-//       ActualTCPForce 是补偿【之后】的净力。负载参数不准 → 读数随姿态漂移。
+//       ActualTCPForce 是补偿【之后】的净力 (应当如此)。负载参数不准 → 读数随姿态漂移。
 //       这些参数只能实测, 所以本模块把它们从编译期常量变成可标定量 (payload_calib.json)。
+//
+// ⚠ 实机实测 (2026-09-18): 机械臂内部那份负载参数从 TCP 口【改不动】——
+//   EnableRobot(load,..) / Payload() / LoadSwitch(1) 三条通道全无响应 (0.25 kg 的变化只
+//   引起 0.0002 N·m 的读数变化; 等 3 s、Disable→Enable 也一样)。所以本模块的产出不再是
+//   "一份要下发给机械臂的绝对负载", 而是【残余量】: Result::dm / Result::dp, 由调用方交给
+//   ForceCompensation 在本地减掉 (见 Result 的说明)。切不可再把它当成"下发绝对参数"的标定。
 //
 // 模型 (工具系; g_i = R_iᵀ·(0,0,9.81) 是重力在工具系的表示):
 //   raw_F_i = b_F + Δm · g_i
@@ -15,34 +21,36 @@
 //   ΔM_k − ΔM_0 = Δp × (g_k − g_0)
 // 这是关于 (Δm, Δp) 的线性最小二乘 (4 个未知量, 每个姿态 6 个方程)。
 //
-// 解是【带符号】的, 所以既给出"往哪边调、调多少", 也顺带把 EnableRobot 的
-// Z 偏心符号约定定死 (符号错了, 解出来的修正量会把误差修回去, 复验残差仍大)。
+// 解是【带符号】的 —— Δm / Δp 直接就是"机械臂还差多少", 本地补偿减掉它即可, 不需要
+// 反推机械臂内部究竟配了什么 (那正是"推出绝对值再下发"那条死路要干的事)。
 namespace PayloadCalibration {
 
     // 求解结果
+    //
+    // 【本标定的输出是 dm / dp 这两个残余量】—— 不是绝对负载。实机实测: 机械臂内部
+    // 的负载参数从 TCP 口【根本改不动】(EnableRobot(load,..) / Payload() / LoadSwitch(1)
+    // 三条通道全无响应, 0.25 kg 的变化只引起 0.0002 N·m 的读数变化), 所以"推出绝对值再
+    // 下发"这条路是死的, 由我们自己在本地把差值减掉:
+    //     compensated = raw − bias − mass·gTool − inertia      (ForceCompensation)
+    // dm / dp 正是机械臂【没补干净的那一份】(差商消掉了传感器零偏, 是纯残余), 所以本地
+    // 补偿不需要知道机械臂内部究竟配的是什么值。
     struct Result {
-        double dm;           // 质量修正量 (kg, 带符号)
-        double dc[3];        // 质心修正量 (mm, 带符号)
-        double massKg;       // 换算出的绝对质量 (kg)
-        // 占位值: 按传入的 comSignZ 折算的绝对质心 (mm, 法兰系)。两个符号约定给出的 Z 相差
-        // 2·m_cfg·cz/m_true, 所以它【不是】结论, 定案后也没有人覆写它 —— 要下发值读 comCand。
+        double dm;           // 残余质量 (kg, 带符号)
+        double dc[3];        // 绝对质心相对当前配置的增量 (mm, 带符号)
+        double dp[3];        // 残余一阶矩 (kg·m, 带符号) —— 力/力矩方程的右端项
+        double massKg;       // 换算出的绝对质量 (kg) = mCfg + dm
+        // 按传入的 signZ 约定折算出的绝对质心 (mm, 法兰系)。⚠ 只用于让机械臂侧的显示值
+        // 跟上来 (applyPayloadToRobot / payload_calib.json), 本标定不依赖它是否被采纳,
+        // 也不依赖这个符号约定选得对不对 —— 本地补偿只用 dm / dp。
         double comMm[3];
-        // 两个符号候选的【下发值】, 供调用方在实机上各下发一次、实测裁决。
-        // 下标按候选: comCand[0] 对应符号约定 +1, comCand[1] 对应 -1。
-        double comCand[2][3];
         double rmsForceN;    // 力通道拟合残差 (N)
         double rmsMomentNm;  // 力矩通道拟合残差 (N·m)
         int    poses;        // 参与求解的姿态数
 
-        // ===== CZ 符号判定 =====
-        // signZ 不进 buildRows, 所以两种符号的拟合残差完全相同 —— 数据本身
-        // 区分不了符号, 解算器只能把两种解释都给全 (comCand),
-        // 由调用方在实机上各下发一次、看谁留下的力矩残余小。
-        // 占位值 = 传入的 comSignZ。solve() 不选边, 而且【没有代码会覆写它】, 所以它永远
-        // 不表示"解算器/探针选中的符号" —— 定案在调用方手里 (chosen), 别拿这个字段当结论。
-        double signZ         = 1.0;
-        double cTrueZ[2]     = {0.0, 0.0};  // {候选+1, 候选-1} 下的物理质心 Z (mm)
-        bool   signAmbiguous = true;   // "解算器无法自行定案" — 恒为 true, 不是判据也不是结论
+        // CZ 符号的两种解释下的物理质心 Z (mm, {+1, -1})。signZ 不进 buildRows, 所以两种
+        // 解释的拟合残差【完全相同】—— 数据本身区分不了符号。这两个值只是把这个不确定性
+        // 摆明, 现在没有任何判据或下发依赖它们 (曾经靠实机探针裁决, 已废除: 见 main.cpp)。
+        double cTrueZ[2]     = {0.0, 0.0};
     };
 
     // 纯函数: 最小二乘求解。无全局状态, 便于单测。
@@ -50,13 +58,10 @@ namespace PayloadCalibration {
     //   forces:   n × 3 各姿态平均原始力 (N)
     //   moments:  n × 3 各姿态平均原始力矩 (N·m)
     //   mCfg/comCfg: 当前机械臂里配置的负载 (即上面公式的 m_cfg / c_cfg, com 单位 mm)
-    //   comSignZ: 机械臂解释 CZ 偏心的符号约定 (+1 或 -1)。见下。
+    //   comSignZ: 折算【绝对】质心 Z 时用的符号约定 (+1 或 -1)。现在它是一个纯粹的显示/记录
+    //             约定 (随 payload_calib.json 持久化), 不再是待裁决的未知量: 数据定不了它,
+    //             而本地补偿只用 dm/dp, 与它无关。选错只会让 comMm 的 Z 读数不同。
     // 返回 false: 姿态数不足、姿态退化 (共线/同姿态)、解非物理 (质量 ≤ 0 或不合理)
-    //
-    // 【为什么需要 comSignZ】我们下发的 c_z 与机械臂内部实际使用的 c_eff_z 可能差一个
-    // 符号 (c_eff = sign·c_z)。若模型里假设的 sign 与真实相反, 解出的修正量不是把误差
-    // 抵消掉而是翻倍, 迭代会发散 (c_next ≈ c_true + 2c_cfg, 且不收敛)。所以把符号
-    // 做成可运行时翻转的参数: sign 对了, 一次求解即收敛。
     bool solve(const double poses[][6], const double forces[][3], const double moments[][3],
                int n, double mCfg, const double comCfg[3], double comSignZ, Result& out);
 
@@ -67,19 +72,18 @@ namespace PayloadCalibration {
     extern double rmsForceN;
     extern double rmsMomentNm;
     extern int    poses;
-    extern double comSignZ;      // 机械臂解释 CZ 的符号约定 (+1 / -1), 随文件持久化
+    // CZ 的符号约定 (+1 / -1), 随 payload_calib.json 持久化。
+    // ⚠ 现在它【只是信息性】的: 数据定不了这个符号 (两种解释拟合残差完全相同), 而写进
+    //    机械臂的那份负载本来也改不动 —— 没有任何东西依赖它的取值, 它只决定 comMm 的 Z
+    //    按哪种解释折算, 以及存盘时记哪个值。没有任何代码会从求解结果里"定"下它。
+    extern double comSignZ;
 
     // 当前应当下发给机械臂的负载参数: 已标定则用标定值, 否则回退 Config 种子
     void effective(double& massKgOut, double comMmOut[3]);
 
-    // 用求解结果覆写生效值 (仅内存)
-    // ⚠ 遗留接口: 它把 r.signZ / r.comMm 当作"已定案的符号和下发值"用, 但 Task 10 之后这两个
-    //    字段只是占位值 (没有任何代码会覆写它们)。生产路径必须走下面那个按实测候选定案的重载,
-    //    这个重载只剩单测 (save/load 往返) 在用。
+    // 用求解结果覆写生效值 (仅内存): 质量/质心/rms/姿态数, 以及 enabled = true。
+    // 【不碰 comSignZ】—— 它是持久化的显示约定, 不是求解器的输出 (见上)。
     void applyResult(const Result& r);
-
-    // 按实机实测选定的候选 (0 = 候选+1, 1 = 候选-1) 覆写生效值 (仅内存)
-    void applyResult(const Result& r, int chosen);
 
     bool load(const char* filepath);
     bool save(const char* filepath);

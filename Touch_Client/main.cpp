@@ -55,11 +55,15 @@ namespace BiasCheck {
     static DWORD lastSampleMs = 0;
     static int   avgCount = 0;
     static double accum[6];
+    static double accumTcp[6];           // 同上, 但累加 @720 TCPForce
     static double pose[MAX_POSES][6];    // Rx,Ry,Rz (deg) + X,Y,Z (mm)
-    static double bias[MAX_POSES][6];    // 该姿态平均 raw 力/力矩
+    static double bias[MAX_POSES][6];    // 该姿态平均 raw 力/力矩 (@576 ActualTCPForce)
+    // 该姿态平均 @720 TCPForce。两路一起采、一起报, 好对比哪一路才反映负载参数。
+    // 2026-09-18 实测: 改 EnableRobot 的负载时 @576 完全不跟着变, @720 按比例变。
+    static double biasTcp[MAX_POSES][6];
 
     // 数据只有在「机械臂配置 == 采集时的配置」时才可用于复验。
-    // 求解下发了新负载 -> 已采数据作废 (拒绝 report 判定)。
+    // 求解改了负载/本地补偿 -> 已采数据作废 (拒绝 report 判定)。
     static bool dataUnderCurrentPayload = true;
 
     // 连续多少次求解被判"不合理"。达到 Config::CALIB_MAX_CONSECUTIVE_FAILS 后锁住 's'。
@@ -73,7 +77,7 @@ namespace BiasCheck {
         count = 0;
         sampling = false;
         avgCount = 0;
-        for (int i = 0; i < 6; i++) accum[i] = 0.0;
+        for (int i = 0; i < 6; i++) { accum[i] = 0.0; accumTcp[i] = 0.0; }
     }
 
     // 静默退出 (被其他采集模式抢占时调用, 丢弃已采姿态)
@@ -103,7 +107,7 @@ namespace BiasCheck {
             std::cout << "[BIAS] 已达 " << MAX_POSES << " 个姿态, 按 'm' 输出报告" << std::endl;
             return;
         }
-        for (int i = 0; i < 6; i++) accum[i] = 0.0;
+        for (int i = 0; i < 6; i++) { accum[i] = 0.0; accumTcp[i] = 0.0; }
         avgCount = 0;
         lastSampleMs = 0;
         sampleStartMs = GetTickCount();
@@ -128,7 +132,10 @@ namespace BiasCheck {
         if (fd.lastUpdateMs == lastSampleMs) return;  // 没有新数据
         lastSampleMs = fd.lastUpdateMs;
 
-        for (int i = 0; i < 6; i++) accum[i] += fd.raw[i];
+        for (int i = 0; i < 6; i++) {
+            accum[i] += fd.raw[i];
+            accumTcp[i] += fd.tcpForce[i];   // 同时采 @720, 见 biasTcp 的说明
+        }
         avgCount++;
 
         if (now - sampleStartMs < AVG_MS) return;
@@ -140,7 +147,10 @@ namespace BiasCheck {
             return;
         }
         if (count >= MAX_POSES) return;
-        for (int i = 0; i < 6; i++) bias[count][i] = accum[i] / avgCount;
+        for (int i = 0; i < 6; i++) {
+            bias[count][i]    = accum[i] / avgCount;
+            biasTcp[count][i] = accumTcp[i] / avgCount;
+        }
 
         EnterCriticalSection(&appState.robotPoseMutex);
         pose[count][0] = appState.robotActualPose.rx;
@@ -218,6 +228,27 @@ namespace BiasCheck {
         double spanF = sqrt(sF[0] * sF[0] + sF[1] * sF[1] + sF[2] * sF[2]);
         double spanM = sqrt(sM[0] * sM[0] + sM[1] * sM[1] + sM[2] * sM[2]);
 
+        // ===== 同一批数据的第二路来源: @720 TCPForce =====
+        // 两路一起报, 才看得出哪一路才随【配置的负载】变化 —— 负载标定该读那一路。
+        // 2026-09-18 实测: 改 EnableRobot 的负载时 @576 纹丝不动, @720 按 1.93 倍变。
+        double tLoF[3], tHiF[3], tLoM[3], tHiM[3];
+        for (int a = 0; a < 3; a++) {
+            tLoF[a] = tHiF[a] = biasTcp[0][a];
+            tLoM[a] = tHiM[a] = biasTcp[0][a + 3];
+        }
+        for (int p = 1; p < count; p++) {
+            for (int a = 0; a < 3; a++) {
+                if (biasTcp[p][a]     < tLoF[a]) tLoF[a] = biasTcp[p][a];
+                if (biasTcp[p][a]     > tHiF[a]) tHiF[a] = biasTcp[p][a];
+                if (biasTcp[p][a + 3] < tLoM[a]) tLoM[a] = biasTcp[p][a + 3];
+                if (biasTcp[p][a + 3] > tHiM[a]) tHiM[a] = biasTcp[p][a + 3];
+            }
+        }
+        double tsF[3], tsM[3];
+        for (int a = 0; a < 3; a++) { tsF[a] = tHiF[a] - tLoF[a]; tsM[a] = tHiM[a] - tLoM[a]; }
+        const double tSpanF = sqrt(tsF[0]*tsF[0] + tsF[1]*tsF[1] + tsF[2]*tsF[2]);
+        const double tSpanM = sqrt(tsM[0]*tsM[0] + tsM[1]*tsM[1] + tsM[2]*tsM[2]);
+
         double mCfg, cCfgNow[3];
         PayloadCalibration::effective(mCfg, cCfgNow);
         if (!(mCfg > 1e-6)) mCfg = 0.66;   // 防除零
@@ -233,12 +264,17 @@ namespace BiasCheck {
                   << cCfgNow[0] << ", " << cCfgNow[1] << ", " << cCfgNow[2] << ") mm"
                   << (PayloadCalibration::enabled ? "  [实机标定值]" : "  [种子值, 未标定]")
                   << "  CZ符号=" << (PayloadCalibration::comSignZ > 0 ? "+1" : "-1")
-                  << std::endl;
+                  << " (信息性: 数据定不了符号, 不影响补偿)" << std::endl;
         std::cout << "======================================================" << std::endl;
         printf("  跨姿态极差(力):   Fx=%.3f  Fy=%.3f  Fz=%.3f   |ΔF|=%.3f N\n",
                sF[0], sF[1], sF[2], spanF);
         printf("  跨姿态极差(力矩): Mx=%.4f My=%.4f Mz=%.4f |ΔM|=%.4f Nm\n",
                sM[0], sM[1], sM[2], spanM);
+        printf("  --- 同一批数据的第二路 @720 TCPForce ---\n");
+        printf("  @720 跨姿态极差(力): |ΔF|=%.3f N   跨姿态极差(力矩): |ΔM|=%.4f Nm\n",
+               tSpanF, tSpanM);
+        printf("       F: %.3f/%.3f/%.3f   M: %.4f/%.4f/%.4f\n",
+               tsF[0], tsF[1], tsF[2], tsM[0], tsM[1], tsM[2]);
         printf("  → 等效质量误差 ≤ %.0f g   /   ", dmUpper);
         if (maxTiltSin >= MIN_TILT_SIN) printf("等效质心误差 %.0f mm\n", drEq);
         else                            printf("等效质心误差 不可观测 (倾角不足)\n");
@@ -273,17 +309,19 @@ namespace BiasCheck {
             std::cout << "    · 力矩项偏大 → 质心不准 (但也可能只是质量误差漏进来的)" << std::endl;
         }
         if (!coverageOk || spanF >= 0.3 || drEq >= 10.0) {
-            std::cout << "   → 按 's' 用这批数据【求解】并下发修正后的负载参数"
+            std::cout << "   → 按 's' 用这批数据【求解】残余量, 写进本地补偿 (force_calib.json)"
                       << std::endl;
         }
         std::cout << std::endl;
     }
 
-    // 's': 用已采数据最小二乘求解负载参数 → 落盘 → 重新下发 EnableRobot
+    // 's': 用已采数据最小二乘求解负载参数 → 把【残余量】写进本地补偿的 force_calib.json
+    //      (机械臂内部负载从 TCP 口改不动, 所以不再靠"下发绝对负载"这条路)
     static void solveAndApply() {
         if (solveLocked) {
             std::cout << "\n[BIAS] !! 已连续 " << consecutiveFails << " 次判定结果不合理, 已停止求解。\n"
-                      << "       [BIAS] !! 原因见最后那次被否掉的判据 (拟合残差 / 符号无法判定)。\n"
+                      << "       [BIAS] !! 判据只剩一条: 拟合残差 (力) 超阈。检查装夹是否松动"
+                      << " / 力传感器是否受挤压 / 姿态覆盖是否足够。\n"
                       << "       [BIAS] !! 处理后按 'm' 重新采集 (计数会清零)。" << std::endl;
             return;
         }
@@ -298,7 +336,9 @@ namespace BiasCheck {
             return;
         }
 
-        // 机械臂当前实际使用的负载 = 上次下发的值 (标定值优先, 否则种子)
+        // 我们"以为"机械臂在用的负载 (标定值优先, 否则种子) —— 只用来折算【绝对】值。
+        // 机械臂内部到底配的是什么从 TCP 口问不出来也改不动 (见下方 [本地补偿]), 而真正要用的
+        // dm/dp 与这个基准无关: 差商把 m_cfg/c_cfg 整项消掉了。
         double mCfg, cCfg[3];
         PayloadCalibration::effective(mCfg, cCfg);
 
@@ -325,166 +365,32 @@ namespace BiasCheck {
         }
 
         std::cout << "\n======================================================" << std::endl;
-        std::cout << "  负载参数求解结果 (" << r.poses << " 个姿态) —— CZ 符号待实测裁决"
-                  << std::endl;
+        std::cout << "  负载参数求解结果 (" << r.poses << " 个姿态)" << std::endl;
         std::cout << "======================================================" << std::endl;
         printf("  质量:    当前 %.3f kg   →  修正 %+.3f kg   →   %.3f kg\n",
                mCfg, r.dm, r.massKg);
-        printf("  质心 X/Y/Z: 当前 (%.1f, %.1f, %.1f)\n", cCfg[0], cCfg[1], cCfg[2]);
-        // 裁决之前【不写"下发"】: r.comMm / r.dc[2] 此刻只是按"当前符号约定"折算出来的占位值,
-        // 真下发的值要等探针选完才是 r.comCand[chosen]。两者 Z 相差 2·m_cfg·cz/m_true
-        // (种子值下约 395 mm) —— 标成"下发"就是在骗操作者。X/Y 与符号无关, 可以直接报。
-        printf("             X/Y 修正 (%+.1f, %+.1f) mm  (Z 修正取决于符号, 见下)\n",
-               r.dc[0], r.dc[1]);
-        printf("             两个候选各自的下发值 (mm, 尚未下发, 待实测裁决):\n"
-               "               +1 → (%.1f, %.1f, %+.1f)   -1 → (%.1f, %.1f, %+.1f)\n",
-               r.comCand[0][0], r.comCand[0][1], r.comCand[0][2],
-               r.comCand[1][0], r.comCand[1][1], r.comCand[1][2]);
+        printf("  质心 X/Y/Z: 当前 (%.1f, %.1f, %.1f) mm   →   解出 (%.1f, %.1f, %+.1f) mm\n",
+               cCfg[0], cCfg[1], cCfg[2], r.comMm[0], r.comMm[1], r.comMm[2]);
         printf("  拟合残差: 力 %.4f N   力矩 %.4f N·m\n", r.rmsForceN, r.rmsMomentNm);
-
-        // ===== CZ 符号候选 (这里不下结论) =====
-        // signZ 不进线性系统, 两种符号的拟合残差完全相同 —— 数据区分不了, 所以解算器
-        // 不再自行选边: 哪个候选成立由下面的实机探针裁决。(r.signZ / r.signAmbiguous 都只
-        // 是"解算器留下的占位值/恒为 true 的标志", 谁都不会覆写它们, 不能当结论打出来。)
-        // 判据只看物理质心必须在法兰下方, 所以把两个候选都打出来, 便于人工复核。
-        printf("    · 候选 +1: 物理质心 Z = %+.1f mm  %s\n",
-               r.cTrueZ[0], r.cTrueZ[0] > 0 ? "✓ 法兰下方" : "✗ 法兰上方 (非物理)");
-        printf("    · 候选 -1: 物理质心 Z = %+.1f mm  %s\n",
-               r.cTrueZ[1], r.cTrueZ[1] > 0 ? "✓ 法兰下方" : "✗ 法兰上方 (非物理)");
-
-        // ===== 符号实测裁决 =====
-        // solve() 只给出两种解释; 这里在【同一个静止姿态】下各下发一次, 谁留下的
-        // 力矩残余小谁对。机械臂全程不动 —— 差异纯粹来自符号, 不是姿态。
-        // 前提: 当前姿态要有足够倾角, 否则两者都≈0、分不开。
-        double rProbe[2] = {0.0, 0.0};
-        int    chosen = -1;
-        bool   probeOk = true;
-        bool   converged = false;   // 已收敛: 配置本身就解释得了数据, 探针无可裁决 (见下)
-        // 符号定不了案时, 下面的判据屏必须说出【真实原因】。一共三条路: 倾角不足 /
-        // 探针没取到读数 / 取到了但两个候选分不开。别再把它们都说成"两个候选在同一侧"
-        // —— 两个候选永远是一对相反的解释, 不会同侧。
-        enum SignFail { SIGN_FAIL_NONE, SIGN_FAIL_TILT, SIGN_FAIL_PROBE, SIGN_FAIL_MARGIN };
-        double   sinTheta = 0.0;
-        SignFail signFail = SIGN_FAIL_NONE;
-        {
-            double p[6];
-            EnterCriticalSection(&appState.robotPoseMutex);
-            p[0] = appState.robotActualPose.x;  p[1] = appState.robotActualPose.y;
-            p[2] = appState.robotActualPose.z;  p[3] = appState.robotActualPose.rx;
-            p[4] = appState.robotActualPose.ry; p[5] = appState.robotActualPose.rz;
-            LeaveCriticalSection(&appState.robotPoseMutex);
-            double R[9];
-            TcpCalibration::rpyToMatrix(p[3], p[4], p[5], R);
-            sinTheta = sqrt(R[2] * R[2] + R[5] * R[5]);
-            if (sinTheta < Config::SIGN_PROBE_MIN_SIN_THETA) {
-                std::cout << "  ✗ 当前姿态倾角不足 (sinθ=" << sinTheta
-                          << " < " << Config::SIGN_PROBE_MIN_SIN_THETA
-                          << ") — 两个符号分不开。" << std::endl;
-                std::cout << "    请把笔摆到明显倾斜/水平再按 's'。" << std::endl;
-                signFail = SIGN_FAIL_TILT;
-                probeOk = false;
-            }
-        }
-        // ===== 收敛短路: 当前配置本身就解释得了这批数据 =====
-        // 两个候选的下发值只差 2·dp/m_true (dp = p_true − p_cfg, 见 solve() 的换算):
-        // 配置越接近真值, 两个候选越重合, 探针量到的差 → 0 → margin 与 ratio 双双不过,
-        // 于是【"配置已经对了"】被报成"实测分不开" —— 连报几次就锁死 's'。刚标定完再按
-        // 一次 's' 正好踩在这个坑里: 机器说"测量失败", 其实已经没什么可改的了。
-        // 输的那个候选留下的力矩误差 ≈ 2·|dp|·g·sinθ (见 Config.h 的门限推导); 它小于
-        // 差值门限, 就说明【在本姿态下】两个候选的差压不过门限, 探针跑不跑都是同一个结局。
-        //   sepNm = r.massKg·|Δc_z|/1000·g·sinθ = m_true·(2|dp|/m_true)·g·sinθ = 2|dp|g·sinθ
-        // 所以短路掉探针 (省掉两次使能口往返 + 两个 400ms 采样窗), 并且【不计失败】。
-        // 【为什么必须放在倾角门限之后】sepNm 里带 sinθ: 倾角越小, 同一个 dp 算出来的 sepNm
-        // 也越小。若放在门限之前, 一个"符号错了 / 配置差得远"的机台只要姿态没摆好, 就会被
-        // 误判成"已收敛" —— 那才是真的把失败藏起来。放在门限之后, sinθ >= 0.7 有下界,
-        // 短路只在 |dp| <= 0.2/(2×9.81×0.7) = 0.0146 kg·m 时才触发, 这个量级探针本来就
-        // 判不出来 (判据同源: 同一个门限, 同一个姿态)。
-        if (probeOk) {
-            const double sepNm = r.massKg * fabs(r.comCand[1][2] - r.comCand[0][2])
-                                 / 1000.0 * 9.81 * sinTheta;
-            if (sepNm < Config::SIGN_PROBE_MIN_MARGIN_NM) {
-                converged = true;
-                // 两个候选分不开, 也就【没有可选项】: 沿用当前符号约定 (chosen 只决定
-                // 存哪个符号, 不决定改多少 —— 两个候选的下发值本来就几乎一样)。
-                chosen = (PayloadCalibration::comSignZ < 0.0) ? 1 : 0;
-                printf("  ✓ 已收敛: 当前配置与数据一致 — 两个候选相差 %.4f N·m (< %.2f N·m "
-                       "门限), 无需改配置, 不因\"分不开\"计失败\n",
-                       sepNm, Config::SIGN_PROBE_MIN_MARGIN_NM);
-                std::cout << "    没有可裁决的东西: 两个候选本来就在仪器的分辨极限之内。"
-                          << std::endl;
-                std::cout << "    本次照样保存/下发解出的参数 (质量修正仍会生效), "
-                          << "只是符号沿用当前约定。" << std::endl;
-            }
-        }
-        if (probeOk && !converged) {
-            for (int k = 0; k < 2; k++) {
-                if (!RelayCore::instance().probePayloadResidual(r.massKg, r.comCand[k], rProbe[k])) {
-                    // probePayloadResidual 的 false 有四种原因: 机械臂未连接、候选下发失败、
-                    // 机械臂没采纳这次候选 (回读不符)、采样窗口内样本不够。别让操作员以为
-                    // 上面一定有 [Probe] 提示 —— 只有"机械臂未连接"是静默返回 false。
-                    std::cout << "  ✗ 符号探针失败 — 这个候选没测到有效读数。" << std::endl;
-                    std::cout << "    四种原因: 机械臂未连接 / 候选下发失败 / 机械臂没采纳这次候选 / "
-                              << "力数据不足。" << std::endl;
-                    std::cout << "    除【机械臂未连接】外, 上面都会打一行 [Probe] 提示 "
-                              << "(可能更靠上, 翻一下); 未连接这种看顶部的连接状态。" << std::endl;
-                    signFail = SIGN_FAIL_PROBE;
-                    probeOk = false;
-                    break;
-                }
-            }
-        }
-        if (probeOk && !converged) {
-            const int    win  = (rProbe[0] <= rProbe[1]) ? 0 : 1;
-            const int    lose = 1 - win;
-            const double margin  = rProbe[lose] - rProbe[win];
-            // 【为什么判差值, 不判胜者的绝对值】raw[] 里含一个姿态常数的传感器零偏 b,
-            // 探针只把每个候选约简成一个模长 |b + d_k| —— 常数在 (b+d) - b 里才消, 在
-            // |b+d| 与 |b| 的比较里消不掉。判"胜者模长够小"等于在考 |b|: |b| 一到 0.05
-            // 的量级两个候选就全过不了, 求解会一路失败到锁死。差值最多被 |b| 吃掉 2|b|,
-            // 与 |b| 大小脱钩, 所以判差值。(门限的物理依据见 Config.h 的 SIGN_PROBE_*。)
-            const bool separated = (rProbe[lose] >= Config::SIGN_PROBE_MIN_RATIO * rProbe[win]);
-            const bool farApart  = (margin >= Config::SIGN_PROBE_MIN_MARGIN_NM);
-            printf("  CZ 符号实测: 候选 +1 残余 %.4f N·m / 候选 -1 残余 %.4f N·m "
-                   "(差值 %.4f N·m)\n",
-                   rProbe[0], rProbe[1], margin);
-            if (separated && farApart) {
-                chosen = win;
-                std::cout << "  CZ 符号约定: 裁决 → " << (win == 0 ? "+1" : "-1")
-                          << " (残余小 " << (rProbe[lose] / rProbe[win]) << " 倍)" << std::endl;
-            } else {
-                std::cout << "  CZ 符号约定: ✗ 实测分不开 — 结果按不合理处理" << std::endl;
-                signFail = SIGN_FAIL_MARGIN;
-            }
-        }
-        // 探针已经把两个候选都下发给了机械臂 (最后留在上面的可能是输的那个) —— 但这里
-        // 【先不定案】: 定案 (applyResult) 要等合理性判据通过, 否则判据一旦否掉这次求解,
-        // 内存里的生效负载就已经被改过了, 下面那句"机械臂负载参数保持原值"就是假的。
-        if (chosen < 0) {
-            // 没候选胜出: 探针已经把某个候选配到机械臂上了, 恢复成当前生效值
-            RelayCore::instance().applyPayloadToRobot();
-        }
+        // 【上面这两个"绝对"值只是记录/显示用】: 机械臂内部负载从 TCP 口改不动, 本标定也
+        // 不再依赖它是否被采纳。真正生效的输出是下面写进 force_calib.json 的【残余量】。
+        // CZ 符号: data 定不了它 (两种解释的拟合残差完全相同), 从前靠实机探针裁决, 探针已废除
+        // —— 现在【没有任何判据或下发依赖符号】。这里只把不确定性摆明, 供人工复核装夹。
+        printf("  CZ 符号提示: 数据区分不了两种解释 — 物理质心 Z = %+.1f mm (+1) / %+.1f mm (-1)"
+               " (仅供复核, 不影响结果)\n",
+               r.cTrueZ[0], r.cTrueZ[1]);
 
         // ===== 合理性判据 =====
-        // 任一命中即"不合理" -> 拒绝保存和下发, 机械臂保持原参数。
-        // 绝不拿一个程序自己都判定为不可信的结果去配置机械臂。
+        // 只剩一条: 拟合残差。符号探针废除之后, 没有任何"待实测裁决"的东西需要挡 ——
+        // 本标定的输出是残余量 (dm/dp), 它只取决于拟合质量, 不取决于机械臂接不接受负载参数。
         const double RMS_F_GOOD = 0.10;   // N — 到这个量级才说明模型与数据一致
-        const double RMS_F_MAX  = 0.30;   // N — 超过即不合理 (实机: 约定对 ~0.06, 错 ~0.9)
+        const double RMS_F_MAX  = 0.30;   // N — 超过即不合理
         const bool   fitGood = (r.rmsForceN < RMS_F_GOOD);
         const bool   fitOk   = (r.rmsForceN < RMS_F_MAX);
-        const bool   signOk = (chosen >= 0);        // 实测必须能裁决出符号
-        // 物理质心 (不是下发值): 要评的是【实测定案的那个候选】。cTrueZ[] 是按候选索引的,
-        // 所以下标就是 chosen —— r.signZ 是解算器留下的占位值 (恒等于传入的旧约定),
-        // 拿它选下标会去评一个根本没被下发的候选。
-        const double cTrueZChosen = signOk ? r.cTrueZ[chosen] : 0.0;
-        const bool   comZOk = signOk && (cTrueZChosen > 0.0); // 工具挂在法兰下方 -> 质心 Z 必须为正
-        const double comXY  = signOk
-            ? sqrt(r.comCand[chosen][0] * r.comCand[chosen][0]
-                 + r.comCand[chosen][1] * r.comCand[chosen][1])
-            : 0.0;
-        const bool   reasonable = fitOk && signOk && comZOk;
+        const bool   reasonable = fitOk;
 
         std::cout << "------------------------------------------------------" << std::endl;
-        std::cout << "  合理性评估 (三条判据, 任一不满足即拒绝下发):" << std::endl;
+        std::cout << "  合理性评估 (拟合残差, 不满足即拒绝保存):" << std::endl;
         if (fitGood) {
             printf("    ✓ 拟合残差 %.4f N ≈ 噪声本底 (< %.2f N)\n", r.rmsForceN, RMS_F_GOOD);
         } else if (fitOk) {
@@ -493,53 +399,11 @@ namespace BiasCheck {
             printf("    ✗ 拟合残差 %.4f N 超过阈值 %.2f N — 模型解释不了这批数据\n",
                    r.rmsForceN, RMS_F_MAX);
         }
-        if (signOk && converged) {
-            // 这条不等于"实测裁决过" —— 探针压根没跑。收敛态下两个候选的下发值几乎相同,
-            // 符号取值在实测层面不可观测, 沿用当前约定只是为了有一个确定的存盘值。
-            printf("    ✓ 符号: 沿用当前约定 %s — 本次【无实测裁决】(两个候选分不开, "
-                   "选谁都一样; 物理质心 Z +1 → %+.1f mm, -1 → %+.1f mm)\n",
-                   chosen == 0 ? "+1" : "-1", r.cTrueZ[0], r.cTrueZ[1]);
-        } else if (signOk) {
-            printf("    ✓ 符号可判定 — 实测裁决 → %s (两候选的物理质心 Z: +1 → %+.1f mm, -1 → %+.1f mm)\n",
-                   chosen == 0 ? "+1" : "-1", r.cTrueZ[0], r.cTrueZ[1]);
-        } else {
-            // 两条候选是一对【相反】的解释, 不存在"都在同一侧"这种失败。真正的原因只有三种。
-            printf("    ✗ 符号无法判定:\n");
-            switch (signFail) {
-            case SIGN_FAIL_TILT:
-                printf("      · 姿态倾角不足 (sinθ=%.2f < %.1f) — 两个符号的力矩差压不过噪声, 分不开\n",
-                       sinTheta, Config::SIGN_PROBE_MIN_SIN_THETA);
-                break;
-            case SIGN_FAIL_PROBE:
-                printf("      · 探针没取到有效读数 (机械臂未连接 / 候选下发失败 / "
-                       "机械臂没采纳这次候选 / 力数据不足)\n");
-                break;
-            case SIGN_FAIL_MARGIN:
-                printf("      · 探针测到了两个候选但区分不开 (残余 +1: %.4f, -1: %.4f N·m; 判据: "
-                       "败者 ≥ 胜者 %.1f 倍 且 两者相差 ≥ %.2f N·m)\n",
-                       rProbe[0], rProbe[1], Config::SIGN_PROBE_MIN_RATIO,
-                       Config::SIGN_PROBE_MIN_MARGIN_NM);
-                break;
-            default:
-                break;
-            }
-            printf("      · 两个候选 (不是同侧): 物理质心 Z +1 → %+.1f mm, -1 → %+.1f mm\n",
-                   r.cTrueZ[0], r.cTrueZ[1]);
-        }
-        if (!signOk) {
-            printf("    · 物理质心 Z 未评估 — 符号没定案, 无从判断哪个候选才是要下发的那个\n");
-        } else if (comZOk) {
-            printf("    ✓ 物理质心 Z = %+.1f mm 在法兰下方 (该候选下发 %+.1f mm), 偏心 |XY| = %.1f mm\n",
-                   cTrueZChosen, r.comCand[chosen][2], comXY);
-        } else {
-            printf("    ✗ 物理质心 Z = %+.1f mm 不在法兰下方 — 工具装夹或符号有问题\n",
-                   cTrueZChosen);
-        }
 
         std::cout << "------------------------------------------------------" << std::endl;
         if (!reasonable) {
             consecutiveFails++;
-            std::cout << "  判定: ✗ 不合理 — 已【拒绝保存和下发】, 机械臂负载参数保持原值 (第 "
+            std::cout << "  判定: ✗ 不合理 — 已【拒绝保存】: payload_calib.json 与本地补偿均未改动 (第 "
                       << consecutiveFails << " 次)" << std::endl;
             std::cout << "  → 请按 'm' 重新采集 (姿态跨度≥30°, 笔要有水平/朝上的姿态), 再按 's'"
                       << std::endl;
@@ -552,45 +416,71 @@ namespace BiasCheck {
                           << std::endl;
                 std::cout << "  [BIAS] !!  · 拟合残差超阈 → 装夹是否松动 / 力传感器是否受挤压 / "
                           << "姿态覆盖是否足够" << std::endl;
-                std::cout << "  [BIAS] !!  · 符号定不了案 → 姿态倾角不足 (摆到明显倾斜再按 's'), "
-                          << "或探针根本没测到 (机械臂是否连接、" << std::endl;
-                std::cout << "  [BIAS] !!    候选负载能否下发、30004 力数据流是否在更新)"
-                          << std::endl;
                 std::cout << "  [BIAS] !! 处理后按 'm' 重新采集 (计数会清零)。" << std::endl;
             }
             std::cout << std::endl;
-            // 判据是在探针【之后】跑的 —— 机械臂此刻的配置还是探针留下的那个候选
-            // (可能是输的那个)。所以拒绝不能只是"不保存", 必须把机器人恢复成原参数,
-            // 否则上面那句"机械臂负载参数保持原值"就是假的。
-            // 内存里的生效值从头到尾没动过, 这一发重发的就是原来的参数。
-            RelayCore::instance().applyPayloadToRobot();
+            // 不需要"恢复机械臂原参数": 判据跑在任何下发【之前】(探针已废除, 这条路里没有
+            // 任何东西动过机械臂), 内存生效值也从头到尾没改过。
             return;
         }
         consecutiveFails = 0;   // 成功一次即清零
 
-        // 定案只发生在这里 (判据全过): 探针选中的候选既是内存生效值, 也是下发值。
-        PayloadCalibration::applyResult(r, chosen);
+        // 记进内存生效值 (只影响机械臂侧显示与下次求解的基准)。
+        PayloadCalibration::applyResult(r);
+
+        // ===== 本次标定的输出: 把【残余】写进本地补偿 =====
+        // 机械臂内部那份负载参数从 TCP 侧【改不动】—— EnableRobot / Payload / LoadSwitch
+        // 三条通道实测全部无响应(0.25 kg 的变化只引起 0.0002 N·m 的读数变化)。所以它补不
+        // 干净的那一份, 只能由我们自己的 ForceCompensation 减掉。下面这两行就是标定结果,
+        // 上面那些绝对负载只是记录/显示用 —— 标定不依赖机械臂接不接受它们。
+        //
+        // 拟合出的 dm/dp 就是那一份【残余本身】(相对机械臂当前实际配置, 差商消掉了零偏),
+        // 所以这里不需要知道机械臂内部配的是什么值 —— 这正是它比"推出绝对值再下发"可靠的地方。
+        //
+        // 符号: ForceCompensation 做 compensated = raw - mass*gTool, gTool = Rᵀ(0,0,+9.81),
+        // 与求解器 gravityTool 同一约定, 所以 mass 直接取 dm 即可(可为负)。
+        std::cout << "------------------------------------------------------" << std::endl;
+        std::cout << "  ✓ 标定结果 → 本地补偿 (机械臂没补干净的那一份由我们减掉):" << std::endl;
+        {
+            const double resMass = r.dm;              // 残余质量 (kg, 带符号)
+            double resCom[3] = {0.0, 0.0, 0.0};       // 残余质心 (m)
+            if (fabs(resMass) > 1e-6) {
+                for (int i = 0; i < 3; i++) resCom[i] = r.dp[i] / resMass;   // kg·m / kg = m
+            }
+            double bF[3], bM[3];
+            ForceCompensation::currentBias(bF, bM);
+            ForceCompensation::setMassCom(resMass, resCom);
+            if (ForceCalibration::saveToFile(CalibStore::fileFor("force_calib.json"),
+                                             resMass, bF, bM)) {
+                printf("  [本地补偿] 残余质量 %+.4f kg  残余质心 (%+.1f, %+.1f, %+.1f) mm\n",
+                       resMass, resCom[0] * 1000.0, resCom[1] * 1000.0, resCom[2] * 1000.0);
+                std::cout << "  [本地补偿] 已写入 force_calib.json — 机械臂没补干净的那一份由我们减掉"
+                          << std::endl;
+            } else {
+                std::cerr << "  [本地补偿] !! force_calib.json 写入失败" << std::endl;
+            }
+        }
+
         if (!PayloadCalibration::save(CalibStore::fileFor("payload_calib.json"))) {
             std::cerr << "[BIAS] !! payload_calib.json 写入失败" << std::endl;
         } else {
             std::cout << "  已保存 payload_calib.json (下次启动自动加载)" << std::endl;
         }
-        // "下发"只在这里报: 上面所有行都是裁决【之前】的占位值, 把它们标成"下发"会骗操作者。
-        const bool   sentOk = RelayCore::instance().applyPayloadToRobot();
-        const double comSent[3] = {r.comCand[chosen][0], r.comCand[chosen][1], r.comCand[chosen][2]};
-        if (sentOk) {
-            printf("  已下发: 质量 %.3f kg, 质心 (%.1f, %.1f, %+.1f) mm  (符号约定 %s)\n",
-                   r.massKg, comSent[0], comSent[1], comSent[2], chosen == 0 ? "+1" : "-1");
-            printf("  相对原值的修正: 质量 %+.3f kg, 质心 (%+.1f, %+.1f, %+.1f) mm\n",
-                   r.dm, comSent[0] - cCfg[0], comSent[1] - cCfg[1], comSent[2] - cCfg[2]);
+        // 顺带把解出的绝对负载发给机械臂, 让机械臂侧的显示值跟上来 —— 仅此而已。
+        // 实机实测那份负载从 TCP 口改不动 (见 RelayCore::applyPayloadToRobot), 所以这一发
+        // 成功与否【都不影响本次标定】: 真正生效的是上面的 [本地补偿]。别把它读成"已下发修正"。
+        if (RelayCore::instance().applyPayloadToRobot()) {
+            printf("  [参考] 已同步机械臂侧负载显示: 质量 %.3f kg, 质心 (%.1f, %.1f, %+.1f) mm\n",
+                   r.massKg, r.comMm[0], r.comMm[1], r.comMm[2]);
         } else {
-            std::cout << "  ✗ 新负载下发失败 — 机械臂仍在用旧参数 (内存已定案, 重启客户端会重试)"
-                      << std::endl;
+            std::cout << "  [参考] 机械臂侧负载显示未同步 (未连接 / 使能口失败) — "
+                      << "不影响本次标定结果" << std::endl;
         }
 
-        // 这批姿态是在【旧负载】下采的。下发新负载之后复验 (report) 必须拒绝它们,
+        // 这批姿态是在【旧负载】下采的。复验 (report) 必须拒绝它们,
         // 否则会拿旧数据骂新参数 (曾经报出假 FAIL: 求解残差 0.06 N,
         // 紧接着的报告却报 |ΔF| = 4.0 N)。
+        // (本地补偿已经改了: 同一份数据在新补偿下不再可比, 所以照样作废。)
         dataUnderCurrentPayload = false;
         std::cout << "  → 复验: 摆姿态按 SPACE 采集 (第一次 SPACE 会自动开新一批,"
                   << " 旧数据作废)" << std::endl;
@@ -856,7 +746,7 @@ void keyboard(unsigned char key, int, int) {
                       << " 每到一个姿态按 SPACE (采样 1s)\n"
                       << "       'd' 拖拽模式开关 (摆姿态用; 摆好一定要关掉再采样) /"
                       << " 'm' 退出并输出报告\n"
-                      << "       's' 求解负载参数并下发 (符号与合理性由程序自动判定)"
+                      << "       's' 求解负载参数 → 写入本地补偿 (合理性由拟合残差判定)"
                       << std::endl;
         } else {
             BiasCheck::mode = false;
@@ -901,7 +791,7 @@ void keyboard(unsigned char key, int, int) {
         return;
     }
 
-    // 's' in BiasCheck mode: 求解负载参数 → 落盘 → 重新下发
+    // 's' in BiasCheck mode: 求解残余量 → 写本地补偿 (force_calib.json)
     if ((key == 's' || key == 'S') && BiasCheck::mode) {
         BiasCheck::solveAndApply();
         return;
