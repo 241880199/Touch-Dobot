@@ -1040,6 +1040,10 @@ git commit -m "feat(force): pick the CZ sign convention automatically"
 
 - [ ] **Step 5: 'i' 改为立即重解**
 
+> ⚠ **本步已被 Task 5 取代。** 设计修订（2026-09-18）后 `'i'` 这整个人工覆盖被移除，
+> 符号只由程序判定。保留原文只为忠实记录 Task 4 当时的实施内容；**最终态见 Task 5 Step 5**
+> （删掉整块）。执行 Task 5 时不要被这里的旧代码误导。
+
 把 `main.cpp` 里的 `'i'` 处理替换为：
 
 ```cpp
@@ -1116,31 +1120,300 @@ git commit -m "feat(force): show the CZ sign decision and gate verification on f
 
 ---
 
-### Task 5: 文档修正与现场清理
+### Task 5: 移除人工符号覆盖 + 合理性硬判据 + 连续失败升级
+
+> **设计修订（2026-09-18，实机评审后）。** 用户否决了 `'i'` 这个人工兜底方向
+> （"这种判断需要程序计算解决，不要引入人工判断"），并要求程序对结果合理性负责、
+> 多次不合理要报错（"如果不合理需要再次采集，多次不合理需要报错"）。
+> 详见 spec §3.5 / §3.6。**本任务会删除 Task 3 交付的一部分 API —— 那是有意的。**
+
+**Files:**
+- Modify: `Touch_Client/config/Config.h`
+- Modify: `Touch_Client/force/PayloadCalibration.h`
+- Modify: `Touch_Client/force/PayloadCalibration.cpp`
+- Modify: `Touch_Client/main.cpp`
+- Modify: `Touch_Client/tests/test_payload_calibration.cpp`
+
+**Interfaces:**
+- Consumes: `Result::signZ` / `cTrueZ[2]` / `signAmbiguous`（Task 3）
+- Produces: 无新增对外接口；**删除** `PayloadCalibration::forcedSignZ`、`flipComSignZ()`、`clearForcedSignZ()`
+
+- [ ] **Step 1: 加连续失败阈值常量**
+
+`config/Config.h` 的 `CALIB_MAX_AGE_SEC` 之后加：
+
+```cpp
+    // 连续多少次"结果不合理"就打红字错误并停止接受求解。
+    // 防的是操作者反复按 's' 却每次被拒的空转 —— 那种情况下问题在硬件/采集, 不在求解器。
+    const int CALIB_MAX_CONSECUTIVE_FAILS = 3;
+```
+
+- [ ] **Step 2: 删掉人工符号覆盖（头文件）**
+
+`force/PayloadCalibration.h` 里删除这三项：
+
+```cpp
+    // 手动强制符号约定: 0 = 自动判定 (默认), ±1 = 强制。
+    // 'i' 键设置它; 开始新一批采集时清回 0。
+    extern double forcedSignZ;
+```
+```cpp
+    // 恢复自动判定 (开始新一批采集时调用)
+    void clearForcedSignZ();
+```
+```cpp
+    // CZ 符号约定 (由实机实测判定; 翻转后需重新采集再求解)
+    void flipComSignZ();
+```
+
+（`flipComSignZ()` 的声明保留原文的注释行，一并删。）
+
+**同时**给 `Result` 里 Task 3 新增的三个字段加默认初始化 —— 这是之前那颗"未初始化的地雷"的根因：
+
+```cpp
+        double signZ         = 1.0;    // 实际选用的符号约定 (+1 / -1)
+        double cTrueZ[2]     = {0.0, 0.0};  // {候选+1, 候选-1} 下的物理质心 Z (mm)
+        bool   signAmbiguous = true;   // 默认 true = 不可信, 不让漏填的 Result 看起来可用
+```
+
+- [ ] **Step 3: 删掉实现**
+
+`force/PayloadCalibration.cpp`：删除 `double forcedSignZ = 0.0;`、`flipComSignZ()`、`clearForcedSignZ()` 三个定义。
+
+`solve()` 里的符号选择去掉人工分支：
+
+```cpp
+        double sChosen = signZ;
+        bool   ambiguous = false;
+        if (plusOk != minusOk) {
+            sChosen = plusOk ? 1.0 : -1.0;          // 恰好一个物理 -> 选它
+        } else {
+            ambiguous = true;                        // 都合理或都不合理 -> 程序判不了
+        }
+```
+
+（原来是 `if (forcedSignZ != 0.0) {...} else if (plusOk != minusOk) {...} else {...}`，删掉第一个分支。）
+
+- [ ] **Step 4: 测试删掉强制符号用例**
+
+`tests/test_payload_calibration.cpp`：删除 `test_forced_sign_overrides_auto()` 整个函数，并从 `main()` 里删掉它的调用。用例数应为 **12**。
+
+- [ ] **Step 5: main.cpp 删掉 `'i'` 处理**
+
+删除整个：
+
+```cpp
+    if ((key == 'i' || key == 'I') && BiasCheck::mode) {
+        ... 整块 ...
+    }
+```
+
+- [ ] **Step 6: 合理性三判据**
+
+在 `BiasCheck` 命名空间里加失败计数：
+
+```cpp
+    // 连续多少次求解被判"不合理"。达到 Config::CALIB_MAX_CONSECUTIVE_FAILS 后锁住 's'。
+    static int  consecutiveFails = 0;
+    static bool solveLocked = false;
+```
+
+`reset()` 里加（放在 `count = 0;` 之前）：
+
+```cpp
+        consecutiveFails = 0;
+        solveLocked = false;
+```
+
+`solveAndApply()` 开头，在 `if (count < 4)` 之前加：
+
+```cpp
+        if (solveLocked) {
+            std::cout << "\n[BIAS] !! 已连续 " << consecutiveFails << " 次判定结果不合理, 已停止求解。\n"
+                      << "       [BIAS] !! 问题多半不在求解器 —— 请检查: 机械臂装夹是否松动 / "
+                      << "力传感器是否受挤压 / 姿态覆盖是否足够。\n"
+                      << "       [BIAS] !! 处理后按 'm' 重新采集 (计数会清零)。" << std::endl;
+            return;
+        }
+```
+
+把 `solveAndApply()` 里现有的判据块（`RMS_F_GOOD` … `if (!fitOk) { ... return; }`）整体替换为：
+
+```cpp
+        // ===== 合理性判据 =====
+        // 任一命中即"不合理" -> 拒绝保存和下发, 机械臂保持原参数。
+        // 绝不拿一个程序自己都判定为不可信的结果去配置机械臂。
+        const double RMS_F_GOOD = 0.10;   // N — 到这个量级才说明模型与数据一致
+        const double RMS_F_MAX  = 0.30;   // N — 超过即不合理 (实机: 约定对 ~0.06, 错 ~0.9)
+        const bool   fitGood = (r.rmsForceN < RMS_F_GOOD);
+        const bool   fitOk   = (r.rmsForceN < RMS_F_MAX);
+        // 物理质心 (不是下发值): cSend = cTrue/signZ 在两种符号下都可能是正的
+        const double cTrueZChosen = r.cTrueZ[r.signZ > 0.0 ? 0 : 1];
+        const bool   signOk = !r.signAmbiguous;     // 程序必须能判出符号
+        const bool   comZOk = (cTrueZChosen > 0.0); // 工具挂在法兰下方 -> 质心 Z 必须为正
+        const double comXY  = sqrt(r.comMm[0] * r.comMm[0] + r.comMm[1] * r.comMm[1]);
+        const bool   reasonable = fitOk && signOk && comZOk;
+
+        std::cout << "------------------------------------------------------" << std::endl;
+        std::cout << "  合理性评估 (三条判据, 任一不满足即拒绝下发):" << std::endl;
+        if (fitGood) {
+            printf("    ✓ 拟合残差 %.4f N ≈ 噪声本底 (< %.2f N)\n", r.rmsForceN, RMS_F_GOOD);
+        } else if (fitOk) {
+            printf("    ✓ 拟合残差 %.4f N 在容许范围内 (< %.2f N)\n", r.rmsForceN, RMS_F_MAX);
+        } else {
+            printf("    ✗ 拟合残差 %.4f N 超过阈值 %.2f N — 模型解释不了这批数据\n",
+                   r.rmsForceN, RMS_F_MAX);
+        }
+        if (signOk) {
+            printf("    ✓ 符号可判定 (候选 +1: %+.1f mm, 候选 -1: %+.1f mm)\n",
+                   r.cTrueZ[0], r.cTrueZ[1]);
+        } else {
+            printf("    ✗ 符号无法判定 — 两个候选都在同一侧 (+1: %+.1f mm, -1: %+.1f mm)\n",
+                   r.cTrueZ[0], r.cTrueZ[1]);
+        }
+        if (comZOk) {
+            printf("    ✓ 物理质心 Z = %+.1f mm 在法兰下方 (下发 %+.1f mm), 偏心 |XY| = %.1f mm\n",
+                   cTrueZChosen, r.comMm[2], comXY);
+        } else {
+            printf("    ✗ 物理质心 Z = %+.1f mm 不在法兰下方 — 工具装夹或符号有问题\n",
+                   cTrueZChosen);
+        }
+
+        std::cout << "------------------------------------------------------" << std::endl;
+        if (!reasonable) {
+            consecutiveFails++;
+            std::cout << "  判定: ✗ 不合理 — 已【拒绝保存和下发】, 机械臂负载参数保持原值 (第 "
+                      << consecutiveFails << " 次)" << std::endl;
+            std::cout << "  → 请按 'm' 重新采集 (姿态跨度≥30°, 笔要有水平/朝上的姿态), 再按 's'"
+                      << std::endl;
+            if (consecutiveFails >= Config::CALIB_MAX_CONSECUTIVE_FAILS) {
+                solveLocked = true;
+                std::cout << std::endl;
+                std::cout << "  [BIAS] !! 已连续 " << consecutiveFails << " 次不合理, 停止求解。"
+                          << std::endl;
+                std::cout << "  [BIAS] !! 问题多半不在求解器 —— 请检查: 机械臂装夹是否松动 / "
+                          << "力传感器是否受挤压 / 姿态覆盖是否足够。" << std::endl;
+                std::cout << "  [BIAS] !! 处理后按 'm' 重新采集 (计数会清零)。" << std::endl;
+            }
+            std::cout << std::endl;
+            return;
+        }
+        consecutiveFails = 0;   // 成功一次即清零
+```
+
+> ⚠ 注意：**质量修正幅度的告警已按用户要求删除**（"不报警，这也许是加装了别的设施，
+> 正符合重新标定的作用"）。替换后不应再出现 `MASS_JUMP` / `massJump` / `dMassFrac`。
+> 质量数值本身仍由上面的"质量:"行展示，只是不再做判断。
+
+- [ ] **Step 7: 清掉三处被新语义带偏的文案**
+
+`solveAndApply()` 横幅里的歧义后缀（`'i'` 已不存在）：
+
+```cpp
+                  << (r.signAmbiguous ? " ⚠ 判不出" : " (自动判定)") << ")" << std::endl;
+```
+
+3c 判定块里那行 `(若结果不对, 按 'i' 强制用另一个符号)` 整句删除。歧义时改为：
+
+```cpp
+        if (r.signAmbiguous) {
+            std::cout << "    (两个候选都在同一侧, 程序判不出符号 —— 结果按不合理处理)"
+                      << std::endl;
+        }
+```
+
+`'m'` 模式进入帮助（现在含 `'i' 翻转 CZ 符号约定`）改为：
+
+```cpp
+            std::cout << "\n[BIAS] Mode ON — 笔尖悬空, 只改姿态(位置尽量不变),"
+                      << " 每到一个姿态按 SPACE (采样 1s)\n"
+                      << "       'd' 拖拽模式开关 (摆姿态用; 摆好一定要关掉再采样) /"
+                      << " 'm' 退出并输出报告\n"
+                      << "       's' 求解负载参数并下发 (符号与合理性由程序自动判定)"
+                      << std::endl;
+```
+
+- [ ] **Step 8: 让 `record()` 复用 `reset()`**
+
+`record()` 里新批次那段现在是三条重复语句（`count = 0; dataUnderCurrentPayload = true;` + 已删的 `clearForcedSignZ()`）。改为：
+
+```cpp
+        // 上一批数据是在旧负载下采的 -> 从这里开始算新一批。
+        // 复用 reset(), 免得将来 reset() 加了字段而这里漏跟。
+        if (!dataUnderCurrentPayload) {
+            std::cout << "[BIAS] 上一批数据是在旧负载下采的, 已丢弃 — 开始新一批采集"
+                      << std::endl;
+            reset();
+        }
+```
+
+- [ ] **Step 9: 编译并跑测试**
+
+Run: `cmd.exe //c "D:\Projects\Touch\Touch_Client\tests\build_payload_calibration_test.bat"`
+然后: `cmd.exe //c "D:\Projects\Touch\Touch_Client\tests\test_payload_calibration.exe"`
+Expected: `12 passed, 0 failed`
+
+Run: `cmd.exe //c "D:\Projects\Touch\Touch_Client\build.bat"`
+Expected: `Build OK.`（**必须是完整构建**，独立测试脚本的编译环境与真实项目不同）
+
+- [ ] **Step 10: 提交**
+
+```bash
+git add Touch_Client/config/Config.h Touch_Client/force/PayloadCalibration.h \
+        Touch_Client/force/PayloadCalibration.cpp Touch_Client/main.cpp \
+        Touch_Client/tests/test_payload_calibration.cpp
+git commit -m "feat(force): decide the CZ sign in software only, and reject unreasonable solves"
+```
+
+---
+
+### Task 6: 文档修正与现场清理
 
 **Files:**
 - Modify: `Docs/调零与负载标定流程.md`
 
-- [ ] **Step 1: 修正"翻符号后旧数据作废"的错误说法**
+- [ ] **Step 1: 重写 §3.5（`'i'` 已彻底移除，整节作废）**
 
-在 `Docs/调零与负载标定流程.md` §3.5 里，把
+Task 5 删掉了人工符号覆盖。`Docs/调零与负载标定流程.md` 的 §3.5 整节（标题为
+`### 3.5 CZ 符号约定不对怎么办（'i'）`，到 `### ---` 之前的下一节为止）**用下面内容整体替换**：
+
+````markdown
+### 3.5 CZ 符号约定：由程序判定，不需要人工干预
+
+下发 `centerZ` 时，机械臂内部可能按相反符号解释。**符号必须对**——假设反了，解出的修正量
+不是把误差抵消掉而是翻倍。
+
+**判定由程序完成**：`signZ` 只影响"Δp → 绝对质心"的换算，不进入拟合方程，所以两种符号的
+**拟合残差完全相同**，数据本身区分不了。可行的是外部判据——两种符号各算一个物理质心候选，
+工具挂在法兰下方 → **物理质心 Z 必须为正**，只有一个候选满足。
+
+求解输出会把两个候选都打出来供你复核：
 
 ```
-符号反了就按 `'i'` 翻转约定，然后**重新 `'m'` 采集**再 `'s'` 求解（旧数据是在旧配置下采的，翻符号后作废）。符号对了，一次求解即收敛。
+  CZ 符号约定: 自动判定 → +1
+    · 候选 +1: 物理质心 Z = +67.9 mm  ✓ 法兰下方
+    · 候选 -1: 物理质心 Z = -191.6 mm ✗ 法兰上方 (非物理)
 ```
 
-改为：
+**程序判不出符号时**（两个候选落在同一侧），该次结果按**不合理**处理并被拒绝——
+不会猜一个符号下发。重新采集姿态再试。
+````
+
+- [ ] **Step 2: 删掉键位表里的 `'i'` 行**
+
+键位表里删除整行：
 
 ```
-符号反了就按 `'i'`。**不需要重新采集** —— `signZ` 只影响解算结果的换算，不进入拟合方程，
-那批数据反映的是机械臂当时的实际配置，换个符号解释依然有效。按 `'i'` 会直接用同一批数据重解。
-
-判据由程序自动给出（见 §3.2 的输出）：两种符号各算一个物理质心候选，
-工具挂在法兰下方 → 物理质心 Z 必须为正，只有一个候选满足。
-两个候选都落在同一侧时程序会标"无法判定"并沿用当前约定，那时才需要 `'i'` 人工指定。
+| `i` | 在 `'m'` 模式下：翻转 CZ 符号约定 | 否 |
 ```
 
-- [ ] **Step 2: 补 24h 有效期与新目录**
+并把 `'s'` 那行的说明改为（符号已自动判定，不再是人工选择）：
+
+```
+| `s` | 在 `'m'` 模式下：**求解负载参数**并下发存盘（符号与合理性由程序自动判定） | 否 |
+```
+
+- [ ] **Step 3: 补 24h 有效期与新目录**
 
 在 `Docs/调零与负载标定流程.md` §1 的表格之后加：
 
@@ -1159,15 +1432,31 @@ git commit -m "feat(force): show the CZ sign decision and gate verification on f
 > 需要重新标定。
 ```
 
-- [ ] **Step 3: 修正 `'i'` 的键位表说明**
+- [ ] **Step 4: 补一节"结果不合理会怎样"**
 
-在键位表里把 `'i'` 那一行改为：
+在 §3.4 之后加：
 
-```
-| `i` | 在 `'m'` 模式下：**强制换一个 CZ 符号**并用同一批数据重解（自动判定失败时才需要） | 否 |
-```
+````markdown
+### 3.5b 程序会判定结果是否合理
 
-- [ ] **Step 4: 清理工作区里的旧标定文件**
+每次按 `'s'`，程序不仅给数字，还会**判定这个结果能不能信**。三条判据，任一不满足即判为
+**不合理**，此时**拒绝保存、拒绝下发**，机械臂保持原参数：
+
+| 判据 | 含义 |
+|------|------|
+| 拟合残差 < 0.30 N | 模型解释得了这批数据 |
+| 符号可判定 | 两个物理质心候选不在同一侧 |
+| 物理质心 Z > 0 | 质心确实在法兰下方 |
+
+**连续 3 次不合理**会打红字错误并停止接受 `'s'`，直到按 `'m'` 重新采集。
+这是刻意的——连续失败通常意味着**问题不在求解器**，而在装夹松动、传感器受挤压、
+或姿态覆盖不足。继续按 `'s'` 只是空转。
+
+> **注意：质量修正幅度再大也不会被判不合理。** 从种子值出发的第一次标定本来就该大改
+> （本项目首次解算就是 0.66 → 0.41 kg）。加装设施后重新标定正是这套流程的用途。
+````
+
+- [ ] **Step 5: 清理工作区里的旧标定文件**
 
 这些文件没有时间戳，按新规则一律作废；留在原处只会和新目录混淆：
 
@@ -1176,19 +1465,20 @@ rm -f Touch_Client/payload_calib.json Touch_Client/force_calib.json
 rm -rf Touch_Client/Touch_Client          # 误建的野目录, 只含 x64/ 构建产物
 ```
 
-- [ ] **Step 5: 提交**
+- [ ] **Step 6: 提交**
 
 ```bash
 git add "Docs/调零与负载标定流程.md"
-git commit -m "docs: correct the CZ sign guidance and document the 24h calibration expiry"
+git commit -m "docs: document the calibration file lifecycle and the result-reasonableness gate"
 ```
 
 ---
 
 ## 完成判据
 
-- `test_calib_store` 4/4、`test_payload_calibration` 13/13、`test_tcp_calibration` 7/7 全绿
+- `test_calib_store` 5/5、`test_payload_calibration` **12/12**（Task 5 删掉了强制符号用例）、`test_tcp_calibration` 7/7 全绿
 - `build.bat` 输出 `Build OK.`
 - 启动日志出现 `[Calib] !! ... 已作废` 与 `[Payload] 无可用 ... — 用种子值`
 - 实机流程第 3 步（紧接着 `'s'` 后按 `'m'`）出现"旧负载"拒绝提示，第 5 步残差显著下降
-- `'i'` 无需重新采集即可重解
+- 代码里**不再存在** `'i'` 键、`forcedSignZ`、`flipComSignZ()`、`clearForcedSignZ()`、`massJump`
+- 三条合理性判据任一不满足 → 拒绝保存和下发；连续 3 次 → 红字错误并锁住 `'s'`
