@@ -31,13 +31,23 @@ static const double g_poses[NP][6] = {
     {300, 100, 40,  -20,  35,  55}
 };
 
-// 重力在工具系下的表示
+// 重力在工具系下的表示: g = Rᵀ·(0,0,G)。
+//
+// 【这里必须从定义展开写，不要"照抄"被测代码的下标。】
+// 曾经两边都写成取 R 的第 3 列 (等价于 R·(0,0,G)，与 Rᵀ 差一个转置):
+// 单测用错的约定造数据、求解器用同一错约定解回来，于是 10/10 全绿，
+// 而实机上把 ~0.40 kg 的工具解成了 0.654 kg —— 转置后仍有相关性，
+// 残差 0.68 N 不致命，所以它是"安静地解错"，不会报错。
+// 约定必须与 ForceCompensation::step 的 matTransposeMulVec(R, (0,0,9.81)) 一致。
 static void gravityTool(const double pose[6], double g[3]) {
     double R[9];
     TcpCalibration::rpyToMatrix(pose[3], pose[4], pose[5], R);
-    g[0] = R[2] * G;
-    g[1] = R[5] * G;
-    g[2] = R[8] * G;
+    const double v[3] = {0.0, 0.0, G};
+    for (int i = 0; i < 3; i++) {
+        g[i] = 0.0;
+        // (Rᵀ·v)[i] = Σ_k R[k][i]·v[k]，row-major 下 R[k][i] 是 R[k*3+i]
+        for (int k = 0; k < 3; k++) g[i] += R[k * 3 + i] * v[k];
+    }
 }
 
 // 正向合成: 由真实负载 + 机械臂配置负载 生成 raw 力/力矩 (传感器零偏设 0)

@@ -24,9 +24,12 @@ namespace PayloadCalibration {
     static void gravityTool(const double pose[6], double g[3]) {
         double R[9];
         TcpCalibration::rpyToMatrix(pose[3], pose[4], pose[5], R);
-        // R 为 row-major; (Rᵀ·v)[i] = Σ_k R[k*3+i]·v[k]
-        g[0] = R[2] * G;
-        g[1] = R[5] * G;
+        // R 为 row-major (工具→世界); 重力在工具系的表示 = Rᵀ·(0,0,G)。
+        // (Rᵀ·v)[i] = Σ_k R[k*3+i]·v[k], 对 v=(0,0,G) 只剩 k=2 一项 → 取 R 的【第 2 行】。
+        // 约定必须与 ForceCompensation::step 一致 (那里是 matTransposeMulVec(R,·)),
+        // 否则解出的 Δm 是错的 —— 转置后仍与真值相关, 残差不会爆掉, 只会安静地解错。
+        g[0] = R[6] * G;
+        g[1] = R[7] * G;
         g[2] = R[8] * G;
     }
 
