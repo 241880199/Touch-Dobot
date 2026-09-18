@@ -375,9 +375,10 @@ namespace BiasCheck {
             double R[9];
             TcpCalibration::rpyToMatrix(p[3], p[4], p[5], R);
             sinTheta = sqrt(R[2] * R[2] + R[5] * R[5]);
-            if (sinTheta < 0.5) {
+            if (sinTheta < Config::SIGN_PROBE_MIN_SIN_THETA) {
                 std::cout << "  ✗ 当前姿态倾角不足 (sinθ=" << sinTheta
-                          << " < 0.5) — 两个符号分不开。" << std::endl;
+                          << " < " << Config::SIGN_PROBE_MIN_SIN_THETA
+                          << ") — 两个符号分不开。" << std::endl;
                 std::cout << "    请把笔摆到明显倾斜/水平再按 's'。" << std::endl;
                 signFail = SIGN_FAIL_TILT;
                 probeOk = false;
@@ -386,11 +387,14 @@ namespace BiasCheck {
         if (probeOk) {
             for (int k = 0; k < 2; k++) {
                 if (!RelayCore::instance().probePayloadResidual(r.massKg, r.comCand[k], rProbe[k])) {
-                    // probePayloadResidual 的 false 不只是"力数据不足": 机械臂未连接、
-                    // 候选下发失败、采样窗口内样本不够都会走到这里 (具体原因它在上面自己打过)。
-                    std::cout << "  ✗ 符号探针失败 — 这个候选没测到有效读数 (机械臂未连接 / "
-                              << "候选下发失败 / 力数据不足, 见上面 [Probe] 提示)。"
-                              << std::endl;
+                    // probePayloadResidual 的 false 有四种原因: 机械臂未连接、候选下发失败、
+                    // 机械臂没采纳这次候选 (回读不符)、采样窗口内样本不够。别让操作员以为
+                    // 上面一定有 [Probe] 提示 —— 只有"机械臂未连接"是静默返回 false。
+                    std::cout << "  ✗ 符号探针失败 — 这个候选没测到有效读数。" << std::endl;
+                    std::cout << "    四种原因: 机械臂未连接 / 候选下发失败 / 机械臂没采纳这次候选 / "
+                              << "力数据不足。" << std::endl;
+                    std::cout << "    除【机械臂未连接】外, 上面都会打一行 [Probe] 提示 "
+                              << "(可能更靠上, 翻一下); 未连接这种看顶部的连接状态。" << std::endl;
                     signFail = SIGN_FAIL_PROBE;
                     probeOk = false;
                     break;
@@ -398,13 +402,20 @@ namespace BiasCheck {
             }
         }
         if (probeOk) {
-            const int  win  = (rProbe[0] <= rProbe[1]) ? 0 : 1;
-            const int  lose = 1 - win;
+            const int    win  = (rProbe[0] <= rProbe[1]) ? 0 : 1;
+            const int    lose = 1 - win;
+            const double margin  = rProbe[lose] - rProbe[win];
+            // 【为什么判差值, 不判胜者的绝对值】raw[] 里含一个姿态常数的传感器零偏 b,
+            // 探针只把每个候选约简成一个模长 |b + d_k| —— 常数在 (b+d) - b 里才消, 在
+            // |b+d| 与 |b| 的比较里消不掉。判"胜者模长够小"等于在考 |b|: |b| 一到 0.05
+            // 的量级两个候选就全过不了, 求解会一路失败到锁死。差值最多被 |b| 吃掉 2|b|,
+            // 与 |b| 大小脱钩, 所以判差值。(门限的物理依据见 Config.h 的 SIGN_PROBE_*。)
             const bool separated = (rProbe[lose] >= Config::SIGN_PROBE_MIN_RATIO * rProbe[win]);
-            const bool small     = (rProbe[win] <= Config::SIGN_PROBE_MAX_WIN_NM);
-            printf("  CZ 符号实测: 候选 +1 残余 %.4f N·m / 候选 -1 残余 %.4f N·m\n",
-                   rProbe[0], rProbe[1]);
-            if (separated && small) {
+            const bool farApart  = (margin >= Config::SIGN_PROBE_MIN_MARGIN_NM);
+            printf("  CZ 符号实测: 候选 +1 残余 %.4f N·m / 候选 -1 残余 %.4f N·m "
+                   "(差值 %.4f N·m)\n",
+                   rProbe[0], rProbe[1], margin);
+            if (separated && farApart) {
                 chosen = win;
                 std::cout << "  CZ 符号约定: 裁决 → " << (win == 0 ? "+1" : "-1")
                           << " (残余小 " << (rProbe[lose] / rProbe[win]) << " 倍)" << std::endl;
@@ -458,17 +469,18 @@ namespace BiasCheck {
             printf("    ✗ 符号无法判定:\n");
             switch (signFail) {
             case SIGN_FAIL_TILT:
-                printf("      · 姿态倾角不足 (sinθ=%.2f < 0.5) — 两个符号的力矩差压不过噪声, 分不开\n",
-                       sinTheta);
+                printf("      · 姿态倾角不足 (sinθ=%.2f < %.1f) — 两个符号的力矩差压不过噪声, 分不开\n",
+                       sinTheta, Config::SIGN_PROBE_MIN_SIN_THETA);
                 break;
             case SIGN_FAIL_PROBE:
-                printf("      · 探针没取到有效读数 (机械臂未连接 / 候选下发失败 / 力数据不足)\n");
+                printf("      · 探针没取到有效读数 (机械臂未连接 / 候选下发失败 / "
+                       "机械臂没采纳这次候选 / 力数据不足)\n");
                 break;
             case SIGN_FAIL_MARGIN:
                 printf("      · 探针测到了两个候选但区分不开 (残余 +1: %.4f, -1: %.4f N·m; 判据: "
-                       "胜者 ≤ %.2f N·m 且败者 ≥ %.1f 倍)\n",
-                       rProbe[0], rProbe[1], Config::SIGN_PROBE_MAX_WIN_NM,
-                       Config::SIGN_PROBE_MIN_RATIO);
+                       "败者 ≥ 胜者 %.1f 倍 且 两者相差 ≥ %.2f N·m)\n",
+                       rProbe[0], rProbe[1], Config::SIGN_PROBE_MIN_RATIO,
+                       Config::SIGN_PROBE_MIN_MARGIN_NM);
                 break;
             default:
                 break;

@@ -94,9 +94,15 @@ static DWORD WINAPI forceReaderThread(LPVOID) {
 
             // Parse ActualTCPForce at offset 576 (6 doubles, 48 bytes)
             double* forcePtr = reinterpret_cast<double*>(buf + 576);
+            // 同一帧里的负载回读 (Load @1168, CenterX/Y/Z @1176~1199) —— 和 raw[] 一起
+            // 落到 forceData, 让主线程能核对机械臂是否采纳了下发的候选负载。
+            const double* loadEchoPtr = reinterpret_cast<const double*>(buf + 1168);
             EnterCriticalSection(&app.forceDataMutex);
             for (int i = 0; i < 6; i++) {
                 app.forceData.raw[i] = forcePtr[i];
+            }
+            for (int i = 0; i < 4; i++) {
+                app.forceData.payloadEcho[i] = loadEchoPtr[i];
             }
             app.forceData.lastUpdateMs = GetTickCount();
             app.forceData.isStale = false;
@@ -173,14 +179,53 @@ bool RelayCore::probePayloadResidual(double massKg, const double comMm[3], doubl
     }
     Sleep(Config::SIGN_PROBE_SETTLE_MS);
 
+    // ===== 回读确认: 机械臂是否真的采纳了这次候选 =====
+    // robotSendEnable() 的成功只说明命令语法对了 / 使能口可用 —— 说明不了控制器采纳了新的
+    // load/com。所以下发后回读 30004 帧里的负载 (Load @1168, 读取线程每帧刷进
+    // forceData.payloadEcho)。少了这一步, 一个忽略 EnableRobot 的机械臂会让两次探针
+    // 量到同一份数据, 操作员只看到"分不开", 完全猜不到真实原因。
+    {
+        double echo[4] = {0, 0, 0, 0};
+        EnterCriticalSection(&appState.forceDataMutex);
+        for (int i = 0; i < 4; i++) echo[i] = appState.forceData.payloadEcho[i];
+        LeaveCriticalSection(&appState.forceDataMutex);
+        // 先判回读本身是否可信 (与 stream 启动时那次一次性核对同一套界限), 免得把
+        // "回读不可用"误报成"机械臂没采纳"。
+        const bool echoSane = (echo[0] >= 0.0 && echo[0] <= 5.0)
+                           && fabs(echo[1]) <= 500.0 && fabs(echo[2]) <= 500.0
+                           && fabs(echo[3]) <= 500.0;
+        const bool adopted = echoSane
+            && fabs(echo[0] - massKg) <= 0.01
+            && fabs(echo[1] - comMm[0]) <= 1.0
+            && fabs(echo[2] - comMm[1]) <= 1.0
+            && fabs(echo[3] - comMm[2]) <= 1.0;
+        if (!adopted) {
+            char want[96];
+            snprintf(want, sizeof(want), "%.3f kg / (%.1f, %.1f, %.1f) mm",
+                     massKg, comMm[0], comMm[1], comMm[2]);
+            if (!echoSane) {
+                std::cerr << "[Probe] 30004 回读的负载不可信 (load=" << echo[0]
+                          << " cx=" << echo[1] << " cy=" << echo[2] << " cz=" << echo[3]
+                          << ") — 读不到就无法确认机械臂是否采纳, 本次测量作废" << std::endl;
+            } else {
+                std::cerr << "[Probe] 机械臂【没有采纳】本次候选负载: 下发 " << want
+                          << ", 回读 " << echo[0] << " kg / (" << echo[1] << ", "
+                          << echo[2] << ", " << echo[3] << ") mm — 本次测量作废" << std::endl;
+            }
+            return false;
+        }
+    }
+
     // 【为什么读 raw 而不是 filtered】本函数跑在 GLUT idle() 线程里, 而 filtered[] 只由
     // pollForce() 更新, pollForce() 的唯一调用点就是 idle() 本身。下面 Sleep 的这段时间
     // 主线程被占住, pollForce 一次都不会跑 —— filtered[] 是【冻结】的, 两个候选读到的是
     // 同一个值, 探针什么都裁决不了。
-    // raw[] 由 30004 读取线程按 ~125 Hz 独立写入, 与主循环无关; 而且它本身就是机械臂按当前
-    // EnableRobot 负载参数补偿【之后】的净力读数, 正是随候选改变的那个量。
-    // ForceCompensation 在本地再减掉的零偏/重力在同一静止姿态下只是常数, 两个候选的残余相减
-    // 时被消掉, 所以用 raw 不损失判别力。(别把它"改进"回 filtered。)
+    // raw[] 是 30004 读取线程按 ~125 Hz 独立写入的 (另一个线程, 与主循环无关), 而且它本身
+    // 就是机械臂按当前 EnableRobot 负载参数补偿【之后】的净力读数 —— 正是随候选改变的那个量。
+    // 【注意 raw[] 不是零均值的】它里面含一个姿态常数的传感器零偏 b (恒定的那一部分从不被
+    // 这里减掉)。所以本函数只返回一个【模长】, 调用方必须判两个候选的【差值】而不是判胜者的
+    // 绝对值 —— 理由和门限的算法见 Config.h 的 SIGN_PROBE_MIN_MARGIN_NM 注释。(别把它
+    // "改进"回 filtered, 那会读到冻住的数据。)
     const DWORD t0 = GetTickCount();
     double sum[3] = {0, 0, 0};
     int n = 0;
@@ -192,6 +237,9 @@ bool RelayCore::probePayloadResidual(double massKg, const double comMm[3], doubl
         LeaveCriticalSection(&appState.forceDataMutex);
         // 去重: 这里的轮询(10ms)比 30004 快, 同一份数据会被反复读到 —— 累加多次均值不变,
         // 但 n 会虚高, "样本太少"的判据就失效了。同一 lastUpdateMs 只算一次。
+        // 探针中途断流(读取线程掉线)也由这条 + 下面的 n<5 兜住: 读数不再更新 -> n 涨不上去。
+        // 上面那个 isStale 只在【进探针之前】就已经过期时有意义 —— 它不可能在探针期间被置位,
+        // 因为置位它的 pollForce() 跑在被本函数阻塞的同一个线程上。它不是这里的护栏。
         if (!fd.isStale && fd.lastUpdateMs != lastMs) {
             lastMs = fd.lastUpdateMs;
             sum[0] += fd.raw[3]; sum[1] += fd.raw[4]; sum[2] += fd.raw[5];
@@ -199,7 +247,11 @@ bool RelayCore::probePayloadResidual(double massKg, const double comMm[3], doubl
         }
         Sleep(10);
     }
-    if (n < 5) return false;                 // 数据太少, 不下结论
+    if (n < 5) {                             // 数据太少(或 30004 断流), 不下结论
+        std::cerr << "[Probe] 采样窗口内有效数据不足 (n=" << n
+                  << ") — 30004 可能断流, 本次测量作废" << std::endl;
+        return false;
+    }
     const double m0 = sum[0] / n, m1 = sum[1] / n, m2 = sum[2] / n;
     residualNm = sqrt(m0 * m0 + m1 * m1 + m2 * m2);
     return true;

@@ -118,6 +118,11 @@ public:
         double hapticOut[3] = {0};      // 已变换到 Touch 坐标系，haptic 线程直接读
         bool isStale = true;            // 超过 200ms 无新数据
         DWORD lastUpdateMs = 0;
+        // 30004 帧里回读的负载参数 (Load @1168): [0]=kg, [1..3]=质心 X/Y/Z (mm)。
+        // 由 ForceReader 线程每帧刷新 (与 raw[] 同一个锁)。用途: 判断【机械臂是否真的
+        // 采纳】了下发的 EnableRobot 负载 —— 使能口的回包只能说明命令语法对了。
+        // 消费者见 RelayCore::probePayloadResidual 开头的回读核对。
+        double payloadEcho[4] = {0};
 
         // 标定参数 (由 ForceCalibration 求解, ForceCompensation 读取)
         bool isCalibrated = false;

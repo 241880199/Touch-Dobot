@@ -53,7 +53,10 @@ public:
     // 调用方必须保证机械臂【不动】(两次探针在同一姿态比较才有意义)。
     // 读数取 30004 的 forceData.raw[] —— 不是 filtered[]。原因见 RelayCore.cpp 实现里
     // 的说明 (filtered 由主线程更新, 而本函数阻塞的就是主线程)。
-    // 返回 false: 机械臂未连接 / 候选下发失败 / 采样窗口内有效数据不足。
+    // 【返回值是个模长, 里面含一个姿态常数的传感器零偏】所以调用方判两个候选的【差值】,
+    // 不要判胜者的绝对值 —— 理由见 Config.h 的 SIGN_PROBE_MIN_MARGIN_NM。
+    // 返回 false 的四种原因: 机械臂未连接 (静默) / 候选下发失败 / 机械臂没采纳这次候选 /
+    // 采样窗口内有效数据不足 —— 后三种都会打一行 [Probe] 提示。
     bool probePayloadResidual(double massKg, const double comMm[3], double& residualNm);
 
     // 奇异脱困 (可在运行中手动触发)
