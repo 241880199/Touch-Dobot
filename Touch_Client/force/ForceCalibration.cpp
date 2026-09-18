@@ -2,10 +2,12 @@
 #include "ForceCalibration.h"
 #include "ForceCompensation.h"
 #include "../config/Config.h"
+#include "../core/CalibStore.h"
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <algorithm>
 
 // ===== Internal state =====
@@ -175,7 +177,7 @@ bool update(double dt, const double raw[6], const double pose[6]) {
                 }
                 double comZero[3] = {0};
                 ForceCompensation::setCalibration(mass, comZero, g_biasForce, g_biasTorque);
-                ForceCalibration::saveToFile("force_calib.json", mass, g_biasForce, g_biasTorque);
+                ForceCalibration::saveToFile(CalibStore::fileFor("force_calib.json"), mass, g_biasForce, g_biasTorque);
                 printf("[Force] ZERO complete (mass %.4f kg kept): "
                        "force bias=(%+.3f,%+.3f,%+.3f) N, torque bias=(%+.4f,%+.4f,%+.4f) Nm\n",
                        mass, g_biasForce[0], g_biasForce[1], g_biasForce[2],
@@ -306,7 +308,7 @@ bool update(double dt, const double raw[6], const double pose[6]) {
         // Apply results
         double comZero[3] = {0};
         ForceCompensation::setCalibration(g_massKg, comZero, g_biasForce, g_biasTorque);
-        ForceCalibration::saveToFile("force_calib.json", g_massKg, g_biasForce, g_biasTorque);
+        ForceCalibration::saveToFile(CalibStore::fileFor("force_calib.json"), g_massKg, g_biasForce, g_biasTorque);
 
         printf("[Force] Calibration complete! bias=(%+.3f,%+.3f,%+.3f)N  mass=%.3f kg\n",
                g_biasForce[0], g_biasForce[1], g_biasForce[2], g_massKg);
@@ -329,7 +331,9 @@ bool saveToFile(const char* path, double massKg,
     FILE* f = fopen(path, "w");
     if (!f) return false;
     fprintf(f, "{\n");
-    fprintf(f, "  \"version\": 2,\n");
+    fprintf(f, "  \"version\": 3,\n");
+    // CalibStore 按这个字段判有效期; 缺了它整份标定会被判过期。
+    fprintf(f, "  \"saved_at_unix\": %ld,\n", (long)time(NULL));
     fprintf(f, "  \"mass_kg\": %.6g,\n", massKg);
     fprintf(f, "  \"bias_force_n\": [%.6g, %.6g, %.6g],\n",
             biasForce[0], biasForce[1], biasForce[2]);

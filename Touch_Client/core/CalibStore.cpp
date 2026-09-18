@@ -1,6 +1,7 @@
 #include "CalibStore.h"
 #include "../config/Config.h"
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <windows.h>

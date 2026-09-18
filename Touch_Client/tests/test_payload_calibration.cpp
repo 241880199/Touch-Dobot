@@ -8,6 +8,8 @@
 #include <iostream>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
+#include <cstdlib>
 #include "../force/PayloadCalibration.h"
 #include "../calibration/TcpCalibration.h"
 #include "../config/Config.h"
@@ -246,6 +248,34 @@ static void test_save_load_roundtrip() {
     PASS();
 }
 
+// 落盘必须带 saved_at_unix —— 没有这个字段的文件会被 CalibStore 判为过期。
+static void test_save_includes_timestamp() {
+    TEST(save_includes_timestamp);
+    const char* path = "test_payload_ts.json";
+    PayloadCalibration::enabled = true;
+    PayloadCalibration::massKg = 0.5;
+    PayloadCalibration::comMm[0] = 0.0;
+    PayloadCalibration::comMm[1] = 0.0;
+    PayloadCalibration::comMm[2] = 80.0;
+    CHECK(PayloadCalibration::save(path));
+
+    FILE* f = fopen(path, "r");
+    CHECK(f != nullptr);
+    char buf[2048];
+    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    buf[n] = '\0';
+    // 字段必须存在, 且是 plausible 的 Unix 秒 (> 2026-01-01)
+    CHECK(strstr(buf, "\"saved_at_unix\"") != nullptr);
+    const char* p = strstr(buf, "\"saved_at_unix\"");
+    const char* colon = strchr(p, ':');
+    double ts = strtod(colon + 1, nullptr);
+    CHECK(ts > 1767225600.0);
+    CHECK(strstr(buf, "\"version\": 2") != nullptr);
+    remove(path);
+    PASS();
+}
+
 // 未标定时 effective() 回退种子值
 static void test_effective_falls_back_to_seed() {
     TEST(effective_falls_back_to_seed);
@@ -268,6 +298,7 @@ int main() {
     test_rejects_degenerate_poses();
     test_rejects_nonphysical_mass();
     test_save_load_roundtrip();
+    test_save_includes_timestamp();
     test_effective_falls_back_to_seed();
     std::cout << "\n" << g_passed << " passed, " << g_failed << " failed" << std::endl;
     return g_failed ? 1 : 0;

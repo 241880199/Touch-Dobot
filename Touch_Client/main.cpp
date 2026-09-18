@@ -9,6 +9,7 @@
 
 #include "config/Config.h"
 #include "core/AppState.h"
+#include "core/CalibStore.h"
 #include "haptic/HapticDevice.h"
 #include "relay/RelayCore.h"
 #include "render/SceneRenderer.h"
@@ -360,7 +361,7 @@ namespace BiasCheck {
         }
 
         PayloadCalibration::applyResult(r);
-        if (!PayloadCalibration::save("payload_calib.json")) {
+        if (!PayloadCalibration::save(CalibStore::fileFor("payload_calib.json"))) {
             std::cerr << "[BIAS] !! payload_calib.json 写入失败" << std::endl;
         } else {
             std::cout << "  已保存 payload_calib.json (下次启动自动加载)" << std::endl;
@@ -820,7 +821,7 @@ void keyboard(unsigned char key, int, int) {
         for (int i = 0; i < 3; i++) TcpCalibration::offset[i] = off[i];
         TcpCalibration::rmsError = rms;
         TcpCalibration::enabled = true;
-        TcpCalibration::save("tcp_calib.json");
+        TcpCalibration::save(CalibStore::fileFor("tcp_calib.json"));
         std::cout << "\n[TCP-CALIB] Solved! TCP offset = [" << off[0] << ", " << off[1] << ", " << off[2]
                   << "] mm, RMS = " << rms << " mm" << std::endl;
         std::cout << "[TCP-CALIB] Saved to tcp_calib.json" << std::endl;
@@ -1032,7 +1033,8 @@ int main(int argc, char* argv[]) {
         std::cout << "Robot: SKIPPED (--no-robot)" << std::endl;
     } else {
         // 末端负载参数必须在使能之前加载 —— EnableRobot 要用它 (见 PayloadCalibration)
-        if (PayloadCalibration::load("payload_calib.json")) {
+        const char* payloadPath = CalibStore::resolve("payload_calib.json");
+        if (payloadPath && PayloadCalibration::load(payloadPath)) {
             std::cout << "[Payload] Loaded payload_calib.json (mass=" << PayloadCalibration::massKg
                       << "kg, com=(" << PayloadCalibration::comMm[0] << ","
                       << PayloadCalibration::comMm[1] << "," << PayloadCalibration::comMm[2]
@@ -1041,7 +1043,7 @@ int main(int argc, char* argv[]) {
         } else {
             double m, c[3];
             PayloadCalibration::effective(m, c);
-            std::cout << "[Payload] 无 payload_calib.json — 用种子值 mass=" << m
+            std::cout << "[Payload] 无可用 payload_calib.json — 用种子值 mass=" << m
                       << "kg com=(" << c[0] << "," << c[1] << "," << c[2] << ")mm\n"
                       << "          实机标定: 启动后按 'm' 采多姿态 → 's' 求解" << std::endl;
         }
@@ -1066,13 +1068,14 @@ int main(int argc, char* argv[]) {
     // 4.6 加载力传感器标定文件
     {
         double massKg, biasF[3], biasM[3];
-        if (ForceCalibration::loadFromFile("force_calib.json", massKg, biasF, biasM)) {
+        const char* forcePath = CalibStore::resolve("force_calib.json");
+        if (forcePath && ForceCalibration::loadFromFile(forcePath, massKg, biasF, biasM)) {
             double comZero[3] = {0};
             ForceCompensation::setCalibration(massKg, comZero, biasF, biasM);
             std::cout << "[Force] Loaded force_calib.json (mass=" << massKg
                       << "kg, bias=" << biasF[0] << "," << biasF[1] << "," << biasF[2] << "N)" << std::endl;
         } else {
-            std::cout << "[Force] No calibration file — press 'z' when idle to zero the sensor." << std::endl;
+            std::cout << "[Force] 无可用 force_calib.json — 按 'z' 调零。" << std::endl;
         }
     }
 
@@ -1092,7 +1095,8 @@ int main(int argc, char* argv[]) {
     }
 
     // 6.6 加载 TCP 偏移标定 (如存在)
-    if (TcpCalibration::load("tcp_calib.json")) {
+    const char* tcpPath = CalibStore::resolve("tcp_calib.json");
+    if (tcpPath && TcpCalibration::load(tcpPath)) {
         std::cout << "[TCP] Loaded tcp_calib.json (offset="
                   << TcpCalibration::offset[0] << "," << TcpCalibration::offset[1] << "," << TcpCalibration::offset[2]
                   << "mm, RMS=" << TcpCalibration::rmsError << "mm)" << std::endl;
