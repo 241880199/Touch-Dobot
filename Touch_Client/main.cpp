@@ -283,8 +283,7 @@ namespace BiasCheck {
     static void solveAndApply() {
         if (solveLocked) {
             std::cout << "\n[BIAS] !! 已连续 " << consecutiveFails << " 次判定结果不合理, 已停止求解。\n"
-                      << "       [BIAS] !! 问题多半不在求解器 —— 请检查: 机械臂装夹是否松动 / "
-                      << "力传感器是否受挤压 / 姿态覆盖是否足够。\n"
+                      << "       [BIAS] !! 原因见最后那次被否掉的判据 (拟合残差 / 符号无法判定)。\n"
                       << "       [BIAS] !! 处理后按 'm' 重新采集 (计数会清零)。" << std::endl;
             return;
         }
@@ -332,14 +331,21 @@ namespace BiasCheck {
         printf("  质量:    当前 %.3f kg   →  修正 %+.3f kg   →   %.3f kg\n",
                mCfg, r.dm, r.massKg);
         printf("  质心 X/Y/Z: 当前 (%.1f, %.1f, %.1f)\n", cCfg[0], cCfg[1], cCfg[2]);
-        printf("             修正 (%+.1f, %+.1f, %+.1f) mm\n", r.dc[0], r.dc[1], r.dc[2]);
-        printf("             下发 (%.1f, %.1f, %.1f) mm\n", r.comMm[0], r.comMm[1], r.comMm[2]);
+        // 裁决之前【不写"下发"】: r.comMm / r.dc[2] 此刻只是按"当前符号约定"折算出来的占位值,
+        // 真下发的值要等探针选完才是 r.comCand[chosen]。两者 Z 相差 2·m_cfg·cz/m_true
+        // (种子值下约 395 mm) —— 标成"下发"就是在骗操作者。X/Y 与符号无关, 可以直接报。
+        printf("             X/Y 修正 (%+.1f, %+.1f) mm  (Z 修正取决于符号, 见下)\n",
+               r.dc[0], r.dc[1]);
+        printf("             两个候选各自的下发值 (mm, 尚未下发, 待实测裁决):\n"
+               "               +1 → (%.1f, %.1f, %+.1f)   -1 → (%.1f, %.1f, %+.1f)\n",
+               r.comCand[0][0], r.comCand[0][1], r.comCand[0][2],
+               r.comCand[1][0], r.comCand[1][1], r.comCand[1][2]);
         printf("  拟合残差: 力 %.4f N   力矩 %.4f N·m\n", r.rmsForceN, r.rmsMomentNm);
 
         // ===== CZ 符号候选 (这里不下结论) =====
         // signZ 不进线性系统, 两种符号的拟合残差完全相同 —— 数据区分不了, 所以解算器
-        // 不再自行选边: 哪个候选成立由下面的实机探针裁决。(signAmbiguous 在探针跑完之前
-        // 恒为 true, 它只表示"解算器没定案", 不是判据, 不能当作结论打出来。)
+        // 不再自行选边: 哪个候选成立由下面的实机探针裁决。(r.signZ / r.signAmbiguous 都只
+        // 是"解算器留下的占位值/恒为 true 的标志", 谁都不会覆写它们, 不能当结论打出来。)
         // 判据只看物理质心必须在法兰下方, 所以把两个候选都打出来, 便于人工复核。
         printf("    · 候选 +1: 物理质心 Z = %+.1f mm  %s\n",
                r.cTrueZ[0], r.cTrueZ[0] > 0 ? "✓ 法兰下方" : "✗ 法兰上方 (非物理)");
@@ -353,6 +359,12 @@ namespace BiasCheck {
         double rProbe[2] = {0.0, 0.0};
         int    chosen = -1;
         bool   probeOk = true;
+        // 符号定不了案时, 下面的判据屏必须说出【真实原因】。一共三条路: 倾角不足 /
+        // 探针没取到读数 / 取到了但两个候选分不开。别再把它们都说成"两个候选在同一侧"
+        // —— 两个候选永远是一对相反的解释, 不会同侧。
+        enum SignFail { SIGN_FAIL_NONE, SIGN_FAIL_TILT, SIGN_FAIL_PROBE, SIGN_FAIL_MARGIN };
+        double   sinTheta = 0.0;
+        SignFail signFail = SIGN_FAIL_NONE;
         {
             double p[6];
             EnterCriticalSection(&appState.robotPoseMutex);
@@ -362,18 +374,24 @@ namespace BiasCheck {
             LeaveCriticalSection(&appState.robotPoseMutex);
             double R[9];
             TcpCalibration::rpyToMatrix(p[3], p[4], p[5], R);
-            const double sinTheta = sqrt(R[2] * R[2] + R[5] * R[5]);
+            sinTheta = sqrt(R[2] * R[2] + R[5] * R[5]);
             if (sinTheta < 0.5) {
                 std::cout << "  ✗ 当前姿态倾角不足 (sinθ=" << sinTheta
                           << " < 0.5) — 两个符号分不开。" << std::endl;
                 std::cout << "    请把笔摆到明显倾斜/水平再按 's'。" << std::endl;
+                signFail = SIGN_FAIL_TILT;
                 probeOk = false;
             }
         }
         if (probeOk) {
             for (int k = 0; k < 2; k++) {
                 if (!RelayCore::instance().probePayloadResidual(r.massKg, r.comCand[k], rProbe[k])) {
-                    std::cout << "  ✗ 符号探针失败 (力数据不足) — 恢复原配置" << std::endl;
+                    // probePayloadResidual 的 false 不只是"力数据不足": 机械臂未连接、
+                    // 候选下发失败、采样窗口内样本不够都会走到这里 (具体原因它在上面自己打过)。
+                    std::cout << "  ✗ 符号探针失败 — 这个候选没测到有效读数 (机械臂未连接 / "
+                              << "候选下发失败 / 力数据不足, 见上面 [Probe] 提示)。"
+                              << std::endl;
+                    signFail = SIGN_FAIL_PROBE;
                     probeOk = false;
                     break;
                 }
@@ -392,6 +410,7 @@ namespace BiasCheck {
                           << " (残余小 " << (rProbe[lose] / rProbe[win]) << " 倍)" << std::endl;
             } else {
                 std::cout << "  CZ 符号约定: ✗ 实测分不开 — 结果按不合理处理" << std::endl;
+                signFail = SIGN_FAIL_MARGIN;
             }
         }
         // 探针已经把两个候选都下发给了机械臂 (最后留在上面的可能是输的那个) —— 但这里
@@ -409,11 +428,16 @@ namespace BiasCheck {
         const double RMS_F_MAX  = 0.30;   // N — 超过即不合理 (实机: 约定对 ~0.06, 错 ~0.9)
         const bool   fitGood = (r.rmsForceN < RMS_F_GOOD);
         const bool   fitOk   = (r.rmsForceN < RMS_F_MAX);
-        // 物理质心 (不是下发值): cSend = cTrue/signZ 在两种符号下都可能是正的
-        const double cTrueZChosen = r.cTrueZ[r.signZ > 0.0 ? 0 : 1];
         const bool   signOk = (chosen >= 0);        // 实测必须能裁决出符号
-        const bool   comZOk = (cTrueZChosen > 0.0); // 工具挂在法兰下方 -> 质心 Z 必须为正
-        const double comXY  = sqrt(r.comMm[0] * r.comMm[0] + r.comMm[1] * r.comMm[1]);
+        // 物理质心 (不是下发值): 要评的是【实测定案的那个候选】。cTrueZ[] 是按候选索引的,
+        // 所以下标就是 chosen —— r.signZ 是解算器留下的占位值 (恒等于传入的旧约定),
+        // 拿它选下标会去评一个根本没被下发的候选。
+        const double cTrueZChosen = signOk ? r.cTrueZ[chosen] : 0.0;
+        const bool   comZOk = signOk && (cTrueZChosen > 0.0); // 工具挂在法兰下方 -> 质心 Z 必须为正
+        const double comXY  = signOk
+            ? sqrt(r.comCand[chosen][0] * r.comCand[chosen][0]
+                 + r.comCand[chosen][1] * r.comCand[chosen][1])
+            : 0.0;
         const bool   reasonable = fitOk && signOk && comZOk;
 
         std::cout << "------------------------------------------------------" << std::endl;
@@ -427,15 +451,36 @@ namespace BiasCheck {
                    r.rmsForceN, RMS_F_MAX);
         }
         if (signOk) {
-            printf("    ✓ 符号可判定 (候选 +1: %+.1f mm, 候选 -1: %+.1f mm)\n",
-                   r.cTrueZ[0], r.cTrueZ[1]);
+            printf("    ✓ 符号可判定 — 实测裁决 → %s (两候选的物理质心 Z: +1 → %+.1f mm, -1 → %+.1f mm)\n",
+                   chosen == 0 ? "+1" : "-1", r.cTrueZ[0], r.cTrueZ[1]);
         } else {
-            printf("    ✗ 符号无法判定 — 两个候选都在同一侧 (+1: %+.1f mm, -1: %+.1f mm)\n",
+            // 两条候选是一对【相反】的解释, 不存在"都在同一侧"这种失败。真正的原因只有三种。
+            printf("    ✗ 符号无法判定:\n");
+            switch (signFail) {
+            case SIGN_FAIL_TILT:
+                printf("      · 姿态倾角不足 (sinθ=%.2f < 0.5) — 两个符号的力矩差压不过噪声, 分不开\n",
+                       sinTheta);
+                break;
+            case SIGN_FAIL_PROBE:
+                printf("      · 探针没取到有效读数 (机械臂未连接 / 候选下发失败 / 力数据不足)\n");
+                break;
+            case SIGN_FAIL_MARGIN:
+                printf("      · 探针测到了两个候选但区分不开 (残余 +1: %.4f, -1: %.4f N·m; 判据: "
+                       "胜者 ≤ %.2f N·m 且败者 ≥ %.1f 倍)\n",
+                       rProbe[0], rProbe[1], Config::SIGN_PROBE_MAX_WIN_NM,
+                       Config::SIGN_PROBE_MIN_RATIO);
+                break;
+            default:
+                break;
+            }
+            printf("      · 两个候选 (不是同侧): 物理质心 Z +1 → %+.1f mm, -1 → %+.1f mm\n",
                    r.cTrueZ[0], r.cTrueZ[1]);
         }
-        if (comZOk) {
-            printf("    ✓ 物理质心 Z = %+.1f mm 在法兰下方 (下发 %+.1f mm), 偏心 |XY| = %.1f mm\n",
-                   cTrueZChosen, r.comMm[2], comXY);
+        if (!signOk) {
+            printf("    · 物理质心 Z 未评估 — 符号没定案, 无从判断哪个候选才是要下发的那个\n");
+        } else if (comZOk) {
+            printf("    ✓ 物理质心 Z = %+.1f mm 在法兰下方 (该候选下发 %+.1f mm), 偏心 |XY| = %.1f mm\n",
+                   cTrueZChosen, r.comCand[chosen][2], comXY);
         } else {
             printf("    ✗ 物理质心 Z = %+.1f mm 不在法兰下方 — 工具装夹或符号有问题\n",
                    cTrueZChosen);
@@ -453,8 +498,14 @@ namespace BiasCheck {
                 std::cout << std::endl;
                 std::cout << "  [BIAS] !! 已连续 " << consecutiveFails << " 次不合理, 停止求解。"
                           << std::endl;
-                std::cout << "  [BIAS] !! 问题多半不在求解器 —— 请检查: 机械臂装夹是否松动 / "
-                          << "力传感器是否受挤压 / 姿态覆盖是否足够。" << std::endl;
+                std::cout << "  [BIAS] !! 问题多不在求解器 —— 按上面那屏判据的实际失败项排查:"
+                          << std::endl;
+                std::cout << "  [BIAS] !!  · 拟合残差超阈 → 装夹是否松动 / 力传感器是否受挤压 / "
+                          << "姿态覆盖是否足够" << std::endl;
+                std::cout << "  [BIAS] !!  · 符号定不了案 → 姿态倾角不足 (摆到明显倾斜再按 's'), "
+                          << "或探针根本没测到 (机械臂是否连接、" << std::endl;
+                std::cout << "  [BIAS] !!    候选负载能否下发、30004 力数据流是否在更新)"
+                          << std::endl;
                 std::cout << "  [BIAS] !! 处理后按 'm' 重新采集 (计数会清零)。" << std::endl;
             }
             std::cout << std::endl;
@@ -474,7 +525,18 @@ namespace BiasCheck {
         } else {
             std::cout << "  已保存 payload_calib.json (下次启动自动加载)" << std::endl;
         }
-        RelayCore::instance().applyPayloadToRobot();
+        // "下发"只在这里报: 上面所有行都是裁决【之前】的占位值, 把它们标成"下发"会骗操作者。
+        const bool   sentOk = RelayCore::instance().applyPayloadToRobot();
+        const double comSent[3] = {r.comCand[chosen][0], r.comCand[chosen][1], r.comCand[chosen][2]};
+        if (sentOk) {
+            printf("  已下发: 质量 %.3f kg, 质心 (%.1f, %.1f, %+.1f) mm  (符号约定 %s)\n",
+                   r.massKg, comSent[0], comSent[1], comSent[2], chosen == 0 ? "+1" : "-1");
+            printf("  相对原值的修正: 质量 %+.3f kg, 质心 (%+.1f, %+.1f, %+.1f) mm\n",
+                   r.dm, comSent[0] - cCfg[0], comSent[1] - cCfg[1], comSent[2] - cCfg[2]);
+        } else {
+            std::cout << "  ✗ 新负载下发失败 — 机械臂仍在用旧参数 (内存已定案, 重启客户端会重试)"
+                      << std::endl;
+        }
 
         // 这批姿态是在【旧负载】下采的。下发新负载之后复验 (report) 必须拒绝它们,
         // 否则会拿旧数据骂新参数 (曾经报出假 FAIL: 求解残差 0.06 N,

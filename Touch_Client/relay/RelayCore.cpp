@@ -167,19 +167,34 @@ bool RelayCore::probePayloadResidual(double massKg, const double comMm[3], doubl
     char cmd[128];
     snprintf(cmd, sizeof(cmd), "EnableRobot(%.3f,%.1f,%.1f,%.1f)",
              massKg, comMm[0], comMm[1], comMm[2]);
-    robotSendEnable(cmd);
+    if (!robotSendEnable(cmd)) {
+        std::cout << "[Probe] 候选负载下发失败 (使能口不可用) — 本次测量作废" << std::endl;
+        return false;
+    }
     Sleep(Config::SIGN_PROBE_SETTLE_MS);
 
+    // 【为什么读 raw 而不是 filtered】本函数跑在 GLUT idle() 线程里, 而 filtered[] 只由
+    // pollForce() 更新, pollForce() 的唯一调用点就是 idle() 本身。下面 Sleep 的这段时间
+    // 主线程被占住, pollForce 一次都不会跑 —— filtered[] 是【冻结】的, 两个候选读到的是
+    // 同一个值, 探针什么都裁决不了。
+    // raw[] 由 30004 读取线程按 ~125 Hz 独立写入, 与主循环无关; 而且它本身就是机械臂按当前
+    // EnableRobot 负载参数补偿【之后】的净力读数, 正是随候选改变的那个量。
+    // ForceCompensation 在本地再减掉的零偏/重力在同一静止姿态下只是常数, 两个候选的残余相减
+    // 时被消掉, 所以用 raw 不损失判别力。(别把它"改进"回 filtered。)
     const DWORD t0 = GetTickCount();
     double sum[3] = {0, 0, 0};
     int n = 0;
+    DWORD lastMs = 0;
     while (GetTickCount() - t0 < (DWORD)Config::SIGN_PROBE_AVG_MS) {
         AppState::ForceData fd;
         EnterCriticalSection(&appState.forceDataMutex);
         fd = appState.forceData;
         LeaveCriticalSection(&appState.forceDataMutex);
-        if (!fd.isStale) {
-            sum[0] += fd.filtered[3]; sum[1] += fd.filtered[4]; sum[2] += fd.filtered[5];
+        // 去重: 这里的轮询(10ms)比 30004 快, 同一份数据会被反复读到 —— 累加多次均值不变,
+        // 但 n 会虚高, "样本太少"的判据就失效了。同一 lastUpdateMs 只算一次。
+        if (!fd.isStale && fd.lastUpdateMs != lastMs) {
+            lastMs = fd.lastUpdateMs;
+            sum[0] += fd.raw[3]; sum[1] += fd.raw[4]; sum[2] += fd.raw[5];
             n++;
         }
         Sleep(10);

@@ -24,10 +24,11 @@ namespace PayloadCalibration {
         double dm;           // 质量修正量 (kg, 带符号)
         double dc[3];        // 质心修正量 (mm, 带符号)
         double massKg;       // 换算出的绝对质量 (kg)
-        double comMm[3];     // 换算出的绝对质心 (mm, 法兰系)
+        // 占位值: 按传入的 comSignZ 折算的绝对质心 (mm, 法兰系)。两个符号约定给出的 Z 相差
+        // 2·m_cfg·cz/m_true, 所以它【不是】结论, 定案后也没有人覆写它 —— 要下发值读 comCand。
+        double comMm[3];
         // 两个符号候选的【下发值】, 供调用方在实机上各下发一次、实测裁决。
-        // solve() 本身不碰机器人, 所以它在 comMm 里放一个临时值,
-        // 由调用方选定后再用 applyResult(r, chosen) 定案。
+        // 下标按候选: comCand[0] 对应符号约定 +1, comCand[1] 对应 -1。
         double comCand[2][3];
         double rmsForceN;    // 力通道拟合残差 (N)
         double rmsMomentNm;  // 力矩通道拟合残差 (N·m)
@@ -37,9 +38,11 @@ namespace PayloadCalibration {
         // signZ 不进 buildRows, 所以两种符号的拟合残差完全相同 —— 数据本身
         // 区分不了符号, 解算器只能把两种解释都给全 (comCand),
         // 由调用方在实机上各下发一次、看谁留下的力矩残余小。
-        double signZ         = 1.0;    // 临时值; 由调用方定案后覆写
+        // 占位值 = 传入的 comSignZ。solve() 不选边, 而且【没有代码会覆写它】, 所以它永远
+        // 不表示"解算器/探针选中的符号" —— 定案在调用方手里 (chosen), 别拿这个字段当结论。
+        double signZ         = 1.0;
         double cTrueZ[2]     = {0.0, 0.0};  // {候选+1, 候选-1} 下的物理质心 Z (mm)
-        bool   signAmbiguous = true;   // "解算器无法自行定案" — 实测前恒为 true
+        bool   signAmbiguous = true;   // "解算器无法自行定案" — 恒为 true, 不是判据也不是结论
     };
 
     // 纯函数: 最小二乘求解。无全局状态, 便于单测。
@@ -70,6 +73,9 @@ namespace PayloadCalibration {
     void effective(double& massKgOut, double comMmOut[3]);
 
     // 用求解结果覆写生效值 (仅内存)
+    // ⚠ 遗留接口: 它把 r.signZ / r.comMm 当作"已定案的符号和下发值"用, 但 Task 10 之后这两个
+    //    字段只是占位值 (没有任何代码会覆写它们)。生产路径必须走下面那个按实测候选定案的重载,
+    //    这个重载只剩单测 (save/load 往返) 在用。
     void applyResult(const Result& r);
 
     // 按实机实测选定的候选 (0 = 候选+1, 1 = 候选-1) 覆写生效值 (仅内存)

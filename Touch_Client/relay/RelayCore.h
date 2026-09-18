@@ -51,6 +51,9 @@ public:
     // 用给定负载重新使能, 等稳定后返回当前姿态的残余力矩模长 (N·m)。
     // 符号裁决用: 同一静止姿态下依次探两个候选, 谁留下的力矩残余小谁对。
     // 调用方必须保证机械臂【不动】(两次探针在同一姿态比较才有意义)。
+    // 读数取 30004 的 forceData.raw[] —— 不是 filtered[]。原因见 RelayCore.cpp 实现里
+    // 的说明 (filtered 由主线程更新, 而本函数阻塞的就是主线程)。
+    // 返回 false: 机械臂未连接 / 候选下发失败 / 采样窗口内有效数据不足。
     bool probePayloadResidual(double massKg, const double comMm[3], double& residualNm);
 
     // 奇异脱困 (可在运行中手动触发)

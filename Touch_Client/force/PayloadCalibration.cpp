@@ -161,7 +161,8 @@ namespace PayloadCalibration {
         out.signAmbiguous = ambiguous;
         for (int i = 0; i < 3; i++) {
             double cTrue = pTrue[i] / mTrue * 1000.0;       // 物理质心 (mm)
-            // 下发值按 sChosen 折算回去, 使机械臂的 c_eff 恰好等于 cTrue
+            // 占位值: 按传入的 signZ 折算, 使机械臂的 c_eff 恰好等于 cTrue。真下发的值由
+            // 实机探针选出的候选决定, 所以这里【不】是结论 —— 定案后也没有人会来覆写它。
             double cSend = (i == 2 && sChosen != 0.0) ? cTrue / sChosen : cTrue;
             out.comMm[i] = cSend;
             out.dc[i] = cSend - comCfg[i];
@@ -212,9 +213,10 @@ namespace PayloadCalibration {
 
     // 实机探针选定候选后定案: 0 = 符号约定 +1, 1 = 符号约定 -1。
     // comCand[chosen] 本身就是该符号下的下发值, 所以直接生效, 不需要再折算。
-    // 同时把定案回写进 Result —— 调用方(实机流程)在定案之后还要用 r.signZ /
-    // r.signAmbiguous / r.cTrueZ / r.comMm 打判据和报告, 不回写就会拿临时值误导操作者。
-    // (签名按计划保持 const&; Result 在本流程里始终是非 const 左值。)
+    // 【不回写 Result】(曾经 const_cast 写过 comMm/signZ/signAmbiguous): Result 是求解器的
+    // 输出, 定案是调用方的事, 写回去既要用 const_cast 强改调用方的对象, 又没法把 dc 一起改对
+    // (dc = 下发值 − 原配置值, 而原配置值只有 solve 收得到) —— 只改 comMm 不改 dc 的 Result
+    // 自相矛盾。调用方要报定案值, 直接读它自己选中的 r.comCand[chosen]。
     void applyResult(const Result& r, int chosen) {
         if (chosen != 0 && chosen != 1) return;      // 无效选择: 不动生效值
         const double sChosen = (chosen == 0) ? 1.0 : -1.0;
@@ -226,13 +228,6 @@ namespace PayloadCalibration {
         rmsForceN = r.rmsForceN;
         rmsMomentNm = r.rmsMomentNm;
         poses = r.poses;
-
-        Result& out = const_cast<Result&>(r);
-        for (int i = 0; i < 3; i++) out.comMm[i] = r.comCand[chosen][i];
-        // dc 是"相对上次下发值的修正量", 而上次下发的值不在 Result 里 (solve 只收得到
-        // 它, 存不下), 所以这里不重算 —— 它只在定案前的报告里用过, 定案后无人再读。
-        out.signZ = sChosen;
-        out.signAmbiguous = false;                   // 已定案
     }
 
     // ===== 持久化 =====
