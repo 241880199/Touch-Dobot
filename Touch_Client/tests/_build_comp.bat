@@ -14,5 +14,6 @@ cl /EHsc /std:c++17 ^
   ..\force\ForceCompensation.cpp ^
   ..\force\ForceCalibration.cpp ^
   ..\core\CalibStore.cpp ^
+  ..\calibration\TcpCalibration.cpp ^
   /Fe:test_force_compensation.exe
 echo BUILD_EXIT=%ERRORLEVEL%

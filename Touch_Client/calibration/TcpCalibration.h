@@ -9,6 +9,23 @@ namespace TcpCalibration {
     // Rx/Ry/Rz 一致, 也和 ForceCompensation::eulerToRotation 的约定一致。
     void rpyToMatrix(double rx_deg, double ry_deg, double rz_deg, double R[9]);
 
+    // 重力在【传感器系】下的表示, 供力补偿与负载求解【共同】使用:
+    //     g = Rz(-psi) · Rᵀ · (0,0,9.81)      psi = Config::SENSOR_MOUNT_YAW_DEG
+    // pose 为 [x,y,z,rx,ry,rz] (mm, 度)。
+    //
+    // 【为什么必须共用这一个函数】两个模块各自实现过一次重力约定, 结果一个写了 Rᵀ、
+    // 另一个写了 R (转置), 求解器因此安静地解错 (残差 0.68 N 而非 0.045 N, 不报错)。
+    // 约定只能有一份实现。
+    //
+    // 符号约定 (推导, 别改反了): 记传感器系 = 法兰系绕 z 转 +psi 得到 → 同一矢量在
+    // 传感器系里的坐标 = Rz(-psi)·(它在法兰系里的坐标)。参考系 = 法兰系 (GetPose 的
+    // RPY 描述的那个)。
+    //   Rz(-psi) = [[ cos, sin, 0], [-sin, cos, 0], [0, 0, 1]]
+    // 即 gx' = cos(psi)·g0x + sin(psi)·g0y, gy' = -sin(psi)·g0x + cos(psi)·g0y, gz' = g0z。
+    // (2026-09-18 实机数据: dF = M·dg 解出的 M ≈ Δm·Rz(-78.9°) ⇒ psi ≈ +78.9°, 即上式。
+    //  写成 Rz(+psi) 会让残差【变大】而不是变小 —— 方向反了控制台立刻看得出来。)
+    void gravitySensorFrame(const double pose[6], double g[3]);
+
     // 纯函数: 求解 TCP 偏移。
     // poses: n 个法兰位姿 [x,y,z,rx,ry,rz], n >= 3
     // offsetOut: 输出偏移 (法兰系, mm); rmsOut: 拟合残差 (mm)

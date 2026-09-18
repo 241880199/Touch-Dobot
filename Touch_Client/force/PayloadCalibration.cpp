@@ -18,20 +18,14 @@ namespace PayloadCalibration {
     int    poses = 0;
     double comSignZ = 1.0;
 
-    static const double G = 9.81;     // m/s²
     static const int    MIN_POSES = 3;   // 4 个未知量, 每个姿态贡献 6 个方程; 3 个起解
 
-    // 重力在工具系下的表示: g_tool = Rᵀ · (0,0,G)
+    // 重力在【传感器系】下的表示 —— 就一句话: 转给 TcpCalibration::gravitySensorFrame。
+    // 本文件从前自己算过一遍 Rᵀ·(0,0,G), 与 ForceCompensation::step 里的那一份并存过 ——
+    // 两份约定一旦漂移 (历史上就是差了个转置), 求解器会【安静地解错】: 残差仍与真值相关,
+    // 不会报错。约定只能有一份实现, 就在这里转出去。
     static void gravityTool(const double pose[6], double g[3]) {
-        double R[9];
-        TcpCalibration::rpyToMatrix(pose[3], pose[4], pose[5], R);
-        // R 为 row-major (工具→世界); 重力在工具系的表示 = Rᵀ·(0,0,G)。
-        // (Rᵀ·v)[i] = Σ_k R[k*3+i]·v[k], 对 v=(0,0,G) 只剩 k=2 一项 → 取 R 的【第 2 行】。
-        // 约定必须与 ForceCompensation::step 一致 (那里是 matTransposeMulVec(R,·)),
-        // 否则解出的 Δm 是错的 —— 转置后仍与真值相关, 残差不会爆掉, 只会安静地解错。
-        g[0] = R[6] * G;
-        g[1] = R[7] * G;
-        g[2] = R[8] * G;
+        TcpCalibration::gravitySensorFrame(pose, g);
     }
 
     // 构造姿态 k (相对姿态 0 差商后) 的 6 行方程。

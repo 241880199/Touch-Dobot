@@ -1,5 +1,6 @@
 #define _USE_MATH_DEFINES
 #include "ForceCompensation.h"
+#include "../calibration/TcpCalibration.h"
 #include "../config/Config.h"
 #include <cmath>
 #include <cstdio>
@@ -18,6 +19,9 @@ static double g_biasTorque[3] = {0};
 static MotionEstimator g_motion;
 
 // ===== Euler angles (deg) to rotation matrix =====
+// ⚠ 本文件里【当前没有调用方】了: 重力的唯一去处已改成 TcpCalibration::gravitySensorFrame
+//   (约定只能有一份实现)。此函数与下面的 matTransposeMulVec 保留未删 —— 删不删由所有者定;
+//   但【不要】再用它们在这里重新展开一遍重力, 那正是本文件以前和求解器各写一份的老毛病。
 // R = Rz(rz_deg) * Ry(ry_deg) * Rx(rx_deg)
 // Output: 3x3 row-major R[9]
 static void eulerToRotation(double rx_deg, double ry_deg, double rz_deg, double R[9]) {
@@ -42,6 +46,7 @@ static void eulerToRotation(double rx_deg, double ry_deg, double rz_deg, double 
 }
 
 // Matrix-vector multiply: out = M^T * v  (3x3 row-major M, 3-vector v)
+// ⚠ 同 eulerToRotation: 当前无调用方 (重力的唯一去处已改成共享函数), 保留未删。
 static void matTransposeMulVec(const double M[9], const double v[3], double out[3]) {
     out[0] = M[0] * v[0] + M[3] * v[1] + M[6] * v[2];
     out[1] = M[1] * v[0] + M[4] * v[1] + M[7] * v[2];
@@ -238,15 +243,14 @@ void step(AppState::ForceData& fd, const double poseRxyz[6]) {
 
     if (!calib) return; // setCalibration cleared calibration mid-flight
 
-    // 4. Compute rotation matrix from Euler angles
-    double R[9];
-    eulerToRotation(poseRxyz[3], poseRxyz[4], poseRxyz[5], R);
-
-    // 5. Gravity in tool frame: g_tool = R^T * (0, 0, +9.81)
-    //    (sensor sees positive Z when supporting a hanging tool)
-    double gBase[3] = {0.0, 0.0, 9.81};
+    // 4-5. Gravity in the SENSOR frame: g_tool = Rz(-psi)·Rᵀ·(0, 0, +9.81)
+    //    (sensor sees positive Z when supporting a hanging tool).
+    //    含传感器相对法兰的安装偏转角 psi —— 与负载求解 (PayloadCalibration) 共用
+    //    TcpCalibration::gravitySensorFrame 这【唯一一份】实现。这里从前自己算过
+    //    matTransposeMulVec(eulerToRotation(...), (0,0,9.81)), 与求解器各写一遍约定;
+    //    两份一旦漂移就是"安静地解错" (残差不会爆掉, 只会缓慢漂移)。别在这里再展开乘一遍。
     double gTool[3];
-    matTransposeMulVec(R, gBase, gTool);
+    TcpCalibration::gravitySensorFrame(poseRxyz, gTool);
 
     // Gravity force: sensor reads +m*g support force when tool hangs
     // (same direction as gTool — not a reaction force)

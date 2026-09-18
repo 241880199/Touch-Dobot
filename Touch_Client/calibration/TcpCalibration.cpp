@@ -1,4 +1,5 @@
 #include "TcpCalibration.h"
+#include "../config/Config.h"
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -33,6 +34,33 @@ namespace TcpCalibration {
         R[6] = -sry;
         R[7] = cry*srx;
         R[8] = cry*crx;
+    }
+
+    // 重力在【传感器系】下的表示 —— 力补偿与负载求解【共用】的唯一一份实现。
+    // 推导与符号约定见头文件; 一句话: 参考系是法兰系 (GetPose 的 RPY), 传感器系 = 法兰系
+    // 绕 z 转 +psi, 所以同一矢量在传感器系里的坐标 = Rz(-psi)·(法兰系坐标)。
+    void gravitySensorFrame(const double pose[6], double g[3]) {
+        double R[9];
+        rpyToMatrix(pose[3], pose[4], pose[5], R);
+
+        // 重力在【法兰系】的表示 g0 = Rᵀ·(0,0,G)。
+        // (Rᵀ·v)[i] = Σ_k R[k*3+i]·v[k], 对 v=(0,0,G) 只剩 k=2 一项 → 取 R 的第三行 R[6..8]。
+        // ⚠ 取 R[2],R[5],R[8] (第三列) 等于 R·(0,0,G), 与 Rᵀ 差一个转置 —— 历史上就错在这里,
+        //    转置后仍与真值相关、残差不会爆掉, 只会安静地解错, 所以别凭"看着像"改。
+        const double G = 9.81;
+        const double g0x = R[6] * G;
+        const double g0y = R[7] * G;
+        const double g0z = R[8] * G;
+
+        // Rz(-psi) = [[ cos, sin, 0], [-sin, cos, 0], [0, 0, 1]]  (psi > 0 = 传感器系相对法兰
+        // 系逆时针偏转这么多; 2026-09-18 实机数据给出 psi ≈ +79°, Config 里先取 90°)。
+        const double D2R = 3.14159265358979323846 / 180.0;
+        const double psi = Config::SENSOR_MOUNT_YAW_DEG * D2R;
+        const double cpsi = cos(psi), spsi = sin(psi);
+
+        g[0] =  cpsi * g0x + spsi * g0y;
+        g[1] = -spsi * g0x + cpsi * g0y;
+        g[2] =  g0z;                       // z 不受绕 z 的偏转影响 —— 这正是"零第三行/列"的特征
     }
 
     void apply(const double pose[6], const double toolOffset[3], double tipOut[3]) {

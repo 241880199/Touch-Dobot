@@ -12,7 +12,8 @@
 //   "一份要下发给机械臂的绝对负载", 而是【残余量】: Result::dm / Result::dp, 由调用方交给
 //   ForceCompensation 在本地减掉 (见 Result 的说明)。切不可再把它当成"下发绝对参数"的标定。
 //
-// 模型 (工具系; g_i = R_iᵀ·(0,0,9.81) 是重力在工具系的表示):
+// 模型 (传感器系; g_i = TcpCalibration::gravitySensorFrame(pose_i) 是重力在传感器系的表示 ——
+// 含传感器相对法兰的安装偏转角, 与 ForceCompensation::step 共用同一份实现, 别在此另写一份):
 //   raw_F_i = b_F + Δm · g_i
 //   raw_M_i = b_M + Δp × g_i
 // 其中 Δm = m_true − m_cfg, Δp = m_true·c_true − m_cfg·c_cfg。
