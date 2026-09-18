@@ -161,7 +161,7 @@ namespace CalibStore {
     //   ...\Touch_Client\x64\Release\Touch_Client.exe → ...\Touch_Client\calib\
     // 只有整个路径一个分隔符都没有时才返回 false (out 内容未定义)。
     // 注: "最多两级" 是评审时明确的契约 —— 原计划写的是"不足两级即 false",
-    //     与 derives_dir_shallow 用例矛盾; 已裁决以测试为准。
+    //     与 test_derive_dir_shallow 用例矛盾; 已裁决以测试为准。
     bool deriveDir(const char* exePath, char* out, size_t outSize);
 
     // 标定目录绝对路径, 结尾带反斜杠。不存在时创建。进程内缓存。
@@ -633,27 +633,44 @@ Expected: `11 passed, 0 failed`
 
 - [ ] **Step 9: 编译并人工验证**
 
-先确认客户端没在跑：
+> ⚠ 这一步要验的是**两条不同的路径**：「目录里没有文件」（静默）和「文件过期」（告警 + 改名）。
+> 只启动一次是验不全的 —— `calib\` 初始为空，走的是静默分支，**不会**打任何 `[Calib] !!`。
+
+先确认客户端没在跑（否则链接报 `LNK1168`，不要去 kill 它）：
 ```bash
 tasklist //FI "IMAGENAME eq Touch_Client.exe"
 ```
 Run: `cmd.exe /c "D:\Projects\Touch\Touch_Client\build.bat"`
 Expected: `Build OK.`
 
-然后启动一次并确认目录被创建、旧文件被判过期：
+**9a. 空目录 -> 静默回退**
+
+此时 `Touch_Client\calib\` 还不存在。启动：
 ```bash
 cmd.exe /c "D:\Projects\Touch\Touch_Client\x64\Release\Touch_Client.exe" < /dev/null
 ```
-Expected 输出中出现：
+Expected:
+- `[Payload] 无可用 payload_calib.json — 用种子值 …`
+- **不出现任何 `[Calib] !!` 行**（"首次启动没有标定文件"是正常情况，按设计静默）
+- `ls -la Touch_Client/calib/` → 目录已创建且为空
+
+**9b. 过期文件 -> 告警 + 改名**
+
+往 `calib\` 放两份**没有 `saved_at_unix` 的旧格式文件**，模拟从旧版本升级上来：
+
+```bash
+cp Touch_Client/payload_calib.json Touch_Client/calib/payload_calib.json
+printf '{ "version": 2, "mass_kg": 0.5, "bias_force_n": [0,0,0], "bias_torque_nm": [0,0,0] }\n' > Touch_Client/calib/force_calib.json
+```
+
+（`Touch_Client/payload_calib.json` 本来就没有 `saved_at_unix` 字段，直接拷即可。）
+
+再启动一次。Expected:
 - `[Calib] !! payload_calib.json 已作废 — 缺少 saved_at_unix 时间戳`
 - `[Calib] !! force_calib.json 已作废 — 缺少 saved_at_unix 时间戳`
 - `[Payload] 无可用 payload_calib.json — 用种子值 …`
-
-并确认 `Touch_Client\calib\` 目录已创建：
-```bash
-ls -la Touch_Client/calib/
-```
-Expected: 目录存在，内含 `payload_calib.json.expired`、`force_calib.json.expired`。
+- `[Force] 无可用 force_calib.json — 按 'z' 调零。`
+- `ls Touch_Client/calib/` → 只剩 `payload_calib.json.expired`、`force_calib.json.expired`（原文件已消失）
 
 - [ ] **Step 10: 提交**
 
