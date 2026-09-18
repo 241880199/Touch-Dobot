@@ -304,7 +304,60 @@ namespace BiasCheck {
         printf("             修正 (%+.1f, %+.1f, %+.1f) mm\n", r.dc[0], r.dc[1], r.dc[2]);
         printf("             下发 (%.1f, %.1f, %.1f) mm\n", r.comMm[0], r.comMm[1], r.comMm[2]);
         printf("  拟合残差: 力 %.4f N   力矩 %.4f N·m\n", r.rmsForceN, r.rmsMomentNm);
+
+        // ===== 合理性评估 =====
+        // 只给数字不够。出过一次事故: 求解器的重力约定写成了转置, 拟合残差 0.914 N
+        // (比正常高 15 倍) 却照样落盘并下发 —— 全程没有一处提示"这个结果不可信",
+        // 操作者只能靠复验时的大残差反推, 白跑一轮实机。
+        // 阈值来自实机实测: 约定正确时拟合残差 ~0.06 N, 约定反了 ~0.9 N。
+        const double RMS_F_GOOD = 0.10;   // N — 到这个量级才说明模型与数据一致
+        const double RMS_F_MAX  = 0.30;   // N — 超过就拒绝落盘 (与 report() 的 PASS 判据一致)
+        const double MASS_JUMP  = 0.30;   // 质量修正超过当前值 30% 就提示复核
+        const bool   fitGood    = (r.rmsForceN < RMS_F_GOOD);
+        const bool   fitOk      = (r.rmsForceN < RMS_F_MAX);
+        const double dMassFrac  = (mCfg > 1e-6) ? fabs(r.dm) / mCfg : 1.0;
+        const bool   massJump   = (dMassFrac > MASS_JUMP);
+        const bool   comZOk     = (r.comMm[2] > 0.0);   // 工具挂在法兰下方 → 质心 Z 应为正
+        const double comXY      = sqrt(r.comMm[0] * r.comMm[0] + r.comMm[1] * r.comMm[1]);
+
         std::cout << "------------------------------------------------------" << std::endl;
+        std::cout << "  合理性评估:" << std::endl;
+        if (fitGood) {
+            printf("    ✓ 拟合残差 %.4f N ≈ 噪声本底 (< %.2f N) — 模型与数据一致\n",
+                   r.rmsForceN, RMS_F_GOOD);
+        } else if (fitOk) {
+            printf("    ⚠ 拟合残差 %.4f N 可用但不够干净 (理想 < %.2f N) — 建议复验确认\n",
+                   r.rmsForceN, RMS_F_GOOD);
+        } else {
+            printf("    ✗ 拟合残差 %.4f N 远高于噪声本底 (阈值 %.2f N)"
+                   " — 模型解释不了这批数据\n", r.rmsForceN, RMS_F_MAX);
+        }
+        if (massJump) {
+            printf("    ⚠ 质量修正 %+.3f kg = 当前值的 %+.0f%% — 幅度大,"
+                   " **上秤称工具链实际总重复核**\n", r.dm, dMassFrac * 100.0);
+        } else {
+            printf("    ✓ 质量修正 %+.3f kg = 当前值的 %+.0f%% — 幅度正常\n",
+                   r.dm, dMassFrac * 100.0);
+        }
+        if (comZOk) {
+            printf("    ✓ 质心 Z = %+.1f mm 在法兰下方, 偏心 |XY| = %.1f mm\n",
+                   r.comMm[2], comXY);
+        } else {
+            printf("    ⚠ 质心 Z = %+.1f mm 为负 — 工具挂在法兰下方, 应为正;"
+                   " 符号约定可疑\n", r.comMm[2]);
+        }
+
+        std::cout << "------------------------------------------------------" << std::endl;
+        if (!fitOk) {
+            std::cout << "  判定: ✗ 不可信 — 已【拒绝保存和下发】, 机械臂负载参数保持原值"
+                      << std::endl;
+            std::cout << "    最可能: CZ 符号约定反了 → 按 'i' 翻转 → 重新 'm' 采集 → 's'"
+                      << std::endl;
+            std::cout << "    其它可能: 采集时机械臂没停稳 / 姿态覆盖不足 / 位姿与力数据不同步"
+                      << std::endl;
+            std::cout << std::endl;
+            return;
+        }
 
         PayloadCalibration::applyResult(r);
         if (!PayloadCalibration::save("payload_calib.json")) {
@@ -313,9 +366,16 @@ namespace BiasCheck {
             std::cout << "  已保存 payload_calib.json (下次启动自动加载)" << std::endl;
         }
         RelayCore::instance().applyPayloadToRobot();
-        std::cout << "  → 请再按 'm' 采 3~4 个姿态【复验】, 看残差是否掉到噪声本底" << std::endl;
-        std::cout << "    若残差反而变大 → 说明机械臂解释 CZ 的符号与我们假设相反:" << std::endl;
-        std::cout << "      按 'i' 翻转符号约定 → 重新 'm' 采集 → 再按 's' 求解" << std::endl;
+
+        // 这批姿态是在【旧负载】下采的, 拿来复验新参数只会得出"FAIL"的假象
+        // (曾经就是这样: 求解残差 0.06 N, 紧接着的报告却报 4.0 N)。
+        // 直接清掉, 逼着重新采集 —— 复验必须用新负载下采的数据。
+        reset();
+        std::cout << "  已清空本次采集数据 (旧负载下采的, 不能用于复验)" << std::endl;
+        std::cout << "  → 保持 'm' 模式, 直接摆姿态按 SPACE 重新采 3~4 个【复验】,"
+                  << " 再看跨姿态极差" << std::endl;
+        std::cout << "    若残差反而变大 → 说明机械臂解释 CZ 的符号与我们假设相反:"
+                  << " 按 'i' 翻转 → 重新采集 → 再 's'" << std::endl;
         std::cout << std::endl;
     }
 }
