@@ -17,7 +17,6 @@ namespace PayloadCalibration {
     double rmsMomentNm = 0.0;
     int    poses = 0;
     double comSignZ = 1.0;
-    double forcedSignZ = 0.0;
 
     static const double G = 9.81;     // m/s²
     static const int    MIN_POSES = 3;   // 4 个未知量, 每个姿态贡献 6 个方程; 3 个起解
@@ -134,12 +133,10 @@ namespace PayloadCalibration {
 
         double sChosen = signZ;
         bool   ambiguous = false;
-        if (forcedSignZ != 0.0) {
-            sChosen = forcedSignZ;                  // 人工覆盖优先
-        } else if (plusOk != minusOk) {
+        if (plusOk != minusOk) {
             sChosen = plusOk ? 1.0 : -1.0;          // 恰好一个物理 -> 选它
         } else {
-            ambiguous = true;                        // 都合理或都不合理 -> 沿用传入值
+            ambiguous = true;                        // 都合理或都不合理 -> 程序判不了
         }
 
         double cEff[3] = {comCfg[0], comCfg[1], comCfg[2] * sChosen};
@@ -192,16 +189,6 @@ namespace PayloadCalibration {
             comMmOut[1] = Config::ROBOT_PAYLOAD_SEED_CY_MM;
             comMmOut[2] = Config::ROBOT_PAYLOAD_SEED_CZ_MM;
         }
-    }
-
-    // 'i': 强制使用与当前约定相反的符号。求解器下次解算时不再自动判定。
-    // 一批新采集开始时 (BiasCheck::reset) 会清回自动判定。
-    void flipComSignZ() {
-        forcedSignZ = (comSignZ >= 0.0) ? -1.0 : 1.0;
-    }
-
-    void clearForcedSignZ() {
-        forcedSignZ = 0.0;
     }
 
     void applyResult(const Result& r) {

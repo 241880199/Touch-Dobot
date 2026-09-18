@@ -137,7 +137,6 @@ static void test_auto_picks_physical_sign() {
     double F[NP][3], M[NP][3];
     synthesize(0.409, cTrue, 0.660, cCfg, +1.0, F, M);   // 机械臂按 +1 解释
 
-    PayloadCalibration::forcedSignZ = 0.0;
     PayloadCalibration::Result r;
     // 故意传入【错误】的 signZ=-1, 自动判定应当把它纠正回 +1
     CHECK(PayloadCalibration::solve(g_poses, F, M, NP, 0.660, cCfg, -1.0, r));
@@ -146,22 +145,6 @@ static void test_auto_picks_physical_sign() {
     CHECK(r.cTrueZ[0] > 0.0);      // 候选 +1: 法兰下方, 物理
     CHECK(r.cTrueZ[1] < 0.0);      // 候选 -1: 法兰上方, 非物理
     CHECK(fabs(r.comMm[2] - 67.9) < 1e-6);
-    PASS();
-}
-
-// forcedSignZ 覆盖自动判定 ('i' 键的兜底路径)
-static void test_forced_sign_overrides_auto() {
-    TEST(forced_sign_overrides_auto);
-    double cTrue[3] = {0.3, 0.3, 67.9};
-    double cCfg[3]  = {0.0, 0.0, 80.4};
-    double F[NP][3], M[NP][3];
-    synthesize(0.409, cTrue, 0.660, cCfg, +1.0, F, M);
-
-    PayloadCalibration::forcedSignZ = -1.0;
-    PayloadCalibration::Result r;
-    CHECK(PayloadCalibration::solve(g_poses, F, M, NP, 0.660, cCfg, -1.0, r));
-    CHECK(fabs(r.signZ - (-1.0)) < 1e-12);
-    PayloadCalibration::forcedSignZ = 0.0;   // 复位, 别污染后面的用例
     PASS();
 }
 
@@ -262,8 +245,7 @@ static void test_save_load_roundtrip() {
     r.comMm[0] = 0.0; r.comMm[1] = 0.0; r.comMm[2] = 80.4;
     r.rmsForceN = 0.021; r.rmsMomentNm = 0.0013; r.poses = 6;
 
-    // applyResult() 现在用求解器选定的 signZ 覆写 comSignZ, 所以这里直接给 r.signZ。
-    // (flipComSignZ() 已改为只设 forcedSignZ, 不再立即影响 comSignZ。)
+    // applyResult() 用求解器选定的 signZ 覆写 comSignZ, 所以这里直接给 r.signZ。
     r.signZ = -1.0;                              // → comSignZ = -1
     PayloadCalibration::applyResult(r);
     CHECK(PayloadCalibration::save(path));
@@ -332,7 +314,6 @@ int main() {
     test_recovers_from_nonzero_config();
     test_sign_convention();
     test_auto_picks_physical_sign();
-    test_forced_sign_overrides_auto();
     test_second_pass_converges();
     test_noise_robustness();
     test_rejects_too_few_poses();

@@ -97,6 +97,10 @@ namespace Config {
     // 超过这个时长的标定一律作废, 启动时要求重新标定。
     const long CALIB_MAX_AGE_SEC = 24 * 3600;   // 24 小时
 
+    // 连续多少次"结果不合理"就打红字错误并停止接受求解。
+    // 防的是操作者反复按 's' 却每次被拒的空转 —— 那种情况下问题在硬件/采集, 不在求解器。
+    const int CALIB_MAX_CONSECUTIVE_FAILS = 3;
+
     // ========== 力补偿运行时参数 ==========
     const double FORCE_MOTION_VEL_THRESH_MS = 0.002;      // 静止判定: 速度阈值 (m/s)
     const double FORCE_MOTION_ACC_THRESH_MSS = 0.005;     // 静止判定: 加速度阈值 (m/s²)

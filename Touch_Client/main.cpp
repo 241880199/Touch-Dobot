@@ -59,13 +59,17 @@ namespace BiasCheck {
     static double bias[MAX_POSES][6];    // 该姿态平均 raw 力/力矩
 
     // 数据只有在「机械臂配置 == 采集时的配置」时才可用于复验。
-    // 求解下发了新负载 -> 已采数据作废 (拒绝 report 判定);
-    // 但同一批数据在不同符号约定下的【重解释】始终合法 ('i' 键), 那时不改机械臂配置。
+    // 求解下发了新负载 -> 已采数据作废 (拒绝 report 判定)。
     static bool dataUnderCurrentPayload = true;
+
+    // 连续多少次求解被判"不合理"。达到 Config::CALIB_MAX_CONSECUTIVE_FAILS 后锁住 's'。
+    static int  consecutiveFails = 0;
+    static bool solveLocked = false;
 
     static void reset() {
         dataUnderCurrentPayload = true;
-        PayloadCalibration::clearForcedSignZ();   // 新一批采集 -> 恢复符号自动判定
+        consecutiveFails = 0;
+        solveLocked = false;
         count = 0;
         sampling = false;
         avgCount = 0;
@@ -89,12 +93,11 @@ namespace BiasCheck {
             return;
         }
         // 上一批数据是在旧负载下采的 -> 从这里开始算新一批, 旧的全部丢弃
+        // 复用 reset(), 免得将来 reset() 加了字段而这里漏跟。
         if (!dataUnderCurrentPayload) {
             std::cout << "[BIAS] 上一批数据是在旧负载下采的, 已丢弃 — 开始新一批采集"
                       << std::endl;
-            count = 0;
-            dataUnderCurrentPayload = true;
-            PayloadCalibration::clearForcedSignZ();
+            reset();
         }
         if (count >= MAX_POSES) {
             std::cout << "[BIAS] 已达 " << MAX_POSES << " 个姿态, 按 'm' 输出报告" << std::endl;
@@ -278,6 +281,13 @@ namespace BiasCheck {
 
     // 's': 用已采数据最小二乘求解负载参数 → 落盘 → 重新下发 EnableRobot
     static void solveAndApply() {
+        if (solveLocked) {
+            std::cout << "\n[BIAS] !! 已连续 " << consecutiveFails << " 次判定结果不合理, 已停止求解。\n"
+                      << "       [BIAS] !! 问题多半不在求解器 —— 请检查: 机械臂装夹是否松动 / "
+                      << "力传感器是否受挤压 / 姿态覆盖是否足够。\n"
+                      << "       [BIAS] !! 处理后按 'm' 重新采集 (计数会清零)。" << std::endl;
+            return;
+        }
         if (count < 4) {
             std::cout << "[BIAS] 求解至少需要 4 个姿态 (当前 " << count
                       << "), 建议 6~8 个" << std::endl;
@@ -318,7 +328,7 @@ namespace BiasCheck {
         std::cout << "\n======================================================" << std::endl;
         std::cout << "  负载参数求解结果 (" << r.poses << " 个姿态, CZ 符号约定 "
                   << (r.signZ > 0 ? "+1" : "-1")
-                  << (r.signAmbiguous ? " ⚠ 歧义, 沿用旧约定" : " (自动判定)") << ")" << std::endl;
+                  << (r.signAmbiguous ? " ⚠ 判不出" : " (自动判定)") << ")" << std::endl;
         std::cout << "======================================================" << std::endl;
         printf("  质量:    当前 %.3f kg   →  修正 %+.3f kg   →   %.3f kg\n",
                mCfg, r.dm, r.massKg);
@@ -342,65 +352,69 @@ namespace BiasCheck {
         printf("    · 候选 -1: 物理质心 Z = %+.1f mm  %s\n",
                r.cTrueZ[1], r.cTrueZ[1] > 0 ? "✓ 法兰下方" : "✗ 法兰上方 (非物理)");
         if (r.signAmbiguous) {
-            std::cout << "    (若结果不对, 按 'i' 强制用另一个符号)" << std::endl;
+            std::cout << "    (两个候选都在同一侧, 程序判不出符号 —— 结果按不合理处理)"
+                      << std::endl;
         }
 
-        // ===== 合理性评估 =====
-        // 只给数字不够。出过一次事故: 求解器的重力约定写成了转置, 拟合残差 0.914 N
-        // (比正常高 15 倍) 却照样落盘并下发 —— 全程没有一处提示"这个结果不可信",
-        // 操作者只能靠复验时的大残差反推, 白跑一轮实机。
-        // 阈值来自实机实测: 约定正确时拟合残差 ~0.06 N, 约定反了 ~0.9 N。
+        // ===== 合理性判据 =====
+        // 任一命中即"不合理" -> 拒绝保存和下发, 机械臂保持原参数。
+        // 绝不拿一个程序自己都判定为不可信的结果去配置机械臂。
         const double RMS_F_GOOD = 0.10;   // N — 到这个量级才说明模型与数据一致
-        const double RMS_F_MAX  = 0.30;   // N — 超过就拒绝落盘 (与 report() 的 PASS 判据一致)
-        const double MASS_JUMP  = 0.30;   // 质量修正超过当前值 30% 就提示复核
-        const bool   fitGood    = (r.rmsForceN < RMS_F_GOOD);
-        const bool   fitOk      = (r.rmsForceN < RMS_F_MAX);
-        const double dMassFrac  = (mCfg > 1e-6) ? fabs(r.dm) / mCfg : 1.0;
-        const bool   massJump   = (dMassFrac > MASS_JUMP);
-        // 判据必须看【物理】质心: cSend = cTrue/signZ 在两种符号下都可能是正的,
-        // 拿下发值判会在 signZ=-1 时把正确结果误报成"符号可疑"。
+        const double RMS_F_MAX  = 0.30;   // N — 超过即不合理 (实机: 约定对 ~0.06, 错 ~0.9)
+        const bool   fitGood = (r.rmsForceN < RMS_F_GOOD);
+        const bool   fitOk   = (r.rmsForceN < RMS_F_MAX);
+        // 物理质心 (不是下发值): cSend = cTrue/signZ 在两种符号下都可能是正的
         const double cTrueZChosen = r.cTrueZ[r.signZ > 0.0 ? 0 : 1];
-        const bool   comZOk       = (cTrueZChosen > 0.0);   // 工具挂在法兰下方 → 质心 Z 应为正
-        const double comXY      = sqrt(r.comMm[0] * r.comMm[0] + r.comMm[1] * r.comMm[1]);
+        const bool   signOk = !r.signAmbiguous;     // 程序必须能判出符号
+        const bool   comZOk = (cTrueZChosen > 0.0); // 工具挂在法兰下方 -> 质心 Z 必须为正
+        const double comXY  = sqrt(r.comMm[0] * r.comMm[0] + r.comMm[1] * r.comMm[1]);
+        const bool   reasonable = fitOk && signOk && comZOk;
 
         std::cout << "------------------------------------------------------" << std::endl;
-        std::cout << "  合理性评估:" << std::endl;
+        std::cout << "  合理性评估 (三条判据, 任一不满足即拒绝下发):" << std::endl;
         if (fitGood) {
-            printf("    ✓ 拟合残差 %.4f N ≈ 噪声本底 (< %.2f N) — 模型与数据一致\n",
-                   r.rmsForceN, RMS_F_GOOD);
+            printf("    ✓ 拟合残差 %.4f N ≈ 噪声本底 (< %.2f N)\n", r.rmsForceN, RMS_F_GOOD);
         } else if (fitOk) {
-            printf("    ⚠ 拟合残差 %.4f N 可用但不够干净 (理想 < %.2f N) — 建议复验确认\n",
-                   r.rmsForceN, RMS_F_GOOD);
+            printf("    ✓ 拟合残差 %.4f N 在容许范围内 (< %.2f N)\n", r.rmsForceN, RMS_F_MAX);
         } else {
-            printf("    ✗ 拟合残差 %.4f N 远高于噪声本底 (阈值 %.2f N)"
-                   " — 模型解释不了这批数据\n", r.rmsForceN, RMS_F_MAX);
+            printf("    ✗ 拟合残差 %.4f N 超过阈值 %.2f N — 模型解释不了这批数据\n",
+                   r.rmsForceN, RMS_F_MAX);
         }
-        if (massJump) {
-            printf("    ⚠ 质量修正 %+.3f kg = 当前值的 %+.0f%% — 幅度大,"
-                   " **上秤称工具链实际总重复核**\n", r.dm, dMassFrac * 100.0);
+        if (signOk) {
+            printf("    ✓ 符号可判定 (候选 +1: %+.1f mm, 候选 -1: %+.1f mm)\n",
+                   r.cTrueZ[0], r.cTrueZ[1]);
         } else {
-            printf("    ✓ 质量修正 %+.3f kg = 当前值的 %+.0f%% — 幅度正常\n",
-                   r.dm, dMassFrac * 100.0);
+            printf("    ✗ 符号无法判定 — 两个候选都在同一侧 (+1: %+.1f mm, -1: %+.1f mm)\n",
+                   r.cTrueZ[0], r.cTrueZ[1]);
         }
         if (comZOk) {
             printf("    ✓ 物理质心 Z = %+.1f mm 在法兰下方 (下发 %+.1f mm), 偏心 |XY| = %.1f mm\n",
                    cTrueZChosen, r.comMm[2], comXY);
         } else {
-            printf("    ⚠ 物理质心 Z = %+.1f mm 为负 — 工具挂在法兰下方, 应为正;"
-                   " 符号约定可疑\n", cTrueZChosen);
+            printf("    ✗ 物理质心 Z = %+.1f mm 不在法兰下方 — 工具装夹或符号有问题\n",
+                   cTrueZChosen);
         }
 
         std::cout << "------------------------------------------------------" << std::endl;
-        if (!fitOk) {
-            std::cout << "  判定: ✗ 不可信 — 已【拒绝保存和下发】, 机械臂负载参数保持原值"
+        if (!reasonable) {
+            consecutiveFails++;
+            std::cout << "  判定: ✗ 不合理 — 已【拒绝保存和下发】, 机械臂负载参数保持原值 (第 "
+                      << consecutiveFails << " 次)" << std::endl;
+            std::cout << "  → 请按 'm' 重新采集 (姿态跨度≥30°, 笔要有水平/朝上的姿态), 再按 's'"
                       << std::endl;
-            std::cout << "    最可能: CZ 符号约定反了 → 按 'i' 翻转 → 重新 'm' 采集 → 's'"
-                      << std::endl;
-            std::cout << "    其它可能: 采集时机械臂没停稳 / 姿态覆盖不足 / 位姿与力数据不同步"
-                      << std::endl;
+            if (consecutiveFails >= Config::CALIB_MAX_CONSECUTIVE_FAILS) {
+                solveLocked = true;
+                std::cout << std::endl;
+                std::cout << "  [BIAS] !! 已连续 " << consecutiveFails << " 次不合理, 停止求解。"
+                          << std::endl;
+                std::cout << "  [BIAS] !! 问题多半不在求解器 —— 请检查: 机械臂装夹是否松动 / "
+                          << "力传感器是否受挤压 / 姿态覆盖是否足够。" << std::endl;
+                std::cout << "  [BIAS] !! 处理后按 'm' 重新采集 (计数会清零)。" << std::endl;
+            }
             std::cout << std::endl;
             return;
         }
+        consecutiveFails = 0;   // 成功一次即清零
 
         PayloadCalibration::applyResult(r);
         if (!PayloadCalibration::save(CalibStore::fileFor("payload_calib.json"))) {
@@ -410,16 +424,12 @@ namespace BiasCheck {
         }
         RelayCore::instance().applyPayloadToRobot();
 
-        // 这批姿态是在【旧负载】下采的。下发新负载之后:
-        //   - 复验 (report) 必须拒绝它们, 否则会拿旧数据骂新参数 (曾经报出假 FAIL:
-        //     求解残差 0.06 N, 紧接着的报告却报 |ΔF| = 4.0 N);
-        //   - 但 'i' 的【重解释】仍然合法 —— 那不改机械臂配置, 只是换个符号看同一批
-        //     测量, 不能把数据清掉 (清了 'i' 就没得重解了)。
+        // 这批姿态是在【旧负载】下采的。下发新负载之后复验 (report) 必须拒绝它们,
+        // 否则会拿旧数据骂新参数 (曾经报出假 FAIL: 求解残差 0.06 N,
+        // 紧接着的报告却报 |ΔF| = 4.0 N)。
         dataUnderCurrentPayload = false;
         std::cout << "  → 复验: 摆姿态按 SPACE 采集 (第一次 SPACE 会自动开新一批,"
                   << " 旧数据作废)" << std::endl;
-        std::cout << "    若复验残差反而变大 → 按 'i' 用同一批数据换符号重解,"
-                  << " **不必重新采集**" << std::endl;
         std::cout << std::endl;
     }
 }
@@ -682,7 +692,8 @@ void keyboard(unsigned char key, int, int) {
                       << " 每到一个姿态按 SPACE (采样 1s)\n"
                       << "       'd' 拖拽模式开关 (摆姿态用; 摆好一定要关掉再采样) /"
                       << " 'm' 退出并输出报告\n"
-                      << "       's' 求解负载参数并下发 / 'i' 翻转 CZ 符号约定" << std::endl;
+                      << "       's' 求解负载参数并下发 (符号与合理性由程序自动判定)"
+                      << std::endl;
         } else {
             BiasCheck::mode = false;
             // 别把柔顺状态带出模式
@@ -728,16 +739,6 @@ void keyboard(unsigned char key, int, int) {
 
     // 's' in BiasCheck mode: 求解负载参数 → 落盘 → 重新下发
     if ((key == 's' || key == 'S') && BiasCheck::mode) {
-        BiasCheck::solveAndApply();
-        return;
-    }
-
-    // 'i' in BiasCheck mode: 翻转 CZ 符号约定 (求解发散时用)
-    if ((key == 'i' || key == 'I') && BiasCheck::mode) {
-        PayloadCalibration::flipComSignZ();
-        std::cout << "[BIAS] 强制 CZ 符号约定 → "
-                  << (PayloadCalibration::forcedSignZ > 0 ? "+1" : "-1")
-                  << " — 用同一批数据重解 (不需要重新采集)" << std::endl;
         BiasCheck::solveAndApply();
         return;
     }
