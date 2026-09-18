@@ -359,6 +359,7 @@ namespace BiasCheck {
         double rProbe[2] = {0.0, 0.0};
         int    chosen = -1;
         bool   probeOk = true;
+        bool   converged = false;   // 已收敛: 配置本身就解释得了数据, 探针无可裁决 (见下)
         // 符号定不了案时, 下面的判据屏必须说出【真实原因】。一共三条路: 倾角不足 /
         // 探针没取到读数 / 取到了但两个候选分不开。别再把它们都说成"两个候选在同一侧"
         // —— 两个候选永远是一对相反的解释, 不会同侧。
@@ -384,7 +385,38 @@ namespace BiasCheck {
                 probeOk = false;
             }
         }
+        // ===== 收敛短路: 当前配置本身就解释得了这批数据 =====
+        // 两个候选的下发值只差 2·dp/m_true (dp = p_true − p_cfg, 见 solve() 的换算):
+        // 配置越接近真值, 两个候选越重合, 探针量到的差 → 0 → margin 与 ratio 双双不过,
+        // 于是【"配置已经对了"】被报成"实测分不开" —— 连报几次就锁死 's'。刚标定完再按
+        // 一次 's' 正好踩在这个坑里: 机器说"测量失败", 其实已经没什么可改的了。
+        // 输的那个候选留下的力矩误差 ≈ 2·|dp|·g·sinθ (见 Config.h 的门限推导); 它小于
+        // 差值门限, 就说明【在本姿态下】两个候选的差压不过门限, 探针跑不跑都是同一个结局。
+        //   sepNm = r.massKg·|Δc_z|/1000·g·sinθ = m_true·(2|dp|/m_true)·g·sinθ = 2|dp|g·sinθ
+        // 所以短路掉探针 (省掉两次使能口往返 + 两个 400ms 采样窗), 并且【不计失败】。
+        // 【为什么必须放在倾角门限之后】sepNm 里带 sinθ: 倾角越小, 同一个 dp 算出来的 sepNm
+        // 也越小。若放在门限之前, 一个"符号错了 / 配置差得远"的机台只要姿态没摆好, 就会被
+        // 误判成"已收敛" —— 那才是真的把失败藏起来。放在门限之后, sinθ >= 0.7 有下界,
+        // 短路只在 |dp| <= 0.2/(2×9.81×0.7) = 0.0146 kg·m 时才触发, 这个量级探针本来就
+        // 判不出来 (判据同源: 同一个门限, 同一个姿态)。
         if (probeOk) {
+            const double sepNm = r.massKg * fabs(r.comCand[1][2] - r.comCand[0][2])
+                                 / 1000.0 * 9.81 * sinTheta;
+            if (sepNm < Config::SIGN_PROBE_MIN_MARGIN_NM) {
+                converged = true;
+                // 两个候选分不开, 也就【没有可选项】: 沿用当前符号约定 (chosen 只决定
+                // 存哪个符号, 不决定改多少 —— 两个候选的下发值本来就几乎一样)。
+                chosen = (PayloadCalibration::comSignZ < 0.0) ? 1 : 0;
+                printf("  ✓ 已收敛: 当前配置与数据一致 — 两个候选相差 %.4f N·m (< %.2f N·m "
+                       "门限), 无需改配置, 不因\"分不开\"计失败\n",
+                       sepNm, Config::SIGN_PROBE_MIN_MARGIN_NM);
+                std::cout << "    没有可裁决的东西: 两个候选本来就在仪器的分辨极限之内。"
+                          << std::endl;
+                std::cout << "    本次照样保存/下发解出的参数 (质量修正仍会生效), "
+                          << "只是符号沿用当前约定。" << std::endl;
+            }
+        }
+        if (probeOk && !converged) {
             for (int k = 0; k < 2; k++) {
                 if (!RelayCore::instance().probePayloadResidual(r.massKg, r.comCand[k], rProbe[k])) {
                     // probePayloadResidual 的 false 有四种原因: 机械臂未连接、候选下发失败、
@@ -401,7 +433,7 @@ namespace BiasCheck {
                 }
             }
         }
-        if (probeOk) {
+        if (probeOk && !converged) {
             const int    win  = (rProbe[0] <= rProbe[1]) ? 0 : 1;
             const int    lose = 1 - win;
             const double margin  = rProbe[lose] - rProbe[win];
@@ -461,7 +493,13 @@ namespace BiasCheck {
             printf("    ✗ 拟合残差 %.4f N 超过阈值 %.2f N — 模型解释不了这批数据\n",
                    r.rmsForceN, RMS_F_MAX);
         }
-        if (signOk) {
+        if (signOk && converged) {
+            // 这条不等于"实测裁决过" —— 探针压根没跑。收敛态下两个候选的下发值几乎相同,
+            // 符号取值在实测层面不可观测, 沿用当前约定只是为了有一个确定的存盘值。
+            printf("    ✓ 符号: 沿用当前约定 %s — 本次【无实测裁决】(两个候选分不开, "
+                   "选谁都一样; 物理质心 Z +1 → %+.1f mm, -1 → %+.1f mm)\n",
+                   chosen == 0 ? "+1" : "-1", r.cTrueZ[0], r.cTrueZ[1]);
+        } else if (signOk) {
             printf("    ✓ 符号可判定 — 实测裁决 → %s (两候选的物理质心 Z: +1 → %+.1f mm, -1 → %+.1f mm)\n",
                    chosen == 0 ? "+1" : "-1", r.cTrueZ[0], r.cTrueZ[1]);
         } else {
