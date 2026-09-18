@@ -28,6 +28,13 @@ namespace PayloadCalibration {
         double rmsForceN;    // 力通道拟合残差 (N)
         double rmsMomentNm;  // 力矩通道拟合残差 (N·m)
         int    poses;        // 参与求解的姿态数
+
+        // ===== CZ 符号自动判定 =====
+        // signZ 不进 buildRows, 所以两种符号的拟合残差完全相同 —— 数据本身
+        // 区分不了符号, 必须用外部判据: 工具挂在法兰下方 → 物理质心 Z 必须为正。
+        double signZ;          // 实际选用的符号约定 (+1 / -1)
+        double cTrueZ[2];      // {候选+1, 候选-1} 下的物理质心 Z (mm), 供人复核
+        bool   signAmbiguous;  // 两个候选都合理或都不合理 → 沿用传入的 signZ
     };
 
     // 纯函数: 最小二乘求解。无全局状态, 便于单测。
@@ -54,11 +61,18 @@ namespace PayloadCalibration {
     extern int    poses;
     extern double comSignZ;      // 机械臂解释 CZ 的符号约定 (+1 / -1), 随文件持久化
 
+    // 手动强制符号约定: 0 = 自动判定 (默认), ±1 = 强制。
+    // 'i' 键设置它; 开始新一批采集时清回 0。
+    extern double forcedSignZ;
+
     // 当前应当下发给机械臂的负载参数: 已标定则用标定值, 否则回退 Config 种子
     void effective(double& massKgOut, double comMmOut[3]);
 
     // 翻转 CZ 符号约定 (由硬件实测判定; 翻转后需重新采集再求解)
     void flipComSignZ();
+
+    // 恢复自动判定 (开始新一批采集时调用)
+    void clearForcedSignZ();
 
     // 用求解结果覆写生效值 (仅内存)
     void applyResult(const Result& r);

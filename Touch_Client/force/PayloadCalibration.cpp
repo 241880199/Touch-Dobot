@@ -17,6 +17,7 @@ namespace PayloadCalibration {
     double rmsMomentNm = 0.0;
     int    poses = 0;
     double comSignZ = 1.0;
+    double forcedSignZ = 0.0;
 
     static const double G = 9.81;     // m/s²
     static const int    MIN_POSES = 3;   // 4 个未知量, 每个姿态贡献 6 个方程; 3 个起解
@@ -113,12 +114,35 @@ namespace PayloadCalibration {
         double dp[3] = {A[1][4], A[2][4], A[3][4]};   // kg·m
 
         // ===== 换算绝对值 =====
-        // 机械臂实际用的是 c_eff = (c_x, c_y, signZ·c_z), 所以模型里的 p_cfg 要用 c_eff;
-        // 反过来算"该下发什么"时, 也要把 signZ 除回去。
+        // signZ 不进 buildRows, 所以两种符号的拟合残差【完全相同】——
+        // 数据本身区分不了符号, 必须用外部判据。
+        // 判据: 工具挂在法兰下方 → 物理质心 Z 必须为正。
+        // 两个候选相差 2·m_cfg·cz/m_true (本工具链约 259 mm), 一个必然非物理。
         double mTrue = mCfg + dm;
         if (!(mTrue > 0.01) || mTrue > 5.0) return false;   // 非物理
 
-        double cEff[3] = {comCfg[0], comCfg[1], comCfg[2] * signZ};
+        // 注意: 下发值 cSend = cTrue/signZ 在两种符号下都可能是正的,
+        // 所以判据必须看【物理】cTrue, 不能看下发值。
+        double cTrueZ[2];
+        for (int k = 0; k < 2; k++) {
+            const double s = (k == 0) ? 1.0 : -1.0;
+            const double pCfgZ = mCfg * (comCfg[2] * s) / 1000.0;
+            cTrueZ[k] = (pCfgZ + dp[2]) / mTrue * 1000.0;
+        }
+        const bool plusOk  = (cTrueZ[0] > 0.0);
+        const bool minusOk = (cTrueZ[1] > 0.0);
+
+        double sChosen = signZ;
+        bool   ambiguous = false;
+        if (forcedSignZ != 0.0) {
+            sChosen = forcedSignZ;                  // 人工覆盖优先
+        } else if (plusOk != minusOk) {
+            sChosen = plusOk ? 1.0 : -1.0;          // 恰好一个物理 -> 选它
+        } else {
+            ambiguous = true;                        // 都合理或都不合理 -> 沿用传入值
+        }
+
+        double cEff[3] = {comCfg[0], comCfg[1], comCfg[2] * sChosen};
         double pCfg[3] = {mCfg * cEff[0] / 1000.0,
                           mCfg * cEff[1] / 1000.0,
                           mCfg * cEff[2] / 1000.0};         // kg·m
@@ -126,10 +150,14 @@ namespace PayloadCalibration {
 
         out.dm = dm;
         out.massKg = mTrue;
+        out.signZ = sChosen;
+        out.cTrueZ[0] = cTrueZ[0];
+        out.cTrueZ[1] = cTrueZ[1];
+        out.signAmbiguous = ambiguous;
         for (int i = 0; i < 3; i++) {
             double cTrue = pTrue[i] / mTrue * 1000.0;       // 物理质心 (mm)
-            // 下发值按 signZ 折算回去, 使机械臂的 c_eff 恰好等于 cTrue
-            double cSend = (i == 2 && signZ != 0.0) ? cTrue / signZ : cTrue;
+            // 下发值按 sChosen 折算回去, 使机械臂的 c_eff 恰好等于 cTrue
+            double cSend = (i == 2 && sChosen != 0.0) ? cTrue / sChosen : cTrue;
             out.comMm[i] = cSend;
             out.dc[i] = cSend - comCfg[i];
             if (fabs(cSend) > 500.0) return false;          // 超出 EnableRobot 的 ±500 量程
@@ -166,14 +194,21 @@ namespace PayloadCalibration {
         }
     }
 
+    // 'i': 强制使用与当前约定相反的符号。求解器下次解算时不再自动判定。
+    // 一批新采集开始时 (BiasCheck::reset) 会清回自动判定。
     void flipComSignZ() {
-        comSignZ = (comSignZ >= 0.0) ? -1.0 : 1.0;
+        forcedSignZ = (comSignZ >= 0.0) ? -1.0 : 1.0;
+    }
+
+    void clearForcedSignZ() {
+        forcedSignZ = 0.0;
     }
 
     void applyResult(const Result& r) {
         enabled = true;
         massKg = r.massKg;
         for (int i = 0; i < 3; i++) comMm[i] = r.comMm[i];
+        comSignZ = r.signZ;
         rmsForceN = r.rmsForceN;
         rmsMomentNm = r.rmsMomentNm;
         poses = r.poses;
