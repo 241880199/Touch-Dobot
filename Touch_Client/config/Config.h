@@ -65,6 +65,19 @@ namespace Config {
     const double ROBOT_PAYLOAD_SEED_CY_MM = 0.0;    // 质心偏心 Y 估计 (mm)
     const double ROBOT_PAYLOAD_SEED_CZ_MM = 80.4;   // 质心偏心 Z 估计 (mm, 法兰下方)
 
+    // ===== CZ 符号判定的锚点 =====
+    // signZ 不进拟合方程 (两种符号残差完全相同), 所以必须外部判据。
+    // 取法: 选离 ROBOT_PAYLOAD_SEED_CZ_MM 更近的那个候选。
+    // 上面那个种子值因此从"仅首次兜底"升级为【判定的外部锚点】, 准确性开始承担判定责任
+    // —— 换装差异大的工具后记得重跑 Hardware/tools/compute_payload.py。
+    //
+    // 余量判据: 只有选中的候选【显著】更近才采纳。
+    //   选错的临界点是种子偏离真值超过两候选间距的一半
+    //   (间距 = 2·m_cfg·cz/m_true, 实机 259.4 mm → 临界 129.7 mm;
+    //    当前种子误差 12.5 mm, 余量约 10 倍)。
+    //   这个比值就是防"种子本身失真"的闸: 不够显著就判不可判定, 而不是静默选错。
+    const double SIGN_SEED_MARGIN_RATIO = 3.0;
+
     // ========== 机械臂运动参数 ==========
     const float SpeedL = 100;                // 运动速度比例 (1~100)
     const float MIN_DELTA_THRESHOLD = 1.0f;  // 最小位移阈值 (mm)

@@ -31,11 +31,18 @@ namespace PayloadCalibration {
 
         // ===== CZ 符号自动判定 =====
         // signZ 不进 buildRows, 所以两种符号的拟合残差完全相同 —— 数据本身
-        // 区分不了符号, 必须用外部判据: 工具挂在法兰下方 → 物理质心 Z 必须为正。
+        // 区分不了符号, 必须用外部判据: 取离 Config::ROBOT_PAYLOAD_SEED_CZ_MM
+        // 更近的候选 (距种子比值差 ≥ SIGN_SEED_MARGIN_RATIO 才采纳),
+        // 再用"物理质心 Z 必须为正"交叉复核。
         double signZ         = 1.0;    // 实际选用的符号约定 (+1 / -1)
         double cTrueZ[2]     = {0.0, 0.0};  // {候选+1, 候选-1} 下的物理质心 Z (mm)
         bool   signAmbiguous = true;   // 默认 true = 不可信, 不让漏填的 Result 看起来可用
     };
+
+    // 纯函数: 余量是否足够采纳锚点选出的候选。
+    // near = 选中候选到种子的距离, far = 另一个候选的距离。
+    // 距离比必须 ≥ Config::SIGN_SEED_MARGIN_RATIO, 否则判不可判定。
+    bool seedMarginSufficient(double near, double far);
 
     // 纯函数: 最小二乘求解。无全局状态, 便于单测。
     //   poses:    n 个法兰位姿 [x,y,z,rx,ry,rz], 角度单位【度】(= GetPose 的返回)

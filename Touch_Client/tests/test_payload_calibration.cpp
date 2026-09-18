@@ -308,6 +308,55 @@ static void test_effective_falls_back_to_seed() {
     PASS();
 }
 
+// 符号判定: 按"离种子更近"选取, 且要求距离比 ≥ SIGN_SEED_MARGIN_RATIO。
+// 真值 +1 时应纠正一个错误的传入符号 —— 这是旧判据【做不到】的
+// (旧判据恒等于 sign(comCfg[2]), 只能确认不能翻转)。
+static void test_sign_seed_anchor_picks_plus() {
+    TEST(sign_seed_anchor_picks_plus);
+    double cTrue[3] = {0.3, 0.3, 67.9};
+    double cCfg[3]  = {0.0, 0.0, 80.4};   // 与种子同向
+    double F[NP][3], M[NP][3];
+    synthesize(0.409, cTrue, 0.660, cCfg, +1.0, F, M);
+
+    PayloadCalibration::Result r;
+    // 故意传入错误的 signZ=-1: 锚点应把它纠正回 +1
+    CHECK(PayloadCalibration::solve(g_poses, F, M, NP, 0.660, cCfg, -1.0, r));
+    CHECK(!r.signAmbiguous);
+    CHECK(fabs(r.signZ - 1.0) < 1e-12);
+    CHECK(fabs(r.comMm[2] - 67.9) < 1e-6);
+    PASS();
+}
+
+// 真值 -1 的机器: 候选 +327.3 / +67.8 —— 【两个都是正的】,
+// 旧判据在这里必然判歧义并永久拒绝; 锚点法应选 -1。
+static void test_sign_seed_anchor_picks_minus() {
+    TEST(sign_seed_anchor_picks_minus);
+    double cTrue[3] = {0.3, 0.3, 67.9};
+    double cCfg[3]  = {0.0, 0.0, 80.4};
+    double F[NP][3], M[NP][3];
+    synthesize(0.409, cTrue, 0.660, cCfg, -1.0, F, M);   // 机械臂按 -1 解释
+
+    PayloadCalibration::Result r;
+    CHECK(PayloadCalibration::solve(g_poses, F, M, NP, 0.660, cCfg, +1.0, r));
+    CHECK(!r.signAmbiguous);
+    CHECK(fabs(r.signZ - (-1.0)) < 1e-12);
+    // 下发值按 signZ 折算回去, 使机械臂的 c_eff 恰好等于物理质心
+    CHECK(fabs(r.comMm[2] - (-67.9)) < 1e-6);
+    PASS();
+}
+
+// 余量不足 -> 判不可判定, 而不是静默选一个
+static void test_sign_insufficient_margin_is_ambiguous() {
+    TEST(sign_insufficient_margin_is_ambiguous);
+    // 构造两个候选都与种子距离相近的场景: 种子本来就该在中点附近
+    // 直接把种子当成锚点不可注入, 所以这里改为验证【距离比】这个纯判断
+    CHECK(PayloadCalibration::seedMarginSufficient(10.0, 40.0));    // 比 4.0 -> 够
+    CHECK(!PayloadCalibration::seedMarginSufficient(30.0, 40.0));   // 比 1.33 -> 不够
+    CHECK( PayloadCalibration::seedMarginSufficient(0.0, 40.0));    // 锚点精确命中 -> 够
+    CHECK(!PayloadCalibration::seedMarginSufficient(0.0, 0.0));     // 两候选重合 -> 退化, 不够
+    PASS();
+}
+
 int main() {
     std::cout << "=== PayloadCalibration Tests ===" << std::endl;
     test_recovers_true_payload();
@@ -322,6 +371,9 @@ int main() {
     test_save_load_roundtrip();
     test_save_includes_timestamp();
     test_effective_falls_back_to_seed();
+    test_sign_seed_anchor_picks_plus();
+    test_sign_seed_anchor_picks_minus();
+    test_sign_insufficient_margin_is_ambiguous();
     std::cout << "\n" << g_passed << " passed, " << g_failed << " failed" << std::endl;
     return g_failed ? 1 : 0;
 }

@@ -65,6 +65,14 @@ namespace PayloadCalibration {
         rhs[3] = dM[0]; rhs[4] = dM[1]; rhs[5] = dM[2];
     }
 
+    bool seedMarginSufficient(double near, double far) {
+        // near == 0 是锚点的【最佳】情形 (候选与种子精确重合), 不是退化 —— 必须放行。
+        // 真正退化的是两个候选【互相重合】: 那时 far 也接近 0, 锚点信息量为零。
+        if (!(far > 0.0)) return false;      // 两候选重合 -> 无从判别
+        if (!(near > 0.0)) return true;      // 锚点精确命中 -> 采纳
+        return (far / near) >= Config::SIGN_SEED_MARGIN_RATIO;
+    }
+
     bool solve(const double posesIn[][6], const double forces[][3], const double moments[][3],
                int n, double mCfg, const double comCfg[3], double signZ, Result& out)
     {
@@ -115,8 +123,9 @@ namespace PayloadCalibration {
         // ===== 换算绝对值 =====
         // signZ 不进 buildRows, 所以两种符号的拟合残差【完全相同】——
         // 数据本身区分不了符号, 必须用外部判据。
-        // 判据: 工具挂在法兰下方 → 物理质心 Z 必须为正。
-        // 两个候选相差 2·m_cfg·cz/m_true (本工具链约 259 mm), 一个必然非物理。
+        // 交叉检查: 工具挂在法兰下方 → 物理质心 Z 必须为正。
+        // 两个候选相差 2·m_cfg·cz/m_true (本工具链约 259 mm), 通常会有一个非物理 ——
+        // 下面的锚点判定选完后, 再用这条物理约束兜底复核。
         double mTrue = mCfg + dm;
         if (!(mTrue > 0.01) || mTrue > 5.0) return false;   // 非物理
 
@@ -128,15 +137,28 @@ namespace PayloadCalibration {
             const double pCfgZ = mCfg * (comCfg[2] * s) / 1000.0;
             cTrueZ[k] = (pCfgZ + dp[2]) / mTrue * 1000.0;
         }
-        const bool plusOk  = (cTrueZ[0] > 0.0);
-        const bool minusOk = (cTrueZ[1] > 0.0);
+        // ===== 符号选取: 种子锚点 + 余量判据 =====
+        // signZ 不进拟合方程, 两种符号的残差完全相同 -> 必须外部判据。
+        // 旧判据 (看哪个候选为正) 在代数上恒等于 sign(comCfg[2]), 只能确认不能翻转
+        // (X>0 时 minusOk 蕴含 plusOk, 非歧义分支永远是 +1), 因此在"配置符号本就错"
+        // 时会把两个都为正的候选判成歧义、永久拒绝。改用外部锚点破环。
+        const double seedZ = Config::ROBOT_PAYLOAD_SEED_CZ_MM;
+        const double d0 = fabs(cTrueZ[0] - seedZ);
+        const double d1 = fabs(cTrueZ[1] - seedZ);
+        const double dNear = (d0 <= d1) ? d0 : d1;
+        const double dFar  = (d0 <= d1) ? d1 : d0;
 
         double sChosen = signZ;
         bool   ambiguous = false;
-        if (plusOk != minusOk) {
-            sChosen = plusOk ? 1.0 : -1.0;          // 恰好一个物理 -> 选它
+        if (!seedMarginSufficient(dNear, dFar)) {
+            ambiguous = true;                       // 余量不足 -> 不静默选
         } else {
-            ambiguous = true;                        // 都合理或都不合理 -> 程序判不了
+            sChosen = (d0 <= d1) ? 1.0 : -1.0;
+        }
+
+        if (!ambiguous) {
+            const double cChosen = (sChosen > 0.0) ? cTrueZ[0] : cTrueZ[1];
+            if (!(cChosen > 0.0)) ambiguous = true;   // 锚点与物理约束矛盾 -> 不可判定
         }
 
         double cEff[3] = {comCfg[0], comCfg[1], comCfg[2] * sChosen};
