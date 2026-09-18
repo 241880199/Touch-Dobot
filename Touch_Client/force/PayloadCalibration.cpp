@@ -140,6 +140,9 @@ namespace PayloadCalibration {
             for (int i = 0; i < 3; i++) {
                 double cSend = (pCfgK[i] + dp[i]) / mTrue * 1000.0;
                 if (i == 2 && s != 0.0) cSend /= s;
+                // 量程按【每个候选】逐项查: 真正下发哪个候选要等实机探针裁决之后才知道,
+                // 只看占位值会误杀一个根本不会用的候选、也会放行一个超量程的定案候选。
+                if (fabs(cSend) > 500.0) return false;      // 超出 EnableRobot 的 ±500 量程
                 out.comCand[k][i] = cSend;
             }
         }
@@ -162,7 +165,8 @@ namespace PayloadCalibration {
             double cSend = (i == 2 && sChosen != 0.0) ? cTrue / sChosen : cTrue;
             out.comMm[i] = cSend;
             out.dc[i] = cSend - comCfg[i];
-            if (fabs(cSend) > 500.0) return false;          // 超出 EnableRobot 的 ±500 量程
+            // 量程不在这里查: comMm 现在只是占位值 (按传入的 signZ 折算), 真正会被下发的
+            // 是 comCand[chosen][*], 已在上面的候选循环里逐项查过。
         }
         // ===== 拟合残差 |A·x − b| (不是数据本身的量级) =====
         double x[4] = {A[0][4], A[1][4], A[2][4], A[3][4]};

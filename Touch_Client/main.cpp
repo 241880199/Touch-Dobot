@@ -326,9 +326,8 @@ namespace BiasCheck {
         }
 
         std::cout << "\n======================================================" << std::endl;
-        std::cout << "  负载参数求解结果 (" << r.poses << " 个姿态, CZ 符号约定 "
-                  << (r.signZ > 0 ? "+1" : "-1")
-                  << (r.signAmbiguous ? " ⚠ 判不出" : " (自动判定)") << ")" << std::endl;
+        std::cout << "  负载参数求解结果 (" << r.poses << " 个姿态) —— CZ 符号待实测裁决"
+                  << std::endl;
         std::cout << "======================================================" << std::endl;
         printf("  质量:    当前 %.3f kg   →  修正 %+.3f kg   →   %.3f kg\n",
                mCfg, r.dm, r.massKg);
@@ -337,24 +336,15 @@ namespace BiasCheck {
         printf("             下发 (%.1f, %.1f, %.1f) mm\n", r.comMm[0], r.comMm[1], r.comMm[2]);
         printf("  拟合残差: 力 %.4f N   力矩 %.4f N·m\n", r.rmsForceN, r.rmsMomentNm);
 
-        // ===== CZ 符号约定判定 =====
-        // signZ 不进线性系统, 两种符号的拟合残差完全相同 —— 数据区分不了,
-        // 判据是"物理质心必须在法兰下方"。把两个候选都打出来, 便于人工复核。
-        if (r.signAmbiguous) {
-            std::cout << "  CZ 符号约定: ⚠ 无法判定 — 两个候选都落在同一侧, 沿用当前 "
-                      << (PayloadCalibration::comSignZ > 0 ? "+1" : "-1") << std::endl;
-        } else {
-            std::cout << "  CZ 符号约定: 自动判定 → "
-                      << (r.signZ > 0 ? "+1" : "-1") << std::endl;
-        }
+        // ===== CZ 符号候选 (这里不下结论) =====
+        // signZ 不进线性系统, 两种符号的拟合残差完全相同 —— 数据区分不了, 所以解算器
+        // 不再自行选边: 哪个候选成立由下面的实机探针裁决。(signAmbiguous 在探针跑完之前
+        // 恒为 true, 它只表示"解算器没定案", 不是判据, 不能当作结论打出来。)
+        // 判据只看物理质心必须在法兰下方, 所以把两个候选都打出来, 便于人工复核。
         printf("    · 候选 +1: 物理质心 Z = %+.1f mm  %s\n",
                r.cTrueZ[0], r.cTrueZ[0] > 0 ? "✓ 法兰下方" : "✗ 法兰上方 (非物理)");
         printf("    · 候选 -1: 物理质心 Z = %+.1f mm  %s\n",
                r.cTrueZ[1], r.cTrueZ[1] > 0 ? "✓ 法兰下方" : "✗ 法兰上方 (非物理)");
-        if (r.signAmbiguous) {
-            std::cout << "    (两个候选都在同一侧, 程序判不出符号 —— 结果按不合理处理)"
-                      << std::endl;
-        }
 
         // ===== 符号实测裁决 =====
         // solve() 只给出两种解释; 这里在【同一个静止姿态】下各下发一次, 谁留下的
@@ -404,10 +394,11 @@ namespace BiasCheck {
                 std::cout << "  CZ 符号约定: ✗ 实测分不开 — 结果按不合理处理" << std::endl;
             }
         }
-        if (chosen >= 0) {
-            PayloadCalibration::applyResult(r, chosen);   // 定案
-        } else {
-            // 探针已经把机器人的配置改乱了, 恢复成当前生效值
+        // 探针已经把两个候选都下发给了机械臂 (最后留在上面的可能是输的那个) —— 但这里
+        // 【先不定案】: 定案 (applyResult) 要等合理性判据通过, 否则判据一旦否掉这次求解,
+        // 内存里的生效负载就已经被改过了, 下面那句"机械臂负载参数保持原值"就是假的。
+        if (chosen < 0) {
+            // 没候选胜出: 探针已经把某个候选配到机械臂上了, 恢复成当前生效值
             RelayCore::instance().applyPayloadToRobot();
         }
 
@@ -467,11 +458,17 @@ namespace BiasCheck {
                 std::cout << "  [BIAS] !! 处理后按 'm' 重新采集 (计数会清零)。" << std::endl;
             }
             std::cout << std::endl;
+            // 判据是在探针【之后】跑的 —— 机械臂此刻的配置还是探针留下的那个候选
+            // (可能是输的那个)。所以拒绝不能只是"不保存", 必须把机器人恢复成原参数,
+            // 否则上面那句"机械臂负载参数保持原值"就是假的。
+            // 内存里的生效值从头到尾没动过, 这一发重发的就是原来的参数。
+            RelayCore::instance().applyPayloadToRobot();
             return;
         }
         consecutiveFails = 0;   // 成功一次即清零
 
-        PayloadCalibration::applyResult(r);
+        // 定案只发生在这里 (判据全过): 探针选中的候选既是内存生效值, 也是下发值。
+        PayloadCalibration::applyResult(r, chosen);
         if (!PayloadCalibration::save(CalibStore::fileFor("payload_calib.json"))) {
             std::cerr << "[BIAS] !! payload_calib.json 写入失败" << std::endl;
         } else {
