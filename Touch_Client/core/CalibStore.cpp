@@ -83,8 +83,10 @@ namespace CalibStore {
         return true;
     }
 
-    const char* resolve(const char* name) {
-        const char* path = fileFor(name);
+    const char* resolveIn(const char* dirPath, const char* name) {
+        static char s_path[MAX_PATH];
+        snprintf(s_path, sizeof(s_path), "%s%s", dirPath, name);
+        const char* path = s_path;
 
         FILE* probe = fopen(path, "r");
         if (!probe) return nullptr;     // 不存在: 静默
@@ -116,4 +118,6 @@ namespace CalibStore {
         else         std::printf("[Calib] !!   (改名失败, 文件保留原处)\n");
         return nullptr;
     }
+
+    const char* resolve(const char* name) { return resolveIn(dir(), name); }
 }

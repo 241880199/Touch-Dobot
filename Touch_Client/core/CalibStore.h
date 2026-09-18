@@ -31,6 +31,10 @@ namespace CalibStore {
     // 判据见 isFresh: 没有 saved_at_unix 字段一律视为过期。
     const char* resolve(const char* name);
 
+    // 同 resolve, 但标定目录由调用方给出 —— 单测用临时目录走这个。
+    // 生产代码用 resolve(name), 它等价于 resolveIn(dir(), name)。
+    const char* resolveIn(const char* dirPath, const char* name);
+
     // 纯函数, 便于单测。nowUnix 由调用方传入, 内部不读时钟。
     // savedAtUnix <= 0 (缺字段/解析失败) 判过期; 时钟回拨按 0 年龄处理。
     bool isFresh(long savedAtUnix, long nowUnix, long maxAgeSec);
