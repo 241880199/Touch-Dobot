@@ -2,24 +2,36 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 让标定文件固定落点、超 24h 自动作废，并让 CZ 符号约定从"人工三步试错"变成"自动判定 + 一键兜底"。
+**Goal:** 让标定文件固定落点**并由实测（而非时间）判定其是否仍然可信**，同时让 CZ 符号约定完全由程序算出、不引入人工判断。
 
-**Architecture:** 新增 `core/CalibStore` 承担标定文件的生命周期（放哪 + 还能不能用），成为唯一的路径与新鲜度判据来源；`PayloadCalibration` 在解算末尾对两种符号各算一个物理质心候选，按"必须在法兰下方"自动选；`BiasCheck` 用一个数据新鲜度标志替代粗暴的 `reset()`，同时满足"复验拦截"和"`'i'` 可重解"。
+**Architecture:** `core/CalibStore` 只负责**位置**（从可执行文件推导 `calib\` 目录）；标定是否仍然可信改由**启动自检**——启动时引导摆 2~3 个姿态，用跨姿态极差实测判定，不通过则作废并要求重标；`PayloadCalibration` 用**外部锚点**（STL 估计的种子质心）加**余量判据**来确定符号；`BiasCheck` 用一个数据新鲜度标志替代粗暴的 `reset()`。
 
 **Tech Stack:** C++17 / MSVC 2022 BuildTools / Win32 API (`GetModuleFileNameA`、`CreateDirectoryA`) / 无第三方库。
 
-**规格:** `Docs/superpowers/specs/2026-09-18-calib-lifecycle-design.md`
+**规格:** `Docs/superpowers/specs/2026-09-18-calib-lifecycle-design.md`（**务必读 §7 的两轮修订**）
+
+> ⚠ **本计划经过两轮设计修订，前面任务的文本保留原样只为记录演进。**
+> **以最终态为准，不要照抄早期步骤。**
+>
+> | 早期文本 | 被谁取代 | 最终态 |
+> |---|---|---|
+> | Task 1/2 的 24h 有效期（`saved_at_unix` / `.expired` / `isFresh` / `resolve`） | **Task 8** 整体移除 | 只保留位置解析；可信性由 Task 9 的启动自检实测 |
+> | Task 3/4 交付的 `'i'` 人工兜底 | **Task 5** 移除 | 符号完全由程序算 |
+> | Task 3/5 的"物理质心为正"判据 | **Task 7** 替换 | 种子锚点 + 余量判据（旧判据**永远选不出相反符号**） |
+>
+> 执行任一任务时，若其文本与本表冲突，**以本表和对应 Task 为准**。
 
 ## Global Constraints
 
 - **文件保持 ASCII 或既有中文注释风格**；`.bat` 文件的额外约束见 `Touch_Client/build_and_run.bat` 顶部注释（`chcp 65001` + 非 ASCII 会 desync cmd 解析器）。
 - **所有新文件用 LF 还是 CRLF 不强制**，但 `.bat` 必须 CRLF。
-- **编译命令固定为：** `cmd.exe /c "D:\Projects\Touch\Touch_Client\build.bat"`，成功标志是输出 `Build OK.`。
+- **编译命令固定为：** `cmd.exe //c "D:\Projects\Touch\Touch_Client\build.bat"`（bash 下双斜杠），成功标志是输出 `Build OK.`。
+- **完整构建是硬性要求**，不能只跑独立测试脚本：测试脚本不定义 `WIN32_LEAN_AND_MEAN`，真实项目定义 —— 两者编译环境不同，单测通过**不等于**项目能编。这一点已经咬过一次。
 - **测试必须真的跑起来**：测试构建脚本只编译，不运行 exe。每步都要单独执行 `tests\<name>.exe`。
 - **编译前确认 `Touch_Client.exe` 没有在运行**，否则链接报 `LNK1168`。检查：`tasklist //FI "IMAGENAME eq Touch_Client.exe"`。
-- **时间源用 `time(NULL)`（wall clock）**，不用 `GetTickCount`（开机计时，跨重启无效）。
-- **24h = 86400 秒**，常量名 `Config::CALIB_MAX_AGE_SEC`。
-- **没有 `saved_at_unix` 字段的文件一律视为过期**（明确决策，不做 mtime 回退）。
+- **不要写以反斜杠结尾的 `//` 注释** —— 它会延续到下一行，静默吃掉那一行。已经咬过一次。
+- **`Config::ROBOT_PAYLOAD_SEED_CZ_MM` 是符号判定的外部锚点**（Task 7 起），不只是首次兜底值 —— 它的准确性开始承担判定责任。
+- **不引入人工判断**：需要判断的地方一律由程序算（用户明确要求）。
 
 ---
 
@@ -1379,6 +1391,382 @@ git add Touch_Client/config/Config.h Touch_Client/force/PayloadCalibration.h \
         Touch_Client/tests/test_payload_calibration.cpp
 git commit -m "feat(force): decide the CZ sign in software only, and reject unreasonable solves"
 ```
+
+---
+
+### Task 7: 符号判定改为「种子锚点 + 余量判据」
+
+> **第二轮设计修订（2026-09-18，终审后）。** 终审证明 Task 3/5 的判据
+> **永远选不出与当前配置相反的符号**（详见 spec §7.2）——它只是"确认或拒绝"。
+> 用户决定改用外部锚点，并追问"种子值做锚点是否存在错误估计的风险"。
+> 余量判据就是为这个风险设的闸。
+
+**Files:**
+- Modify: `Touch_Client/config/Config.h`
+- Modify: `Touch_Client/force/PayloadCalibration.cpp`
+- Modify: `Touch_Client/tests/test_payload_calibration.cpp`
+
+**Interfaces:**
+- Consumes: `Result::cTrueZ[2]`（Task 3）、`Config::ROBOT_PAYLOAD_SEED_CZ_MM`
+- Produces: `Config::SIGN_SEED_MARGIN_RATIO`；`solve()` 的符号选取改为锚点法（`Result` 字段不变）
+
+- [ ] **Step 1: 加余量阈值常量**
+
+`config/Config.h`，紧跟 `ROBOT_PAYLOAD_SEED_CZ_MM`（约 :63）之后加 —— **它是判定的锚点，不再是"仅首次兜底"**：
+
+```cpp
+    // ===== CZ 符号判定的锚点 =====
+    // signZ 不进拟合方程 (两种符号残差完全相同), 所以必须外部判据。
+    // 取法: 选离 ROBOT_PAYLOAD_SEED_CZ_MM 更近的那个候选。
+    // 上面那个种子值因此从"仅首次兜底"升级为【判定的外部锚点】, 准确性开始承担判定责任
+    // —— 换装差异大的工具后记得重跑 Hardware/tools/compute_payload.py。
+    //
+    // 余量判据: 只有选中的候选【显著】更近才采纳。
+    //   选错的临界点是种子偏离真值超过两候选间距的一半
+    //   (间距 = 2·m_cfg·cz/m_true, 实机 259.4 mm → 临界 129.7 mm;
+    //    当前种子误差 12.5 mm, 余量约 10 倍)。
+    //   这个比值就是防"种子本身失真"的闸: 不够显著就判不可判定, 而不是静默选错。
+    const double SIGN_SEED_MARGIN_RATIO = 3.0;
+```
+
+- [ ] **Step 2: 写失败的测试**
+
+在 `tests/test_payload_calibration.cpp` 加：
+
+```cpp
+// 符号判定: 按"离种子更近"选取, 且要求距离比 ≥ SIGN_SEED_MARGIN_RATIO。
+// 真值 +1 时应纠正一个错误的传入符号 —— 这是旧判据【做不到】的
+// (旧判据恒等于 sign(comCfg[2]), 只能确认不能翻转)。
+static void test_sign_seed_anchor_picks_plus() {
+    TEST(sign_seed_anchor_picks_plus);
+    double cTrue[3] = {0.3, 0.3, 67.9};
+    double cCfg[3]  = {0.0, 0.0, 80.4};   // 与种子同向
+    double F[NP][3], M[NP][3];
+    synthesize(0.409, cTrue, 0.660, cCfg, +1.0, F, M);
+
+    PayloadCalibration::Result r;
+    // 故意传入错误的 signZ=-1: 锚点应把它纠正回 +1
+    CHECK(PayloadCalibration::solve(g_poses, F, M, NP, 0.660, cCfg, -1.0, r));
+    CHECK(!r.signAmbiguous);
+    CHECK(fabs(r.signZ - 1.0) < 1e-12);
+    CHECK(fabs(r.comMm[2] - 67.9) < 1e-6);
+    PASS();
+}
+
+// 真值 -1 的机器: 候选 +327.3 / +67.8 —— 【两个都是正的】,
+// 旧判据在这里必然判歧义并永久拒绝; 锚点法应选 -1。
+static void test_sign_seed_anchor_picks_minus() {
+    TEST(sign_seed_anchor_picks_minus);
+    double cTrue[3] = {0.3, 0.3, 67.9};
+    double cCfg[3]  = {0.0, 0.0, 80.4};
+    double F[NP][3], M[NP][3];
+    synthesize(0.409, cTrue, 0.660, cCfg, -1.0, F, M);   // 机械臂按 -1 解释
+
+    PayloadCalibration::Result r;
+    CHECK(PayloadCalibration::solve(g_poses, F, M, NP, 0.660, cCfg, +1.0, r));
+    CHECK(!r.signAmbiguous);
+    CHECK(fabs(r.signZ - (-1.0)) < 1e-12);
+    // 下发值按 signZ 折算回去, 使机械臂的 c_eff 恰好等于物理质心
+    CHECK(fabs(r.comMm[2] - (-67.9)) < 1e-6);
+    PASS();
+}
+
+// 余量不足 -> 判不可判定, 而不是静默选一个
+static void test_sign_insufficient_margin_is_ambiguous() {
+    TEST(sign_insufficient_margin_is_ambiguous);
+    // 构造两个候选都与种子距离相近的场景: 种子本来就该在中点附近
+    // 直接把种子当成锚点不可注入, 所以这里改为验证【距离比】这个纯判断
+    CHECK(PayloadCalibration::seedMarginSufficient(10.0, 40.0));    // 比 4.0 -> 够
+    CHECK(!PayloadCalibration::seedMarginSufficient(30.0, 40.0));   // 比 1.33 -> 不够
+    CHECK(!PayloadCalibration::seedMarginSufficient(0.0, 40.0));    // 退化 -> 不够
+    PASS();
+}
+```
+
+在 `main()` 里加这三个调用。
+
+- [ ] **Step 3: 跑测试确认失败**
+
+Run: `build_payload_calibration_test.bat` 然后跑 exe
+Expected: 编译失败 —— `seedMarginSufficient` 未声明。
+
+- [ ] **Step 4: 导出余量判据（纯函数，便于单测）**
+
+`force/PayloadCalibration.h`，在 `bool solve(...)` 之前加：
+
+```cpp
+    // 纯函数: 余量是否足够采纳锚点选出的候选。
+    // near = 选中候选到种子的距离, far = 另一个候选的距离。
+    // 距离比必须 ≥ Config::SIGN_SEED_MARGIN_RATIO, 否则判不可判定。
+    bool seedMarginSufficient(double near, double far);
+```
+
+- [ ] **Step 5: 实现锚点判定**
+
+`force/PayloadCalibration.cpp` 加：
+
+```cpp
+    bool seedMarginSufficient(double near, double far) {
+        if (!(near > 0.0)) return false;                       // 退化/重合
+        if (!(far > near)) return false;                       // 另一个反而更近
+        return (far / near) >= Config::SIGN_SEED_MARGIN_RATIO;
+    }
+```
+
+把 `solve()` 里选符号那段（`plusOk` / `minusOk` / `sChosen` / `ambiguous`）替换为：
+
+```cpp
+        // ===== 符号选取: 种子锚点 + 余量判据 =====
+        // signZ 不进拟合方程, 两种符号的残差完全相同 -> 必须外部判据。
+        // 旧判据 (看哪个候选为正) 在代数上恒等于 sign(comCfg[2]), 只能确认不能翻转
+        // (X>0 时 minusOk 蕴含 plusOk, 非歧义分支永远是 +1), 因此在"配置符号本就错"
+        // 时会把两个都为正的候选判成歧义、永久拒绝。改用外部锚点破环。
+        const double seedZ = Config::ROBOT_PAYLOAD_SEED_CZ_MM;
+        const double d0 = fabs(cTrueZ[0] - seedZ);
+        const double d1 = fabs(cTrueZ[1] - seedZ);
+        const double dNear = (d0 <= d1) ? d0 : d1;
+        const double dFar  = (d0 <= d1) ? d1 : d0;
+
+        double sChosen = signZ;
+        bool   ambiguous = false;
+        if (!seedMarginSufficient(dNear, dFar)) {
+            ambiguous = true;                       // 余量不足 -> 不静默选
+        } else {
+            sChosen = (d0 <= d1) ? 1.0 : -1.0;
+        }
+```
+
+后面原有的 `cEff` / `pCfg` / `pTrue` / `out.*` 换算**保持不变**，但**再加一道物理交叉检查** —— 锚点选中的候选必须为正：
+
+```cpp
+        if (!ambiguous) {
+            const double cChosen = (sChosen > 0.0) ? cTrueZ[0] : cTrueZ[1];
+            if (!(cChosen > 0.0)) ambiguous = true;   // 锚点与物理约束矛盾 -> 不可判定
+        }
+```
+
+（放在 `sChosen` 定下来之后、`cEff` 计算之前。）
+
+- [ ] **Step 6: 跑测试确认通过**
+
+Run: `build_payload_calibration_test.bat` 然后跑 exe
+Expected: **15 passed, 0 failed**（12 + 3 个新用例）
+
+> `test_sign_convention` 现在会走锚点分支：它合成的是 −1 约定，候选 `+241.2 / +80.4`，
+> 种子 80.4 离 **+80.4** 更近（距离 0 vs 160.8）→ 选 **−1** ✓
+> 恰好也是该用例期望的 `comMm[2] = -80.4`。**若它挂了，先查锚点距离算对没有。**
+
+- [ ] **Step 7: 完整构建**
+
+Run: `cmd.exe //c "D:\Projects\Touch\Touch_Client\build.bat"`
+Expected: `Build OK.`（**必须完整构建** —— 独立测试脚本的编译环境与真实项目不同）
+
+- [ ] **Step 8: 提交**
+
+```bash
+git add Touch_Client/config/Config.h Touch_Client/force/PayloadCalibration.h \
+        Touch_Client/force/PayloadCalibration.cpp Touch_Client/tests/test_payload_calibration.cpp
+git commit -m "feat(force): break the CZ sign tie with an external anchor and a margin gate"
+```
+
+---
+
+### Task 8: 移除 24h 时间闸门
+
+> **第二轮设计修订。** §7.1：终审发现 TCP 过了闸门却从不写时间戳、每次启动被销毁。
+> 用户决定不用补时间戳的办法，而是**换掉整个机制**（启动自检，见 Task 9）。
+> 本任务只做**减法**：把时间闸门拆掉，`CalibStore` 退化为纯位置模块。
+
+**Files:**
+- Modify: `Touch_Client/core/CalibStore.h`
+- Modify: `Touch_Client/core/CalibStore.cpp`
+- Modify: `Touch_Client/config/Config.h`
+- Modify: `Touch_Client/main.cpp`
+- Modify: `Touch_Client/force/PayloadCalibration.cpp`
+- Modify: `Touch_Client/force/ForceCalibration.cpp`
+- Modify: `Touch_Client/tests/test_calib_store.cpp`
+- Modify: `Touch_Client/tests/test_payload_calibration.cpp`
+- Delete: `Touch_Client/tests/build_calib_store_test.bat` 若无测试可留（见 Step 6）
+
+- [ ] **Step 1: 删掉 CalibStore 的有效期部分**
+
+`core/CalibStore.h`：删除 `resolveIn()`、`resolve()`、`isFresh()` 三个声明。
+保留 `deriveDir()` / `dir()` / `fileFor()`，并把命名空间的头注释改为只讲位置：
+
+```cpp
+// 标定文件放哪。
+//
+// 为什么需要它: 三个标定文件原本都用相对路径 ("./payload_calib.json") 读写,
+// 落在【当前工作目录】—— 从 Touch_Client\ 启动和从 x64\Release\ 启动会拿到
+// 两份不同的文件。
+//
+// 注: 本模块【不管有效期】。标定是否仍然可信由启动自检实测判定 (见 main.cpp),
+//     不用时间闸门 —— 时间只是代理指标, 而这里能直接测。
+```
+
+`core/CalibStore.cpp`：删除 `isFresh()`、`readLongField()`、`resolveIn()`、`resolve()` 四个定义。
+保留 `deriveDir()` / `dir()` / `fileFor()`；`<ctime>` 与 `<cstdio>` 若不再需要可一并删。
+
+- [ ] **Step 2: 删掉配置常量**
+
+`config/Config.h`：删除 `CALIB_MAX_AGE_SEC`（连它的注释块）。
+
+- [ ] **Step 3: 写入端去掉时间戳字段**
+
+- `force/PayloadCalibration.cpp` 的 `save()`：删掉 `"saved_at_unix"` 那一行，`version` 回到 1
+- `force/ForceCalibration.cpp` 的 `saveToFile()`：同上，`version` 回到 2
+
+> 保留时间戳字段作为纯元数据也是一种选择，但既然不再有任何判定依赖它，
+> 少一个字段就少一处会漂移的真相副本。删干净。
+
+- [ ] **Step 4: 读取端改用 fileFor**
+
+- `main.cpp`：三处 `CalibStore::resolve("xxx.json")` 改为 `CalibStore::fileFor("xxx.json")`，
+  并把 `if (p && Xxx::load(p))` 改回 `if (Xxx::load(CalibStore::fileFor("xxx.json")))`
+  （各解析器自己处理"文件不存在"）
+- 删掉 main.cpp 里两处 `saved_at_unix` 相关的注释/提示
+
+> 注意 `fileFor()` 返回 static 缓冲：**每个文件立即用完**，不要跨调用持有。
+
+- [ ] **Step 5: 测试清理**
+
+`tests/test_payload_calibration.cpp`：删除 `test_save_includes_timestamp()` 及其 `main()` 调用。
+用例数回到 **14**（15 − 1）。
+
+`tests/test_calib_store.cpp`：删除 `test_is_fresh_boundaries()`、`test_resolve_policy()`、
+`writeFixture()`、`fixtureExists()` 及各自的 `main()` 调用；保留 `deriveDir` 三个用例。
+用例数 **3**。
+
+- [ ] **Step 6: 跑测试 + 完整构建**
+
+Run: `build_calib_store_test.bat` → exe → Expected `3 passed, 0 failed`
+Run: `build_payload_calibration_test.bat` → exe → Expected `14 passed, 0 failed`
+Run: `cmd.exe //c "D:\Projects\Touch\Touch_Client\build.bat"` → Expected `Build OK.`
+
+- [ ] **Step 7: 清理现场**
+
+`Touch_Client/calib/` 下现存两份 `.expired`（Task 2 验证时产生的）已无意义，
+且新机制不再改名。删除：
+
+```bash
+rm -f Touch_Client/calib/*.expired
+```
+
+- [ ] **Step 8: 提交**
+
+```bash
+git add -A Touch_Client/
+git commit -m "refactor(calib): drop the 24h expiry gate; CalibStore only owns location"
+```
+
+---
+
+### Task 9: 启动自检
+
+> **第二轮设计修订。** §7.1。取代 24h 时间闸门：不再用时间代理，而是**实测**标定是否仍然成立。
+> 用户明确选择"启动后引导摆 2~3 个姿态"，且"不通过 → 作废并要求重标"。
+
+**Files:**
+- Modify: `Touch_Client/main.cpp`
+
+**Interfaces:**
+- Consumes: `BiasCheck` 的采集与跨姿态极差数学（同文件内）
+- Produces: 无对外接口（启动流程行为）
+
+- [ ] **Step 1: 自检状态**
+
+在 `BiasCheck` 里加：
+
+```cpp
+    // ===== 启动自检 =====
+    // 取代 24h 时间闸门: 不用时间当代理, 直接实测已存标定是否仍然成立。
+    // 单姿态不行 —— 质量误差在力通道 (|ΔF|=|Δm|·9.81) 可测, 但质心误差只在力矩通道、
+    // 响应 ∝ sinθ, 静止单一姿态下它是定值、混在零偏里分不开。所以至少 2~3 个姿态且要覆盖倾角。
+    static bool  selfCheckActive = false;
+    static void  startSelfCheck();
+    static void  finishSelfCheck();
+```
+
+`reset()` 里**不要**清 `selfCheckActive`（自检是启动期的独立状态）。
+
+- [ ] **Step 2: 进入自检**
+
+```cpp
+    static void startSelfCheck() {
+        selfCheckActive = true;
+        mode = true;                 // 复用 'm' 的采集机制
+        reset();
+        std::cout << "\n======================================================" << std::endl;
+        std::cout << "  标定自检 — 验证已存标定是否仍然成立" << std::endl;
+        std::cout << "======================================================" << std::endl;
+        std::cout << "  请摆 2~3 个姿态 (跨度≥30°, 笔朝下/水平/朝上都要有):" << std::endl;
+        std::cout << "    'd' 开关拖拽模式 (摆姿态用, 摆好一定要关掉)" << std::endl;
+        std::cout << "    每个姿态按 SPACE 采样 1s" << std::endl;
+        std::cout << "  采完按 's' 判定。" << std::endl;
+        std::cout << "======================================================" << std::endl;
+    }
+```
+
+- [ ] **Step 3: 自检判定**
+
+```cpp
+    static void finishSelfCheck() {
+        if (count < 3) {
+            std::cout << "[自检] 至少需要 3 个姿态才能判定, 当前 " << count << std::endl;
+            return;
+        }
+        // 复用 report() 的跨姿态极差数学: 把结果算出来(打报告), 再据其判据定夺
+        std::cout << "\n[自检] 判定已存标定是否仍然成立..." << std::endl;
+        report();                        // 先把极差/覆盖度打出来供人看
+
+        // 判据与 report() 的 PASS 一致: |ΔF| < 0.3 N 且等效质心误差 < 10 mm
+        // 复用 report() 内部算过的量, 因此把它抽成一个小函数返回结论
+        const bool ok = lastReportPassed;   // report() 里置位
+        if (ok) {
+            std::cout << "\n[自检] ✓ 通过 — 已存标定仍然成立, 继续正常启动。" << std::endl;
+        } else {
+            std::cout << "\n[自检] ✗ 不通过 — 已存标定不再成立, 作废并要求重标。" << std::endl;
+            PayloadCalibration::enabled = false;
+            ForceCalibration::clearCalibration();
+            remove(CalibStore::fileFor("payload_calib.json"));
+            remove(CalibStore::fileFor("force_calib.json"));
+            RelayCore::instance().applyPayloadToRobot();   // 用种子值重新使能
+            std::cout << "[自检] 负载已回退种子值, 零偏已清零, 两份标定文件已删除。" << std::endl;
+            std::cout << "[自检] 请按 'm' 采多姿态 → 's' 求解; 按 'z' 调零。" << std::endl;
+        }
+        selfCheckActive = false;
+        mode = false;
+        RelayCore::instance().setDragMode(false);
+    }
+```
+
+> `lastReportPassed` 需要在 `report()` 里按既有 PASS 判据置位 —— 即
+> `coverageOk && spanF < 0.3 && drEq < 10.0`，与 `report()` 现有的 `✓ PASS` 分支同一个表达式，
+> 不要另写一套阈值。
+
+- [ ] **Step 4: 接线**
+
+- `'s'` 处理里：`if (selfCheckActive) { finishSelfCheck(); return; }` —— 排在 `solveAndApply()` 之前
+- `'m'` 处理里：自检进行中时不要让它切走（或允许，但明确提示自检被放弃）
+- 启动流程：在 `RelayCore::init()` 成功、力数据流就绪**之后**，若
+  `PayloadCalibration::enabled || ForceCalibration::isCalibrated()` 为真 → `BiasCheck::startSelfCheck()`
+- `BiasCheck::cancel()` 里：若 `selfCheckActive`，提示"自检已放弃，已存标定未经验证"
+
+- [ ] **Step 5: 完整构建**
+
+Run: `cmd.exe //c "D:\Projects\Touch\Touch_Client\build.bat"`
+Expected: `Build OK.`
+
+- [ ] **Step 6: 实机验证（交用户，不在本任务内执行）**
+
+- [ ] **Step 7: 提交**
+
+```bash
+git add Touch_Client/main.cpp
+git commit -m "feat(calib): verify the stored calibration by measurement at startup"
+```
+
+---
 
 ---
 
