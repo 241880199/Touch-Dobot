@@ -128,9 +128,11 @@ static void test_sign_convention() {
     PASS();
 }
 
-// 符号自动判定: 两个候选差 2·m_cfg·cz/m_true, 只有一个落在法兰下方。
-static void test_auto_picks_physical_sign() {
-    TEST(auto_picks_physical_sign);
+// 两个候选的【物理】质心横跨法兰平面: 一个在下方 (物理), 一个在上方 (非物理)。
+// 解算器不再自行选边 (signAmbiguous 实测前恒为 true) —— 符号由实机探针裁决,
+// 所以传入的 signZ 只影响 comMm 临时值, 左右不了候选。
+static void test_candidates_bracket_flange() {
+    TEST(candidates_bracket_flange);
     // 配置 0.660kg / com +80.4mm; 真值 0.409kg / com +67.9mm
     double cTrue[3] = {0.3, 0.3, 67.9};
     double cCfg[3]  = {0.0, 0.0, 80.4};
@@ -138,13 +140,11 @@ static void test_auto_picks_physical_sign() {
     synthesize(0.409, cTrue, 0.660, cCfg, +1.0, F, M);   // 机械臂按 +1 解释
 
     PayloadCalibration::Result r;
-    // 故意传入【错误】的 signZ=-1, 自动判定应当把它纠正回 +1
+    // 故意传入【错误】的 signZ=-1: 解算器不再据此纠正什么
     CHECK(PayloadCalibration::solve(g_poses, F, M, NP, 0.660, cCfg, -1.0, r));
-    CHECK(!r.signAmbiguous);
-    CHECK(fabs(r.signZ - 1.0) < 1e-12);
     CHECK(r.cTrueZ[0] > 0.0);      // 候选 +1: 法兰下方, 物理
     CHECK(r.cTrueZ[1] < 0.0);      // 候选 -1: 法兰上方, 非物理
-    CHECK(fabs(r.comMm[2] - 67.9) < 1e-6);
+    CHECK(r.signAmbiguous);        // 解算器无法自行定案
     PASS();
 }
 
@@ -308,52 +308,31 @@ static void test_effective_falls_back_to_seed() {
     PASS();
 }
 
-// 符号判定: 按"离种子更近"选取, 且要求距离比 ≥ SIGN_SEED_MARGIN_RATIO。
-// 真值 +1 时应纠正一个错误的传入符号 —— 这是旧判据【做不到】的
-// (旧判据恒等于 sign(comCfg[2]), 只能确认不能翻转)。
-static void test_sign_seed_anchor_picks_plus() {
-    TEST(sign_seed_anchor_picks_plus);
+// 两个候选都必须算对: 每个候选 = "按该符号解释时的物理质心"折算回下发值。
+// 符号本身由实机实测裁决, 解算器只负责把两种解释都给全。
+static void test_both_candidates_computed() {
+    TEST(both_candidates_computed);
     double cTrue[3] = {0.3, 0.3, 67.9};
-    double cCfg[3]  = {0.0, 0.0, 80.4};   // 与种子同向
+    double cCfg[3]  = {0.0, 0.0, 80.4};
     double F[NP][3], M[NP][3];
     synthesize(0.409, cTrue, 0.660, cCfg, +1.0, F, M);
 
     PayloadCalibration::Result r;
-    // 故意传入错误的 signZ=-1: 锚点应把它纠正回 +1
-    CHECK(PayloadCalibration::solve(g_poses, F, M, NP, 0.660, cCfg, -1.0, r));
-    CHECK(!r.signAmbiguous);
-    CHECK(fabs(r.signZ - 1.0) < 1e-12);
-    CHECK(fabs(r.comMm[2] - 67.9) < 1e-6);
-    PASS();
-}
-
-// 真值 -1 的机器: 候选 +327.3 / +67.8 —— 【两个都是正的】,
-// 旧判据在这里必然判歧义并永久拒绝; 锚点法应选 -1。
-static void test_sign_seed_anchor_picks_minus() {
-    TEST(sign_seed_anchor_picks_minus);
-    double cTrue[3] = {0.3, 0.3, 67.9};
-    double cCfg[3]  = {0.0, 0.0, 80.4};
-    double F[NP][3], M[NP][3];
-    synthesize(0.409, cTrue, 0.660, cCfg, -1.0, F, M);   // 机械臂按 -1 解释
-
-    PayloadCalibration::Result r;
     CHECK(PayloadCalibration::solve(g_poses, F, M, NP, 0.660, cCfg, +1.0, r));
-    CHECK(!r.signAmbiguous);
-    CHECK(fabs(r.signZ - (-1.0)) < 1e-12);
-    // 下发值按 signZ 折算回去, 使机械臂的 c_eff 恰好等于物理质心
-    CHECK(fabs(r.comMm[2] - (-67.9)) < 1e-6);
-    PASS();
-}
-
-// 余量不足 -> 判不可判定, 而不是静默选一个
-static void test_sign_insufficient_margin_is_ambiguous() {
-    TEST(sign_insufficient_margin_is_ambiguous);
-    // 构造两个候选都与种子距离相近的场景: 种子本来就该在中点附近
-    // 直接把种子当成锚点不可注入, 所以这里改为验证【距离比】这个纯判断
-    CHECK(PayloadCalibration::seedMarginSufficient(10.0, 40.0));    // 比 4.0 -> 够
-    CHECK(!PayloadCalibration::seedMarginSufficient(30.0, 40.0));   // 比 1.33 -> 不够
-    CHECK( PayloadCalibration::seedMarginSufficient(0.0, 40.0));    // 锚点精确命中 -> 够
-    CHECK(!PayloadCalibration::seedMarginSufficient(0.0, 0.0));     // 两候选重合 -> 退化, 不够
+    // 独立算一遍 dp_z (= p_true − p_cfg), 别照抄被测代码
+    const double dpZ    = (0.409 * 67.9 - 0.660 * 80.4) / 1000.0;
+    // 候选 k=0 (s=+1): 机械臂按 +1 用过 comCfg → cSend_z = (p_cfg(+1) + dp)/m = +67.9
+    const double pCfgZ0 = 0.660 * 80.4 / 1000.0;
+    CHECK(fabs(r.comCand[0][2] - (pCfgZ0 + dpZ) / 0.409 * 1000.0) < 1e-9);
+    CHECK(fabs(r.comCand[0][2] - 67.9) < 1e-6);
+    // 候选 k=1 (s=-1): 【p_cfg 里要带符号】——
+    // cSend_z = (p_cfg(-1) + dp)/m / (-1), 其中 p_cfg(-1) = m_cfg·(-cz)/1000。
+    // 少写这个负号就会误以为候选是 -67.9; 实际是 +191.58 (= cTrueZ[1] / (-1))。
+    const double pCfgZ1 = 0.660 * (-80.4) / 1000.0;
+    CHECK(fabs(r.comCand[1][2] - (pCfgZ1 + dpZ) / 0.409 * 1000.0 / (-1.0)) < 1e-9);
+    CHECK(fabs(r.comCand[1][2] - 191.581663) < 1e-5);
+    // solve() 不再自行定案
+    CHECK(r.signAmbiguous);
     PASS();
 }
 
@@ -362,7 +341,7 @@ int main() {
     test_recovers_true_payload();
     test_recovers_from_nonzero_config();
     test_sign_convention();
-    test_auto_picks_physical_sign();
+    test_candidates_bracket_flange();
     test_second_pass_converges();
     test_noise_robustness();
     test_rejects_too_few_poses();
@@ -371,9 +350,7 @@ int main() {
     test_save_load_roundtrip();
     test_save_includes_timestamp();
     test_effective_falls_back_to_seed();
-    test_sign_seed_anchor_picks_plus();
-    test_sign_seed_anchor_picks_minus();
-    test_sign_insufficient_margin_is_ambiguous();
+    test_both_candidates_computed();
     std::cout << "\n" << g_passed << " passed, " << g_failed << " failed" << std::endl;
     return g_failed ? 1 : 0;
 }

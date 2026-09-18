@@ -356,6 +356,61 @@ namespace BiasCheck {
                       << std::endl;
         }
 
+        // ===== 符号实测裁决 =====
+        // solve() 只给出两种解释; 这里在【同一个静止姿态】下各下发一次, 谁留下的
+        // 力矩残余小谁对。机械臂全程不动 —— 差异纯粹来自符号, 不是姿态。
+        // 前提: 当前姿态要有足够倾角, 否则两者都≈0、分不开。
+        double rProbe[2] = {0.0, 0.0};
+        int    chosen = -1;
+        bool   probeOk = true;
+        {
+            double p[6];
+            EnterCriticalSection(&appState.robotPoseMutex);
+            p[0] = appState.robotActualPose.x;  p[1] = appState.robotActualPose.y;
+            p[2] = appState.robotActualPose.z;  p[3] = appState.robotActualPose.rx;
+            p[4] = appState.robotActualPose.ry; p[5] = appState.robotActualPose.rz;
+            LeaveCriticalSection(&appState.robotPoseMutex);
+            double R[9];
+            TcpCalibration::rpyToMatrix(p[3], p[4], p[5], R);
+            const double sinTheta = sqrt(R[2] * R[2] + R[5] * R[5]);
+            if (sinTheta < 0.5) {
+                std::cout << "  ✗ 当前姿态倾角不足 (sinθ=" << sinTheta
+                          << " < 0.5) — 两个符号分不开。" << std::endl;
+                std::cout << "    请把笔摆到明显倾斜/水平再按 's'。" << std::endl;
+                probeOk = false;
+            }
+        }
+        if (probeOk) {
+            for (int k = 0; k < 2; k++) {
+                if (!RelayCore::instance().probePayloadResidual(r.massKg, r.comCand[k], rProbe[k])) {
+                    std::cout << "  ✗ 符号探针失败 (力数据不足) — 恢复原配置" << std::endl;
+                    probeOk = false;
+                    break;
+                }
+            }
+        }
+        if (probeOk) {
+            const int  win  = (rProbe[0] <= rProbe[1]) ? 0 : 1;
+            const int  lose = 1 - win;
+            const bool separated = (rProbe[lose] >= Config::SIGN_PROBE_MIN_RATIO * rProbe[win]);
+            const bool small     = (rProbe[win] <= Config::SIGN_PROBE_MAX_WIN_NM);
+            printf("  CZ 符号实测: 候选 +1 残余 %.4f N·m / 候选 -1 残余 %.4f N·m\n",
+                   rProbe[0], rProbe[1]);
+            if (separated && small) {
+                chosen = win;
+                std::cout << "  CZ 符号约定: 裁决 → " << (win == 0 ? "+1" : "-1")
+                          << " (残余小 " << (rProbe[lose] / rProbe[win]) << " 倍)" << std::endl;
+            } else {
+                std::cout << "  CZ 符号约定: ✗ 实测分不开 — 结果按不合理处理" << std::endl;
+            }
+        }
+        if (chosen >= 0) {
+            PayloadCalibration::applyResult(r, chosen);   // 定案
+        } else {
+            // 探针已经把机器人的配置改乱了, 恢复成当前生效值
+            RelayCore::instance().applyPayloadToRobot();
+        }
+
         // ===== 合理性判据 =====
         // 任一命中即"不合理" -> 拒绝保存和下发, 机械臂保持原参数。
         // 绝不拿一个程序自己都判定为不可信的结果去配置机械臂。
@@ -365,7 +420,7 @@ namespace BiasCheck {
         const bool   fitOk   = (r.rmsForceN < RMS_F_MAX);
         // 物理质心 (不是下发值): cSend = cTrue/signZ 在两种符号下都可能是正的
         const double cTrueZChosen = r.cTrueZ[r.signZ > 0.0 ? 0 : 1];
-        const bool   signOk = !r.signAmbiguous;     // 程序必须能判出符号
+        const bool   signOk = (chosen >= 0);        // 实测必须能裁决出符号
         const bool   comZOk = (cTrueZChosen > 0.0); // 工具挂在法兰下方 -> 质心 Z 必须为正
         const double comXY  = sqrt(r.comMm[0] * r.comMm[0] + r.comMm[1] * r.comMm[1]);
         const bool   reasonable = fitOk && signOk && comZOk;

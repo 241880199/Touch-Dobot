@@ -65,14 +65,6 @@ namespace PayloadCalibration {
         rhs[3] = dM[0]; rhs[4] = dM[1]; rhs[5] = dM[2];
     }
 
-    bool seedMarginSufficient(double near, double far) {
-        // near == 0 是锚点的【最佳】情形 (候选与种子精确重合), 不是退化 —— 必须放行。
-        // 真正退化的是两个候选【互相重合】: 那时 far 也接近 0, 锚点信息量为零。
-        if (!(far > 0.0)) return false;      // 两候选重合 -> 无从判别
-        if (!(near > 0.0)) return true;      // 锚点精确命中 -> 采纳
-        return (far / near) >= Config::SIGN_SEED_MARGIN_RATIO;
-    }
-
     bool solve(const double posesIn[][6], const double forces[][3], const double moments[][3],
                int n, double mCfg, const double comCfg[3], double signZ, Result& out)
     {
@@ -122,43 +114,34 @@ namespace PayloadCalibration {
 
         // ===== 换算绝对值 =====
         // signZ 不进 buildRows, 所以两种符号的拟合残差【完全相同】——
-        // 数据本身区分不了符号, 必须用外部判据。
-        // 交叉检查: 工具挂在法兰下方 → 物理质心 Z 必须为正。
-        // 两个候选相差 2·m_cfg·cz/m_true (本工具链约 259 mm), 通常会有一个非物理 ——
-        // 下面的锚点判定选完后, 再用这条物理约束兜底复核。
+        // 数据本身区分不了符号, 只能把两种解释都给全 (下面的 comCand)。
+        // 这里仍把两个候选的【物理】质心 Z 算出来供人复核 (判据必须看物理值,
+        // 不能看下发值 —— cSend = cTrue/signZ 在两种符号下都可能是正的)。
         double mTrue = mCfg + dm;
         if (!(mTrue > 0.01) || mTrue > 5.0) return false;   // 非物理
 
-        // 注意: 下发值 cSend = cTrue/signZ 在两种符号下都可能是正的,
-        // 所以判据必须看【物理】cTrue, 不能看下发值。
         double cTrueZ[2];
         for (int k = 0; k < 2; k++) {
             const double s = (k == 0) ? 1.0 : -1.0;
             const double pCfgZ = mCfg * (comCfg[2] * s) / 1000.0;
             cTrueZ[k] = (pCfgZ + dp[2]) / mTrue * 1000.0;
         }
-        // ===== 符号选取: 种子锚点 + 余量判据 =====
-        // signZ 不进拟合方程, 两种符号的残差完全相同 -> 必须外部判据。
-        // 旧判据 (看哪个候选为正) 在代数上恒等于 sign(comCfg[2]), 只能确认不能翻转
-        // (X>0 时 minusOk 蕴含 plusOk, 非歧义分支永远是 +1), 因此在"配置符号本就错"
-        // 时会把两个都为正的候选判成歧义、永久拒绝。改用外部锚点破环。
-        const double seedZ = Config::ROBOT_PAYLOAD_SEED_CZ_MM;
-        const double d0 = fabs(cTrueZ[0] - seedZ);
-        const double d1 = fabs(cTrueZ[1] - seedZ);
-        const double dNear = (d0 <= d1) ? d0 : d1;
-        const double dFar  = (d0 <= d1) ? d1 : d0;
+        // ===== 两个候选都算出来, 不在解算器里选 =====
+        // 符号不在数据里 (它只进入 p_cfg 的换算, 在 Δp 的差值里被消掉), 所以解算器
+        // 只能把两种解释都给全, 由调用方在实机上各下发一次、看谁留下的力矩残余小。
+        double sChosen = signZ;              // 临时值; 由调用方定案
+        bool   ambiguous = true;             // 实测前恒为"未定案"
 
-        double sChosen = signZ;
-        bool   ambiguous = false;
-        if (!seedMarginSufficient(dNear, dFar)) {
-            ambiguous = true;                       // 余量不足 -> 不静默选
-        } else {
-            sChosen = (d0 <= d1) ? 1.0 : -1.0;
-        }
-
-        if (!ambiguous) {
-            const double cChosen = (sChosen > 0.0) ? cTrueZ[0] : cTrueZ[1];
-            if (!(cChosen > 0.0)) ambiguous = true;   // 锚点与物理约束矛盾 -> 不可判定
+        for (int k = 0; k < 2; k++) {
+            const double s = (k == 0) ? 1.0 : -1.0;
+            double cEffK[3] = {comCfg[0], comCfg[1], comCfg[2] * s};
+            double pCfgK[3] = {mCfg * cEffK[0] / 1000.0, mCfg * cEffK[1] / 1000.0,
+                               mCfg * cEffK[2] / 1000.0};
+            for (int i = 0; i < 3; i++) {
+                double cSend = (pCfgK[i] + dp[i]) / mTrue * 1000.0;
+                if (i == 2 && s != 0.0) cSend /= s;
+                out.comCand[k][i] = cSend;
+            }
         }
 
         double cEff[3] = {comCfg[0], comCfg[1], comCfg[2] * sChosen};
@@ -221,6 +204,31 @@ namespace PayloadCalibration {
         rmsForceN = r.rmsForceN;
         rmsMomentNm = r.rmsMomentNm;
         poses = r.poses;
+    }
+
+    // 实机探针选定候选后定案: 0 = 符号约定 +1, 1 = 符号约定 -1。
+    // comCand[chosen] 本身就是该符号下的下发值, 所以直接生效, 不需要再折算。
+    // 同时把定案回写进 Result —— 调用方(实机流程)在定案之后还要用 r.signZ /
+    // r.signAmbiguous / r.cTrueZ / r.comMm 打判据和报告, 不回写就会拿临时值误导操作者。
+    // (签名按计划保持 const&; Result 在本流程里始终是非 const 左值。)
+    void applyResult(const Result& r, int chosen) {
+        if (chosen != 0 && chosen != 1) return;      // 无效选择: 不动生效值
+        const double sChosen = (chosen == 0) ? 1.0 : -1.0;
+
+        enabled = true;
+        massKg = r.massKg;
+        for (int i = 0; i < 3; i++) comMm[i] = r.comCand[chosen][i];
+        comSignZ = sChosen;
+        rmsForceN = r.rmsForceN;
+        rmsMomentNm = r.rmsMomentNm;
+        poses = r.poses;
+
+        Result& out = const_cast<Result&>(r);
+        for (int i = 0; i < 3; i++) out.comMm[i] = r.comCand[chosen][i];
+        // dc 是"相对上次下发值的修正量", 而上次下发的值不在 Result 里 (solve 只收得到
+        // 它, 存不下), 所以这里不重算 —— 它只在定案前的报告里用过, 定案后无人再读。
+        out.signZ = sChosen;
+        out.signAmbiguous = false;                   // 已定案
     }
 
     // ===== 持久化 =====

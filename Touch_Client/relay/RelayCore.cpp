@@ -161,6 +161,35 @@ bool RelayCore::applyPayloadToRobot() {
     return ok;
 }
 
+bool RelayCore::probePayloadResidual(double massKg, const double comMm[3], double& residualNm) {
+    if (!isRobotConnected()) return false;
+
+    char cmd[128];
+    snprintf(cmd, sizeof(cmd), "EnableRobot(%.3f,%.1f,%.1f,%.1f)",
+             massKg, comMm[0], comMm[1], comMm[2]);
+    robotSendEnable(cmd);
+    Sleep(Config::SIGN_PROBE_SETTLE_MS);
+
+    const DWORD t0 = GetTickCount();
+    double sum[3] = {0, 0, 0};
+    int n = 0;
+    while (GetTickCount() - t0 < (DWORD)Config::SIGN_PROBE_AVG_MS) {
+        AppState::ForceData fd;
+        EnterCriticalSection(&appState.forceDataMutex);
+        fd = appState.forceData;
+        LeaveCriticalSection(&appState.forceDataMutex);
+        if (!fd.isStale) {
+            sum[0] += fd.filtered[3]; sum[1] += fd.filtered[4]; sum[2] += fd.filtered[5];
+            n++;
+        }
+        Sleep(10);
+    }
+    if (n < 5) return false;                 // 数据太少, 不下结论
+    const double m0 = sum[0] / n, m1 = sum[1] / n, m2 = sum[2] / n;
+    residualNm = sqrt(m0 * m0 + m1 * m1 + m2 * m2);
+    return true;
+}
+
 RelayCore& RelayCore::instance() {
     static RelayCore inst;
     return inst;

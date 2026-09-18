@@ -25,24 +25,22 @@ namespace PayloadCalibration {
         double dc[3];        // 质心修正量 (mm, 带符号)
         double massKg;       // 换算出的绝对质量 (kg)
         double comMm[3];     // 换算出的绝对质心 (mm, 法兰系)
+        // 两个符号候选的【下发值】, 供调用方在实机上各下发一次、实测裁决。
+        // solve() 本身不碰机器人, 所以它在 comMm 里放一个临时值,
+        // 由调用方选定后再用 applyResult(r, chosen) 定案。
+        double comCand[2][3];
         double rmsForceN;    // 力通道拟合残差 (N)
         double rmsMomentNm;  // 力矩通道拟合残差 (N·m)
         int    poses;        // 参与求解的姿态数
 
-        // ===== CZ 符号自动判定 =====
+        // ===== CZ 符号判定 =====
         // signZ 不进 buildRows, 所以两种符号的拟合残差完全相同 —— 数据本身
-        // 区分不了符号, 必须用外部判据: 取离 Config::ROBOT_PAYLOAD_SEED_CZ_MM
-        // 更近的候选 (距种子比值差 ≥ SIGN_SEED_MARGIN_RATIO 才采纳),
-        // 再用"物理质心 Z 必须为正"交叉复核。
-        double signZ         = 1.0;    // 实际选用的符号约定 (+1 / -1)
+        // 区分不了符号, 解算器只能把两种解释都给全 (comCand),
+        // 由调用方在实机上各下发一次、看谁留下的力矩残余小。
+        double signZ         = 1.0;    // 临时值; 由调用方定案后覆写
         double cTrueZ[2]     = {0.0, 0.0};  // {候选+1, 候选-1} 下的物理质心 Z (mm)
-        bool   signAmbiguous = true;   // 默认 true = 不可信, 不让漏填的 Result 看起来可用
+        bool   signAmbiguous = true;   // "解算器无法自行定案" — 实测前恒为 true
     };
-
-    // 纯函数: 余量是否足够采纳锚点选出的候选。
-    // near = 选中候选到种子的距离, far = 另一个候选的距离。
-    // 距离比必须 ≥ Config::SIGN_SEED_MARGIN_RATIO, 否则判不可判定。
-    bool seedMarginSufficient(double near, double far);
 
     // 纯函数: 最小二乘求解。无全局状态, 便于单测。
     //   poses:    n 个法兰位姿 [x,y,z,rx,ry,rz], 角度单位【度】(= GetPose 的返回)
@@ -73,6 +71,9 @@ namespace PayloadCalibration {
 
     // 用求解结果覆写生效值 (仅内存)
     void applyResult(const Result& r);
+
+    // 按实机实测选定的候选 (0 = 候选+1, 1 = 候选-1) 覆写生效值 (仅内存)
+    void applyResult(const Result& r, int chosen);
 
     bool load(const char* filepath);
     bool save(const char* filepath);

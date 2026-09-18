@@ -48,6 +48,11 @@ public:
     // 末端负载标定后重新下发 EnableRobot(load,cx,cy,cz)
     bool applyPayloadToRobot();
 
+    // 用给定负载重新使能, 等稳定后返回当前姿态的残余力矩模长 (N·m)。
+    // 符号裁决用: 同一静止姿态下依次探两个候选, 谁留下的力矩残余小谁对。
+    // 调用方必须保证机械臂【不动】(两次探针在同一姿态比较才有意义)。
+    bool probePayloadResidual(double massKg, const double comMm[3], double& residualNm);
+
     // 奇异脱困 (可在运行中手动触发)
     bool triggerEscape();
 
