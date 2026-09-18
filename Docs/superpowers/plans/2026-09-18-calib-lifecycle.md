@@ -1478,7 +1478,8 @@ static void test_sign_insufficient_margin_is_ambiguous() {
     // 直接把种子当成锚点不可注入, 所以这里改为验证【距离比】这个纯判断
     CHECK(PayloadCalibration::seedMarginSufficient(10.0, 40.0));    // 比 4.0 -> 够
     CHECK(!PayloadCalibration::seedMarginSufficient(30.0, 40.0));   // 比 1.33 -> 不够
-    CHECK(!PayloadCalibration::seedMarginSufficient(0.0, 40.0));    // 退化 -> 不够
+    CHECK( PayloadCalibration::seedMarginSufficient(0.0, 40.0));    // 锚点精确命中 -> 够
+    CHECK(!PayloadCalibration::seedMarginSufficient(0.0, 0.0));     // 两候选重合 -> 退化, 不够
     PASS();
 }
 ```
@@ -1507,8 +1508,10 @@ Expected: 编译失败 —— `seedMarginSufficient` 未声明。
 
 ```cpp
     bool seedMarginSufficient(double near, double far) {
-        if (!(near > 0.0)) return false;                       // 退化/重合
-        if (!(far > near)) return false;                       // 另一个反而更近
+        // near == 0 是锚点的【最佳】情形 (候选与种子精确重合), 不是退化 —— 必须放行。
+        // 真正退化的是两个候选【互相重合】: 那时 far 也接近 0, 锚点信息量为零。
+        if (!(far > 0.0)) return false;      // 两候选重合 -> 无从判别
+        if (!(near > 0.0)) return true;      // 锚点精确命中 -> 采纳
         return (far / near) >= Config::SIGN_SEED_MARGIN_RATIO;
     }
 ```
