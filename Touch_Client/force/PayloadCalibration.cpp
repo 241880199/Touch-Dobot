@@ -17,26 +17,32 @@ namespace PayloadCalibration {
     double rmsMomentNm = 0.0;
     int    poses = 0;
     double comSignZ = 1.0;
+    // 生效的传感器安装偏转角 (度)。种子 = Config (未标定/旧文件时的回退值)。
+    double sensorYawDeg = Config::SENSOR_MOUNT_YAW_DEG;
 
     static const int    MIN_POSES = 3;   // 4 个未知量, 每个姿态贡献 6 个方程; 3 个起解
 
-    // 重力在【传感器系】下的表示 —— 就一句话: 转给 TcpCalibration::gravitySensorFrame。
+    // 重力在【传感器系】下的表示 —— 就一句话: 转给 TcpCalibration, 本文件不自己算。
     // 本文件从前自己算过一遍 Rᵀ·(0,0,G), 与 ForceCompensation::step 里的那一份并存过 ——
     // 两份约定一旦漂移 (历史上就是差了个转置), 求解器会【安静地解错】: 残差仍与真值相关,
     // 不会报错。约定只能有一份实现, 就在这里转出去。
-    static void gravityTool(const double pose[6], double g[3]) {
-        TcpCalibration::gravitySensorFrame(pose, g);
+    // psi 显式给出 (psiDeg) 而不是读模块状态: 扫描要遍历 721 个角, 反复 setSensorYawDeg
+    // 既慢又会在中途失败时给运行时留下一个被污染的安装角。数学仍只有一份 ——
+    // gravitySensorFrameAtYaw 与 gravitySensorFrame 共用同一个实体 (见 TcpCalibration.cpp)。
+    static void gravityTool(const double pose[6], double psiDeg, double g[3]) {
+        TcpCalibration::gravitySensorFrameAtYaw(pose, psiDeg, g);
     }
 
     // 构造姿态 k (相对姿态 0 差商后) 的 6 行方程。
     // 未知量 x = [Δm, Δp_x, Δp_y, Δp_z] (Δm: kg; Δp: kg·m)。
     // 差商同时消掉了传感器零偏 b_F / b_M, 所以方程右端不含常数项。
+    // psiDeg: 构造 g_k 时用的安装偏转角 —— 扫描就是这个参数在动。
     static void buildRows(const double posesIn[][6], const double forces[][3],
-                          const double moments[][3], const double g0[3], int k,
+                          const double moments[][3], const double g0[3], double psiDeg, int k,
                           double rows[6][4], double rhs[6])
     {
         double gk[3];
-        gravityTool(posesIn[k], gk);
+        gravityTool(posesIn[k], psiDeg, gk);
         double dg[3] = {gk[0] - g0[0], gk[1] - g0[1], gk[2] - g0[2]};   // m/s²
 
         double dF[3] = {forces[k][0] - forces[0][0],
@@ -59,8 +65,24 @@ namespace PayloadCalibration {
         rhs[3] = dM[0]; rhs[4] = dM[1]; rhs[5] = dM[2];
     }
 
-    bool solve(const double posesIn[][6], const double forces[][3], const double moments[][3],
-               int n, double mCfg, const double comCfg[3], double signZ, Result& out)
+    // ===== ψ 扫描的范围与步长 =====
+    // 90° 只是安装孔 45° 分度给出的种子; 三组独立实机数据都指向 ≈79–81.5°, 而 90° 与 80°
+    // 之差正好跨过 0.30 N 的验收门限 (90° → 0.3192 N 拒 / ≈80° → 0.215 N 过) —— ψ 是
+    // "能标不能猜"的量, 所以让数据自己找。
+    // [-180, 180] 覆盖整个圆周; 0.5° 步长 = 721 次 4×4 解, 相对采集耗时可忽略。
+    // ⚠ 【不钳位】: 最优落在区间边缘是信号 (数据/装夹/模型有问题), 不是该被抹掉的噪声。
+    static const double PSI_MIN_DEG  = -180.0;
+    static const double PSI_MAX_DEG  =  180.0;
+    static const double PSI_STEP_DEG =    0.5;
+    static const int    PSI_N_SCAN   = 721;   // (180 − (−180)) / 0.5 + 1
+
+    // 在给定 ψ 下做一次完整的最小二乘。这是本文件【唯一的拟合主体】—— 扫描与最终解算都走
+    // 它, 所以扫描在最小化的量就是 solve() 报出、门限判的那个量, 两条路径不可能各算各的。
+    // 返回 false = 姿态退化 (4×4 主元过小, 与从前 solve() 的判据相同)。
+    // 输出 x[4] = {Δm, Δp_x, Δp_y, Δp_z}; sumSqF / sumSqM = 两通道的 |A·x − b|²。
+    static bool fitAtYaw(const double posesIn[][6], const double forces[][3],
+                         const double moments[][3], int n, double psiDeg,
+                         double x[4], double& sumSqF, double& sumSqM)
     {
         if (n < MIN_POSES) return false;
 
@@ -68,11 +90,11 @@ namespace PayloadCalibration {
         double Atb[4] = {0};
 
         double g0[3];
-        gravityTool(posesIn[0], g0);
+        gravityTool(posesIn[0], psiDeg, g0);
 
         double rows[6][4], rhs[6];
         for (int k = 1; k < n; k++) {
-            buildRows(posesIn, forces, moments, g0, k, rows, rhs);
+            buildRows(posesIn, forces, moments, g0, psiDeg, k, rows, rhs);
             for (int r = 0; r < 6; r++) {
                 for (int a = 0; a < 4; a++) {
                     for (int b = 0; b < 4; b++) AtA[a][b] += rows[r][a] * rows[r][b];
@@ -103,8 +125,67 @@ namespace PayloadCalibration {
                 for (int c = col; c < 5; c++) A[r][c] -= f * A[col][c];
             }
         }
-        double dm = A[0][4];
-        double dp[3] = {A[1][4], A[2][4], A[3][4]};   // kg·m
+        for (int i = 0; i < 4; i++) x[i] = A[i][4];
+
+        // ===== 拟合残差 |A·x − b| (不是数据本身的量级) =====
+        sumSqF = 0.0;
+        sumSqM = 0.0;
+        for (int k = 1; k < n; k++) {
+            buildRows(posesIn, forces, moments, g0, psiDeg, k, rows, rhs);
+            for (int r = 0; r < 6; r++) {
+                double pred = 0.0;
+                for (int a = 0; a < 4; a++) pred += rows[r][a] * x[a];
+                double e = pred - rhs[r];
+                if (r < 3) sumSqF += e * e;
+                else       sumSqM += e * e;
+            }
+        }
+        return true;
+    }
+
+    bool solve(const double posesIn[][6], const double forces[][3], const double moments[][3],
+               int n, double mCfg, const double comCfg[3], double signZ, Result& out)
+    {
+        if (n < MIN_POSES) return false;
+
+        // ===== 1) 先扫 ψ: 让数据自己定传感器安装偏转角 =====
+        double bestPsi = 0.0, bestSumSq = 0.0;
+        bool haveFit = false;
+        for (int s = 0; s < PSI_N_SCAN; s++) {
+            const double psi = PSI_MIN_DEG + s * PSI_STEP_DEG;
+            double xs[4], ssF = 0.0, ssM = 0.0;
+            if (!fitAtYaw(posesIn, forces, moments, n, psi, xs, ssF, ssM)) continue;
+            // 判据 = 拟合残差 |A·x − b|² 的【全部 6 行】(力 3 + 力矩 3) —— 与 solve() 报出、
+            // 门限判的那个残差是同一个表达式的同一个量, 只是不按通道拆开看。
+            // 【两个通道都要算进去】: 力矩方程同样含 ψ (dM = Δp × dg)。只看力通道会在
+            // Δm ≈ 0 时退化 (力方程全是 0 → 每个 ψ 的残差都是 0 → argmin 由扫描起点决定),
+            // 而那种情况下 ψ 恰好是由力矩通道定的。
+            if (!haveFit || ssF + ssM < bestSumSq) {
+                haveFit = true;
+                bestSumSq = ssF + ssM;
+                bestPsi = psi;
+            }
+        }
+        if (!haveFit) return false;   // 每个 ψ 下都秩亏 → 退化的是姿态本身, 不是 ψ
+        // 全零数据 (dF 与 dM 恒为 0: 当前配置与真值一模一样) → 每个 ψ 的残差都是 0, argmin
+        // 没有意义。此时保持种子不动, 而不是报一个"由扫描起点决定"的角 —— 那个角会被当成
+        // 标定结果持久化, 进而把运行时的重力模型整个转歪。
+        if (bestSumSq <= 0.0) bestPsi = Config::SENSOR_MOUNT_YAW_DEG;
+        out.sensorYawDeg = bestPsi;
+
+        // 最优落在扫描边界 = 信号。照实报出 (不钳位), 另外说一句 —— 免得它被当成正常结果。
+        if (fabs(bestPsi - PSI_MIN_DEG) < 1e-9 || fabs(bestPsi - PSI_MAX_DEG) < 1e-9) {
+            fprintf(stderr, "[Payload] !! psi 最优落在扫描边界 %.1f deg — 未钳位, 但这是异常信号:"
+                            " 多半是姿态覆盖不足 / 装夹松动 / 数据里有直线运动, 不是真装了 180°。\n",
+                    bestPsi);
+        }
+
+        // ===== 2) 用最优 ψ 跑最终那一次拟合 (同一个 fitAtYaw, 不是另一条路径) =====
+        double x[4], sumSqF = 0.0, sumSqM = 0.0;
+        if (!fitAtYaw(posesIn, forces, moments, n, bestPsi, x, sumSqF, sumSqM)) return false;
+
+        double dm = x[0];
+        double dp[3] = {x[1], x[2], x[3]};   // kg·m
 
         // ===== 换算绝对值 =====
         // signZ 不进 buildRows, 所以两种符号的拟合残差【完全相同】—— 数据本身区分不了符号
@@ -144,21 +225,11 @@ namespace PayloadCalibration {
             out.dc[i] = cSend - comCfg[i];
         }
         // ===== 拟合残差 |A·x − b| (不是数据本身的量级) =====
-        double x[4] = {A[0][4], A[1][4], A[2][4], A[3][4]};
-        double sumSqF = 0.0, sumSqM = 0.0;
-        int eqF = 0, eqM = 0;
-        for (int k = 1; k < n; k++) {
-            buildRows(posesIn, forces, moments, g0, k, rows, rhs);
-            for (int r = 0; r < 6; r++) {
-                double pred = 0.0;
-                for (int a = 0; a < 4; a++) pred += rows[r][a] * x[a];
-                double e = pred - rhs[r];
-                if (r < 3) { sumSqF += e * e; eqF++; }
-                else       { sumSqM += e * e; eqM++; }
-            }
-        }
-        out.rmsForceN = eqF > 0 ? sqrt(sumSqF / (double)eqF) : 0.0;
-        out.rmsMomentNm = eqM > 0 ? sqrt(sumSqM / (double)eqM) : 0.0;
+        // 逐分量均方根: 每姿态 3 个力方程、3 个力矩方程 → 分母各 3·(n−1)。
+        // 这两个值就是扫描在上一步最小化的同一个量的开方 (见 fitAtYaw)。
+        const double eqF = 3.0 * (n - 1);
+        out.rmsForceN   = sqrt(sumSqF / eqF);
+        out.rmsMomentNm = sqrt(sumSqM / eqF);
         out.poses = n;
         return true;
     }
@@ -184,6 +255,9 @@ namespace PayloadCalibration {
         rmsForceN = r.rmsForceN;
         rmsMomentNm = r.rmsMomentNm;
         poses = r.poses;
+        // ψ 也一并记下 (它随文件持久化), 但【不】替调用方去动 TcpCalibration 的模块状态 ——
+        // 那样做等于让一次"记账"悄悄改掉全局重力约定。装 psi 是 main.cpp 的显式一步。
+        sensorYawDeg = r.sensorYawDeg;
     }
 
     // ===== 持久化 =====
@@ -203,6 +277,9 @@ namespace PayloadCalibration {
         fprintf(f, "  \"rms_force_n\": %.6g,\n", rmsForceN);
         fprintf(f, "  \"rms_moment_nm\": %.6g,\n", rmsMomentNm);
         fprintf(f, "  \"poses\": %d,\n", poses);
+        // 传感器安装偏转角: 【是结论, 不是信息性字段】—— 重力模型的一半靠它, 装错整个
+        // 力补偿都会跟着歪。写 6 位有效数字: 扫描分辨率 0.5°, 存回精度远高于此。
+        fprintf(f, "  \"sensor_yaw_deg\": %.6g,\n", sensorYawDeg);
         fprintf(f, "  \"com_sign_z\": %.1f\n", comSignZ);   // 信息性, 见上 — 不是结论
         fprintf(f, "}\n");
         fclose(f);
@@ -256,6 +333,11 @@ namespace PayloadCalibration {
         // 信息性字段 (见 save 的说明): 只为让 com_mm 的 Z 有一个确定的解释, 缺了也无妨。
         p = jsonFind(buf, "\"com_sign_z\"");
         comSignZ = (p && strtod(p, nullptr) < 0.0) ? -1.0 : 1.0;
+        // ψ: 【有则用, 无则回退 Config 种子】—— 旧文件 (本字段出现之前存的) 没有它,
+        // 必须仍能加载, 否则用户的标定会在升级后集体作废。回退不是"缺失即 90"的猜测:
+        // Config::SENSOR_MOUNT_YAW_DEG 就是本字段存在之前一直生效的那个值。
+        p = jsonFind(buf, "\"sensor_yaw_deg\"");
+        sensorYawDeg = p ? strtod(p, nullptr) : Config::SENSOR_MOUNT_YAW_DEG;
 
         massKg = m;
         for (int i = 0; i < 3; i++) comMm[i] = c[i];

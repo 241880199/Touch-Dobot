@@ -47,6 +47,10 @@ namespace PayloadCalibration {
         double rmsForceN;    // 力通道拟合残差 (N)
         double rmsMomentNm;  // 力矩通道拟合残差 (N·m)
         int    poses;        // 参与求解的姿态数
+        // 本次解出的传感器安装偏转角 (度) —— solve() 在 [-180, 180] 上以 0.5° 步长扫出来的
+        // 最优值。它是【模型参数】, 不是残余量: 调用方必须先 TcpCalibration::setSensorYawDeg()
+        // 再写本地补偿, 否则重力模型与刚解出的 dm/dp 对不上 (详见 .cpp 里的扫描说明)。
+        double sensorYawDeg;
 
         // CZ 符号的两种解释下的物理质心 Z (mm, {+1, -1})。signZ 不进 buildRows, 所以两种
         // 解释的拟合残差【完全相同】—— 数据本身区分不了符号。这两个值只是把这个不确定性
@@ -73,6 +77,11 @@ namespace PayloadCalibration {
     extern double rmsForceN;
     extern double rmsMomentNm;
     extern int    poses;
+    // 生效的传感器安装偏转角 (度), 随 payload_calib.json 的 "sensor_yaw_deg" 持久化。
+    // load() 读不到该字段时 (旧文件) 回退 Config::SENSOR_MOUNT_YAW_DEG。
+    // ⚠ 这里存的是【文件里的值】; 真正作用于重力模型的是 TcpCalibration 的模块状态 ——
+    //   启动时由 main.cpp 把本值 setSensorYawDeg 过去 (本模块不替调用方动全局状态)。
+    extern double sensorYawDeg;
     // CZ 的符号约定 (+1 / -1), 随 payload_calib.json 持久化。
     // ⚠ 现在它【只是信息性】的: 数据定不了这个符号 (两种解释拟合残差完全相同), 而写进
     //    机械臂的那份负载本来也改不动 —— 没有任何东西依赖它的取值, 它只决定 comMm 的 Z
@@ -82,8 +91,10 @@ namespace PayloadCalibration {
     // 当前应当下发给机械臂的负载参数: 已标定则用标定值, 否则回退 Config 种子
     void effective(double& massKgOut, double comMmOut[3]);
 
-    // 用求解结果覆写生效值 (仅内存): 质量/质心/rms/姿态数, 以及 enabled = true。
+    // 用求解结果覆写生效值 (仅内存): 质量/质心/rms/姿态数/psi, 以及 enabled = true。
     // 【不碰 comSignZ】—— 它是持久化的显示约定, 不是求解器的输出 (见上)。
+    // 注意: psi 只是被记进本模块 (供 save 落盘与启动时取用), 【不会】替调用方调
+    // TcpCalibration::setSensorYawDeg —— 见 main.cpp 的显式调用。
     void applyResult(const Result& r);
 
     bool load(const char* filepath);

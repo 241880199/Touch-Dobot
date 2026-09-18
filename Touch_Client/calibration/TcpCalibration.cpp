@@ -6,6 +6,9 @@
 #include <cstdlib>
 
 namespace TcpCalibration {
+    static const double D2R = 3.14159265358979323846 / 180.0;
+    static const double G   = 9.81;
+
     // ===== 全局标定状态 =====
     bool enabled = false;
     double offset[3] = {0, 0, 0};
@@ -15,11 +18,36 @@ namespace TcpCalibration {
     int  collectCount = 0;
     double collectPose[MAX_COLLECT_POSES][6] = {{0}};
 
+    // ===== 传感器安装偏转角 psi (模块状态) =====
+    // 种子 = Config::SENSOR_MOUNT_YAW_DEG (编译期常量即可初始化, 无静态初始化顺序问题)。
+    // 真值由 PayloadCalibration::solve 从数据里扫出来, main.cpp 用 setSensorYawDeg 装上。
+    static double s_sensorYawDeg = Config::SENSOR_MOUNT_YAW_DEG;
+    // cos/sin 缓存: gravitySensorFrame 在运行时路径上 (~125 Hz), 不值得每次都调三角函数。
+    // 用"有效位 + 懒重算"而不是在 setSensorYawDeg 里直接算 —— 否则任何一个早于 setter 的
+    // 调用都会读到未初始化的 0, g 变成全 0 而【不报错】(本文件最怕的就是这种安静的错误)。
+    static double s_cosYaw = 0.0, s_sinYaw = 0.0;
+    static bool   s_yawCacheValid = false;
+
+    static void refreshYawCache() {
+        const double psi = s_sensorYawDeg * D2R;
+        s_cosYaw = cos(psi);
+        s_sinYaw = sin(psi);
+        s_yawCacheValid = true;
+    }
+
+    void setSensorYawDeg(double deg) {
+        s_sensorYawDeg = deg;
+        s_yawCacheValid = false;
+    }
+
+    double sensorYawDeg() {
+        return s_sensorYawDeg;
+    }
+
     // 输入为【度】(与 GetPose 返回的 Rx/Ry/Rz、Config 安全限位、ServoP 一致)。
     // 注: 早先此函数直接对入参做 cos/sin (即按弧度解释), 而唯一真实调用方
     //     main.cpp 传的是 GetPose 的度值 → 旋转矩阵是错的。单位统一到"度"。
     void rpyToMatrix(double rx_deg, double ry_deg, double rz_deg, double R[9]) {
-        const double D2R = 3.14159265358979323846 / 180.0;
         double rx = rx_deg * D2R, ry = ry_deg * D2R, rz = rz_deg * D2R;
         double crx = cos(rx), srx = sin(rx);
         double cry = cos(ry), sry = sin(ry);
@@ -36,31 +64,44 @@ namespace TcpCalibration {
         R[8] = cry*crx;
     }
 
+    // 重力在【法兰系】的表示 g0 = Rᵀ·(0,0,G)。
+    // (Rᵀ·v)[i] = Σ_k R[k*3+i]·v[k], 对 v=(0,0,G) 只剩 k=2 一项 → 取 R 的第三行 R[6..8]。
+    // ⚠ 取 R[2],R[5],R[8] (第三列) 等于 R·(0,0,G), 与 Rᵀ 差一个转置 —— 历史上就错在这里,
+    //    转置后仍与真值相关、残差不会爆掉, 只会安静地解错, 所以别凭"看着像"改。
+    static void flangeGravity(const double pose[6], double g0[3]) {
+        double R[9];
+        rpyToMatrix(pose[3], pose[4], pose[5], R);
+        g0[0] = R[6] * G;
+        g0[1] = R[7] * G;
+        g0[2] = R[8] * G;
+    }
+
+    // Rz(-psi) 作用在【法兰系】重力上 —— 这是本文件唯一的数学实体, 上面两个入口都走它,
+    // 免得"带 psi 的扫描版"和"用模块状态的运行时版"各写一份而漂移。
+    // Rz(-psi) = [[ cos, sin, 0], [-sin, cos, 0], [0, 0, 1]]  (psi > 0 = 传感器系相对法兰
+    // 系逆时针偏转这么多)。z 分量不受绕 z 偏转影响 —— 这正是"零第三行/列"的特征。
+    static void rotateGravityByYaw(const double g0[3], double cpsi, double spsi, double g[3]) {
+        g[0] =  cpsi * g0[0] + spsi * g0[1];
+        g[1] = -spsi * g0[0] + cpsi * g0[1];
+        g[2] =  g0[2];
+    }
+
     // 重力在【传感器系】下的表示 —— 力补偿与负载求解【共用】的唯一一份实现。
     // 推导与符号约定见头文件; 一句话: 参考系是法兰系 (GetPose 的 RPY), 传感器系 = 法兰系
     // 绕 z 转 +psi, 所以同一矢量在传感器系里的坐标 = Rz(-psi)·(法兰系坐标)。
     void gravitySensorFrame(const double pose[6], double g[3]) {
-        double R[9];
-        rpyToMatrix(pose[3], pose[4], pose[5], R);
+        double g0[3];
+        flangeGravity(pose, g0);
+        if (!s_yawCacheValid) refreshYawCache();   // 一次可预测分支 —— psi 只在标定后变
+        rotateGravityByYaw(g0, s_cosYaw, s_sinYaw, g);
+    }
 
-        // 重力在【法兰系】的表示 g0 = Rᵀ·(0,0,G)。
-        // (Rᵀ·v)[i] = Σ_k R[k*3+i]·v[k], 对 v=(0,0,G) 只剩 k=2 一项 → 取 R 的第三行 R[6..8]。
-        // ⚠ 取 R[2],R[5],R[8] (第三列) 等于 R·(0,0,G), 与 Rᵀ 差一个转置 —— 历史上就错在这里,
-        //    转置后仍与真值相关、残差不会爆掉, 只会安静地解错, 所以别凭"看着像"改。
-        const double G = 9.81;
-        const double g0x = R[6] * G;
-        const double g0y = R[7] * G;
-        const double g0z = R[8] * G;
-
-        // Rz(-psi) = [[ cos, sin, 0], [-sin, cos, 0], [0, 0, 1]]  (psi > 0 = 传感器系相对法兰
-        // 系逆时针偏转这么多; 2026-09-18 实机数据给出 psi ≈ +79°, Config 里先取 90°)。
-        const double D2R = 3.14159265358979323846 / 180.0;
-        const double psi = Config::SENSOR_MOUNT_YAW_DEG * D2R;
-        const double cpsi = cos(psi), spsi = sin(psi);
-
-        g[0] =  cpsi * g0x + spsi * g0y;
-        g[1] = -spsi * g0x + cpsi * g0y;
-        g[2] =  g0z;                       // z 不受绕 z 的偏转影响 —— 这正是"零第三行/列"的特征
+    // psi 显式给出的版本 (扫描用, 不碰模块状态)。数学与上面逐位相同。
+    void gravitySensorFrameAtYaw(const double pose[6], double psiDeg, double g[3]) {
+        double g0[3];
+        flangeGravity(pose, g0);
+        const double psi = psiDeg * D2R;
+        rotateGravityByYaw(g0, cos(psi), sin(psi), g);
     }
 
     void apply(const double pose[6], const double toolOffset[3], double tipOut[3]) {

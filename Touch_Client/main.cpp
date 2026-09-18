@@ -372,6 +372,11 @@ namespace BiasCheck {
         printf("  质心 X/Y/Z: 当前 (%.1f, %.1f, %.1f) mm   →   解出 (%.1f, %.1f, %+.1f) mm\n",
                cCfg[0], cCfg[1], cCfg[2], r.comMm[0], r.comMm[1], r.comMm[2]);
         printf("  拟合残差: 力 %.4f N   力矩 %.4f N·m\n", r.rmsForceN, r.rmsMomentNm);
+        // 传感器安装偏转角: 【由数据解出, 不是常量】。它在 [-180,180] 上以 0.5° 步长扫出,
+        // 取力残差最小者 —— 90° 那套种子值与 ≈80° 正好差在 0.30 N 的门限两侧 (见 Config.h)。
+        // 操作者要看得到它: 换工具/重装传感器后这个数会变, 变了才说明标定真的重新定了模型。
+        printf("  传感器安装偏转角 psi: %+.1f deg (扫描 [-180,180]/0.5°, 取自最小力残差)\n",
+               r.sensorYawDeg);
         // 【上面这两个"绝对"值只是记录/显示用】: 机械臂内部负载从 TCP 口改不动, 本标定也
         // 不再依赖它是否被采纳。真正生效的输出是下面写进 force_calib.json 的【残余量】。
         // CZ 符号: data 定不了它 (两种解释的拟合残差完全相同), 从前靠实机探针裁决, 探针已废除
@@ -425,7 +430,13 @@ namespace BiasCheck {
         }
         consecutiveFails = 0;   // 成功一次即清零
 
+        // ψ 必须【先于】写本地补偿生效: 上面解出的 dm/dp 是在这个 ψ 下算出来的, 而
+        // ForceCompensation 后续每一帧都用 TcpCalibration::gravitySensorFrame 的重力模型减
+        // 这一份残余。两者用不同的 ψ, 等于减错方向的力 —— 这正是本模块最怕的"安静地错"。
+        TcpCalibration::setSensorYawDeg(r.sensorYawDeg);
+
         // 记进内存生效值 (只影响机械臂侧显示与下次求解的基准)。
+        // (它同时把 psi 记进 PayloadCalibration 的生效值, 供 save() 落盘。)
         PayloadCalibration::applyResult(r);
 
         // ===== 本次标定的输出: 把【残余】写进本地补偿 =====
@@ -1134,10 +1145,15 @@ int main(int argc, char* argv[]) {
         // 末端负载参数必须在使能之前加载 —— EnableRobot 要用它 (见 PayloadCalibration)
         const char* payloadPath = CalibStore::resolve("payload_calib.json");
         if (payloadPath && PayloadCalibration::load(payloadPath)) {
+            // ψ 必须在这里装上 —— 本地补偿 (ForceCompensation::step) 与负载求解共用
+            // TcpCalibration::gravitySensorFrame 这一个重力模型, 装错角度等于把重力矢量
+            // 整个转歪。放在负载加载之后、任何一帧力处理之前。
+            TcpCalibration::setSensorYawDeg(PayloadCalibration::sensorYawDeg);
             std::cout << "[Payload] Loaded payload_calib.json (mass=" << PayloadCalibration::massKg
                       << "kg, com=(" << PayloadCalibration::comMm[0] << ","
                       << PayloadCalibration::comMm[1] << "," << PayloadCalibration::comMm[2]
-                      << ")mm, " << PayloadCalibration::poses << " poses, sign_z="
+                      << ")mm, " << PayloadCalibration::poses << " poses, psi="
+                      << TcpCalibration::sensorYawDeg() << "deg, sign_z="
                       << (PayloadCalibration::comSignZ > 0 ? "+1" : "-1") << ")" << std::endl;
         } else {
             double m, c[3];

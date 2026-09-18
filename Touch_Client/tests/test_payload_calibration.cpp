@@ -33,7 +33,10 @@ static const double g_poses[NP][6] = {
     {300, 100, 40,  -20,  35,  55}
 };
 
-// 传感器相对法兰的安装偏转角 (度, 绕工具 z) —— 与 Config 里的同一个常量。
+// 传感器相对法兰的安装偏转角 (度, 绕工具 z)。
+// ⚠ 【测试自己声明 ψ, 不再"因为 Config 写了这个数就用这个数"】: ψ 现在是求解器的输出,
+//   若生成端与估计端都读同一个常量, 这个测试就退化成"求解器同意 Config"。
+//   下面这个默认值只用于"历史行为"的回归用例; 每个需要说明 ψ 的用例都显式传自己的值。
 static const double PSI_DEG = Config::SENSOR_MOUNT_YAW_DEG;
 
 // 重力在【法兰系】的表示: g0 = Rᵀ·(0,0,G)。
@@ -54,26 +57,46 @@ static void gravityFlange(const double pose[6], double g[3]) {
     }
 }
 
-// 重力在【传感器系】的表示 —— 【独立推导, 不调用被测函数】。
+// 重力在【传感器系】的表示 —— 【独立推导, 不调用被测函数】, ψ 由调用方给出。
 // 约定: 传感器系 = 法兰系绕 z 转 +psi ⇒ 同一矢量在传感器系里的坐标 = Rz(-psi)·(法兰系坐标):
 //     Rz(-psi) = [[ cos, sin, 0], [-sin, cos, 0], [0, 0, 1]]
 // 记法转置写反的话, 造出来的数据与求解器方向相反 —— 这个测试会立刻红 (残差 0.7 N 量级)。
-static void gravitySensorRef(const double pose[6], double g[3]) {
+//
+// 【生成器与估计器【不共用代码】, 这是刻意的】: 这一份是从定义手写展开的, 估计器那一份在
+// TcpCalibration/PayloadCalibration 里。本仓库已经两次被"测试与实现同错"咬到 (两边都写
+// 成取 R 第三列、10/10 全绿而实机解错) —— 谁把这里改成调用被测函数, 就是第三次。
+static void gravitySensorRefAt(const double pose[6], double psiDeg, double g[3]) {
     double g0[3];
     gravityFlange(pose, g0);
     const double D2R = 3.14159265358979323846 / 180.0;
-    const double p = PSI_DEG * D2R;
+    const double p = psiDeg * D2R;
     const double c = cos(p), s = sin(p);
     g[0] =  c * g0[0] + s * g0[1];
     g[1] = -s * g0[0] + c * g0[1];
     g[2] =  g0[2];
 }
 
-typedef void (*GravityFn)(const double pose[6], double g[3]);
+// 旧模型 (psi 恒等): 只用于"反向对照" —— 造出一批【没有任何 psi 能解释】的数据。
+static void gravityFlangeAt(const double pose[6], double psiDeg, double g[3]) {
+    (void)psiDeg;                 // 旧模型不认识 psi
+    gravityFlange(pose, g);
+}
+
+// 转置了的约定 (取 R 第三列 = R·(0,0,G)) —— 任何 ψ 都吸收不了这种错, 见下方反向对照用例。
+static void gravityTransposedAt(const double pose[6], double psiDeg, double g[3]) {
+    (void)psiDeg;
+    double R[9];
+    TcpCalibration::rpyToMatrix(pose[3], pose[4], pose[5], R);
+    for (int i = 0; i < 3; i++) g[i] = R[i * 3 + 2] * G;   // 第三【列】, 即 R·(0,0,G)
+}
+
+typedef void (*GravityFnAt)(const double pose[6], double psiDeg, double g[3]);
 
 // 正向合成: 由真实负载 + 机械臂配置负载 生成 raw 力/力矩 (传感器零偏设 0)。
-// grav 决定用哪个重力模型造数据 —— 正向对照传 gravitySensorRef, 反向对照传 gravityFlange。
-static void synthesizeWith(GravityFn grav, double mTrue, const double cTrue[3],
+// psiDeg 显式给出 —— "造数据时用了哪个安装角"必须写在调用点上, 不能藏在常量里。
+// grav 决定用哪个重力模型造数据 —— 正向对照传 gravitySensorRefAt, 反向对照传
+// gravityFlangeAt / gravityTransposedAt。
+static void synthesizeWith(GravityFnAt grav, double psiDeg, double mTrue, const double cTrue[3],
                            double mCfg, const double cCfg[3], double signZ,
                            double forces[NP][3], double moments[NP][3])
 {
@@ -85,7 +108,7 @@ static void synthesizeWith(GravityFn grav, double mTrue, const double cTrue[3],
 
     for (int i = 0; i < NP; i++) {
         double g[3];
-        grav(g_poses[i], g);
+        grav(g_poses[i], psiDeg, g);
         for (int a = 0; a < 3; a++) forces[i][a] = dm * g[a];
         // M = Δp × g
         moments[i][0] = dp[1] * g[2] - dp[2] * g[1];
@@ -94,12 +117,12 @@ static void synthesizeWith(GravityFn grav, double mTrue, const double cTrue[3],
     }
 }
 
-// 默认 (物理真值) 合成: 传感器自己那一系的模型 —— 含安装偏转角。
-static void synthesize(double mTrue, const double cTrue[3],
+// 物理真值合成: 传感器自己那一系的模型 —— 含安装偏转角 psiDeg。
+static void synthesize(double psiDeg, double mTrue, const double cTrue[3],
                        double mCfg, const double cCfg[3], double signZ,
                        double forces[NP][3], double moments[NP][3])
 {
-    synthesizeWith(gravitySensorRef, mTrue, cTrue, mCfg, cCfg, signZ, forces, moments);
+    synthesizeWith(gravitySensorRefAt, psiDeg, mTrue, cTrue, mCfg, cCfg, signZ, forces, moments);
 }
 
 // 基础: 从零配置出发, 能否还原出真实负载
@@ -108,7 +131,7 @@ static void test_recovers_true_payload() {
     double cTrue[3] = {0.0, 0.0, 80.4};
     double cCfg[3]  = {0.0, 0.0, 0.0};
     double F[NP][3], M[NP][3];
-    synthesize(0.657, cTrue, 0.5, cCfg, +1.0, F, M);
+    synthesize(PSI_DEG, 0.657, cTrue, 0.5, cCfg, +1.0, F, M);
 
     PayloadCalibration::Result r;
     CHECK(PayloadCalibration::solve(g_poses, F, M, NP, 0.5, cCfg, +1.0, r));
@@ -130,7 +153,7 @@ static void test_recovers_from_nonzero_config() {
     double cTrue[3] = {0.0, 0.0, 80.4};
     double cCfg[3]  = {0.0, 0.0, 60.0};
     double F[NP][3], M[NP][3];
-    synthesize(0.657, cTrue, 0.60, cCfg, +1.0, F, M);
+    synthesize(PSI_DEG, 0.657, cTrue, 0.60, cCfg, +1.0, F, M);
 
     PayloadCalibration::Result r;
     CHECK(PayloadCalibration::solve(g_poses, F, M, NP, 0.60, cCfg, +1.0, r));
@@ -146,7 +169,7 @@ static void test_sign_convention() {
     double cTrue[3] = {0.0, 0.0, 80.4};
     double cCfg[3]  = {0.0, 0.0, 80.4};   // 我们下发的值 (原样)
     double F[NP][3], M[NP][3];
-    synthesize(0.657, cTrue, 0.657, cCfg, -1.0, F, M);   // 机械臂按 -1 解释
+    synthesize(PSI_DEG, 0.657, cTrue, 0.657, cCfg, -1.0, F, M);   // 机械臂按 -1 解释
 
     PayloadCalibration::Result r;
     CHECK(PayloadCalibration::solve(g_poses, F, M, NP, 0.657, cCfg, -1.0, r));
@@ -165,7 +188,7 @@ static void test_candidates_bracket_flange() {
     double cTrue[3] = {0.3, 0.3, 67.9};
     double cCfg[3]  = {0.0, 0.0, 80.4};
     double F[NP][3], M[NP][3];
-    synthesize(0.409, cTrue, 0.660, cCfg, +1.0, F, M);   // 机械臂按 +1 解释
+    synthesize(PSI_DEG, 0.409, cTrue, 0.660, cCfg, +1.0, F, M);   // 机械臂按 +1 解释
 
     PayloadCalibration::Result r;
     // 故意传入【错误】的 signZ=-1: 解算器不据此纠正什么, 只按它折算 comMm
@@ -181,14 +204,14 @@ static void test_second_pass_converges() {
     double cTrue[3] = {0.0, 0.0, 80.4};
     double cCfg[3]  = {0.0, 0.0, 0.0};
     double F[NP][3], M[NP][3];
-    synthesize(0.657, cTrue, 0.5, cCfg, +1.0, F, M);
+    synthesize(PSI_DEG, 0.657, cTrue, 0.5, cCfg, +1.0, F, M);
 
     PayloadCalibration::Result r1;
     CHECK(PayloadCalibration::solve(g_poses, F, M, NP, 0.5, cCfg, +1.0, r1));
 
     // 第二轮: 机械臂现在用 r1 的值, 重新采一轮
     double cNext[3] = {r1.comMm[0], r1.comMm[1], r1.comMm[2]};
-    synthesize(0.657, cTrue, r1.massKg, cNext, +1.0, F, M);
+    synthesize(PSI_DEG, 0.657, cTrue, r1.massKg, cNext, +1.0, F, M);
 
     PayloadCalibration::Result r2;
     CHECK(PayloadCalibration::solve(g_poses, F, M, NP, r1.massKg, cNext, +1.0, r2));
@@ -203,7 +226,7 @@ static void test_noise_robustness() {
     double cTrue[3] = {0.0, 0.0, 80.4};
     double cCfg[3]  = {0.0, 0.0, 0.0};
     double F[NP][3], M[NP][3];
-    synthesize(0.657, cTrue, 0.5, cCfg, +1.0, F, M);
+    synthesize(PSI_DEG, 0.657, cTrue, 0.5, cCfg, +1.0, F, M);
 
     unsigned seed = 12345u;
     for (int i = 0; i < NP; i++) {
@@ -229,7 +252,7 @@ static void test_rejects_too_few_poses() {
     TEST(rejects_too_few_poses);
     double cCfg[3] = {0, 0, 0};
     double F[NP][3], M[NP][3];
-    synthesize(0.657, cCfg, 0.5, cCfg, +1.0, F, M);
+    synthesize(PSI_DEG, 0.657, cCfg, 0.5, cCfg, +1.0, F, M);
     PayloadCalibration::Result r;
     CHECK(!PayloadCalibration::solve(g_poses, F, M, 2, 0.5, cCfg, +1.0, r));
     PASS();
@@ -244,7 +267,7 @@ static void test_rejects_degenerate_poses() {
 
     double cTrue[3] = {0, 0, 80.4}, cCfg[3] = {0, 0, 0};
     double F[NP][3], M[NP][3];
-    synthesize(0.657, cTrue, 0.5, cCfg, +1.0, F, M);
+    synthesize(PSI_DEG, 0.657, cTrue, 0.5, cCfg, +1.0, F, M);
     PayloadCalibration::Result r;
     CHECK(!PayloadCalibration::solve(same, F, M, NP, 0.5, cCfg, +1.0, r));
     PASS();
@@ -256,7 +279,7 @@ static void test_rejects_nonphysical_mass() {
     double cTrue[3] = {0, 0, 80.4}, cCfg[3] = {0, 0, 0};
     double F[NP][3], M[NP][3];
     // 真实负载质量 0 → 配置 0.5 → 解出 0 kg, 应判非物理
-    synthesize(0.0, cTrue, 0.5, cCfg, +1.0, F, M);
+    synthesize(PSI_DEG, 0.0, cTrue, 0.5, cCfg, +1.0, F, M);
     PayloadCalibration::Result r;
     CHECK(!PayloadCalibration::solve(g_poses, F, M, NP, 0.5, cCfg, +1.0, r));
     PASS();
@@ -271,6 +294,7 @@ static void test_save_load_roundtrip() {
     r.dc[0] = 0; r.dc[1] = 0; r.dc[2] = 20.4;
     r.comMm[0] = 0.0; r.comMm[1] = 0.0; r.comMm[2] = 80.4;
     r.rmsForceN = 0.021; r.rmsMomentNm = 0.0013; r.poses = 6;
+    r.sensorYawDeg = 79.5;      // 解出的 psi 必须随文件往返 —— 它是模型的一半
 
     // comSignZ 是【持久化的显示约定】, 不再是求解结果的一部分: applyResult() 不碰它
     // (从前它被求解器/探针"定案", 现在没人定这个案了), 所以这里直接设生效值。
@@ -285,6 +309,7 @@ static void test_save_load_roundtrip() {
     PayloadCalibration::comSignZ = 1.0;
     PayloadCalibration::rmsForceN = 0.0;
     PayloadCalibration::poses = 0;
+    PayloadCalibration::sensorYawDeg = -123.0;
 
     CHECK(PayloadCalibration::load(path));
     CHECK(PayloadCalibration::enabled);
@@ -293,6 +318,30 @@ static void test_save_load_roundtrip() {
     CHECK(PayloadCalibration::comSignZ < 0.0);
     CHECK(fabs(PayloadCalibration::rmsForceN - 0.021) < 1e-9);
     CHECK(PayloadCalibration::poses == 6);
+    CHECK(fabs(PayloadCalibration::sensorYawDeg - 79.5) < 1e-9);
+    remove(path);
+    PASS();
+}
+
+// 旧文件 (本字段出现之前存的 payload_calib.json) 【必须仍能加载】, psi 回退 Config 种子。
+// 这是升级路径的硬要求: 若缺字段就拒载, 用户现存的标定会集体作废、机器人拿不到负载参数。
+static void test_load_old_file_without_yaw() {
+    TEST(load_old_file_without_yaw);
+    const char* path = "test_payload_old.json";
+    FILE* f = fopen(path, "w");
+    CHECK(f != nullptr);
+    // 逐字写出"旧版本"的文件内容 (没有 sensor_yaw_deg 这一行)
+    fprintf(f, "{\n  \"version\": 2,\n  \"saved_at_unix\": 1767225601,\n"
+               "  \"mass_kg\": 0.657,\n  \"com_mm\": [0, 0, 80.4],\n"
+               "  \"rms_force_n\": 0.021,\n  \"rms_moment_nm\": 0.0013,\n"
+               "  \"poses\": 6,\n  \"com_sign_z\": 1.0\n}\n");
+    fclose(f);
+
+    PayloadCalibration::sensorYawDeg = -123.0;   // 先弄脏, 确认它是真的被读/被回退
+    CHECK(PayloadCalibration::load(path));
+    CHECK(fabs(PayloadCalibration::sensorYawDeg - Config::SENSOR_MOUNT_YAW_DEG) < 1e-12);
+    CHECK(fabs(PayloadCalibration::massKg - 0.657) < 1e-9);   // 其余字段照常读进来
+    CHECK(PayloadCalibration::enabled);
     remove(path);
     PASS();
 }
@@ -344,7 +393,7 @@ static void test_fit_is_sign_independent() {
     double cTrue[3] = {0.3, 0.3, 67.9};
     double cCfg[3]  = {0.0, 0.0, 80.4};
     double F[NP][3], M[NP][3];
-    synthesize(0.409, cTrue, 0.660, cCfg, +1.0, F, M);
+    synthesize(PSI_DEG, 0.409, cTrue, 0.660, cCfg, +1.0, F, M);
 
     PayloadCalibration::Result rA, rB;
     CHECK(PayloadCalibration::solve(g_poses, F, M, NP, 0.660, cCfg, +1.0, rA));
@@ -368,10 +417,14 @@ static void test_fit_is_sign_independent() {
 static void test_gravity_sensor_frame_convention() {
     TEST(gravity_sensor_frame_convention);
 
-    // (a) 公共路径 (TcpCalibration::gravitySensorFrame) 与测试自己展开的模型逐姿态一致
+    // (a) 公共路径 (TcpCalibration::gravitySensorFrame, 走【模块状态】里的 psi) 与测试自己
+    //     展开的模型 (psi 显式给 PSI_DEG) 逐姿态一致。
+    //     这一步同时断言了: 没有哪个用例把模块状态留在了别的角度上 (setSensorYawDeg 的用例
+    //     必须还原) —— 否则这里会红, 而不是让后面的用例悄悄跑在错的 psi 下。
+    CHECK(fabs(TcpCalibration::sensorYawDeg() - PSI_DEG) < 1e-12);
     for (int i = 0; i < NP; i++) {
         double ref[3], got[3];
-        gravitySensorRef(g_poses[i], ref);
+        gravitySensorRefAt(g_poses[i], PSI_DEG, ref);
         TcpCalibration::gravitySensorFrame(g_poses[i], got);
         CHECK(fabs(ref[0] - got[0]) < 1e-12);
         CHECK(fabs(ref[1] - got[1]) < 1e-12);
@@ -403,6 +456,32 @@ static void test_gravity_sensor_frame_convention() {
     PASS();
 }
 
+// psi 的模块状态: setter/getter 生效, 且 gravitySensorFrame 真的按它转 (与"显式给 psi"的
+// 路径逐位相同)。标定后的 psi 就是经这条路进重力模型的 —— 对不上等于标定白做。
+static void test_sensor_yaw_state() {
+    TEST(sensor_yaw_state);
+    CHECK(fabs(TcpCalibration::sensorYawDeg() - PSI_DEG) < 1e-12);   // 未标定时 = Config 种子
+
+    TcpCalibration::setSensorYawDeg(80.0);                           // 模拟标定解出 80°
+    CHECK(fabs(TcpCalibration::sensorYawDeg() - 80.0) < 1e-12);
+    for (int i = 0; i < NP; i++) {
+        double viaState[3], explicitPsi[3], handRef[3];
+        TcpCalibration::gravitySensorFrame(g_poses[i], viaState);            // 走模块状态
+        TcpCalibration::gravitySensorFrameAtYaw(g_poses[i], 80.0, explicitPsi);
+        gravitySensorRefAt(g_poses[i], 80.0, handRef);                       // 测试自己的推导
+        CHECK(fabs(viaState[0] - explicitPsi[0]) < 1e-12);
+        CHECK(fabs(viaState[0] - handRef[0]) < 1e-12);
+        CHECK(fabs(viaState[1] - explicitPsi[1]) < 1e-12);
+        CHECK(fabs(viaState[1] - handRef[1]) < 1e-12);
+        CHECK(fabs(viaState[2] - explicitPsi[2]) < 1e-12);
+        CHECK(fabs(viaState[2] - handRef[2]) < 1e-12);
+    }
+    // 还回种子值 —— 模块状态是全局的, 留着 80° 会让别的用例跑在另一个模型上。
+    TcpCalibration::setSensorYawDeg(PSI_DEG);
+    CHECK(fabs(TcpCalibration::sensorYawDeg() - PSI_DEG) < 1e-12);
+    PASS();
+}
+
 // 两条公共路径必须落在同一个重力约定上。
 // 这里够得着的两条是: 负载求解 (PayloadCalibration::solve, 内部经由本文件的 gravityTool)
 // 与共享函数 (TcpCalibration::gravitySensorFrame); ForceCompensation::step 需要 AppState
@@ -413,7 +492,7 @@ static void test_solver_uses_shared_gravity_convention() {
     double cTrue[3] = {0.0, 0.0, 80.4};
     double cCfg[3]  = {0.0, 0.0, 0.0};
     double F[NP][3], M[NP][3];
-    synthesize(0.657, cTrue, 0.5, cCfg, +1.0, F, M);   // 数据里已含 psi
+    synthesize(PSI_DEG, 0.657, cTrue, 0.5, cCfg, +1.0, F, M);   // 数据里已含 psi
 
     PayloadCalibration::Result r;
     CHECK(PayloadCalibration::solve(g_poses, F, M, NP, 0.5, cCfg, +1.0, r));
@@ -423,27 +502,57 @@ static void test_solver_uses_shared_gravity_convention() {
     PASS();
 }
 
-// 反向对照: 造数据时【故意不转】这个 yaw (即改之前的模型) → 带 yaw 的求解器就该明显解不上。
-// 这证明 yaw 真的进了模型, 而不是被写成恒等 / 在别处被约掉。
-// 历史教训: 单测用错约定造数据 + 求解器用同一错约定解回来 = 全绿而实机错。
-static void test_stale_model_no_longer_fits() {
-    TEST(stale_model_no_longer_fits);
-    if (fabs(PSI_DEG) < 1.0) { std::cout << "SKIP(psi≈0, 无区分度) "; PASS(); return; }
-
+// ψ 的可解性 —— 【这就是"扫描真的在估 ψ"的证明】。没有它, 扫描是未验证的。
+// 数据用【已知的】ψ 合成 (生成器是上面那份独立展开的推导, 不调用被测函数), 求解器应把它
+// 解回来: 误差不超过扫描分辨率的一半 (0.25°), 残差落到机器精度, 质量/质心也跟着解对。
+// 同一个函数跑两个不同的 ψ —— 只测一个值说明不了"不是被调成那个答案的"。
+static void test_recovers_sensor_yaw(double psiTrue) {
+    std::cout << "  recovers_sensor_yaw(psi_true=" << psiTrue << "deg)... ";
     double cTrue[3] = {0.0, 0.0, 80.4};
     double cCfg[3]  = {0.0, 0.0, 0.0};
     double F[NP][3], M[NP][3];
-    // 旧模型 (psi=0) 造数据 —— 实机 2026-09-18 那组数据的写照
-    synthesizeWith(gravityFlange, 0.657, cTrue, 0.5, cCfg, +1.0, F, M);
+    synthesize(psiTrue, 0.657, cTrue, 0.5, cCfg, +1.0, F, M);
+
+    PayloadCalibration::Result r;
+    CHECK(PayloadCalibration::solve(g_poses, F, M, NP, 0.5, cCfg, +1.0, r));
+    printf("[psi=%.1f (err=%.2f), mass=%.5f (err=%.1e), comZ=%.4f, rmsF=%.2e] ",
+           r.sensorYawDeg, fabs(r.sensorYawDeg - psiTrue), r.massKg,
+           fabs(r.massKg - 0.657), r.comMm[2], r.rmsForceN);
+    // 网格是 0.5°, 所以真值到最近网格点最多差 0.25° —— 这就是"扫描分辨率内"的严格写法。
+    CHECK(fabs(r.sensorYawDeg - psiTrue) <= 0.25 + 1e-9);
+    // 残差: 真值正落在网格上时是机器精度 (实测 ~2e-16); 落在网格【之间】时最优网格点差半个
+    // 步长, 模型对不上, 残差抬到 ~3e-3 N 量级 (差 0.25° 的一阶效应)。两者都远在 0.10 N 的
+    // "好拟合"线和 0.30 N 的门限之下 —— 一个阈值就能同时覆盖, 不必按用例分档。
+    CHECK(r.rmsForceN < 0.05);
+    // 质量/质心: 网格上的真值精确还原 (误差 0); 网格之间的真值差半个步长, 误差抬到
+    // ~1e-6 kg / ~2e-3 mm —— 仍然远小于噪声用例的容差 (20 g / 15 mm)。
+    CHECK(fabs(r.massKg - 0.657) < 1e-4);
+    CHECK(fabs(r.comMm[2] - 80.4) < 0.1);
+    PASS();
+}
+
+// 反向对照: 造数据时用【转置了的】重力约定 (取 R 的第三列 = R·(0,0,G), 历史上就错在这里)。
+// 这不是任何一个 ψ 能修好的错 —— ψ 只能吸收绕 z 的偏转, 吸收不了转置。扫描必须照样解不上,
+// 否则说明"扫描"变成了万能挡箭牌: 什么错的数据都能被它拟合到门限以内。
+// 历史教训: 单测用错约定造数据 + 求解器用同一错约定解回来 = 全绿而实机错。
+static void test_scan_cannot_fix_transposed_gravity() {
+    TEST(scan_cannot_fix_transposed_gravity);
+    double cTrue[3] = {0.0, 0.0, 80.4};
+    double cCfg[3]  = {0.0, 0.0, 0.0};
+    double F[NP][3], M[NP][3];
+    synthesizeWith(gravityTransposedAt, 0.0, 0.657, cTrue, 0.5, cCfg, +1.0, F, M);
 
     PayloadCalibration::Result r;
     bool ok = PayloadCalibration::solve(g_poses, F, M, NP, 0.5, cCfg, +1.0, r);
     if (ok) {
-        printf("[旧模型数据 → mass=%.4f kg, rmsF=%.4f N] ", r.massKg, r.rmsForceN);
-        CHECK(r.rmsForceN > 0.1);                  // 量级 0.70 N —— 与实机那 0.73 N 同源
-        CHECK(fabs(r.massKg - 0.657) > 0.05);      // 质量也解错了, 不是"差不多能用"
+        printf("[转置数据 → psi=%+.1f, mass=%.4f kg, rmsF=%.4f N] ",
+               r.sensorYawDeg, r.massKg, r.rmsForceN);
+        // ψ 扫描能把转置误差从 0.70 N (固定 ψ=90 时) 压到 ~0.28 N —— 但压不到噪声本底,
+        // 差着十几个数量级。这就是本用例要守的: 扫描不是万能挡箭牌。
+        // ⚠ 0.28 N 已经【贴着】0.30 N 的验收门限 (见报告): 转置这种错现在只勉强拦得住。
+        CHECK(r.rmsForceN > 0.1);
     } else {
-        std::cout << "[旧模型数据被直接拒绝] ";
+        std::cout << "[转置数据被直接拒绝] ";
     }
     PASS();
 }
@@ -460,12 +569,18 @@ int main() {
     test_rejects_degenerate_poses();
     test_rejects_nonphysical_mass();
     test_save_load_roundtrip();
+    test_load_old_file_without_yaw();
     test_save_includes_timestamp();
     test_effective_falls_back_to_seed();
     test_fit_is_sign_independent();
     test_gravity_sensor_frame_convention();
+    test_sensor_yaw_state();
     test_solver_uses_shared_gravity_convention();
-    test_stale_model_no_longer_fits();
+    // psi 估计: 两个不同的真值各来一遍 (只测一个说明不了"不是被调成那个答案的")
+    test_recovers_sensor_yaw(80.0);
+    test_recovers_sensor_yaw(35.0);
+    test_recovers_sensor_yaw(80.25);   // 故意落在网格【之间】—— 验证容差 (半个步长) 不是摆设
+    test_scan_cannot_fix_transposed_gravity();
     std::cout << "\n" << g_passed << " passed, " << g_failed << " failed" << std::endl;
     return g_failed ? 1 : 0;
 }

@@ -10,7 +10,7 @@ namespace TcpCalibration {
     void rpyToMatrix(double rx_deg, double ry_deg, double rz_deg, double R[9]);
 
     // 重力在【传感器系】下的表示, 供力补偿与负载求解【共同】使用:
-    //     g = Rz(-psi) · Rᵀ · (0,0,9.81)      psi = Config::SENSOR_MOUNT_YAW_DEG
+    //     g = Rz(-psi) · Rᵀ · (0,0,9.81)      psi = sensorYawDeg()
     // pose 为 [x,y,z,rx,ry,rz] (mm, 度)。
     //
     // 【为什么必须共用这一个函数】两个模块各自实现过一次重力约定, 结果一个写了 Rᵀ、
@@ -25,6 +25,17 @@ namespace TcpCalibration {
     // (2026-09-18 实机数据: dF = M·dg 解出的 M ≈ Δm·Rz(-78.9°) ⇒ psi ≈ +78.9°, 即上式。
     //  写成 Rz(+psi) 会让残差【变大】而不是变小 —— 方向反了控制台立刻看得出来。)
     void gravitySensorFrame(const double pose[6], double g[3]);
+
+    // 同上, 但 psi 显式给出(度), 且【不读写模块状态】。
+    // 存在的唯一理由: 负载标定要扫 psi —— 扫描时若反复 setSensorYawDeg, 一旦中途失败
+    // 就会给运行时留下一个被污染的安装角。数学仍然只有一份: 二者走同一个
+    // rotateGravityByYaw (见 .cpp), 不是各写一份公式。运行时路径请用 gravitySensorFrame。
+    void gravitySensorFrameAtYaw(const double pose[6], double psiDeg, double g[3]);
+
+    // 传感器相对法兰绕工具 z 的安装偏转角 (度)。由负载标定解出并持久化;
+    // 未标定时用 Config::SENSOR_MOUNT_YAW_DEG 作种子。
+    void   setSensorYawDeg(double deg);
+    double sensorYawDeg();
 
     // 纯函数: 求解 TCP 偏移。
     // poses: n 个法兰位姿 [x,y,z,rx,ry,rz], n >= 3
