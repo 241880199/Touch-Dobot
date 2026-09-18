@@ -15,6 +15,13 @@ namespace ForceCalibration {
     // Start calibration
     bool start();
 
+    // 仅调零 (TARE only): 静置采集零偏 → 直接应用+存盘, 不进 MOTION 相、不开拖拽模式
+    // 用于换装工具 (笔夹/笔) 后重新调零, 无需拖动机械臂
+    bool startZero();
+
+    // 当前是否处于「仅调零」流程
+    bool isZeroing();
+
     // Abort immediately
     void abort();
 

@@ -18,6 +18,8 @@
 #include "../force/ForceCompensation.h"
 #include "../force/ForceCalibration.h"
 #include "../force/ForceLogger.h"
+#include "../force/PayloadCalibration.h"
+#include "../calibration/TcpCalibration.h"
 #include "../safety/SingularityAvoidance.h"
 
 // ===== 姿态安全边界钳位 =====
@@ -62,6 +64,34 @@ static DWORD WINAPI forceReaderThread(LPVOID) {
                 break;  // reconnect loop
             }
 
+            // 一次性回读: 机械臂是否真的接受了我们下发的负载参数
+            // (下发成功 ≠ 机械臂采纳; EnableRobot 的返回码只能说明语法对了)
+            static bool payloadEchoed = false;
+            if (!payloadEchoed) {
+                payloadEchoed = true;
+                // 30004 布局: Load @1168 (1×double), CenterX/Y/Z @1176~1199 (3×double)
+                const double* echo = reinterpret_cast<const double*>(buf + 1168);
+                bool sane = echo[0] >= 0.0 && echo[0] <= 5.0
+                         && fabs(echo[1]) <= 500.0 && fabs(echo[2]) <= 500.0
+                         && fabs(echo[3]) <= 500.0;
+                if (sane) {
+                    double mWant, cWant[3];
+                    PayloadCalibration::effective(mWant, cWant);
+                    char msg[192];
+                    snprintf(msg, sizeof(msg),
+                             "[Relay] 机械臂实际负载: load=%.3f kg  center=(%.1f, %.1f, %.1f) mm",
+                             echo[0], echo[1], echo[2], echo[3]);
+                    if (fabs(echo[0] - mWant) > 0.01 || fabs(echo[3] - cWant[2]) > 1.0) {
+                        std::cerr << msg << "\n[Relay] !! 与下发的 "
+                                  << mWant << " kg / (" << cWant[0] << "," << cWant[1] << ","
+                                  << cWant[2] << ") mm 不符 — 负载参数可能没生效"
+                                  << std::endl;
+                    } else {
+                        std::cout << msg << std::endl;
+                    }
+                }
+            }
+
             // Parse ActualTCPForce at offset 576 (6 doubles, 48 bytes)
             double* forcePtr = reinterpret_cast<double*>(buf + 576);
             EnterCriticalSection(&app.forceDataMutex);
@@ -98,6 +128,37 @@ static DWORD WINAPI forceReaderThread(LPVOID) {
 
     std::cout << "[Force] Reader thread exiting" << std::endl;
     return 0;
+}
+
+// ===== 使能机械臂 (带末端负载参数) =====
+// EnableRobot(load, centerX, centerY, centerZ) — 机械臂内部按此做重力/惯性补偿。
+// 负载设置不准 → 30004 力值随姿态漂移 / 碰撞检测误触发 / 拖拽失控。
+// 负载值优先取实机标定结果 (PayloadCalibration / payload_calib.json),
+// 未标定时回退 Config.h 的种子值。
+static bool enableRobotWithPayload() {
+    double m, c[3];
+    PayloadCalibration::effective(m, c);
+    char cmd[96];
+    snprintf(cmd, sizeof(cmd), "EnableRobot(%.3f,%.1f,%.1f,%.1f)", m, c[0], c[1], c[2]);
+    std::cout << "[Relay] 使能 " << cmd
+              << (PayloadCalibration::enabled ? "  (实机标定值)" : "  (种子值, 未标定)")
+              << std::endl;
+    return robotSendEnable(cmd);
+}
+
+bool RelayCore::applyPayloadToRobot() {
+    if (!isRobotConnected()) {
+        std::cout << "[Payload] 机械臂未连接, 无法下发" << std::endl;
+        return false;
+    }
+    robotDrainEnable();
+    bool ok = enableRobotWithPayload();
+    Sleep(200);
+    robotDrainEnable();
+    if (!ok) {
+        std::cerr << "[Payload] 下发失败 — 重启客户端会用新值重试" << std::endl;
+    }
+    return ok;
 }
 
 RelayCore& RelayCore::instance() {
@@ -297,7 +358,7 @@ static bool escapeSingularity() {
 
     // Step 6: ClearError 不够, 需要 EnableRobot
     std::cout << "[脱困] 尝试 EnableRobot..." << std::endl;
-    robotSendEnable("EnableRobot(0.5,0,0,0)");
+    enableRobotWithPayload();
     Sleep(300);
     robotDrainEnable();
 
@@ -347,7 +408,7 @@ bool RelayCore::init() {
     robotSendEnable("LoadSwitch(0)");           // 关闭负载自适应
     Sleep(50);
 
-    if (!robotSendEnable("EnableRobot(0.5,0,0,0)")) {
+    if (!enableRobotWithPayload()) {
         std::cerr << "[Relay] 使能失败" << std::endl;
         m_stateMachine.onEnableFail();
         return false;
@@ -1035,11 +1096,6 @@ void RelayCore::pollFeedback() {
 }
 
 void RelayCore::queryPose() {
-    static int dbgCount = 0;
-    if (++dbgCount <= 3 || dbgCount % 50 == 0) {
-        std::cerr << "[DBG] queryPose #" << dbgCount << " connected=" << isRobotConnected()
-                  << " hbAge=" << (GetTickCount() - m_lastHeartbeatMs) << "ms" << std::endl;
-    }
     if (!isRobotConnected()) return;
     robotDrainEnable();  // 排空残留避免读到其他命令的响应
     robotSendEnable("GetPose()");
@@ -1114,10 +1170,6 @@ void RelayCore::queryPose() {
 }
 
 void RelayCore::queryJointAngles() {
-    static int dbgCount = 0;
-    if (++dbgCount <= 3 || dbgCount % 50 == 0) {
-        std::cerr << "[DBG] queryJointAngles #" << dbgCount << " connected=" << isRobotConnected() << std::endl;
-    }
     if (!isRobotConnected()) return;
     robotDrainEnable();  // 排空残留
     robotSendEnable("GetAngle()");
@@ -1237,7 +1289,12 @@ void RelayCore::checkAlarm() {
             // Re-enable robot since FATAL callback disabled it
             robotSendEnable("ClearError()");
             Sleep(200);
-            robotSendEnable("EnableRobot(0.5,0,0,0)");
+            if (!enableRobotWithPayload()) {
+                // 使能失败却照样 onRecovery() 会让上层以为手臂已可用 (实际还在下使能状态)
+                std::cerr << "[Relay] 恢复失败: EnableRobot 未成功, 保持报警状态" << std::endl;
+                app.isRobotInAlarm = true;
+                return;
+            }
             Sleep(200);
             m_stateMachine.onRecovery();
         }
@@ -1480,19 +1537,28 @@ void RelayCore::reportDiagnostic(int errorCode, double speedFactor, const char* 
 
 // ===== ForceReader 管理 =====
 
+// 拖拽模式 = Dobot 的 SetCollideDrag。开着时机械臂柔顺可手动拖动,
+// 但姿态会漂, 所以采样/标定期间必须关掉。
+bool RelayCore::setDragMode(bool enable) {
+    if (!isRobotConnected()) {
+        // 重连会重建连接, 拖拽状态随之归零 —— 别留一个「以为开着」的假状态,
+        // 否则掉线时按 'd' 会永远切不回来。
+        m_dragMode.store(false);
+        return false;
+    }
+    if (m_dragMode.load() == enable) return true;   // 已是该状态, 不重复下发
+    robotSendEnable(enable ? "SetCollideDrag(1)" : "SetCollideDrag(0)");
+    Sleep(100);
+    robotDrainEnable();
+    m_dragMode.store(enable);
+    std::cout << "[Relay] Drag mode " << (enable ? "ON — 可手动拖动机械臂" : "OFF — 位姿锁定")
+              << std::endl;
+    return true;
+}
+
 // Drag mode callback for ForceCalibration
 static void calibDragMode(bool enable) {
-    if (enable) {
-        robotSendEnable("SetCollideDrag(1)");
-        Sleep(100);
-        robotDrainEnable();
-        std::cout << "[Force] Drag mode ON — manually rotate end effector" << std::endl;
-    } else {
-        robotSendEnable("SetCollideDrag(0)");
-        Sleep(100);
-        robotDrainEnable();
-        std::cout << "[Force] Drag mode OFF — position locked" << std::endl;
-    }
+    RelayCore::instance().setDragMode(enable);
 }
 
 bool RelayCore::initForceReader() {
@@ -1581,8 +1647,19 @@ void RelayCore::pollForce() {
 
     LeaveCriticalSection(&app.forceDataMutex);
 
-    // 落盘到 CSV (演示对照实验用, 含 ff_enabled 标志列)
-    ForceLogger::log(now, filtered, pose,
+    // 落盘到 CSV (演示对照实验用, 含 ff_enabled 标志列)。
+    // TCP 偏移标定过之后记录笔尖世界坐标而不是法兰坐标 —— 演示要看的是笔尖
+    // 在纸上的轨迹和受力, 法兰位姿差着笔长 + 夹持段 + 传感器高度 (约 100~200mm)。
+    double logPose[6];
+    if (TcpCalibration::enabled) {
+        double tip[3];
+        TcpCalibration::apply(pose, TcpCalibration::offset, tip);
+        logPose[0] = tip[0]; logPose[1] = tip[1]; logPose[2] = tip[2];
+        logPose[3] = pose[3]; logPose[4] = pose[4]; logPose[5] = pose[5]; // 姿态同法兰
+    } else {
+        for (int i = 0; i < 6; i++) logPose[i] = pose[i];
+    }
+    ForceLogger::log(now, filtered, logPose,
                      appState.forceFeedbackEnabled ? 1 : 0);
 
     sendRelayUpdate(buf);
@@ -1602,22 +1679,34 @@ void RelayCore::shutdownForceReader() {
 
 // ===== 力传感器标定控制 =====
 
-bool RelayCore::startForceCalibration() {
-    if (m_transmitting) {
-        std::cout << "[Force] Cannot calibrate while transmitting — release button first" << std::endl;
+// 力标定/调零的公共前置检查: 未传输中 + 已连接 + 未报警
+static bool forceCalibPreconditions(bool transmitting, const char* what) {
+    if (transmitting) {
+        std::cout << "[Force] Cannot " << what
+                  << " while transmitting — release button first" << std::endl;
         return false;
     }
     if (!isRobotConnected()) {
-        std::cout << "[Force] Robot not connected, cannot calibrate" << std::endl;
+        std::cout << "[Force] Robot not connected, cannot " << what << std::endl;
         return false;
     }
-    auto& app = appState;
-    if (app.isRobotInAlarm.load()) {
-        std::cout << "[Force] Robot in alarm, cannot calibrate" << std::endl;
+    if (appState.isRobotInAlarm.load()) {
+        std::cout << "[Force] Robot in alarm, cannot " << what << std::endl;
         return false;
     }
+    return true;
+}
+
+bool RelayCore::startForceCalibration() {
+    if (!forceCalibPreconditions(m_transmitting, "calibrate")) return false;
     std::cout << "[Force] Starting calibration sweep..." << std::endl;
     return ForceCalibration::start();
+}
+
+bool RelayCore::startForceZeroing() {
+    if (!forceCalibPreconditions(m_transmitting, "zero")) return false;
+    std::cout << "[Force] Starting zero (TARE only)..." << std::endl;
+    return ForceCalibration::startZero();
 }
 
 void RelayCore::abortForceCalibration() {
@@ -1627,6 +1716,10 @@ void RelayCore::abortForceCalibration() {
 
 bool RelayCore::isForceCalibrating() const {
     return ForceCalibration::isRunning();
+}
+
+bool RelayCore::isForceZeroing() const {
+    return ForceCalibration::isZeroing();
 }
 
 bool RelayCore::isForceCalibrationDone() const {

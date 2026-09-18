@@ -39,6 +39,9 @@ namespace ForceCompensation {
     // Check if calibration is active
     bool isCalibrated();
 
+    // 当前生效的惯性补偿质量 (kg) — 供「仅调零」保留质量、只换零偏
+    double currentMassKg();
+
     // Call on shutdown
     void shutdown();
 }

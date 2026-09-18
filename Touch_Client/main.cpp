@@ -17,6 +17,7 @@
 #include "calibration/TcpCalibration.h"
 #include "force/ForceCalibration.h"
 #include "force/ForceCompensation.h"
+#include "force/PayloadCalibration.h"
 #include "robot/Kinematics.h"
 #include <cstdio>
 
@@ -34,6 +35,305 @@ namespace FkValidate {
     static char labels[20][64];
 }
 
+// ===== 多姿态零偏检查 (验证 EnableRobot 末端负载参数) =====
+// 负载设对 → 空载时 raw 力与姿态无关, 各姿态零偏一致 (极差≈噪声);
+// 负载设错 → 残余重力随姿态变化, 零偏随姿态漂移。
+// 用法: 'm' 进入 → 笔尖悬空、只改姿态(位置尽量不变), 每到一个姿态按 SPACE
+//       (采样 1s) → 'm' 退出并输出报告。
+namespace BiasCheck {
+    static const int   MAX_POSES  = 12;
+    static const DWORD AVG_MS     = 1000;   // 每个姿态的采样时长
+    static const int   MIN_SAMPLES = 10;    // 少于这个数说明数据流有问题, 本次作废
+    static const double MIN_TILT_SIN = 0.5; // 姿态倾角覆盖下限 (sinθ)
+    static const double MIN_SPAN_DEG = 30.0;// 姿态之间至少差这么多, 否则极差只是噪声
+
+    static bool  mode = false;
+    static int   count = 0;
+    static bool  sampling = false;
+    static DWORD sampleStartMs = 0;
+    static DWORD lastSampleMs = 0;
+    static int   avgCount = 0;
+    static double accum[6];
+    static double pose[MAX_POSES][6];    // Rx,Ry,Rz (deg) + X,Y,Z (mm)
+    static double bias[MAX_POSES][6];    // 该姿态平均 raw 力/力矩
+
+    static void reset() {
+        count = 0;
+        sampling = false;
+        avgCount = 0;
+        for (int i = 0; i < 6; i++) accum[i] = 0.0;
+    }
+
+    // 静默退出 (被其他采集模式抢占时调用, 丢弃已采姿态)
+    static void cancel() {
+        if (!mode) return;
+        mode = false;
+        sampling = false;
+        // 退出时一定要关拖拽: 柔顺状态漏出去, 机械臂会一直软着
+        RelayCore::instance().setDragMode(false);
+        std::cout << "[BIAS] Mode OFF (" << count << " poses discarded)" << std::endl;
+    }
+
+    // SPACE: 开始对该姿态采样
+    static void record() {
+        if (sampling) {
+            std::cout << "[BIAS] 正在采样中, 保持静止" << std::endl;
+            return;
+        }
+        if (count >= MAX_POSES) {
+            std::cout << "[BIAS] 已达 " << MAX_POSES << " 个姿态, 按 'm' 输出报告" << std::endl;
+            return;
+        }
+        for (int i = 0; i < 6; i++) accum[i] = 0.0;
+        avgCount = 0;
+        lastSampleMs = 0;
+        sampleStartMs = GetTickCount();
+        sampling = true;
+        std::cout << "[BIAS] 采样 " << AVG_MS << "ms — 保持静止..." << std::endl;
+    }
+
+    // 每帧调用 (idle)。注意 idle 跑得比力数据快: pollForce 自我节流到 33ms,
+    // 所以必须靠 lastUpdateMs 去重, 否则同一份数据会被反复累加 (均值不变但
+    // 降噪完全失效), 采样窗口也会比标称短。
+    static void sample(const AppState::ForceData& fd) {
+        if (!mode || !sampling) return;
+        DWORD now = GetTickCount();
+
+        if (fd.isStale) {
+            if (now - sampleStartMs > AVG_MS * 3) {   // 数据流断了, 别卡死
+                sampling = false;
+                std::cout << "[BIAS] 采样超时 (力数据中断), 本次作废" << std::endl;
+            }
+            return;
+        }
+        if (fd.lastUpdateMs == lastSampleMs) return;  // 没有新数据
+        lastSampleMs = fd.lastUpdateMs;
+
+        for (int i = 0; i < 6; i++) accum[i] += fd.raw[i];
+        avgCount++;
+
+        if (now - sampleStartMs < AVG_MS) return;
+
+        // 采样窗口结束
+        sampling = false;
+        if (avgCount < MIN_SAMPLES) {
+            std::cout << "[BIAS] 有效样本太少 (" << avgCount << "), 本次作废" << std::endl;
+            return;
+        }
+        if (count >= MAX_POSES) return;
+        for (int i = 0; i < 6; i++) bias[count][i] = accum[i] / avgCount;
+
+        EnterCriticalSection(&appState.robotPoseMutex);
+        pose[count][0] = appState.robotActualPose.rx;
+        pose[count][1] = appState.robotActualPose.ry;
+        pose[count][2] = appState.robotActualPose.rz;
+        pose[count][3] = appState.robotActualPose.x;
+        pose[count][4] = appState.robotActualPose.y;
+        pose[count][5] = appState.robotActualPose.z;
+        LeaveCriticalSection(&appState.robotPoseMutex);
+
+        printf("[BIAS] Pose %d: R=(%+.1f,%+.1f,%+.1f)deg F=(%+.3f,%+.3f,%+.3f) N\n",
+               count + 1, pose[count][0], pose[count][1], pose[count][2],
+               bias[count][0], bias[count][1], bias[count][2]);
+        count++;
+    }
+
+    // 姿态 → 3×3 旋转矩阵 (Rz·Ry·Rx, 与 GetPose/FK 同约定; 输入为度)
+    static void rotFromPose(const double p[6], double R[9]) {
+        TcpCalibration::rpyToMatrix(p[0], p[1], p[2], R);
+    }
+
+    static void report() {
+        if (count < 3) {
+            std::cout << "[BIAS] 至少需要 3 个姿态才能判断, 当前 " << count << std::endl;
+            return;
+        }
+        // ===== 姿态覆盖度: 覆盖不足时极差只是噪声, 不能拿来判定 =====
+        //   笔始终朝下 → 工具轴与重力夹角 θ≈0 → 轴向质心误差的力矩响应 ∝ sinθ ≈ 0,
+        //   力矩通道"看不见"它; 除以 sinθ 归一化后这种姿态的 drEq 会失去意义。
+        double R[MAX_POSES][9];
+        double maxTiltSin = 0.0, maxPairDeg = 0.0;
+        const double R2D = 180.0 / 3.14159265358979323846;
+        for (int p = 0; p < count; p++) {
+            rotFromPose(pose[p], R[p]);
+            double s = sqrt(R[p][2] * R[p][2] + R[p][5] * R[p][5]);  // 工具轴 z 与重力夹角的正弦
+            if (s > maxTiltSin) maxTiltSin = s;
+            for (int q = 0; q < p; q++) {
+                double tr = 0.0;
+                for (int m = 0; m < 9; m++) tr += R[p][m] * R[q][m];  // trace(Rpᵀ·Rq)
+                double c = (tr - 1.0) / 2.0;
+                if (c > 1.0) c = 1.0;
+                if (c < -1.0) c = -1.0;
+                double deg = acos(c) * R2D;
+                if (deg > maxPairDeg) maxPairDeg = deg;
+            }
+        }
+        bool coverageOk = (maxPairDeg >= MIN_SPAN_DEG) && (maxTiltSin >= MIN_TILT_SIN);
+
+        // ===== 力 (Fx,Fy,Fz) 与 力矩 (Mx,My,Mz) 的跨姿态极差分开看 =====
+        //   重力补偿残差 ΔF = Δm·g_tool        → 质量误差污染力通道
+        //                ΔM = (p − p_cfg) × g_tool,  p = m·r
+        //   注意: 质量误差 Δm 同样会经由 p_cfg 漏进力矩通道, 所以力矩极差变大
+        //   既可能是质心不准、也可能是质量不准; 反之质量误差一定同时抬高两者。
+        //   力矩通道的独有价值是: 它是唯一能反映质心误差的通道。
+        double loF[3], hiF[3], loM[3], hiM[3];
+        for (int a = 0; a < 3; a++) {
+            loF[a] = hiF[a] = bias[0][a];
+            loM[a] = hiM[a] = bias[0][a + 3];
+        }
+        for (int p = 1; p < count; p++) {
+            for (int a = 0; a < 3; a++) {
+                if (bias[p][a]     < loF[a]) loF[a] = bias[p][a];
+                if (bias[p][a]     > hiF[a]) hiF[a] = bias[p][a];
+                if (bias[p][a + 3] < loM[a]) loM[a] = bias[p][a + 3];
+                if (bias[p][a + 3] > hiM[a]) hiM[a] = bias[p][a + 3];
+            }
+        }
+        double sF[3], sM[3];
+        for (int a = 0; a < 3; a++) { sF[a] = hiF[a] - loF[a]; sM[a] = hiM[a] - loM[a]; }
+        double spanF = sqrt(sF[0] * sF[0] + sF[1] * sF[1] + sF[2] * sF[2]);
+        double spanM = sqrt(sM[0] * sM[0] + sM[1] * sM[1] + sM[2] * sM[2]);
+
+        double mCfg, cCfgNow[3];
+        PayloadCalibration::effective(mCfg, cCfgNow);
+        if (!(mCfg > 1e-6)) mCfg = 0.66;   // 防除零
+        // |ΔF| 是多轴分量极差的模, 对同一个转动矢量可达真实 Δm 的 ~2 倍 → 只当上界看
+        double dmUpper = spanF / 9.81 * 1000.0;                        // 等效质量误差上界 (g)
+        double drEq = spanM / (mCfg * 9.81 * maxTiltSin) * 1000.0;     // 等效质心误差 (mm)
+
+        std::cout << "\n======================================================" << std::endl;
+        std::cout << "  多姿态零偏检查 — 负载参数验证" << std::endl;
+        std::cout << "  姿态数: " << count << "   最大姿态跨度: " << (int)(maxPairDeg + 0.5)
+                  << "°   最大 sinθ: " << maxTiltSin << std::endl;
+        std::cout << "  当前负载: load=" << mCfg << " kg  center=("
+                  << cCfgNow[0] << ", " << cCfgNow[1] << ", " << cCfgNow[2] << ") mm"
+                  << (PayloadCalibration::enabled ? "  [实机标定值]" : "  [种子值, 未标定]")
+                  << "  CZ符号=" << (PayloadCalibration::comSignZ > 0 ? "+1" : "-1")
+                  << std::endl;
+        std::cout << "======================================================" << std::endl;
+        printf("  跨姿态极差(力):   Fx=%.3f  Fy=%.3f  Fz=%.3f   |ΔF|=%.3f N\n",
+               sF[0], sF[1], sF[2], spanF);
+        printf("  跨姿态极差(力矩): Mx=%.4f My=%.4f Mz=%.4f |ΔM|=%.4f Nm\n",
+               sM[0], sM[1], sM[2], spanM);
+        printf("  → 等效质量误差 ≤ %.0f g   /   ", dmUpper);
+        if (maxTiltSin >= MIN_TILT_SIN) printf("等效质心误差 %.0f mm\n", drEq);
+        else                            printf("等效质心误差 不可观测 (倾角不足)\n");
+        std::cout << "------------------------------------------------------" << std::endl;
+
+        // 先判覆盖度: 覆盖不足时任何极差结论都不成立
+        if (maxPairDeg < MIN_SPAN_DEG) {
+            std::cout << "  ⚠ 姿态跨度不足 " << (int)MIN_SPAN_DEG << "° — 各姿态几乎一样,"
+                      << " 极差只是噪声" << std::endl;
+        }
+        if (maxTiltSin < MIN_TILT_SIN) {
+            std::cout << "  ⚠ 倾角覆盖不足 (sinθ<" << MIN_TILT_SIN
+                      << ") — 笔始终朝下时轴向质心误差在力矩上无响应,"
+                      << " 请把笔摆到水平/朝上再补几个姿态" << std::endl;
+        }
+
+        if (!coverageOk) {
+            std::cout << "  ? 覆盖不足, 不作判定 — 补姿态后重测" << std::endl;
+        } else if (spanF < 0.3 && drEq < 10.0) {
+            std::cout << "  ✓ PASS — 零偏与姿态无关, 负载参数正确" << std::endl;
+        } else if (spanF < 1.0 && drEq < 30.0) {
+            std::cout << "  ⚠ WARN — 有残余姿态依赖, 按下面的量级微调后重测" << std::endl;
+        } else {
+            std::cout << "  ✗ FAIL — 负载参数明显不准" << std::endl;
+        }
+
+        if (spanF >= 0.3) {
+            std::cout << "    · 力项偏大 → 质量不准。**上秤称工具链实际总重**复核"
+                      << " (别用这里的上界去加减)" << std::endl;
+        }
+        if (coverageOk && drEq >= 10.0) {
+            std::cout << "    · 力矩项偏大 → 质心不准 (但也可能只是质量误差漏进来的)" << std::endl;
+        }
+        if (!coverageOk || spanF >= 0.3 || drEq >= 10.0) {
+            std::cout << "   → 按 's' 用这批数据【求解】并下发修正后的负载参数"
+                      << std::endl;
+        }
+        std::cout << std::endl;
+    }
+
+    // 's': 用已采数据最小二乘求解负载参数 → 落盘 → 重新下发 EnableRobot
+    static void solveAndApply() {
+        if (count < 4) {
+            std::cout << "[BIAS] 求解至少需要 4 个姿态 (当前 " << count
+                      << "), 建议 6~8 个" << std::endl;
+            return;
+        }
+        // 采样中途不允许求解
+        if (sampling) {
+            std::cout << "[BIAS] 正在采样, 稍后再求解" << std::endl;
+            return;
+        }
+
+        // 机械臂当前实际使用的负载 = 上次下发的值 (标定值优先, 否则种子)
+        double mCfg, cCfg[3];
+        PayloadCalibration::effective(mCfg, cCfg);
+
+        // 姿态转成求解器要的 [x,y,z,rx,ry,rz]: 本模块存的是 [rx,ry,rz,x,y,z]
+        static double sp[12][6];
+        static double sf[12][3];
+        static double sm[12][3];
+        for (int i = 0; i < count; i++) {
+            sp[i][0] = pose[i][3]; sp[i][1] = pose[i][4]; sp[i][2] = pose[i][5];
+            sp[i][3] = pose[i][0]; sp[i][4] = pose[i][1]; sp[i][5] = pose[i][2];
+            for (int a = 0; a < 3; a++) {
+                sf[i][a] = bias[i][a];        // 力
+                sm[i][a] = bias[i][a + 3];    // 力矩
+            }
+        }
+
+        PayloadCalibration::Result r;
+        if (!PayloadCalibration::solve(sp, sf, sm, count, mCfg, cCfg,
+                                       PayloadCalibration::comSignZ, r)) {
+            std::cout << "[BIAS] 求解失败 — 姿态数不足/退化(姿态太接近)/解非物理。\n"
+                      << "       请确认各姿态差异足够大 (跨度≥30°, 且笔有水平/朝上的姿态)"
+                      << std::endl;
+            return;
+        }
+
+        std::cout << "\n======================================================" << std::endl;
+        std::cout << "  负载参数求解结果 (" << r.poses << " 个姿态, CZ 符号约定 "
+                  << (PayloadCalibration::comSignZ > 0 ? "+1" : "-1") << ")" << std::endl;
+        std::cout << "======================================================" << std::endl;
+        printf("  质量:    当前 %.3f kg   →  修正 %+.3f kg   →   %.3f kg\n",
+               mCfg, r.dm, r.massKg);
+        printf("  质心 X/Y/Z: 当前 (%.1f, %.1f, %.1f)\n", cCfg[0], cCfg[1], cCfg[2]);
+        printf("             修正 (%+.1f, %+.1f, %+.1f) mm\n", r.dc[0], r.dc[1], r.dc[2]);
+        printf("             下发 (%.1f, %.1f, %.1f) mm\n", r.comMm[0], r.comMm[1], r.comMm[2]);
+        printf("  拟合残差: 力 %.4f N   力矩 %.4f N·m\n", r.rmsForceN, r.rmsMomentNm);
+        std::cout << "------------------------------------------------------" << std::endl;
+
+        PayloadCalibration::applyResult(r);
+        if (!PayloadCalibration::save("payload_calib.json")) {
+            std::cerr << "[BIAS] !! payload_calib.json 写入失败" << std::endl;
+        } else {
+            std::cout << "  已保存 payload_calib.json (下次启动自动加载)" << std::endl;
+        }
+        RelayCore::instance().applyPayloadToRobot();
+        std::cout << "  → 请再按 'm' 采 3~4 个姿态【复验】, 看残差是否掉到噪声本底" << std::endl;
+        std::cout << "    若残差反而变大 → 说明机械臂解释 CZ 的符号与我们假设相反:" << std::endl;
+        std::cout << "      按 'i' 翻转符号约定 → 重新 'm' 采集 → 再按 's' 求解" << std::endl;
+        std::cout << std::endl;
+    }
+}
+
+// ===== 采集类模式互斥 =====
+// 坐标标定 / TCP 标定 / 多姿态检查 / FK 验证都靠 SPACE 采点, 同时开着会互相吞按键
+// (最坏情况: MOTION 相在等 SPACE 收尾却被别的模式吃掉, 拖拽模式一直开着)。
+// 进入任一个之前先关掉其它的。keep = 本次要进入的模式代号。
+static void cancelOtherCaptureModes(char keep) {
+    if (keep != 'c' && Calibration::collectMode)   Calibration::cancelCollect();
+    if (keep != 't' && TcpCalibration::collectMode) TcpCalibration::cancelCollect();
+    if (keep != 'm')                                BiasCheck::cancel();
+    if (keep != 'v' && FkValidate::mode) {
+        FkValidate::mode = false;
+        std::cout << "[FK-VAL] Mode OFF" << std::endl;
+    }
+}
+
 // ===== GLUT 回调 =====
 
 void keyboard(unsigned char key, int, int);  // forward decl for console polling in idle()
@@ -47,7 +347,6 @@ void display() {
     }
 }
 void idle() {
-    static int dbgCount = 0;
     if (!appState.isClosing) {
         glutPostRedisplay();
 
@@ -63,6 +362,15 @@ void idle() {
         // Poll force data at ~30Hz alongside feedback (robot mode only)
         if (!g_noRobot) {
             RelayCore::instance().pollForce();
+
+            // 多姿态零偏检查采样 (负载参数验证)
+            if (BiasCheck::mode) {
+                AppState::ForceData fdSnap;
+                EnterCriticalSection(&appState.forceDataMutex);
+                fdSnap = appState.forceData;
+                LeaveCriticalSection(&appState.forceDataMutex);
+                BiasCheck::sample(fdSnap);
+            }
 
             // Track force calibration state changes
             static ForceCalibration::State lastCalibState = ForceCalibration::State::IDLE;
@@ -82,9 +390,6 @@ void idle() {
             RelayCore::instance().checkHapticWatchdog();
             // 安全网: 每帧刷新心跳，防止 GLUT 定时器延迟导致误判超时
             RelayCore::instance().resetHeartbeat();
-        }
-        if (++dbgCount <= 5 || dbgCount % 200 == 0) {
-            std::cerr << "[DBG] idle #" << dbgCount << " noRobot=" << g_noRobot << std::endl;
         }
         Sleep(1);
     }
@@ -175,29 +480,61 @@ void keyboard(unsigned char key, int, int) {
         }
     }
 
-    // ===== Force Calibration ('c' key) =====
-    // 'c' when IDLE (not transmitting): start/abort force calibration
-    // 'c' when coord-calib mode is active: cancel coord calib
-    if (key == 'c' || key == 'C') {
+    // ===== 力传感器调零 ('z' key) =====
+    // 'z': 静置采集零偏 → 直接应用+存盘。不进 MOTION 相、不开拖拽模式。再按一次中止。
+    //      换装工具 (笔夹/笔) 后重新调零用这个。
+    if (key == 'z' || key == 'Z') {
         auto& relay = RelayCore::instance();
+        if (relay.isForceZeroing()) {
+            relay.abortForceCalibration();
+            return;
+        }
+        if (relay.isForceCalibrating()) {
+            std::cout << "[Force] 力标定进行中 — 等它结束, 或按 'k' 中止" << std::endl;
+            return;
+        }
+        if (g_noRobot) {
+            std::cout << "[Force] --no-robot 模式下无法调零" << std::endl;
+            return;
+        }
+        cancelOtherCaptureModes('z');
+        if (relay.startForceZeroing()) {
+            std::cout << "[Force] 调零中: 保持机械臂静止, 采集完成后自动应用并存盘"
+                      << std::endl;
+        }
+        return;
+    }
 
-        // If force calibration is running, 'c' aborts it
+    // ===== 力标定全流程 ('k' key) =====
+    // 'k': TARE + MOTION(拖动拟合质量) — 需要拖动机械臂。再按一次中止。
+    if (key == 'k' || key == 'K') {
+        auto& relay = RelayCore::instance();
+        if (relay.isForceZeroing()) {
+            std::cout << "[Force] 调零进行中 — 等待完成, 或按 'z' 中止" << std::endl;
+            return;
+        }
         if (relay.isForceCalibrating()) {
             relay.abortForceCalibration();
             return;
         }
-
-        // If idle, try to start force calibration
+        cancelOtherCaptureModes('k');
         if (!g_noRobot && relay.startForceCalibration()) {
             std::cout << "[Force] TARE: keep robot still (2s), then drag to move for mass cal." << std::endl;
+        }
+        return;
+    }
+
+    // ===== Touch→Robot 坐标标定 ('c' key) =====
+    if (key == 'c' || key == 'C') {
+        if (RelayCore::instance().isForceCalibrating()) {
+            std::cout << "[CALIB] 力标定/调零进行中 — 先按 'z' 或 'k' 结束" << std::endl;
             return;
         }
-
-        // Coordinate calibration mode toggle (fall through if force calib not started)
         if (Calibration::collectMode) {
             Calibration::cancelCollect();
             std::cout << "\n[CALIB] Mode OFF" << std::endl;
         } else {
+            cancelOtherCaptureModes('c');
             Calibration::startCollect();
             std::cout << "\n[CALIB] Mode ON — "
                       << "Align Touch pen + robot to marker, press SPACE to record,"
@@ -213,7 +550,7 @@ void keyboard(unsigned char key, int, int) {
             TcpCalibration::cancelCollect();
             std::cout << "\n[TCP-CALIB] Mode OFF" << std::endl;
         } else {
-            if (Calibration::collectMode) Calibration::cancelCollect(); // 与坐标标定互斥
+            cancelOtherCaptureModes('t');
             TcpCalibration::startCollect();
             std::cout << "\n[TCP-CALIB] Mode ON — "
                       << "Keep pen TIP at a fixed point, reorient arm, "
@@ -222,9 +559,81 @@ void keyboard(unsigned char key, int, int) {
         return;
     }
 
+    // ===== 多姿态零偏检查 ('m' key) =====
+    // 'm': 切换模式; SPACE 记录一个姿态 (自动平均 1s); 关闭模式时输出报告
+    if (key == 'm' || key == 'M') {
+        if (!BiasCheck::mode) {
+            if (g_noRobot) {
+                std::cout << "[BIAS] --no-robot 模式下不可用" << std::endl;
+                return;
+            }
+            if (RelayCore::instance().isForceCalibrating()) {
+                std::cout << "[BIAS] 力标定/调零进行中 — 结束后再试" << std::endl;
+                return;
+            }
+            cancelOtherCaptureModes('m');
+            BiasCheck::reset();
+            BiasCheck::mode = true;
+            std::cout << "\n[BIAS] Mode ON — 笔尖悬空, 只改姿态(位置尽量不变),"
+                      << " 每到一个姿态按 SPACE (采样 1s)\n"
+                      << "       'd' 拖拽模式开关 (摆姿态用; 摆好一定要关掉再采样) /"
+                      << " 'm' 退出并输出报告\n"
+                      << "       's' 求解负载参数并下发 / 'i' 翻转 CZ 符号约定" << std::endl;
+        } else {
+            BiasCheck::mode = false;
+            // 别把柔顺状态带出模式
+            RelayCore::instance().setDragMode(false);
+            BiasCheck::report();
+        }
+        return;
+    }
+
+    // ===== 拖拽模式开关 ('d' key, 仅 'm' 模式下) =====
+    // 标定要摆 6~8 个姿态, 但拖拽开着时机械臂柔顺、姿态会漂, 采到的力数据是脏的。
+    // 所以做成手动开关: 拖到位 → 按 'd' 锁住 → 再按 SPACE 采样。
+    // 不用示教器也能摆姿态; 退出 'm' 模式会自动关掉, 不会把柔顺状态漏出去。
+    if ((key == 'd' || key == 'D') && BiasCheck::mode) {
+        if (g_noRobot) {
+            std::cout << "[BIAS] --no-robot 模式下无法切换拖拽" << std::endl;
+            return;
+        }
+        auto& relay = RelayCore::instance();
+        const bool want = !relay.isDragMode();
+        if (!relay.setDragMode(want)) {
+            std::cout << "[BIAS] 拖拽模式切换失败 (机械臂未连接?)" << std::endl;
+            return;
+        }
+        std::cout << (want ? "       现在可以手动拖动机械臂摆姿态; 摆好后按 'd' 锁定位姿再 SPACE 采样"
+                           : "       位姿已锁定, 可以按 SPACE 采样了")
+                  << std::endl;
+        return;
+    }
+
     // SPACE during force calibration: start/stop sampling
+    // 必须排在 BiasCheck 之前: 否则标定/MOTION 相在用 SPACE 收尾时会被 BiasCheck 吞掉,
+    // 导致 MOTION 迟迟不结束 (拖拽模式一直开着)。
     if (key == ' ' && RelayCore::instance().isForceCalibrating()) {
         ForceCalibration::confirmPose();
+        return;
+    }
+
+    if (key == ' ' && BiasCheck::mode) {
+        BiasCheck::record();
+        return;
+    }
+
+    // 's' in BiasCheck mode: 求解负载参数 → 落盘 → 重新下发
+    if ((key == 's' || key == 'S') && BiasCheck::mode) {
+        BiasCheck::solveAndApply();
+        return;
+    }
+
+    // 'i' in BiasCheck mode: 翻转 CZ 符号约定 (求解发散时用)
+    if ((key == 'i' || key == 'I') && BiasCheck::mode) {
+        PayloadCalibration::flipComSignZ();
+        std::cout << "[BIAS] CZ 符号约定 → "
+                  << (PayloadCalibration::comSignZ > 0 ? "+1" : "-1")
+                  << " (请重新 'm' 采集再按 's' 求解)" << std::endl;
         return;
     }
 
@@ -366,6 +775,7 @@ void keyboard(unsigned char key, int, int) {
 
     if (key == 'v' || key == 'V') {
         if (!FkValidate::mode) {
+            cancelOtherCaptureModes('v');
             FkValidate::mode = true;
             FkValidate::count = 0;
             std::cout << "\n[FK-VAL] Mode ON — move robot to different poses,"
@@ -561,6 +971,21 @@ int main(int argc, char* argv[]) {
     if (g_noRobot) {
         std::cout << "Robot: SKIPPED (--no-robot)" << std::endl;
     } else {
+        // 末端负载参数必须在使能之前加载 —— EnableRobot 要用它 (见 PayloadCalibration)
+        if (PayloadCalibration::load("payload_calib.json")) {
+            std::cout << "[Payload] Loaded payload_calib.json (mass=" << PayloadCalibration::massKg
+                      << "kg, com=(" << PayloadCalibration::comMm[0] << ","
+                      << PayloadCalibration::comMm[1] << "," << PayloadCalibration::comMm[2]
+                      << ")mm, " << PayloadCalibration::poses << " poses, sign_z="
+                      << (PayloadCalibration::comSignZ > 0 ? "+1" : "-1") << ")" << std::endl;
+        } else {
+            double m, c[3];
+            PayloadCalibration::effective(m, c);
+            std::cout << "[Payload] 无 payload_calib.json — 用种子值 mass=" << m
+                      << "kg com=(" << c[0] << "," << c[1] << "," << c[2] << ")mm\n"
+                      << "          实机标定: 启动后按 'm' 采多姿态 → 's' 求解" << std::endl;
+        }
+
         std::cout << "Initializing robot via Relay..." << std::endl;
         if (!RelayCore::instance().init()) {
             std::cerr << "ERROR: Robot init failed" << std::endl;
@@ -587,7 +1012,7 @@ int main(int argc, char* argv[]) {
             std::cout << "[Force] Loaded force_calib.json (mass=" << massKg
                       << "kg, bias=" << biasF[0] << "," << biasF[1] << "," << biasF[2] << "N)" << std::endl;
         } else {
-            std::cout << "[Force] No calibration file — press 'c' when idle to calibrate." << std::endl;
+            std::cout << "[Force] No calibration file — press 'z' when idle to zero the sensor." << std::endl;
         }
     }
 

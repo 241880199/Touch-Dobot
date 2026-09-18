@@ -14,7 +14,12 @@ namespace TcpCalibration {
     int  collectCount = 0;
     double collectPose[MAX_COLLECT_POSES][6] = {{0}};
 
-    void rpyToMatrix(double rx, double ry, double rz, double R[9]) {
+    // 输入为【度】(与 GetPose 返回的 Rx/Ry/Rz、Config 安全限位、ServoP 一致)。
+    // 注: 早先此函数直接对入参做 cos/sin (即按弧度解释), 而唯一真实调用方
+    //     main.cpp 传的是 GetPose 的度值 → 旋转矩阵是错的。单位统一到"度"。
+    void rpyToMatrix(double rx_deg, double ry_deg, double rz_deg, double R[9]) {
+        const double D2R = 3.14159265358979323846 / 180.0;
+        double rx = rx_deg * D2R, ry = ry_deg * D2R, rz = rz_deg * D2R;
         double crx = cos(rx), srx = sin(rx);
         double cry = cos(ry), sry = sin(ry);
         double crz = cos(rz), srz = sin(rz);

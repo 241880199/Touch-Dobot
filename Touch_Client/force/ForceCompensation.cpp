@@ -186,6 +186,13 @@ bool isCalibrated() {
     return g_isCalibrated;
 }
 
+double currentMassKg() {
+    EnterCriticalSection(&g_calibMutex);
+    double m = g_massKg;
+    LeaveCriticalSection(&g_calibMutex);
+    return m;
+}
+
 void step(AppState::ForceData& fd, const double poseRxyz[6]) {
     // poseRxyz = {X_mm, Y_mm, Z_mm, Rx_deg, Ry_deg, Rz_deg}
 

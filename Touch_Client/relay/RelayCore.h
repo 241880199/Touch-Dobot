@@ -37,13 +37,24 @@ public:
 
     // 力传感器标定
     bool startForceCalibration();
+    // 仅调零: 静置采集零偏 → 直接应用+存盘 (不进 MOTION 相、不开拖拽模式)
+    bool startForceZeroing();
     void abortForceCalibration();
     bool isForceCalibrating() const;
+    bool isForceZeroing() const;
     bool isForceCalibrationDone() const;
     const char* forceCalibStatus() const;
 
+    // 末端负载标定后重新下发 EnableRobot(load,cx,cy,cz)
+    bool applyPayloadToRobot();
+
     // 奇异脱困 (可在运行中手动触发)
     bool triggerEscape();
+
+    // 手动拖拽模式 (SetCollideDrag) —— 'm' 采集姿态时用 'd' 切换。
+    // 拖拽中机械臂是柔顺的, 姿态会漂; 采样前必须关掉, 否则力数据是脏的。
+    bool setDragMode(bool enable);
+    bool isDragMode() const { return m_dragMode; }
 
     // 扩展
     void registerExtension(IExtension* ext);
@@ -91,6 +102,7 @@ private:
 
     std::atomic<bool> m_transmitting{false};
     std::atomic<bool> m_basePointSet{false};
+    std::atomic<bool> m_dragMode{false};   // 手动/标定拖拽模式是否开着
     Vec3 m_targetPos;           // 累加式机器人目标位置
     Vec3 m_lastTouchPos;        // 上一帧 Touch 位置 (robot系), 用于增量计算
     bool   m_lastTouchValid = false;

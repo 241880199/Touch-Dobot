@@ -5,8 +5,9 @@
 //      最小二乘求解偏移 t 使 p_i + R_i·t = 常数 (笔尖固定点)。
 // 约定: RPY → 旋转矩阵采用 R = Rz(rz) * Ry(ry) * Rx(rx) (与 FK/姿态控制一致)。
 namespace TcpCalibration {
-    // RPY(弧度) → 3×3 旋转矩阵 (row-major)
-    void rpyToMatrix(double rx, double ry, double rz, double R[9]);
+    // RPY(度) → 3×3 旋转矩阵 (row-major)。输入单位是【度】——与 GetPose 返回的
+    // Rx/Ry/Rz 一致, 也和 ForceCompensation::eulerToRotation 的约定一致。
+    void rpyToMatrix(double rx_deg, double ry_deg, double rz_deg, double R[9]);
 
     // 纯函数: 求解 TCP 偏移。
     // poses: n 个法兰位姿 [x,y,z,rx,ry,rz], n >= 3

@@ -1,2 +1,4 @@
 build_constraint_test.bat
 *_log*.txt
+# 测试运行产物 (ForceCalibration::saveToFile 写当前目录)
+force_calib.json

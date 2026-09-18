@@ -11,6 +11,7 @@
 // ===== Internal state =====
 
 static ForceCalibration::State g_state = ForceCalibration::State::IDLE;
+static bool g_tareOnly = false;   // true = 仅调零流程: TARE 定稿后直接应用+存盘, 不进 MOTION
 
 // TARE
 static double g_phaseTimer = 0.0;
@@ -45,6 +46,10 @@ bool isRunning() {
     return g_state != State::IDLE && g_state != State::DONE && g_state != State::ABORTED;
 }
 
+bool isZeroing() {
+    return g_tareOnly && isRunning();
+}
+
 bool isDone() {
     return g_state == State::DONE || g_state == State::ABORTED;
 }
@@ -52,7 +57,8 @@ bool isDone() {
 const char* statusText() {
     switch (g_state) {
         case State::IDLE:    return "Idle";
-        case State::TARE:    return "Taring... (keep still)";
+        case State::TARE:    return g_tareOnly ? "Zeroing... (keep still)"
+                                               : "Taring... (keep still)";
         case State::MOTION:  return "Motion cal... (move robot, SPACE to stop)";
         case State::SOLVE:   return "Solving...";
         case State::DONE:    return "Calibration complete";
@@ -61,10 +67,28 @@ const char* statusText() {
     return "Unknown";
 }
 
+// 由采集缓冲定稿零偏 (力 + 力矩)
+static void finalizeBias() {
+    int n = (g_tareCount > 0) ? g_tareCount : 1;
+    for (int i = 0; i < 6; i++) g_tareAccum[i] /= n;
+    for (int i = 0; i < 3; i++) {
+        g_biasForce[i]  = g_tareAccum[i];
+        g_biasTorque[i] = g_tareAccum[i + 3];
+    }
+}
+
+// 可启动: 空闲, 或上一次已结束 (DONE/ABORTED) — 允许同一进程内重新调零/重标
+static bool canStart() {
+    return g_state == ForceCalibration::State::IDLE
+        || g_state == ForceCalibration::State::DONE
+        || g_state == ForceCalibration::State::ABORTED;
+}
+
 bool start() {
-    if (g_state != State::IDLE) return false;
+    if (!canStart()) return false;
 
     g_state = State::TARE;
+    g_tareOnly = false;
     g_phaseTimer = 0.0;
     g_tareCount = 0;
     for (int i = 0; i < 6; i++) g_tareAccum[i] = 0.0;
@@ -73,37 +97,34 @@ bool start() {
     return true;
 }
 
+bool startZero() {
+    if (!canStart()) return false;
+
+    g_state = State::TARE;
+    g_tareOnly = true;
+    g_phaseTimer = 0.0;
+    g_tareCount = 0;
+    for (int i = 0; i < 6; i++) g_tareAccum[i] = 0.0;
+
+    printf("[Force] ZERO started — keep robot still for %.0fs "
+           "(TARE only: no motion phase, drag mode NOT enabled)...\n",
+           Config::FORCE_CALIB_STILL_COLLECT_S);
+    return true;
+}
+
 void abort() {
     printf("[Force] Calibration ABORTED (was: %s)\n", statusText());
     if (g_dragCb) g_dragCb(false);
     g_state = State::ABORTED;
+    g_tareOnly = false;   // 中止即放弃, 不做任何应用/存盘
 }
 
 void confirmPose() {
     if (g_state == State::TARE) {
-        // SPACE during TARE: skip ahead if user is ready
-        if (g_phaseTimer < Config::FORCE_CALIB_STILL_COLLECT_S) {
-            printf("[Force] TARE still collecting (%.1f/%.0fs), wait or press SPACE to skip...\n",
-                   g_phaseTimer, Config::FORCE_CALIB_STILL_COLLECT_S);
-            return;
-        }
-        // Finalize tare
-        for (int i = 0; i < 6; i++) g_tareAccum[i] /= g_tareCount;
-        g_biasForce[0] = g_tareAccum[0];
-        g_biasForce[1] = g_tareAccum[1];
-        g_biasForce[2] = g_tareAccum[2];
-        g_biasTorque[0] = g_tareAccum[3];
-        g_biasTorque[1] = g_tareAccum[4];
-        g_biasTorque[2] = g_tareAccum[5];
-        printf("[Force] TARE done: biasF=(%+.3f, %+.3f, %+.3f) N  biasM=(%+.4f, %+.4f, %+.4f) Nm\n",
-               g_biasForce[0], g_biasForce[1], g_biasForce[2],
-               g_biasTorque[0], g_biasTorque[1], g_biasTorque[2]);
-
-        // Enter MOTION phase
-        g_state = State::MOTION;
-        g_motionCount = 0;
-        if (g_dragCb) g_dragCb(true);
-        printf("[Force] MOTION phase: move robot with varying speed + direction, then press SPACE\n");
+        // TARE 由 update() 采集满 FORCE_CALIB_STILL_COLLECT_S 后自动定稿 (定时器递增,
+        // 跨过阈值的同一次 update() 就切换状态), 因此这里只报告进度、不需要按键。
+        printf("[Force] TARE in progress (%.1f/%.0fs) — auto-completes, no key needed\n",
+               g_phaseTimer, Config::FORCE_CALIB_STILL_COLLECT_S);
         return;
     }
 
@@ -134,15 +155,36 @@ bool update(double dt, const double raw[6], const double pose[6]) {
         g_phaseTimer += dt;
         if (g_phaseTimer >= Config::FORCE_CALIB_STILL_COLLECT_S) {
             // Auto-complete tare after collection time
-            for (int i = 0; i < 6; i++) g_tareAccum[i] /= g_tareCount;
-            g_biasForce[0] = g_tareAccum[0];
-            g_biasForce[1] = g_tareAccum[1];
-            g_biasForce[2] = g_tareAccum[2];
-            g_biasTorque[0] = g_tareAccum[3];
-            g_biasTorque[1] = g_tareAccum[4];
-            g_biasTorque[2] = g_tareAccum[5];
-            printf("[Force] TARE done: biasF=(%+.3f, %+.3f, %+.3f) N\n",
-                   g_biasForce[0], g_biasForce[1], g_biasForce[2]);
+            finalizeBias();
+            printf("[Force] TARE done: biasF=(%+.3f, %+.3f, %+.3f) N  biasM=(%+.4f, %+.4f, %+.4f) Nm\n",
+                   g_biasForce[0], g_biasForce[1], g_biasForce[2],
+                   g_biasTorque[0], g_biasTorque[1], g_biasTorque[2]);
+
+            // ===== 仅调零: 直接应用+存盘, 保留现有惯性补偿质量, 不进 MOTION、不开拖拽 =====
+            if (g_tareOnly) {
+                double mass = ForceCompensation::currentMassKg();
+                // CR3 内部已补偿重力/惯性, 正常情况这里的质量应 ≈0 (见 force-compensation 设计)。
+                // 若 force_calib.json 里带着一个非零质量 (上一次 'k' 全流程, 或换装工具前留下的),
+                // 保留它会让 compensated = raw - 零偏 - m·g_tool 随姿态漂移,
+                // 而且这个错误零偏会被写进文件。这时该做的是 'k' 重标, 不是 'z'。
+                if (mass > 0.05) {
+                    printf("[Force] WARNING: 保留的惯性补偿质量 %.3f kg 非零 —— "
+                           "残余 %.2f N 的姿态相关误差会被当成零偏存盘。\n"
+                           "        换装工具后应先用 'k' 全流程重标质量, 再用 'z' 调零。\n",
+                           mass, mass * 9.81);
+                }
+                double comZero[3] = {0};
+                ForceCompensation::setCalibration(mass, comZero, g_biasForce, g_biasTorque);
+                ForceCalibration::saveToFile("force_calib.json", mass, g_biasForce, g_biasTorque);
+                printf("[Force] ZERO complete (mass %.4f kg kept): "
+                       "force bias=(%+.3f,%+.3f,%+.3f) N, torque bias=(%+.4f,%+.4f,%+.4f) Nm\n",
+                       mass, g_biasForce[0], g_biasForce[1], g_biasForce[2],
+                       g_biasTorque[0], g_biasTorque[1], g_biasTorque[2]);
+                printf("[Force] Saved force_calib.json\n");
+                g_state = State::DONE;
+                g_tareOnly = false;
+                break;
+            }
 
             g_state = State::MOTION;
             g_motionCount = 0;

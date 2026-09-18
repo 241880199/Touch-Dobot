@@ -25,7 +25,7 @@ static void test_rpy_identity() {
 static void test_rpy_rz90() {
     TEST(rpy_rz90);
     double R[9];
-    TcpCalibration::rpyToMatrix(0, 0, M_PI/2, R);
+    TcpCalibration::rpyToMatrix(0, 0, 90.0, R);
     // Rz(90°): [[0,-1,0],[1,0,0],[0,0,1]]
     CHECK(fabs(R[0]-0)<1e-9 && fabs(R[1]+1)<1e-9);
     CHECK(fabs(R[3]-1)<1e-9 && fabs(R[4]-0)<1e-9);
@@ -35,7 +35,7 @@ static void test_rpy_rz90() {
 
 static void test_apply_zero_offset() {
     TEST(apply_zero_offset);
-    double pose[6] = {10, 20, 30, 0.1, 0.2, 0.3};
+    double pose[6] = {10, 20, 30, 5.7, 11.5, 17.2};
     double off[3] = {0,0,0};
     double tip[3];
     TcpCalibration::apply(pose, off, tip);
@@ -45,7 +45,7 @@ static void test_apply_zero_offset() {
 
 static void test_apply_rotated_offset() {
     TEST(apply_rotated_offset);
-    double pose[6] = {0,0,0, 0,0, M_PI/2};  // Rz 90°
+    double pose[6] = {0,0,0, 0,0, 90.0};  // Rz 90°
     double off[3] = {1,0,0};
     double tip[3];
     TcpCalibration::apply(pose, off, tip);
@@ -57,11 +57,11 @@ static void test_solve_recovers_offset() {
     TEST(solve_recovers_offset);
     double tTrue[3] = {5.0, -8.0, -150.0};
     double pTip[3] = {300.0, 100.0, 40.0};
-    double rpy[4][3] = {
-        {0.1, 0.2, 0.3},
-        {-0.15, 0.05, 0.5},
-        {0.25, -0.1, -0.2},
-        {0.0, 0.3, -0.4}
+    double rpy[4][3] = {          // 单位: 度 (真实量级)
+        {5.0, 11.0, 17.0},
+        {-8.6, 2.9, 28.6},
+        {14.3, -5.7, -11.5},
+        {0.0, 17.2, -22.9}
     };
     double poses[4][6];
     for (int k = 0; k < 4; k++) {

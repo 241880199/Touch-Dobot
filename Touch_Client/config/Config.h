@@ -50,6 +50,21 @@ namespace Config {
     const int RELAY_PORT = 8888;
     const int RELAY_UPDATE_INTERVAL = 33; // 更新间隔 (ms), ~30Hz
 
+    // ========== 机械臂末端负载【种子值】(工具链: 传感器 + 笔夹 + 笔) ==========
+    // 注意: 这三个量【只能实机测出来】, 正式数据源是 force/PayloadCalibration
+    //       (payload_calib.json, 由 'm' 采集 + 's' 求解生成)。
+    //       这里的值只是"还没标定过"时的兜底 —— 第一次启用机械臂前还没有任何
+    //       实测数据, 而 EnableRobot 必须先给一个负载才能使能, 所以留一组估计值。
+    // 估计来源: Hardware/tools/compute_payload.py (硬件改动后可重跑复核)
+    // 实测方法: 启动客户端 → 'm' 采 6~8 个姿态 (笔尖悬空, 只改姿态) → 's' 求解
+    //          → 自动重新下发 EnableRobot 并存 payload_calib.json → 再 'm' 复验
+    // 负载设置不准 → 碰撞检测误触发 / 拖拽失控 / 30004 力值随姿态漂移 (见
+    // Docs/机械臂资料/Dobot CR3机械臂参数文档.md §负载设置)。
+    const double ROBOT_PAYLOAD_SEED_KG    = 0.66;   // 工具链总质量估计 (kg)
+    const double ROBOT_PAYLOAD_SEED_CX_MM = 0.0;    // 质心偏心 X 估计 (mm)
+    const double ROBOT_PAYLOAD_SEED_CY_MM = 0.0;    // 质心偏心 Y 估计 (mm)
+    const double ROBOT_PAYLOAD_SEED_CZ_MM = 80.4;   // 质心偏心 Z 估计 (mm, 法兰下方)
+
     // ========== 机械臂运动参数 ==========
     const float SpeedL = 100;                // 运动速度比例 (1~100)
     const float MIN_DELTA_THRESHOLD = 1.0f;  // 最小位移阈值 (mm)
