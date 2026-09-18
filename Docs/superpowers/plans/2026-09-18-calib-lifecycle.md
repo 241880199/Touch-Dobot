@@ -1915,8 +1915,13 @@ static void test_both_candidates_computed() {
     CHECK(PayloadCalibration::solve(g_poses, F, M, NP, 0.660, cCfg, +1.0, r));
     // 候选 k=0 (s=+1): cSend_z = cTrue_z = +67.9
     CHECK(fabs(r.comCand[0][2] - 67.9) < 1e-6);
-    // 候选 k=1 (s=-1): cSend_z = (p_cfg(-1) + dp)/m / (-1) = -67.9
-    CHECK(fabs(r.comCand[1][2] - (-67.9)) < 1e-6);
+    // 候选 k=1 (s=-1): pCfgK_z = -0.053064, cSend_z = (pCfgK_z + dp_z)/m/(-1) = +191.58
+    //
+    // ⚠ 初版计划此处写的是 -67.9 —— 【错的】。它把 pCfgK 当成了 +0.053064, 丢了那个负号。
+    //   代入: dp_z = -0.0252929, pCfgK_z = 0.660*(-0.0804) = -0.053064
+    //         (-0.053064 + -0.0252929)/0.409*1000 = -191.58, 再 /(-1) = +191.58
+    //   推导见实施报告; 这条数值由实施者从第一性原理重算后纠正。
+    CHECK(fabs(r.comCand[1][2] - 191.581663) < 1e-5);
     // solve() 不再自行定案
     CHECK(r.signAmbiguous);
     PASS();
@@ -2022,22 +2027,31 @@ bool RelayCore::probePayloadResidual(double massKg, const double comMm[3], doubl
                 std::cout << "  CZ 符号约定: ✗ 实测分不开 — 结果按不合理处理" << std::endl;
             }
         }
-        if (chosen >= 0) {
-            PayloadCalibration::applyResult(r, chosen);   // 定案
-        } else {
-            // 探针已经把机器人的配置改乱了, 恢复成当前生效值
+        // ⚠ 这里【不】调用 applyResult —— 定案必须等合理性判据通过之后。
+        //    否则判据一旦拒绝, 内存里的生效负载已经变了, 而机器人还停在探针留下的
+        //    临时配置 (可能是败者 comCand[1]) 上, 那句"机械臂负载参数保持原值"就是假话。
+        if (chosen < 0) {
+            // 探针把机器人的配置改乱了, 恢复成当前生效值 (内存没动, 所以就是原值)
             RelayCore::instance().applyPayloadToRobot();
         }
 ```
 
 `applyResult(const Result&, int chosen)` 是**新增重载**：按 `chosen` 选 `comCand` 填
 `comMm` / `dc` / `signZ`，并置 `signAmbiguous = false`；原无参重载保留（供启动加载等用）。
+**它只在接受路径上调用**，位置与原有的 `applyResult(r)` 相同（判据通过之后）。
 
-合理性判据里的 `signOk` 相应改为 `(chosen >= 0)`。
+合理性判据里的 `signOk` 改为 `(chosen >= 0)`。
 
-> ⚠ 插入位置很关键：**必须在合理性判据之前**（判据要用 `chosen`）。
-> 探针会下发临时负载，所以**拒绝路径上必须把机器人恢复回去**（上面 `else` 分支）。
-> 成功路径沿用原有 `applyPayloadToRobot()`，它按已定案的生效值下发。
+**拒绝路径**（`判定: ✗ 不合理` 那一支）在 `return` 之前**必须加**：
+
+```cpp
+            // 探针动过机器人的配置, 拒绝时必须恢复 —— 否则"保持原值"是假话。
+            // 内存未改 (applyResult 在判据之后才调), 所以这次下发就是原值。
+            RelayCore::instance().applyPayloadToRobot();
+```
+
+> ⚠ 插入位置很关键：探针必须在合理性判据之前（判据要用 `chosen`），
+> 而**定案必须在判据之后**。这两件事分居判据两侧——初版计划把定案也放在了判据之前，是错的。
 
 - [ ] **Step 6: 跑测试 + 完整构建**
 
