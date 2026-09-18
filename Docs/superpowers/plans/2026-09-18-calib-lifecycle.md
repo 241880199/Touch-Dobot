@@ -71,7 +71,7 @@ static int g_passed = 0, g_failed = 0;
 #define CHECK(cond) do { if (!(cond)) { std::printf("FAIL: %s\n", #cond); g_failed++; return; } } while(0)
 #define PASS() do { std::printf("PASS\n"); g_passed++; } while(0)
 
-// 正常布局: exe 在 <repo>\Touch_Client\x64\Release\ 下, 上溯两级到 Touch_Client\
+// 正常布局: exe 在 <repo>\Touch_Client\x64\Release\ 下, 上溯两级到 Touch_Client 目录
 static void test_derive_dir_normal() {
     TEST(derive_dir_normal);
     char out[512];
@@ -158,7 +158,7 @@ namespace CalibStore {
 
     // 纯函数: 由可执行文件全路径推出标定目录 (结尾带反斜杠)。
     // 规则: 去掉文件名 + 上溯两级, 再拼 "calib\"。
-    //   ...\Touch_Client\x64\Release\Touch_Client.exe → ...\Touch_Client\calib\
+    //   ...\Touch_Client\x64\Release\Touch_Client.exe → ...\Touch_Client\calib\  (带结尾反斜杠)
     // 分隔符不足两级时返回 false (out 内容未定义)。
     bool deriveDir(const char* exePath, char* out, size_t outSize);
 
