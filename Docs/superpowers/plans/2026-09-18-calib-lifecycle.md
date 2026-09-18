@@ -15,9 +15,13 @@
 >
 > | 早期文本 | 被谁取代 | 最终态 |
 > |---|---|---|
-> | Task 1/2 的 24h 有效期（`saved_at_unix` / `.expired` / `isFresh` / `resolve`） | **Task 8** 整体移除 | 只保留位置解析；可信性由 Task 9 的启动自检实测 |
-> | Task 3/4 交付的 `'i'` 人工兜底 | **Task 5** 移除 | 符号完全由程序算 |
-> | Task 3/5 的"物理质心为正"判据 | **Task 7** 替换 | 种子锚点 + 余量判据（旧判据**永远选不出相反符号**） |
+> | Task 1/2 的 24h 有效期（`saved_at_unix` / `.expired` / `isFresh` / `resolve`） | **Task 8** 整体移除 | `CalibStore` 只管位置；负载不漂、**不做启动检查**；零偏会漂，由 Task 9 便宜地查 |
+> | Task 3/4 交付的 `'i'` 人工兜底 | **Task 5** 移除 | 符号不引入人工判断 |
+> | Task 3/5 的"物理质心为正"判据 | **Task 7** 替换 | 旧判据**永远选不出相反符号**（代数上恒等于 `sign(comCfg[2])`） |
+> | Task 7 的"种子锚点 + 余量判据" | **Task 10** 替换 | **两次下发实测**：解算器给出两个候选，实机各下发一次、谁残余力矩小谁对。不依赖任何估计值 |
+>
+> **任务顺序：1 → 2 → 3 → 4 → 5 → 7 → 10 → 8 → 9 → 6。**
+> （10 取代 7 的选择逻辑但复用它的候选计算；8/9/10 都动 `main.cpp`，必须串行；6 是文档，最后做。）
 >
 > 执行任一任务时，若其文本与本表冲突，**以本表和对应 Task 为准**。
 
@@ -1664,98 +1668,112 @@ git commit -m "refactor(calib): drop the 24h expiry gate; CalibStore only owns l
 
 ---
 
-### Task 9: 启动自检
+### Task 9: 启动零偏漂移检查
 
-> **第二轮设计修订。** §7.1。取代 24h 时间闸门：不再用时间代理，而是**实测**标定是否仍然成立。
-> 用户明确选择"启动后引导摆 2~3 个姿态"，且"不通过 → 作废并要求重标"。
+> **第二轮设计修订的第三次调整（2026-09-18）。** 用户推理：
+> "既然不需要重新计算质心，那是否不需要在启动时重新计算质心等参数，而是作为可选项，
+> 供有加装设备时的重新标定" —— **成立**，而且它暴露了原设计把两件事混在一起：
+>
+> | | 是否随时间漂移 | 失效时机 |
+> |---|---|---|
+> | **负载（质量 + 质心）** | **不漂** —— 工具的物理属性 | 只在硬件变化时 |
+> | **力传感器零偏** | **会漂** —— 温度、时间 | 持续 |
+>
+> 所以：**负载不做任何启动检查**，按需重标（`'m'` → `'s'`，硬件变了才做）。
+> 启动只**便宜地**查**零偏漂移**——那才是会漂的那个。
+>
+> **为什么单姿态就够**（而这个论证只对零偏成立）：**负载正确时残余力与姿态无关**，
+> 所以在任意静止姿态读一次，"测量值 − 存储零偏"就是漂移量本身。
+> 它验不了负载（负载错时残余是姿态相关的，恰好停在某个姿态可能读起来接近 0）——
+> 但负载本来就不漂，不需要每次验。
 
 **Files:**
 - Modify: `Touch_Client/main.cpp`
+- Modify: `Touch_Client/config/Config.h`
 
 **Interfaces:**
-- Consumes: `BiasCheck` 的采集与跨姿态极差数学（同文件内）
-- Produces: 无对外接口（启动流程行为）
+- Consumes: `ForceCompensation` 已算好的 `appState.forceData.filtered`（补偿后读数）、`ForceCalibration::loadFromFile` 存入的零偏
+- Produces: 无对外接口（启动期一次性检查）
 
-- [ ] **Step 1: 自检状态**
+- [ ] **Step 1: 加阈值常量**
 
-在 `BiasCheck` 里加：
+`config/Config.h`，紧跟 `FORCE_RESIDUAL_DEADZONE_N` 之后：
 
 ```cpp
-    // ===== 启动自检 =====
-    // 取代 24h 时间闸门: 不用时间当代理, 直接实测已存标定是否仍然成立。
-    // 单姿态不行 —— 质量误差在力通道 (|ΔF|=|Δm|·9.81) 可测, 但质心误差只在力矩通道、
-    // 响应 ∝ sinθ, 静止单一姿态下它是定值、混在零偏里分不开。所以至少 2~3 个姿态且要覆盖倾角。
-    static bool  selfCheckActive = false;
-    static void  startSelfCheck();
-    static void  finishSelfCheck();
+    // 启动零偏漂移检查的告警阈值 (N)。
+    // 负载正确时残余力与姿态无关, 所以任意静止姿态下 "补偿后读数" 就是零偏漂移量。
+    // 取 0.5 N: 明显高于死区 0.20 N 与噪声本底 (~0.05 N), 免得天天误报。
+    const double FORCE_ZERO_DRIFT_WARN_N = 0.5;
 ```
 
-`reset()` 里**不要**清 `selfCheckActive`（自检是启动期的独立状态）。
+- [ ] **Step 2: 一次性检查**
 
-- [ ] **Step 2: 进入自检**
-
-```cpp
-    static void startSelfCheck() {
-        selfCheckActive = true;
-        mode = true;                 // 复用 'm' 的采集机制
-        reset();
-        std::cout << "\n======================================================" << std::endl;
-        std::cout << "  标定自检 — 验证已存标定是否仍然成立" << std::endl;
-        std::cout << "======================================================" << std::endl;
-        std::cout << "  请摆 2~3 个姿态 (跨度≥30°, 笔朝下/水平/朝上都要有):" << std::endl;
-        std::cout << "    'd' 开关拖拽模式 (摆姿态用, 摆好一定要关掉)" << std::endl;
-        std::cout << "    每个姿态按 SPACE 采样 1s" << std::endl;
-        std::cout << "  采完按 's' 判定。" << std::endl;
-        std::cout << "======================================================" << std::endl;
-    }
-```
-
-- [ ] **Step 3: 自检判定**
+在 `main.cpp` 里加一个启动期状态（放在 `BiasCheck` 之外，因为它不属于采集模式）：
 
 ```cpp
-    static void finishSelfCheck() {
-        if (count < 3) {
-            std::cout << "[自检] 至少需要 3 个姿态才能判定, 当前 " << count << std::endl;
-            return;
-        }
-        // 复用 report() 的跨姿态极差数学: 把结果算出来(打报告), 再据其判据定夺
-        std::cout << "\n[自检] 判定已存标定是否仍然成立..." << std::endl;
-        report();                        // 先把极差/覆盖度打出来供人看
+// ===== 启动零偏漂移检查 =====
+// 负载参数是工具的物理属性、不随时间漂移, 所以启动【不】验证负载 —— 它按需重标。
+// 会漂的是力传感器零偏, 这里便宜地查它:
+//   负载正确时残余力与姿态无关, 因此任意静止姿态读一次 "补偿后读数" 就是漂移量。
+// 零操作负担: 不摆姿态、不阻断、不写盘。
+static bool g_zeroCheckDone = false;
+static DWORD g_zeroCheckStartMs = 0;
+static double g_zeroCheckAccum[3] = {0, 0, 0};
+static int g_zeroCheckCount = 0;
 
-        // 判据与 report() 的 PASS 一致: |ΔF| < 0.3 N 且等效质心误差 < 10 mm
-        // 复用 report() 内部算过的量, 因此把它抽成一个小函数返回结论
-        const bool ok = lastReportPassed;   // report() 里置位
-        if (ok) {
-            std::cout << "\n[自检] ✓ 通过 — 已存标定仍然成立, 继续正常启动。" << std::endl;
+static void runZeroDriftCheck(bool hasStoredZero) {
+    if (g_zeroCheckDone || !hasStoredZero) return;
+    if (!g_noRobot) {
+        DWORD now = GetTickCount();
+        if (g_zeroCheckStartMs == 0) { g_zeroCheckStartMs = now; return; }
+
+        AppState::ForceData fd;
+        EnterCriticalSection(&appState.forceDataMutex);
+        fd = appState.forceData;
+        LeaveCriticalSection(&appState.forceDataMutex);
+
+        // 启动后前 2s 让读数稳定, 之后取 1s 均值
+        if (fd.isStale || now - g_zeroCheckStartMs < 2000) return;
+
+        for (int i = 0; i < 3; i++) g_zeroCheckAccum[i] += fd.filtered[i];
+        g_zeroCheckCount++;
+        if (now - g_zeroCheckStartMs < 3000) return;
+
+        // 定稿
+        g_zeroCheckDone = true;
+        if (g_zeroCheckCount < 10) return;   // 数据太少, 本次不作结论
+
+        const double drift = sqrt(
+            (g_zeroCheckAccum[0] / g_zeroCheckCount) * (g_zeroCheckAccum[0] / g_zeroCheckCount) +
+            (g_zeroCheckAccum[1] / g_zeroCheckCount) * (g_zeroCheckAccum[1] / g_zeroCheckCount) +
+            (g_zeroCheckAccum[2] / g_zeroCheckCount) * (g_zeroCheckAccum[2] / g_zeroCheckCount));
+
+        if (drift > Config::FORCE_ZERO_DRIFT_WARN_N) {
+            std::cout << "
+[Force] ⚠ 零偏漂移检查: 补偿后读数 " << drift
+                      << " N, 超过阈值 " << Config::FORCE_ZERO_DRIFT_WARN_N << " N" << std::endl;
+            std::cout << "[Force]   两种可能:" << std::endl;
+            std::cout << "[Force]     · 零偏漂了 (温度/时间)  -> 按 'z' 重新调零" << std::endl;
+            std::cout << "[Force]     · 硬件有变化 (加装/拆装) -> 按 'm' 采多姿态后 's' 重标负载"
+                      << std::endl;
+            std::cout << "[Force]   两种都不影响继续操作, 但建议尽快处理。" << std::endl;
         } else {
-            std::cout << "\n[自检] ✗ 不通过 — 已存标定不再成立, 作废并要求重标。" << std::endl;
-            PayloadCalibration::enabled = false;
-            ForceCalibration::clearCalibration();
-            remove(CalibStore::fileFor("payload_calib.json"));
-            remove(CalibStore::fileFor("force_calib.json"));
-            RelayCore::instance().applyPayloadToRobot();   // 用种子值重新使能
-            std::cout << "[自检] 负载已回退种子值, 零偏已清零, 两份标定文件已删除。" << std::endl;
-            std::cout << "[自检] 请按 'm' 采多姿态 → 's' 求解; 按 'z' 调零。" << std::endl;
+            std::cout << "[Force] 零偏漂移检查: 补偿后读数 " << drift
+                      << " N, 正常 (< " << Config::FORCE_ZERO_DRIFT_WARN_N << " N)" << std::endl;
         }
-        selfCheckActive = false;
-        mode = false;
-        RelayCore::instance().setDragMode(false);
     }
+}
 ```
 
-> `lastReportPassed` 需要在 `report()` 里按既有 PASS 判据置位 —— 即
-> `coverageOk && spanF < 0.3 && drEq < 10.0`，与 `report()` 现有的 `✓ PASS` 分支同一个表达式，
-> 不要另写一套阈值。
+在 `idle()` 的 `if (!appState.isClosing)` 块里、`RelayCore::instance().pollForce()` 之后调用：
 
-- [ ] **Step 4: 接线**
+```cpp
+            runZeroDriftCheck(g_hasStoredZeroCalib);
+```
 
-- `'s'` 处理里：`if (selfCheckActive) { finishSelfCheck(); return; }` —— 排在 `solveAndApply()` 之前
-- `'m'` 处理里：自检进行中时不要让它切走（或允许，但明确提示自检被放弃）
-- 启动流程：在 `RelayCore::init()` 成功、力数据流就绪**之后**，若
-  `PayloadCalibration::enabled || ForceCalibration::isCalibrated()` 为真 → `BiasCheck::startSelfCheck()`
-- `BiasCheck::cancel()` 里：若 `selfCheckActive`，提示"自检已放弃，已存标定未经验证"
+其中 `g_hasStoredZeroCalib` 是在启动加载 `force_calib.json` 时置位的文件级 bool（**新增**，与上面的状态放在一起）。
 
-- [ ] **Step 4b: 同时修掉几处为【旧判据】写的文案（Task 7 实施者上报）**
+- [ ] **Step 3: 同时修掉几处为【旧判据】写的文案（Task 7 实施者上报）**
 
 Task 7 把符号判据从"哪个候选为正"换成了"离种子更近 + 余量"。失败模式随之从
 **"两个候选都在同一侧"** 变成了 **"两个候选与种子的距离不够悬殊"**。
@@ -1768,24 +1786,277 @@ Task 7 把符号判据从"哪个候选为正"换成了"离种子更近 + 余量"
 | `main.cpp:387`（合理性评估里 `signOk` 的 ✗ 行） | `两个候选都在同一侧` | 同上口径 |
 | `main.cpp:410-411`（连续失败锁死后的提示） | `问题多半不在求解器 —— 请检查: 机械臂装夹是否松动 / 力传感器是否受挤压 / 姿态覆盖是否足够` | 追加一种可能：**种子质心估计失真** —— 提示可重跑 `python Hardware/tools/compute_payload.py` 复核后的种子值 |
 
-> 最后一条尤其重要：**旧判据下"连续判不出符号"确实指向硬件异常；新判据下它最可能指向种子值失真。**
-> 让操作者照着错误的清单去查装夹，正是这次改动要消灭的那类误导。
+> 最后一条尤其重要：**旧判据下"连续判不出符号"确实指向硬件异常；
+> 新判据下它最可能指向种子值失真。** 让操作者照着错误的清单去查装夹，
+> 正是这次改动要消灭的那类误导。
 
-- [ ] **Step 5: 完整构建**
+- [ ] **Step 4: 完整构建**
 
-Run: `cmd.exe //c "D:\Projects\Touch\Touch_Client\build.bat"`
+Run: `cmd.exe //c "D:\Projects\Touch\Touch_Clientuild.bat"`
 Expected: `Build OK.`
 
-- [ ] **Step 6: 实机验证（交用户，不在本任务内执行）**
+- [ ] **Step 5: 实机验证（交用户，不在本任务内执行）**
+
+启动时应看到一行 `[Force] 零偏漂移检查: 补偿后读数 … N`。
+漂移超阈时应看到 ⚠ 三条提示。
+
+- [ ] **Step 6: 提交**
+
+```bash
+git add Touch_Client/config/Config.h Touch_Client/main.cpp
+git commit -m "feat(force): check the stored zero for drift at startup, without blocking"
+```
+
+---
+
+### Task 10: 符号改由「两次下发实测」定案
+
+> **第三轮设计修订（2026-09-18）。** 用户连续两次追问推翻了 Task 7 的锚点方案：
+> "理论上通过多个位置与力数据不就可以得到所有的坐标与力参数了吗？"
+> "只需要计算力的零偏，为什么还需要种子？"
+>
+> **对。** 数据解出的是差值 `Δp = p* − p_r`，而 `p_r = m_cfg·(cx,cy,±cz)` 里的 `±`
+> 是固件解释、**在差值里被消掉**，所以必须有数据之外的东西补上它。
+> 种子是"估计"，而**另一次测量**才是"算出来"——这正是用户从一开始指向的方向。
+>
+> 而且比预想的便宜：**不需要重新采集一整轮**。同一个静止姿态下依次下发两个候选、
+> 各读一次残余力矩即可——机械臂不动，差异纯粹来自符号。
+> 信噪比悬殊：符号对时残余 ≈ 噪声本底 **0.003 N·m**，符号错时 `2·|p*_z|·g·sinθ ≈ 0.44 N·m`，**差 100 倍**。
+
+**Files:**
+- Modify: `Touch_Client/config/Config.h`
+- Modify: `Touch_Client/force/PayloadCalibration.h`
+- Modify: `Touch_Client/force/PayloadCalibration.cpp`
+- Modify: `Touch_Client/relay/RelayCore.h`
+- Modify: `Touch_Client/relay/RelayCore.cpp`
+- Modify: `Touch_Client/main.cpp`
+- Modify: `Touch_Client/tests/test_payload_calibration.cpp`
+
+**Interfaces:**
+- Consumes: `Result::cTrueZ[2]`（Task 3）
+- Produces:
+  - `Result::comCand[2][3]` —— `{候选+, 候选-}` 的**下发值**，供调用方实测裁决
+  - `PayloadCalibration::applyResult(const Result&, int chosen)` —— 新增重载，按选定候选定案
+  - `bool RelayCore::probePayloadResidual(double massKg, const double comMm[3], double& residualNm)`
+  - **删除** `Config::SIGN_SEED_MARGIN_RATIO`、`PayloadCalibration::seedMarginSufficient()`
+
+- [ ] **Step 1: 配置常量**
+
+`config/Config.h`：删掉 `SIGN_SEED_MARGIN_RATIO`（连注释块），换成：
+
+```cpp
+    // ===== CZ 符号实测裁决 =====
+    // 符号不再靠估计值猜: 同一个静止姿态下依次下发两个候选, 各读一次残余力矩,
+    // 谁的小谁对 (符号对时 ≈ 噪声本底 0.003 N·m; 符号错时 ≈ 0.44 N·m, 差 100 倍)。
+    const double SIGN_PROBE_MIN_RATIO    = 3.0;    // 胜者的残余必须比败者小这么多倍
+    const double SIGN_PROBE_MAX_WIN_NM   = 0.05;   // 且胜者自身的残余要够小 (N·m)
+    const int    SIGN_PROBE_SETTLE_MS    = 600;    // 重新使能后等待控制器采纳 + 读数刷新
+    const int    SIGN_PROBE_AVG_MS       = 400;    // 每个候选的残余取样窗口
+```
+
+- [ ] **Step 2: `Result` 带出两个候选**
+
+`force/PayloadCalibration.h` 的 `Result` 里，`comMm[3]` 之后加：
+
+```cpp
+        // 两个符号候选的【下发值】, 供调用方在实机上各下发一次、实测裁决。
+        // solve() 本身不碰机器人, 所以它在 comMm 里放一个临时值,
+        // 由调用方选定后再用 applyResult(r, chosen) 定案。
+        double comCand[2][3];
+```
+
+`Result::signAmbiguous` 的语义改为 **"解算器无法自行定案"**，实测前恒为 `true`。
+
+`solve()` 里把 Task 7 的"锚点 + 余量"选择整段替换为：
+
+```cpp
+        // ===== 两个候选都算出来, 不在解算器里选 =====
+        // 符号不在数据里 (它只进入 p_cfg 的换算, 在 Δp 的差值里被消掉), 所以解算器
+        // 只能把两种解释都给全, 由调用方在实机上各下发一次、看谁留下的力矩残余小。
+        double sChosen = signZ;              // 临时值; 由调用方定案
+        bool   ambiguous = true;             // 实测前恒为"未定案"
+
+        for (int k = 0; k < 2; k++) {
+            const double s = (k == 0) ? 1.0 : -1.0;
+            double cEffK[3] = {comCfg[0], comCfg[1], comCfg[2] * s};
+            double pCfgK[3] = {mCfg * cEffK[0] / 1000.0, mCfg * cEffK[1] / 1000.0,
+                               mCfg * cEffK[2] / 1000.0};
+            for (int i = 0; i < 3; i++) {
+                double cSend = (pCfgK[i] + dp[i]) / mTrue * 1000.0;
+                if (i == 2 && s != 0.0) cSend /= s;
+                out.comCand[k][i] = cSend;
+            }
+        }
+```
+
+`out.comMm` / `out.dc` / `out.signZ` / `out.signAmbiguous` 仍按 `sChosen`/`ambiguous` 填
+（临时值）；**`comCand` 才是调用方要用的**。
+
+> **删掉** `seedMarginSufficient()` 的声明与定义，以及所有对 `SIGN_SEED_MARGIN_RATIO` 的引用。
+> 同时删掉 Task 7 新增的三个锚点用例
+> （`test_sign_seed_anchor_picks_plus` / `_minus` / `test_sign_insufficient_margin_is_ambiguous`），
+> 换成 Step 3 的用例。
+
+- [ ] **Step 3: 测试改为验证"两个候选确实算对"**
+
+在 `tests/test_payload_calibration.cpp` 加：
+
+```cpp
+// 两个候选都必须算对: 一个是真值, 另一个是真值减间距。
+// 符号本身由实机实测裁决, 解算器只负责把两种解释都给全。
+static void test_both_candidates_computed() {
+    TEST(both_candidates_computed);
+    double cTrue[3] = {0.3, 0.3, 67.9};
+    double cCfg[3]  = {0.0, 0.0, 80.4};
+    double F[NP][3], M[NP][3];
+    synthesize(0.409, cTrue, 0.660, cCfg, +1.0, F, M);
+
+    PayloadCalibration::Result r;
+    CHECK(PayloadCalibration::solve(g_poses, F, M, NP, 0.660, cCfg, +1.0, r));
+    // 候选 k=0 (s=+1): cSend_z = cTrue_z = +67.9
+    CHECK(fabs(r.comCand[0][2] - 67.9) < 1e-6);
+    // 候选 k=1 (s=-1): cSend_z = (p_cfg(-1) + dp)/m / (-1) = -67.9
+    CHECK(fabs(r.comCand[1][2] - (-67.9)) < 1e-6);
+    // solve() 不再自行定案
+    CHECK(r.signAmbiguous);
+    PASS();
+}
+```
+
+在 `main()` 里替换掉被删的三个调用。
+
+- [ ] **Step 4: RelayCore 的实测探针**
+
+`relay/RelayCore.h`（公开区，`applyPayloadToRobot()` 之后）：
+
+```cpp
+    // 用给定负载重新使能, 等稳定后返回当前姿态的残余力矩模长 (N·m)。
+    // 符号裁决用: 同一静止姿态下依次探两个候选, 谁留下的力矩残余小谁对。
+    // 调用方必须保证机械臂【不动】(两次探针在同一姿态比较才有意义)。
+    bool probePayloadResidual(double massKg, const double comMm[3], double& residualNm);
+```
+
+`relay/RelayCore.cpp`：
+
+```cpp
+bool RelayCore::probePayloadResidual(double massKg, const double comMm[3], double& residualNm) {
+    if (!isRobotConnected()) return false;
+
+    char cmd[128];
+    snprintf(cmd, sizeof(cmd), "EnableRobot(%.3f,%.1f,%.1f,%.1f)",
+             massKg, comMm[0], comMm[1], comMm[2]);
+    robotSendEnable(cmd);
+    Sleep(Config::SIGN_PROBE_SETTLE_MS);
+
+    const DWORD t0 = GetTickCount();
+    double sum[3] = {0, 0, 0};
+    int n = 0;
+    while (GetTickCount() - t0 < (DWORD)Config::SIGN_PROBE_AVG_MS) {
+        AppState::ForceData fd;
+        EnterCriticalSection(&appState.forceDataMutex);
+        fd = appState.forceData;
+        LeaveCriticalSection(&appState.forceDataMutex);
+        if (!fd.isStale) {
+            sum[0] += fd.filtered[3]; sum[1] += fd.filtered[4]; sum[2] += fd.filtered[5];
+            n++;
+        }
+        Sleep(10);
+    }
+    if (n < 5) return false;                 // 数据太少, 不下结论
+    const double m0 = sum[0] / n, m1 = sum[1] / n, m2 = sum[2] / n;
+    residualNm = sqrt(m0 * m0 + m1 * m1 + m2 * m2);
+    return true;
+}
+```
+
+- [ ] **Step 5: solveAndApply 里做裁决**
+
+在 `solveAndApply()` 的合理性判据**之前**插入：
+
+```cpp
+        // ===== 符号实测裁决 =====
+        // solve() 只给出两种解释; 这里在【同一个静止姿态】下各下发一次, 谁留下的
+        // 力矩残余小谁对。机械臂全程不动 —— 差异纯粹来自符号, 不是姿态。
+        // 前提: 当前姿态要有足够倾角, 否则两者都≈0、分不开。
+        double rProbe[2] = {0.0, 0.0};
+        int    chosen = -1;
+        bool   probeOk = true;
+        {
+            double p[6];
+            EnterCriticalSection(&appState.robotPoseMutex);
+            p[0] = appState.robotActualPose.x;  p[1] = appState.robotActualPose.y;
+            p[2] = appState.robotActualPose.z;  p[3] = appState.robotActualPose.rx;
+            p[4] = appState.robotActualPose.ry; p[5] = appState.robotActualPose.rz;
+            LeaveCriticalSection(&appState.robotPoseMutex);
+            double R[9];
+            TcpCalibration::rpyToMatrix(p[3], p[4], p[5], R);
+            const double sinTheta = sqrt(R[2] * R[2] + R[5] * R[5]);
+            if (sinTheta < 0.5) {
+                std::cout << "  ✗ 当前姿态倾角不足 (sinθ=" << sinTheta
+                          << " < 0.5) — 两个符号分不开。" << std::endl;
+                std::cout << "    请把笔摆到明显倾斜/水平再按 's'。" << std::endl;
+                probeOk = false;
+            }
+        }
+        if (probeOk) {
+            for (int k = 0; k < 2; k++) {
+                if (!RelayCore::instance().probePayloadResidual(r.massKg, r.comCand[k], rProbe[k])) {
+                    std::cout << "  ✗ 符号探针失败 (力数据不足) — 恢复原配置" << std::endl;
+                    probeOk = false;
+                    break;
+                }
+            }
+        }
+        if (probeOk) {
+            const int  win  = (rProbe[0] <= rProbe[1]) ? 0 : 1;
+            const int  lose = 1 - win;
+            const bool separated = (rProbe[lose] >= Config::SIGN_PROBE_MIN_RATIO * rProbe[win]);
+            const bool small     = (rProbe[win] <= Config::SIGN_PROBE_MAX_WIN_NM);
+            printf("  CZ 符号实测: 候选 +1 残余 %.4f N·m / 候选 -1 残余 %.4f N·m\n",
+                   rProbe[0], rProbe[1]);
+            if (separated && small) {
+                chosen = win;
+                std::cout << "  CZ 符号约定: 裁决 → " << (win == 0 ? "+1" : "-1")
+                          << " (残余小 " << (rProbe[lose] / rProbe[win]) << " 倍)" << std::endl;
+            } else {
+                std::cout << "  CZ 符号约定: ✗ 实测分不开 — 结果按不合理处理" << std::endl;
+            }
+        }
+        if (chosen >= 0) {
+            PayloadCalibration::applyResult(r, chosen);   // 定案
+        } else {
+            // 探针已经把机器人的配置改乱了, 恢复成当前生效值
+            RelayCore::instance().applyPayloadToRobot();
+        }
+```
+
+`applyResult(const Result&, int chosen)` 是**新增重载**：按 `chosen` 选 `comCand` 填
+`comMm` / `dc` / `signZ`，并置 `signAmbiguous = false`；原无参重载保留（供启动加载等用）。
+
+合理性判据里的 `signOk` 相应改为 `(chosen >= 0)`。
+
+> ⚠ 插入位置很关键：**必须在合理性判据之前**（判据要用 `chosen`）。
+> 探针会下发临时负载，所以**拒绝路径上必须把机器人恢复回去**（上面 `else` 分支）。
+> 成功路径沿用原有 `applyPayloadToRobot()`，它按已定案的生效值下发。
+
+- [ ] **Step 6: 跑测试 + 完整构建**
+
+Run: `cmd.exe //c "D:\Projects\Touch\Touch_Client\tests\build_payload_calibration_test.bat"`
+然后: `cmd.exe //c "D:\Projects\Touch\Touch_Client\tests\test_payload_calibration.exe"`
+Expected: `13 passed, 0 failed`（15 − 3 个锚点用例 + 1 个新用例）
+
+Run: `cmd.exe //c "D:\Projects\Touch\Touch_Client\build.bat"`
+Expected: `Build OK.`（**必须完整构建**）
 
 - [ ] **Step 7: 提交**
 
 ```bash
-git add Touch_Client/main.cpp
-git commit -m "feat(calib): verify the stored calibration by measurement at startup"
+git add Touch_Client/config/Config.h Touch_Client/force/PayloadCalibration.h \
+        Touch_Client/force/PayloadCalibration.cpp Touch_Client/relay/RelayCore.h \
+        Touch_Client/relay/RelayCore.cpp Touch_Client/main.cpp \
+        Touch_Client/tests/test_payload_calibration.cpp
+git commit -m "feat(force): decide the CZ sign by measuring both candidates on the robot"
 ```
-
----
 
 ---
 
