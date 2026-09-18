@@ -58,7 +58,14 @@ namespace BiasCheck {
     static double pose[MAX_POSES][6];    // Rx,Ry,Rz (deg) + X,Y,Z (mm)
     static double bias[MAX_POSES][6];    // 该姿态平均 raw 力/力矩
 
+    // 数据只有在「机械臂配置 == 采集时的配置」时才可用于复验。
+    // 求解下发了新负载 -> 已采数据作废 (拒绝 report 判定);
+    // 但同一批数据在不同符号约定下的【重解释】始终合法 ('i' 键), 那时不改机械臂配置。
+    static bool dataUnderCurrentPayload = true;
+
     static void reset() {
+        dataUnderCurrentPayload = true;
+        PayloadCalibration::clearForcedSignZ();   // 新一批采集 -> 恢复符号自动判定
         count = 0;
         sampling = false;
         avgCount = 0;
@@ -80,6 +87,14 @@ namespace BiasCheck {
         if (sampling) {
             std::cout << "[BIAS] 正在采样中, 保持静止" << std::endl;
             return;
+        }
+        // 上一批数据是在旧负载下采的 -> 从这里开始算新一批, 旧的全部丢弃
+        if (!dataUnderCurrentPayload) {
+            std::cout << "[BIAS] 上一批数据是在旧负载下采的, 已丢弃 — 开始新一批采集"
+                      << std::endl;
+            count = 0;
+            dataUnderCurrentPayload = true;
+            PayloadCalibration::clearForcedSignZ();
         }
         if (count >= MAX_POSES) {
             std::cout << "[BIAS] 已达 " << MAX_POSES << " 个姿态, 按 'm' 输出报告" << std::endl;
@@ -147,6 +162,11 @@ namespace BiasCheck {
     static void report() {
         if (count < 3) {
             std::cout << "[BIAS] 至少需要 3 个姿态才能判断, 当前 " << count << std::endl;
+            return;
+        }
+        if (!dataUnderCurrentPayload) {
+            std::cout << "\n[BIAS] 这批数据是在【旧负载】下采的, 不能用来复验当前参数。\n"
+                      << "       请直接摆姿态按 SPACE 重新采集 (会开始新一批)。" << std::endl;
             return;
         }
         // ===== 姿态覆盖度: 覆盖不足时极差只是噪声, 不能拿来判定 =====
@@ -297,7 +317,8 @@ namespace BiasCheck {
 
         std::cout << "\n======================================================" << std::endl;
         std::cout << "  负载参数求解结果 (" << r.poses << " 个姿态, CZ 符号约定 "
-                  << (PayloadCalibration::comSignZ > 0 ? "+1" : "-1") << ")" << std::endl;
+                  << (r.signZ > 0 ? "+1" : "-1")
+                  << (r.signAmbiguous ? " ⚠ 歧义, 沿用旧约定" : " (自动判定)") << ")" << std::endl;
         std::cout << "======================================================" << std::endl;
         printf("  质量:    当前 %.3f kg   →  修正 %+.3f kg   →   %.3f kg\n",
                mCfg, r.dm, r.massKg);
@@ -305,6 +326,24 @@ namespace BiasCheck {
         printf("             修正 (%+.1f, %+.1f, %+.1f) mm\n", r.dc[0], r.dc[1], r.dc[2]);
         printf("             下发 (%.1f, %.1f, %.1f) mm\n", r.comMm[0], r.comMm[1], r.comMm[2]);
         printf("  拟合残差: 力 %.4f N   力矩 %.4f N·m\n", r.rmsForceN, r.rmsMomentNm);
+
+        // ===== CZ 符号约定判定 =====
+        // signZ 不进线性系统, 两种符号的拟合残差完全相同 —— 数据区分不了,
+        // 判据是"物理质心必须在法兰下方"。把两个候选都打出来, 便于人工复核。
+        if (r.signAmbiguous) {
+            std::cout << "  CZ 符号约定: ⚠ 无法判定 — 两个候选都落在同一侧, 沿用当前 "
+                      << (PayloadCalibration::comSignZ > 0 ? "+1" : "-1") << std::endl;
+        } else {
+            std::cout << "  CZ 符号约定: 自动判定 → "
+                      << (r.signZ > 0 ? "+1" : "-1") << std::endl;
+        }
+        printf("    · 候选 +1: 物理质心 Z = %+.1f mm  %s\n",
+               r.cTrueZ[0], r.cTrueZ[0] > 0 ? "✓ 法兰下方" : "✗ 法兰上方 (非物理)");
+        printf("    · 候选 -1: 物理质心 Z = %+.1f mm  %s\n",
+               r.cTrueZ[1], r.cTrueZ[1] > 0 ? "✓ 法兰下方" : "✗ 法兰上方 (非物理)");
+        if (r.signAmbiguous) {
+            std::cout << "    (若结果不对, 按 'i' 强制用另一个符号)" << std::endl;
+        }
 
         // ===== 合理性评估 =====
         // 只给数字不够。出过一次事故: 求解器的重力约定写成了转置, 拟合残差 0.914 N
@@ -318,7 +357,10 @@ namespace BiasCheck {
         const bool   fitOk      = (r.rmsForceN < RMS_F_MAX);
         const double dMassFrac  = (mCfg > 1e-6) ? fabs(r.dm) / mCfg : 1.0;
         const bool   massJump   = (dMassFrac > MASS_JUMP);
-        const bool   comZOk     = (r.comMm[2] > 0.0);   // 工具挂在法兰下方 → 质心 Z 应为正
+        // 判据必须看【物理】质心: cSend = cTrue/signZ 在两种符号下都可能是正的,
+        // 拿下发值判会在 signZ=-1 时把正确结果误报成"符号可疑"。
+        const double cTrueZChosen = r.cTrueZ[r.signZ > 0.0 ? 0 : 1];
+        const bool   comZOk       = (cTrueZChosen > 0.0);   // 工具挂在法兰下方 → 质心 Z 应为正
         const double comXY      = sqrt(r.comMm[0] * r.comMm[0] + r.comMm[1] * r.comMm[1]);
 
         std::cout << "------------------------------------------------------" << std::endl;
@@ -341,11 +383,11 @@ namespace BiasCheck {
                    r.dm, dMassFrac * 100.0);
         }
         if (comZOk) {
-            printf("    ✓ 质心 Z = %+.1f mm 在法兰下方, 偏心 |XY| = %.1f mm\n",
-                   r.comMm[2], comXY);
+            printf("    ✓ 物理质心 Z = %+.1f mm 在法兰下方 (下发 %+.1f mm), 偏心 |XY| = %.1f mm\n",
+                   cTrueZChosen, r.comMm[2], comXY);
         } else {
-            printf("    ⚠ 质心 Z = %+.1f mm 为负 — 工具挂在法兰下方, 应为正;"
-                   " 符号约定可疑\n", r.comMm[2]);
+            printf("    ⚠ 物理质心 Z = %+.1f mm 为负 — 工具挂在法兰下方, 应为正;"
+                   " 符号约定可疑\n", cTrueZChosen);
         }
 
         std::cout << "------------------------------------------------------" << std::endl;
@@ -368,15 +410,16 @@ namespace BiasCheck {
         }
         RelayCore::instance().applyPayloadToRobot();
 
-        // 这批姿态是在【旧负载】下采的, 拿来复验新参数只会得出"FAIL"的假象
-        // (曾经就是这样: 求解残差 0.06 N, 紧接着的报告却报 4.0 N)。
-        // 直接清掉, 逼着重新采集 —— 复验必须用新负载下采的数据。
-        reset();
-        std::cout << "  已清空本次采集数据 (旧负载下采的, 不能用于复验)" << std::endl;
-        std::cout << "  → 保持 'm' 模式, 直接摆姿态按 SPACE 重新采 3~4 个【复验】,"
-                  << " 再看跨姿态极差" << std::endl;
-        std::cout << "    若残差反而变大 → 说明机械臂解释 CZ 的符号与我们假设相反:"
-                  << " 按 'i' 翻转 → 重新采集 → 再 's'" << std::endl;
+        // 这批姿态是在【旧负载】下采的。下发新负载之后:
+        //   - 复验 (report) 必须拒绝它们, 否则会拿旧数据骂新参数 (曾经报出假 FAIL:
+        //     求解残差 0.06 N, 紧接着的报告却报 |ΔF| = 4.0 N);
+        //   - 但 'i' 的【重解释】仍然合法 —— 那不改机械臂配置, 只是换个符号看同一批
+        //     测量, 不能把数据清掉 (清了 'i' 就没得重解了)。
+        dataUnderCurrentPayload = false;
+        std::cout << "  → 复验: 摆姿态按 SPACE 采集 (第一次 SPACE 会自动开新一批,"
+                  << " 旧数据作废)" << std::endl;
+        std::cout << "    若复验残差反而变大 → 按 'i' 用同一批数据换符号重解,"
+                  << " **不必重新采集**" << std::endl;
         std::cout << std::endl;
     }
 }
@@ -644,7 +687,7 @@ void keyboard(unsigned char key, int, int) {
             BiasCheck::mode = false;
             // 别把柔顺状态带出模式
             RelayCore::instance().setDragMode(false);
-            BiasCheck::report();
+            BiasCheck::report();   // 数据属旧负载时会自行拒绝判定
         }
         return;
     }
@@ -692,9 +735,10 @@ void keyboard(unsigned char key, int, int) {
     // 'i' in BiasCheck mode: 翻转 CZ 符号约定 (求解发散时用)
     if ((key == 'i' || key == 'I') && BiasCheck::mode) {
         PayloadCalibration::flipComSignZ();
-        std::cout << "[BIAS] CZ 符号约定 → "
-                  << (PayloadCalibration::comSignZ > 0 ? "+1" : "-1")
-                  << " (请重新 'm' 采集再按 's' 求解)" << std::endl;
+        std::cout << "[BIAS] 强制 CZ 符号约定 → "
+                  << (PayloadCalibration::forcedSignZ > 0 ? "+1" : "-1")
+                  << " — 用同一批数据重解 (不需要重新采集)" << std::endl;
+        BiasCheck::solveAndApply();
         return;
     }
 
