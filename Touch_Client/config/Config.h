@@ -92,6 +92,11 @@ namespace Config {
     const double FORCE_CALIB_POSE_ANGLE_DEG = 15.0;      // 标定姿态偏角 (度)
     const int    FORCE_CALIB_NUM_POSES = 6;               // 标定姿态数
 
+    // ========== 标定文件有效期 ==========
+    // 力传感器零偏随温度/时间漂移; 负载解算又依赖力数据。
+    // 超过这个时长的标定一律作废, 启动时要求重新标定。
+    const long CALIB_MAX_AGE_SEC = 24 * 3600;   // 24 小时
+
     // ========== 力补偿运行时参数 ==========
     const double FORCE_MOTION_VEL_THRESH_MS = 0.002;      // 静止判定: 速度阈值 (m/s)
     const double FORCE_MOTION_ACC_THRESH_MSS = 0.005;     // 静止判定: 加速度阈值 (m/s²)
