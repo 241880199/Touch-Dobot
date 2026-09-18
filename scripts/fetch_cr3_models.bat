@@ -2,7 +2,10 @@
 chcp 65001 >nul
 setlocal
 
-set "MODEL_DIR=%~dp0..\Codes\Touch_Client\models\cr3"
+rem Path matches the post-v3.0 layout. It used to point at the pre-v3.0
+rem "Codes\Touch_Client" directory: that guard below would then never match and
+rem the script would mkdir a stray Codes\ tree in the repo root.
+set "MODEL_DIR=%~dp0..\Touch_Client\models\cr3"
 set "TEMP_DIR=%TEMP%\cr3_models_clone"
 
 echo ================================================
@@ -42,10 +45,8 @@ if not exist "meshes\cr3a\*.stl" (
 echo Copying STL files...
 if not exist "%MODEL_DIR%" mkdir "%MODEL_DIR%"
 
-:: CR3 的 STL 文件名可能不同，批量拷贝
 copy /Y "meshes\cr3a\*.stl" "%MODEL_DIR%\" >nul
 
-:: 如果文件命名不符合预期(base/link1~6)，列出可用文件供手动调整
 echo.
 echo Available STL files:
 dir /b "%MODEL_DIR%"
