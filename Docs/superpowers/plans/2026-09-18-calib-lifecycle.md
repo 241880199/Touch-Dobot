@@ -1755,6 +1755,22 @@ git commit -m "refactor(calib): drop the 24h expiry gate; CalibStore only owns l
   `PayloadCalibration::enabled || ForceCalibration::isCalibrated()` 为真 → `BiasCheck::startSelfCheck()`
 - `BiasCheck::cancel()` 里：若 `selfCheckActive`，提示"自检已放弃，已存标定未经验证"
 
+- [ ] **Step 4b: 同时修掉几处为【旧判据】写的文案（Task 7 实施者上报）**
+
+Task 7 把符号判据从"哪个候选为正"换成了"离种子更近 + 余量"。失败模式随之从
+**"两个候选都在同一侧"** 变成了 **"两个候选与种子的距离不够悬殊"**。
+下面几处字符串是旧判据写的，现在会误导操作者：
+
+| 位置 | 现在写的 | 应改为 |
+|---|---|---|
+| `main.cpp:344`（歧义横幅） | `两个候选都落在同一侧, 沿用当前 ±1` | `两个候选与种子距离相近, 判不出符号` |
+| `main.cpp:355`（3c 判定块） | `两个候选都在同一侧, 程序判不出符号` | 同上口径 |
+| `main.cpp:387`（合理性评估里 `signOk` 的 ✗ 行） | `两个候选都在同一侧` | 同上口径 |
+| `main.cpp:410-411`（连续失败锁死后的提示） | `问题多半不在求解器 —— 请检查: 机械臂装夹是否松动 / 力传感器是否受挤压 / 姿态覆盖是否足够` | 追加一种可能：**种子质心估计失真** —— 提示可重跑 `python Hardware/tools/compute_payload.py` 复核后的种子值 |
+
+> 最后一条尤其重要：**旧判据下"连续判不出符号"确实指向硬件异常；新判据下它最可能指向种子值失真。**
+> 让操作者照着错误的清单去查装夹，正是这次改动要消灭的那类误导。
+
 - [ ] **Step 5: 完整构建**
 
 Run: `cmd.exe //c "D:\Projects\Touch\Touch_Client\build.bat"`
