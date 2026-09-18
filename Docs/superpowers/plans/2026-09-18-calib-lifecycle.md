@@ -157,9 +157,11 @@ Expected: 编译失败，报 `无法打开包括文件: "CalibStore.h"`（模块
 namespace CalibStore {
 
     // 纯函数: 由可执行文件全路径推出标定目录 (结尾带反斜杠)。
-    // 规则: 去掉文件名 + 上溯两级, 再拼 "calib\"。
-    //   ...\Touch_Client\x64\Release\Touch_Client.exe → ...\Touch_Client\calib\  (带结尾反斜杠)
-    // 分隔符不足两级时返回 false (out 内容未定义)。
+    // 规则: 去掉文件名, 再【最多】上溯两级 (停在盘符根), 拼上 "calib\"。
+    //   ...\Touch_Client\x64\Release\Touch_Client.exe → ...\Touch_Client\calib\
+    // 只有整个路径一个分隔符都没有时才返回 false (out 内容未定义)。
+    // 注: "最多两级" 是评审时明确的契约 —— 原计划写的是"不足两级即 false",
+    //     与 derives_dir_shallow 用例矛盾; 已裁决以测试为准。
     bool deriveDir(const char* exePath, char* out, size_t outSize);
 
     // 标定目录绝对路径, 结尾带反斜杠。不存在时创建。进程内缓存。
@@ -203,11 +205,17 @@ namespace CalibStore {
         if (n >= sizeof(buf)) return false;
         memcpy(buf, exePath, n + 1);
 
-        // 去掉文件名 + 上溯两级
-        for (int up = 0; up < 3; up++) {
-            char* p = strrchr(buf, '\\');
-            if (!p) return false;
-            *p = '\0';
+        // 去掉文件名
+        char* p = strrchr(buf, '\\');
+        if (!p) return false;              // 一个分隔符都没有: 推不出目录
+        *p = '\0';
+
+        // 再上溯两级。上溯停在盘符根 ("C:\a" -> 不再剥成 "C:"):
+        // 盘符根没有可以承载 calib\ 的目录, 而且各种布局的标定文件会撞在一起。
+        for (int up = 0; up < 2; up++) {
+            char* q = strrchr(buf, '\\');
+            if (!q || (q == buf + 2 && buf[1] == ':')) break;
+            *q = '\0';
         }
         if (snprintf(out, outSize, "%s\\calib\\", buf) >= (int)outSize) return false;
         return true;
@@ -317,9 +325,129 @@ git add Touch_Client/core/CalibStore.h Touch_Client/core/CalibStore.cpp \
 git commit -m "feat(calib): add CalibStore for calibration file location and expiry"
 ```
 
-> **关于测试覆盖面:** `deriveDir` 与 `isFresh` 是纯函数，已单测。`dir()` / `fileFor()` /
-> `resolve()` 要碰真实文件系统（`GetModuleFileNameA` 取的是测试 exe 自己的路径），
-> 不做单测——**由 Task 2 Step 9 的实机启动验证**（旧文件被判过期 + 改名 + `calib\` 被创建）。
+> **关于测试覆盖面（评审后修正）:** 原计划把 `resolve()` 的覆盖推迟到 Task 2 Step 9 的实机启动验证。
+> 评审指出这不行 —— 模块最承重的两条规则（改名 `.expired`、"无时间戳即作废"）就住在 `resolve()` 里，
+> 而"计划授权的不测试"恰恰是这类策略以后被改坏而不自知的成因。**已裁决：现在就加自动化覆盖。**
+
+### Task 1 补充：`resolve()` 的自动化覆盖（评审后追加）
+
+**Files:**
+- Modify: `Touch_Client/core/CalibStore.h`
+- Modify: `Touch_Client/core/CalibStore.cpp`
+- Modify: `Touch_Client/tests/test_calib_store.cpp`
+
+**背景:** `resolve()` 的路径来自模块自己的 `dir()`（即测试 exe 的位置），所以没法指向临时目录。
+加一个显式传目录的兄弟函数作为接缝，`resolve()` 退化成一行转发。
+
+- [ ] **Step A1: 加可测接缝**
+
+`CalibStore.h` 里，在 `const char* resolve(const char* name);` 之后加：
+
+```cpp
+    // 同 resolve, 但标定目录由调用方给出 —— 单测用临时目录走这个。
+    // 生产代码用 resolve(name), 它等价于 resolveIn(dir(), name)。
+    const char* resolveIn(const char* dirPath, const char* name);
+```
+
+`CalibStore.cpp` 里，把现有 `resolve()` 的函数体改名为 `resolveIn`，签名加 `dirPath` 参数，
+第一行由 `const char* path = fileFor(name);` 改为：
+
+```cpp
+        static char s_path[MAX_PATH];
+        snprintf(s_path, sizeof(s_path), "%s%s", dirPath, name);
+        const char* path = s_path;
+```
+
+其余逻辑**逐字不动**（探针 `fopen`、`readLongField`、`isFresh` 判定、改名、打印提示）。
+
+然后在它后面加转发：
+
+```cpp
+    const char* resolve(const char* name) { return resolveIn(dir(), name); }
+```
+
+- [ ] **Step A2: 写测试**
+
+在 `Touch_Client/tests/test_calib_store.cpp` 加（并在文件顶部补 `#include <ctime>` 与 `#include <windows.h>`）：
+
+```cpp
+// 造一个样本标定文件; savedAt == 0 表示【不写】saved_at_unix 字段。
+static void writeFixture(const char* dir, const char* name, long savedAt) {
+    char path[512];
+    snprintf(path, sizeof(path), "%s%s", dir, name);
+    FILE* f = fopen(path, "w");
+    if (!f) return;
+    if (savedAt == 0) fprintf(f, "{ \"mass_kg\": 1.0 }\n");
+    else fprintf(f, "{ \"version\": 2, \"saved_at_unix\": %ld, \"mass_kg\": 1.0 }\n", savedAt);
+    fclose(f);
+}
+
+static bool fixtureExists(const char* dir, const char* name) {
+    char path[512];
+    snprintf(path, sizeof(path), "%s%s", dir, name);
+    FILE* f = fopen(path, "r");
+    if (f) { fclose(f); return true; }
+    return false;
+}
+
+// resolve() 的两条承重策略: 无时间戳即作废、超期作废, 且都要改名 .expired。
+// (注: 本用例会打印模块自己的 [Calib] !! 提示行 —— 那是被测的用户可见行为, 属预期。)
+static void test_resolve_policy() {
+    TEST(resolve_policy);
+    const char* d = "test_calibstore_tmp\\";
+    CreateDirectoryA("test_calibstore_tmp", NULL);
+    const long now = (long)time(NULL);
+
+    // 新鲜: 带时间戳且在有效期内 -> 可用, 不改名
+    writeFixture(d, "fresh.json", now);
+    CHECK(CalibStore::resolveIn(d, "fresh.json") != nullptr);
+    CHECK(fixtureExists(d, "fresh.json"));
+
+    // 缺 saved_at_unix -> 作废并改名
+    writeFixture(d, "nostamp.json", 0);
+    CHECK(CalibStore::resolveIn(d, "nostamp.json") == nullptr);
+    CHECK(!fixtureExists(d, "nostamp.json"));
+    CHECK(fixtureExists(d, "nostamp.json.expired"));
+
+    // 超期 -> 作废并改名
+    writeFixture(d, "stale.json", now - Config::CALIB_MAX_AGE_SEC - 60);
+    CHECK(CalibStore::resolveIn(d, "stale.json") == nullptr);
+    CHECK(!fixtureExists(d, "stale.json"));
+    CHECK(fixtureExists(d, "stale.json.expired"));
+
+    // 不存在 -> 静默返回 nullptr (无提示)
+    CHECK(CalibStore::resolveIn(d, "missing.json") == nullptr);
+
+    // 顺手钉住被 Config.h 规定的值 (reviewer Minor #4)
+    CHECK(Config::CALIB_MAX_AGE_SEC == 86400);
+
+    remove("test_calibstore_tmp\\fresh.json");
+    remove("test_calibstore_tmp\\nostamp.json.expired");
+    remove("test_calibstore_tmp\\stale.json.expired");
+    remove("test_calibstore_tmp");
+    PASS();
+}
+```
+
+在 `main()` 里 `test_is_fresh_boundaries();` 之后加 `test_resolve_policy();`。
+
+- [ ] **Step A3: 跑测试确认通过**
+
+Run: `cmd.exe //c "D:\Projects\Touch\Touch_Client\tests\build_calib_store_test.bat"`
+然后: `cmd.exe //c "D:\Projects\Touch\Touch_Client\tests\test_calib_store.exe"`
+Expected: `5 passed, 0 failed`
+
+- [ ] **Step A4: 回归确认**
+
+`resolve()` 的行为对生产代码必须逐字不变（Task 2 要用）。确认 `CalibStore.h` 的
+`resolve()` 声明还在、`dir()`/`fileFor()` 未改动。
+
+- [ ] **Step A5: 提交**
+
+```bash
+git add Touch_Client/core/CalibStore.h Touch_Client/core/CalibStore.cpp Touch_Client/tests/test_calib_store.cpp
+git commit -m "test(calib): cover resolve()'s void-and-rename policy"
+```
 
 ---
 
