@@ -13,5 +13,6 @@ cl /EHsc /std:c++17 ^
   test_force_compensation.cpp ^
   ..\force\ForceCompensation.cpp ^
   ..\force\ForceCalibration.cpp ^
+  ..\core\CalibStore.cpp ^
   /Fe:test_force_compensation.exe
 echo BUILD_EXIT=%ERRORLEVEL%
