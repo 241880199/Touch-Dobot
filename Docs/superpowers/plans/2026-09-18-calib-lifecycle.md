@@ -20,7 +20,7 @@
 > | Task 3/5 的"物理质心为正"判据 | **Task 7** 替换 | 旧判据**永远选不出相反符号**（代数上恒等于 `sign(comCfg[2])`） |
 > | Task 7 的"种子锚点 + 余量判据" | **Task 10** 替换 | **两次下发实测**：解算器给出两个候选，实机各下发一次、谁残余力矩小谁对。不依赖任何估计值 |
 >
-> **任务顺序：1 → 2 → 3 → 4 → 5 → 7 → 10 → 8 → 9 → 6。**
+> **任务顺序：1 → 2 → 3 → 4 → 5 → 7 → 10 → 11 → 8 → 9 → 6。**
 > （10 取代 7 的选择逻辑但复用它的候选计算；8/9/10 都动 `main.cpp`，必须串行；6 是文档，最后做。）
 >
 > 执行任一任务时，若其文本与本表冲突，**以本表和对应 Task 为准**。
@@ -2064,6 +2064,102 @@ git add Touch_Client/config/Config.h Touch_Client/force/PayloadCalibration.h \
         Touch_Client/relay/RelayCore.cpp Touch_Client/main.cpp \
         Touch_Client/tests/test_payload_calibration.cpp
 git commit -m "feat(force): decide the CZ sign by measuring both candidates on the robot"
+```
+
+---
+
+### Task 11: 标定结果落盘（`calib\calib_log.txt`）
+
+> **用户提出（2026-09-18 首次实机测试后）。** 他测完想回看结果，**控制台已经滚掉了**。
+>
+> 这暴露了一个真实的缺口：整个标定流程**只往控制台打，什么都不留**——探针的两个残余、
+> 比值、定案符号、拟合残差，全都没有持久记录。这既是操作者的日常问题（想追溯只能靠回忆），
+> 也卡住了本项目自己：探针常数 `SIGN_PROBE_*` 明确需要实机数据来标定，
+> 而程序**不提供把数据带回来的办法**。
+>
+> 这与本分支的主题直接相关：**"让操作者看见标定到底做了什么"**。
+
+**Files:**
+- Modify: `Touch_Client/main.cpp`
+
+**Interfaces:**
+- Consumes: `CalibStore::fileFor()`（位置职责，Task 8 保留）、`Result`、探针结果
+- Produces: 无对外接口；新增数据文件 `Touch_Client\calib\calib_log.txt`
+
+- [ ] **Step 1: 落盘助手**
+
+在 `main.cpp` 的 `BiasCheck` 命名空间里加：
+
+```cpp
+    // 每次负载求解尝试都落一行 —— 控制台会滚掉, 而"这次标定到底做了什么"必须能追溯。
+    // 一行一次尝试, 便于 grep 与表格工具直接读; 表头只在文件首次创建时写。
+    static void logCalibAttempt(const PayloadCalibration::Result& r,
+                                const double probe[2], int chosen,
+                                const char* outcome)
+    {
+        static bool headerDone = false;
+        FILE* f = fopen(CalibStore::fileFor("calib_log.txt"), headerDone ? "a" : "w");
+        if (!f) return;
+        if (!headerDone) {
+            headerDone = true;
+            fprintf(f, "# 负载标定尝试记录 (每次按 's' 一行)\n");
+            fprintf(f, "# time | poses | rmsF_N | probe_plus1_Nm | probe_minus1_Nm"
+                       " | ratio | sign | mass_kg | comZ_sent_mm | outcome\n");
+        }
+        const double a = probe[0], b = probe[1];
+        const double hi = (a >= b) ? a : b;
+        const double lo = (a >= b) ? b : a;
+        const double ratio = (lo > 0.0) ? (hi / lo) : 0.0;
+        const int idx = (chosen < 0) ? 0 : chosen;   // 拒绝时记候选0, 仅作参考
+
+        SYSTEMTIME st;
+        GetLocalTime(&st);
+        fprintf(f, "%04d-%02d-%02d %02d:%02d:%02d | %d | %.4f | %.4f | %.4f | %.2f | %s"
+                   " | %.4f | %+.1f | %s\n",
+                st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond,
+                r.poses, r.rmsForceN, a, b, ratio,
+                (chosen == 0) ? "+1" : (chosen == 1) ? "-1" : "?",
+                r.massKg, r.comCand[idx][2], outcome);
+        fclose(f);
+    }
+```
+
+- [ ] **Step 2: 在 `solveAndApply()` 的每条出口调用它**
+
+| 出口 | `outcome` 文本 |
+|---|---|
+| 姿态倾角不足 | `REJECTED tilt sin_theta=%.2f` |
+| 探针失败（拿不到数据 / 机械臂未连接） | `REJECTED probe_failed` |
+| 实测分不开 | `REJECTED probe_cannot_separate` |
+| 拟合残差超阈 | `REJECTED rmsF=%.4f` |
+| 物理质心 Z 非正 | `REJECTED comZ_not_positive` |
+| 接受并下发 | `DISPATCHED` |
+
+> 每条出口都要调用 —— 否则"为什么这批数据没被采纳"又一次只能靠回忆。
+> 拒绝路径上 `chosen` 可能是 −1，助手已按候选 0 处理。
+
+- [ ] **Step 3: 验证路径正确**
+
+`CalibStore::fileFor()` 把文件放进 `calib\`（与三份标定文件同目录）。确认目录不存在时
+`CalibStore::dir()` 会创建它（已有行为）。
+
+**不要**用相对路径 —— 那正是本分支一开始要修的问题。
+
+- [ ] **Step 4: 完整构建**
+
+Run: `cmd.exe //c "D:\Projects\Touch\Touch_Client\build.bat"`
+Expected: `Build OK.`
+
+- [ ] **Step 5: 实机验证（交用户）**
+
+按一次 `'s'`，确认 `Touch_Client\calib\calib_log.txt` 出现，且最后一行含两个候选的
+残余力矩与定案结果。**把那一行发回来即可用来标定 `SIGN_PROBE_*` 常数。**
+
+- [ ] **Step 6: 提交**
+
+```bash
+git add Touch_Client/main.cpp
+git commit -m "feat(calib): persist every payload-solve attempt to calib\\calib_log.txt"
 ```
 
 ---
