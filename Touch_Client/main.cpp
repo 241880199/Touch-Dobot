@@ -504,10 +504,31 @@ namespace BiasCheck {
         for (int i = 0; i < count; i++) {
             sp[i][0] = pose[i][3]; sp[i][1] = pose[i][4]; sp[i][2] = pose[i][5];
             sp[i][3] = pose[i][0]; sp[i][4] = pose[i][1]; sp[i][5] = pose[i][2];
-            for (int a = 0; a < 3; a++) {
-                sf[i][a] = bias[i][a];        // 力
-                sm[i][a] = bias[i][a + 3];    // 力矩
-            }
+            // ===== @1304 原始通道 → 本项目约定的对齐 (z 镜像) =====
+            // biasSix[] 是 @1304 SixForceValue 的【原始】读数。它的 z 轴与项目其余部分用的
+            // 约定 (@576 ActualTCPForce 满足的 raw = b + m·g) 【反号】—— 这是一次 z 镜像,
+            // 不是旋转。2026-09-19 对 calib_poses.txt 那批 7 姿态做自由拟合 (F = b + M·g,
+            // M 不限形式) 得到的证据:
+            //   · M 的 2×2 (x,y) 块 det = +0.182 > 0 → 是正常旋转, 尺度 +0.4266;
+            //   · M[2][2] = −0.4139 → 【负的】, 且量级与 xy 块几乎相等 → 只有 z 被翻。
+            // 于是 M = m · diag(1,1,−1) · Rz(−ψ): 一个 z 镜像叠一个绕 z 的偏转。
+            // 模型 (raw = b + Δm·g) 里【没有】z 反号这个自由度, 求解器就会拿【质量】去顶:
+            // 直接喂原始值解出 Δm = −0.417 (非物理, solve() 直接拒), 镜像后是
+            // Δm = +0.417 kg / ψ ≈ +29.5°, 与上面那个 2×2 块的角度对得上。
+            //
+            // 镜像按张量性质【分别】作用 —— 力与力矩的变换不同, 不能一起处理:
+            //   · 力 F 是【真矢量】(polar vector): F → S·F = diag(1,1,−1)·F, 只把 Fz 取反;
+            //   · 力矩 M 是【赝矢量】(axial vector): M → det(S)·S·M, 这里 S = diag(1,1,−1)、
+            //     det(S) = −1 → diag(−1,−1,+1)·M, 即 Mx、My 取反而 Mz 【不动】。
+            // 力/力矩两个残差就是这条对齐对不对的判据 (见下面打印的 rms)。
+            // ⚠ 只对齐【喂给求解器的这一份拷贝】: biasSix[] 本身、上面的打印、以及落盘的
+            //    calib_poses.txt 全部保持原始值 —— 离线分析要的就是没被动过的那一份。
+            sf[i][0] = biasSix[i][0];
+            sf[i][1] = biasSix[i][1];
+            sf[i][2] = -biasSix[i][2];        // 真矢量: 只有 Fz 反号
+            sm[i][0] = -biasSix[i][3];        // 赝矢量: Mx ...
+            sm[i][1] = -biasSix[i][4];        //         ... My 反号
+            sm[i][2] = biasSix[i][5];         //         Mz 不动
         }
 
         PayloadCalibration::Result r;
