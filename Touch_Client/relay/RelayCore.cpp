@@ -96,6 +96,15 @@ static DWORD WINAPI forceReaderThread(LPVOID) {
                     } else {
                         std::cout << msg << std::endl;
                     }
+                    // 落进 ForceData: 求解负载时的【基线】用 (main.cpp 的 solveAndApply)。
+                    // 存机械臂自报的值而非我们下发的值 —— 要的是"它实际在用哪个"。
+                    EnterCriticalSection(&app.forceDataMutex);
+                    app.forceData.payloadEchoLoadKg = echo[0];
+                    for (int i = 0; i < 3; i++) {
+                        app.forceData.payloadEchoCenterMm[i] = echo[1 + i];
+                    }
+                    app.forceData.payloadEchoValid = true;
+                    LeaveCriticalSection(&app.forceDataMutex);
                 }
             }
 

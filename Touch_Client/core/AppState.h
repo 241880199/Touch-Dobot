@@ -118,9 +118,19 @@ public:
         double hapticOut[3] = {0};      // 已变换到 Touch 坐标系，haptic 线程直接读
         bool isStale = true;            // 超过 200ms 无新数据
         DWORD lastUpdateMs = 0;
-        // 【已删: payloadEcho[4]】—— 30004 帧里 Load @1168 的负载回读镜像。它唯一的使用者
-        // 是符号探针 (RelayCore::probePayloadResidual) 的"机械臂有没有采纳候选负载"核对,
-        // 探针已废除。读取线程启动时那一次性的负载回读核对改为就近从帧里读, 不再往这里落。
+        // 【曾删过 payloadEcho[4], 现以清晰命名重建 —— 是【新】用途, 不是旧字段复活】。
+        // 当初那个字段唯一的使用者是符号探针 (RelayCore::probePayloadResidual) 的
+        // "机械臂有没有采纳候选负载"核对, 探针已废除。
+        //
+        // 30004 帧 @1168 的负载回读: 机械臂【自报】它当前在用的负载。
+        // 用途: 作为负载求解的【基线】(main.cpp 的 solveAndApply) —— 求解器测的是
+        // "真值 − 基线"的差, 要还原绝对质心必须知道基线是谁。用机械臂自报的值而不是
+        // 我们下发的值, 是因为我们要的是【它实际在用什么】, 不是【我们以为它该用什么】;
+        // 实测过两者会不一致(自报 0.4061 vs 下发 0.404)。
+        // 有了忠实基线, 绝对质心的换算就是直接的, 不再需要 comSignZ 折叠。
+        bool   payloadEchoValid = false;
+        double payloadEchoLoadKg = 0.0;
+        double payloadEchoCenterMm[3] = {0, 0, 0};
 
         // 30004 帧里的 TCPForce @720 = "TCP力值 (通过关节电流计算)" —— 与 raw[] 读的
         // ActualTCPForce @576 = "TCP传感器力值" 是【两个不同的量】。

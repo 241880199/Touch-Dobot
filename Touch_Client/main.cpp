@@ -397,11 +397,38 @@ namespace BiasCheck {
             return;
         }
 
-        // 我们"以为"机械臂在用的负载 (标定值优先, 否则种子) —— 只用来折算【绝对】值。
-        // 机械臂内部到底配的是什么从 TCP 口问不出来也改不动 (见下方 [本地补偿]), 而真正要用的
-        // dm/dp 与这个基准无关: 差商把 m_cfg/c_cfg 整项消掉了。
+        // ===== 求解基线 (m_cfg / c_cfg): 机械臂【自报】它当前在用的负载 =====
+        // 求解器测的是"真值 − 基线"的差 (dp = m_true·c_true − m_cfg·c_cfg), 所以要把 dp 折回
+        // 【绝对】质心, 就必须知道基线是谁。机械臂自报的值 (30004 帧 @1168) 才是权威:
+        //   · 它说的是"机械臂实际在用什么", 不是"我们以为它该用什么" —— 实测过两者不一致
+        //     (自报 0.4061 kg vs 下发 0.404 kg);
+        //   · 有了忠实基线, 绝对质心的换算就是直接的: 没有 centerZ 变号要折, 歧义消失。
+        // dm/dp 本身与基线无关 (差商把 m_cfg/c_cfg 整项消掉), 变的是折算出来的绝对值。
         double mCfg, cCfg[3];
-        PayloadCalibration::effective(mCfg, cCfg);
+        bool baselineFromRobot = false;
+        {
+            EnterCriticalSection(&appState.forceDataMutex);
+            baselineFromRobot = appState.forceData.payloadEchoValid;
+            if (baselineFromRobot) {
+                mCfg = appState.forceData.payloadEchoLoadKg;
+                for (int i = 0; i < 3; i++) {
+                    cCfg[i] = appState.forceData.payloadEchoCenterMm[i];
+                }
+            }
+            LeaveCriticalSection(&appState.forceDataMutex);
+        }
+        if (!baselineFromRobot) {
+            // 退回我们"以为"的负载 (标定值优先, 否则种子)。【不静默】: 这条路径下折出来的
+            // 绝对质心又背上 centerZ 折叠歧义 (两种解释相差 ~2·m_cfg·cz/m_true ≈ 125 mm),
+            // 打印出来的 comZ 不能直接采信。
+            PayloadCalibration::effective(mCfg, cCfg);
+            std::cout << "\n[BIAS] !! 【警告】机械臂未回读负载 (30004 @1168 没收到 / 不合理),"
+                      << " 基线退回本客户端的信念值\n"
+                      << "[BIAS] !! 此路径下绝对质心 Z 再次带有 comSignZ 折叠歧义"
+                      << " (两种解释约差 125 mm),\n"
+                      << "[BIAS] !! 下面打印的 comZ 【不可】直接采信 —— 等机械臂回读可用后再求解。"
+                      << std::endl;
+        }
 
         // 姿态转成求解器要的 [x,y,z,rx,ry,rz]: 本模块存的是 [rx,ry,rz,x,y,z]
         static double sp[12][6];
@@ -417,8 +444,9 @@ namespace BiasCheck {
         }
 
         PayloadCalibration::Result r;
-        if (!PayloadCalibration::solve(sp, sf, sm, count, mCfg, cCfg,
-                                       PayloadCalibration::comSignZ, r)) {
+        // comSignZ 一律传 +1.0: 基线忠实 (机械臂自报) 时没有 centerZ 变号要折, 折算就是直接的。
+        // 走的是上面那条退回路径也一样传 +1.0 —— 那里已经就"comZ 不可采信"报过警告了。
+        if (!PayloadCalibration::solve(sp, sf, sm, count, mCfg, cCfg, +1.0, r)) {
             std::cout << "[BIAS] 求解失败 — 姿态数不足/退化(姿态太接近)/解非物理。\n"
                       << "       请确认各姿态差异足够大 (跨度≥30°, 且笔有水平/朝上的姿态)"
                       << std::endl;
@@ -432,6 +460,10 @@ namespace BiasCheck {
         std::cout << "\n======================================================" << std::endl;
         std::cout << "  负载参数求解结果 (" << r.poses << " 个姿态)" << std::endl;
         std::cout << "======================================================" << std::endl;
+        // 基线必须打印: 绝对质心是由"基线 + 解出的差"折出来的, 看着基线才能判读下面那行 comZ。
+        printf("  基线:    %s  load=%.3f kg  center=(%.1f, %.1f, %.1f) mm\n",
+               baselineFromRobot ? "机械臂自报 [30004 @1168]" : "★ 本客户端信念值 [机械臂未回读] ★",
+               mCfg, cCfg[0], cCfg[1], cCfg[2]);
         printf("  质量:    当前 %.3f kg   →  修正 %+.3f kg   →   %.3f kg\n",
                mCfg, r.dm, r.massKg);
         printf("  质心 X/Y/Z: 当前 (%.1f, %.1f, %.1f) mm   →   解出 (%.1f, %.1f, %+.1f) mm\n",
