@@ -443,3 +443,195 @@ $ tests\test_payload_calibration.exe | tail -2
    run-001 的数只是"两种约定下结论相反"的一个实例。
 4. M3 的效果(`stdout` 被重定向时不憋到进程退出)**没有实测** —— 手上没有一个把 stdout 接进
    文件的运行实例; 断言只到"覆盖了 `sync()`, 且它调 `fflush(stdout)`"。
+
+---
+
+# 9. 追加 (2026-09-19 第二遍): 复审判为"上一次修改新引入"的三条 Minor —— N1 / N2 / N4
+
+> 复审在 `5df1489` 上又标出三条 **Minor，且都判为"由 `5df1489` 新引入"**。本次【只改这三条】,
+> 其余一律没碰: `logCalibAttempt` / `logPoseData` / `calib_log.txt` / `calib_poses.txt` 的格式、
+> `#if 0` 块、任何阈值、模型、判决逻辑、`fitRaw` —— 一个字节没动。append-only (`"a+"`)、
+> 块/围栏结构、"每次 `'s'` 都留一个块"这三条性质照旧。
+>
+> **硬要求 1(块正文 = 屏幕上那一份字节)**: **成功路径上一个字节没变**。三条修改里唯二会落到
+> 控制台字节上的是 N1 与 N4, 而 N1 只改 `sync()` 的**返回值**(不发字节, `fflush` 照旧调),
+> N4 只动**读失败那条分支**(见 §9-6: 那是本次要改掉的"半截被当成整段")。
+
+## 9-1 N1 —— `sync()` 返回 −1 会把 ostream **永久**毒掉
+
+**改前** (`main.cpp:913`): `int sync() override { return fflush(stdout) == 0 ? 0 : -1; }`
+
+`std::ostream::flush()` 在 `pubsync()` 返回非 0 时 `setstate(badbit)`, 而异常掩码是默认值 ——
+**不抛异常**。于是从那一次起, 每一个 `diagOut() << ...` 都变成**静默的空操作**, 而 `diagEmitf(...)`
+那一路照旧在打: 屏幕与文档块**同时**缺行, 且没有任何提示。最容易撞上的场合就是
+`Touch_Client.exe > log.txt` 跑到一半卷满 —— 第一次失败的 `fflush(stdout)` 把这一轮剩下的
+ostream 诊断**永久**静音, 块的正文从此不全, 而块本身照样写成。这正是本模块开头点名的
+"诊断被安静地藏起来"。
+
+**改后** (`main.cpp:913-923`): `(void)fflush(stdout); return 0;` —— 冲刷照旧(**那才是 `sync()`
+的本职**), 只是**不把结果当失败报**。字节已经由 `diagEmit` 的 `fwrite` 交给 C 流了, 这个返回值
+唯一的作用是决定 badbit, 这里没有"失败"可报 (C 流的写失败另有 `ferror(stdout)` 这条出路)。
+
+**这条没有单测** —— 理由见 §9-7 第 1 条 (造不出一次真的 `fflush` 失败)。改的是 2 行,
+判据是"返回值恒为 0", 读代码即成立。
+
+## 9-2 N2 —— 两个约定的标签把 `+`/`−` 写死在格式串里, 负的 `c_s_z` 会印成 `+−55.556`
+
+`cS` 是法方程解出来的**原始解**, 没有任何符号归一 (`force/PayloadCalibration.cpp` 的 `cS` 直接
+来自求解), 而这一节的论点恰恰是**符号不由数据定** —— 所以负的 `c_s_z` 与 run-001 的正值
+**一样可能**。改前 (`core/SessionReport.h:107-113`) 两个标签写死了 `+%.17g` / `−%.17g`:
+负值下会印出 `c_s_z = +-55.556…` 与 `c_s_z = −-55.556…`, **标签与紧挨着的那个数互相打架**,
+而且正好发生在那段论证"符号未定"的文字里面。
+
+**改后**: 两个约定的标签都写成 `c_s_z = %.17g mm` —— 符号**由数字自己带出来**;
+约定一用 `c_s_z` 本身, 约定二用它取负 (反向就是**这一个数**)。**约定的区别(同向/反向)是真的,
+标签保留**; 谁也不加修饰。`d` 的表达式与运算符、判据、`fitOk` 那一段限定一个字没动。
+
+run-001 那一支 (`csZ = +55.556`) 现在印出:
+
+```
+    约定一【同向, c_s_z = 55.556000000000004 mm】: d = 68.699999999999989 − 55.556000000000004 = 13.143999999999984 mm  【在范围内】
+    约定二【反向, c_s_z = -55.556000000000004 mm】: d = 68.699999999999989 + 55.556000000000004 = 124.256 mm  【在范围外】
+```
+
+负的那一支 (`csZ = −55.556`, 本次新增用例喂的) 现在印出 —— 两个数都带**自己的**符号:
+
+```
+    约定一【同向, c_s_z = -55.556000000000004 mm】: d = 68.699999999999989 − -55.556000000000004 = 124.256 mm  【在范围外】
+    约定二【反向, c_s_z = 55.556000000000004 mm】: d = 68.699999999999989 + -55.556000000000004 = 13.143999999999984 mm  【在范围内】
+```
+
+(第二行那个 `+ -55.556…` 是**照实**的: 反向的 `d = cz + c_s_z`, 而这里的 `c_s_z` 是负的。
+它与第一行的 `− -55.556…` 是同一条算术, 不是"变负"。`+`/`−` 在这里是**运算符**,
+不是给数字贴的符号 —— 与本次去掉的那种"贴上去的符号"不是一回事。)
+
+**单测** (新增 `test_payload_d_section_negative_cs_prints_no_fabricated_signs`): 喂
+`csZ = −55.556000000000004`, 断言 1) `s` 里**不出现** `+-` 与 `−-`; 2) `= %.17g mm` 的
+**两个**带符号值 (正负各一) 都在; 3) `约定一【同向` / `约定二【反向` 两个标签还在;
+4) 两个 `d` 与"【相反】"照旧都在; 5) **正值那一支也照同一条规矩**(不许只在负值上打补丁)。
+
+## 9-3 N4 —— 读到一半失败 ≠ EOF: 半截不许当成整段发出去
+
+**改前** (`core/SessionReport.h:236-243`): `while ((n = _read(...)) > 0) {...}` 之后**无条件**
+`_close(fd); _unlink(st.tmpPath);`。中途读失败 (I/O 错误 / 杀软正占着文件) 与"读完了"长得
+一模一样: `out` 里是**半截**、`ok` 却是 **true**, 调用方 `diagEmit(errText…)` 把它当成整段发出去,
+临时文件还被**删掉** —— 缺的尾巴两处都没有了, 而且**没有警告**。文件里那句新注释
+"读不出来时【不删】"比代码宽 (代码只覆盖 `_open` 失败), 这一条就是把代码补到与注释一致。
+
+**改后**: `n < 0` 与 `fd < 0` (**打不开**) **同等对待** —— `ok = false`、文件**不删**、
+路径报给 `stderrCaptureLeftoverPath()`; 另外把**本调用已经追加进 `out` 的那半截退回去**
+(`out->resize(outLen0)`)。"与 `_open` 失败同等对待"字面上就是这个意思: 那条路上 `out`
+**一个字都不并入**, 所以调用方那句"这一段**没能并入**本块"才是真的 —— 否则它旁边会摆着
+一段被截断的表, 读者会把它当成整张表 (正是本模块最忌讳的"安静地错")。字节**没丢**:
+它们在不删的那个文件里, 路径照报, 人还能捡回来。
+
+> ⚠ 这是本次唯一一处会让**控制台**字节与改前不同的地方 (只在读失败那条分支): 从前它会把
+> 半截表打出去 + 一句"没能并入", 现在一个字都不打 + 那一句 + 路径。**正常路径 (读成功) 一个
+> 字节没变**, 所以硬要求 1 不受影响。
+
+## 9-4 N4 的单测: 那条路径**真的被走到了** (不是"理论上会失败")
+
+新增 `test_stderr_capture_end_read_error_is_a_failure_not_eof`。
+
+**先说为什么非注错不可**: Windows 上"打开了却读不出来"造不出来 —— 实测 (探针程序) 拿一个
+目录去 `_open(_O_RDONLY)`, 结果是 `fd=-1 errno=13 (EACCES)`, 也就是**在 `_open` 那一步就被挡掉**,
+落进的是上一条用例覆盖的那条老路; 只读文件照样读得出来。所以"中途读失败"这条路
+**从前没有任何测试走到过**, 只能注错: 在测试 TU 里**先取到真的 `_read`**, 再用宏把
+`SessionReport.h` 里出现的 `_read` 改名到一个转发函数 (`tests/test_session_report.cpp:22-49`),
+置位后**先交出去 4 个字节**(制造"半截"), **再返回 −1**(读坏了)。**注错只在这个 TU 生效,
+产品代码一个字节没动。**
+
+**怎么知道它真的走了那条路** (三条计数断言, 先于其它断言):
+
+| 断言 | 含义 |
+|---|---|
+| `g_fakeReadCalls > before` | 头文件里那一句 `_read` **确实**经过注错点 (宏接上了) |
+| `g_fakeBytesServed == before + 4` | **半截真的进过 `out`** —— 旧代码里它就是这么出去的 |
+| `g_fakeReadErrors == before + 1` | 那一次**确实返回了 −1** (读坏了, 不是 EOF) |
+
+**然后才是行为断言**: `!ok` (**旧代码这里是 `true`**) / `out.empty()` (**旧代码这里是那 4 个
+字节**) / fd 2 已还原 / `stderrCaptureLeftoverPath() == 那个路径` / `_access(path) == 0`
+(**旧代码把文件 `_unlink` 掉了**) / **读回来的内容逐字等于写进去的那一行**(半截那 4 个字节也
+在里面 ⇒ 字节真的可捡回)。
+
+**红-绿都跑过**(不是"写完就绿"):
+
+* 把 `SessionReport.h` 的两处修改**暂时撤掉**(`git stash push -- Touch_Client/core/SessionReport.h`),
+  重新编译运行 → **`14 passed, 2 failed`**, 红的正是这一条与 N2 那一条:
+  ```
+    payload_d_section_negative_cs_prints_no_fabricated_signs... FAIL: s.find("+-") == std::string::npos
+    stderr_capture_end_read_error_is_a_failure_not_eof... FAIL: !ok
+  ```
+  (N4 那条**先**过了三条计数断言才在 `!ok` 上红 —— 说明注错确实打中了那一句 `_read`,
+  红的是行为, 不是"没注上"。)
+* 恢复修改后重编 → **`16 passed, 0 failed`**。
+
+## 9-5 验收命令与输出 (逐条照抄)
+
+```
+$ cmd.exe /c "D:\Projects\Touch\Touch_Client\build.bat"
+  Touch_Client.vcxproj -> D:\Projects\Touch\Touch_Client\x64\Release\Touch_Client.exe
+  Build OK.
+  [2/2] Copying DLLs...   DLLs copied.
+  [3/3] Copying models... Models copied.
+  Build complete. Run: D:\Projects\Touch\Touch_Client\x64\Release\Touch_Client.exe
+
+$ cmd.exe /c "D:\Projects\Touch\Touch_Client\tests\build_session_report_test.bat"
+  ... /out:test_session_report.exe ... BUILD_EXIT=0
+$ Touch_Client\tests\test_session_report.exe
+  block_header_format... PASS
+  block_wraps_body_verbatim... PASS
+  block_closes_fence_when_body_has_no_trailing_newline... PASS
+  block_trailer_goes_after_the_fence... PASS
+  block_wraps_a_real_console_screen_verbatim... PASS
+  payload_d_section_prints_both_sign_conventions... PASS
+  payload_d_section_qualifies_a_rejected_fit... PASS
+  payload_d_section_negative_cs_prints_no_fabricated_signs... PASS     ← 新增 (N2)
+  append_preserves_existing_bytes... PASS
+  append_creates_missing_file... PASS
+  append_on_unreadable_file_reports_failure_without_truncating... PASS
+  solve_path_prints_only_through_the_sink... PASS
+  stderr_capture_roundtrip_and_restore... PASS
+  stderr_capture_begin_failure_leaves_stderr_alone... PASS
+  stderr_capture_end_read_failure_keeps_the_bytes... PASS
+  stderr_capture_end_read_error_is_a_failure_not_eof... PASS          ← 新增 (N4)
+  16 passed, 0 failed                          (改前 14 passed, 0 failed; +2 = 本次新增的两条)
+
+$ cmd.exe /c "D:\Projects\Touch\Touch_Client\tests\build_payload_calibration_test.bat"
+  ... BUILD_EXIT=0
+$ Touch_Client\tests\test_payload_calibration.exe
+  45 passed, 0 failed                          (与改前一致)
+```
+
+`build.bat` 全程没有 `LNK1168` ⇒ `Touch_Client.exe` 没在跑, 也不曾需要结束任何进程。
+
+## 9-6 没碰的东西 (自查)
+
+* 硬要求 1 的两半: `diagEmit` / `diagEmitf` / `diagBegin` / `diagFinish` 一个字没改;
+  求解路径上的打印调用一处没改。
+* `payloadDSection` 里 `d` 的算式与运算符、`0 < d < 31.5` 判据、`fitOk` 那段"该结论不成立"
+  的限定: 没动。
+* `appendToFile` 的 `"a+"` + `_O_BINARY`、块/围栏结构: 没动 (改的只是"读失败时删不删").
+* `logCalibAttempt` / `logPoseData` / 两份日志格式 / `#if 0` 块 / 阈值 / 模型 / 判决 / `fitRaw`:
+  一个字节没动。
+* `Docs/superpowers/specs/2026-09-19-raw-channel-calibration-run-001.md` 与本文件 §7 里
+  **引用的那两行旧输出**(带 `+`/`−` 的那两行)是**当时那一屏的记录**, 所以**没改** ——
+  它们是"改前长什么样"的证据。改后的样子见 §9-2。
+
+## 9-7 仍然没能验证的 (照实说)
+
+1. **N1 没有单测, 也没有实测**。要造一次真的 `fflush(stdout)` 失败 (卷满 / 管道读端没了)
+   才能把"毒掉之后静默空操作"这件事演出来 —— 手上造不出一个**确定性的**失败 (`> log.txt`
+   加满盘会波及其它东西, 而且这台机器上没有可控的"写满"装置)。所以 N1 的判据只有: 返回值
+   恒为 0 (读代码即成立) + `flush` 仍然在调。**"被毒掉之后确实不再 SilentNoop"这条没有跑过。**
+2. 与 §6-1 / §8-8 第 1 条相同: **端到端那条验收 (真机跑一次 `'s'`, 比对屏幕与块)仍然没做** ——
+   没有设备。
+3. N2 的两个约定**哪一个对**, 本次仍然没有解决 (这条不归本次管), 只是把负值那一支也
+   摆正了: 现在不管 `c_s_z` 是正是负, 标签旁边的数都是**那个约定的真值**。
+4. 注错是**测试侧**的 (`#define _read`, 只在本 TU): 它证明的是 `stderrCaptureEnd` 在
+   `_read` 返回 −1 时的行为。**产品里那条 `_read` 真的出 I/O 错误**的场合, 仍然只能靠
+   "代码路径与单测一致"来推 —— 与 8-8 第 1 条同一个性质。
+5. ⚠ 收尾时 `git stash list` 里留了一条 `stash@{0}`(WIP on feat/pen-clamp-redesign) —— 那是
+   本次为做红-绿对比而 `git stash push -- Touch_Client/core/SessionReport.h` 留下的**同一份
+   修改的副本**, 内容已经回到工作区 (用 `git show stash@{0}:… > 文件` 落的盘, 所以是 LF,
+   没走 git 的 CRLF 转换)。**它是冗余的, 可以安全 `git stash drop`**;

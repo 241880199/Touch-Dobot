@@ -910,8 +910,18 @@ namespace BiasCheck {
         // 一次跑到一半被结束的求解, 尾巴就没了。从前这里是 std::cout << ... << std::endl,
         // 那时 sync_with_stdio 默认 true, endl 确实会冲刷 —— 换成 diagOut() 之后这行为得自己接回来。
         // 只是把字节推出去, 【不改任何字节】。
+        //
+        // 【返回值必须是 0, 不是一个"失败码"】: 它唯一的作用是决定 std::ostream 要不要置 badbit
+        // (std::ostream::flush() 在 pubsync() 返回非 0 时 setstate(badbit)), 而默认异常掩码下
+        // 【不抛异常】—— 于是从那一刻起, 每一个 diagOut() << ... 都变成【静默的空操作】, 而
+        // diagEmitf(...) 那一路照旧在打。屏幕和文档块会【同时】缺行, 而且没有任何提示。
+        // 最容易撞上的场合: Touch_Client.exe > log.txt 跑到一半卷满 —— 第一次失败的
+        // fflush(stdout) 就把这一轮剩下的 ostream 诊断永久静音了, 恰好是本文件开头点名的
+        // "诊断被安静地藏起来"。字节已经由 diagEmit 的 fwrite 交给 C 流了, 这里没有"失败"可报
+        // (C 流的写失败另有 ferror(stdout) 这条出路), 所以无条件 0。
         int sync() override {
-            return fflush(stdout) == 0 ? 0 : -1;
+            (void)fflush(stdout);
+            return 0;
         }
     };
     static std::ostream& diagOut() {

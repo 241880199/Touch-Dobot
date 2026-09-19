@@ -11,14 +11,42 @@
 //   · 追加语义: 已有内容一个字节不动 —— 尤其"文件读不了"时【不得】退化成截断;
 //   · stderr 捕获窗口: 窗口内的字节能收回来, 且【窗口结束后 fd 2 必须还原】(诊断不许被弄丢)。
 
-#include "../core/SessionReport.h"
-
 #include <cstdio>
 #include <cstring>
 #include <string>
-#include <direct.h>   // _mkdir
-#include <io.h>       // _access / _unlink / _rmdir
+#include <cerrno>     // errno / EIO
+#include <direct.h>   // _mkdir / _chdir / _getcwd
+#include <io.h>       // _access / _unlink / _rmdir (+ 真的 _read, 先取到手)
 #include <sys/stat.h> // _chmod / _S_IREAD / _S_IWRITE
+
+// ===== 注错点: 让 SessionReport.h 里那一句 _read 失败 =====
+// 服务的是 test_stderr_capture_end_read_error_is_a_failure_not_eof (N4)。
+// 【为什么非注错不可】: Windows 上"打开了却读不出来"造不出来 —— 目录在 _open 那一步就被挡掉
+// (EACCES, 实测), 只读文件照样读得出来。所以"中途读失败"这条路【从前没有任何测试走到过】,
+// 而它正是本次修的那一条: `while (_read(...) > 0)` 分不出"读完了"与"读坏了"(I/O 错误 / 杀软
+// 正占着这个文件), 于是磁盘上那份的【半截】被当成整段发出去 (没有警告), 临时文件还被删掉。
+// 做法: 先取到真的 _read, 再用宏把头文件里出现的 _read 改名到下面的转发函数 ——
+// 【注错只在本 TU 生效, 产品代码一个字节没动】。计数器与字节数保证"这条路真的被走到了",
+// 而不是"在旁边断言一句理论上会失败"。
+using ReadFn = int (*)(int, void*, unsigned);
+static ReadFn g_realRead = &::_read;    // ← 必须在 #define 之前取
+static bool   g_failRead = false;       // 置位后: 读先给半截, 然后一律失败
+static int    g_partialFirstRead = 0;   // >0 = 第一次最多给这么多字节; <0 = 已经给过 -> 之后一律 -1
+static int    g_fakeReadCalls = 0;      // 注错点被走到几次
+static int    g_fakeReadErrors = 0;     // 其中返回 -1 (读坏了) 几次
+static long   g_fakeBytesServed = 0;    // 注错点一共交出去多少字节 (证明"半截"真的进过 out)
+static int fakeRead(int fd, void* buf, unsigned n) {
+    g_fakeReadCalls++;
+    if (!g_failRead) return g_realRead(fd, buf, n);
+    if (g_partialFirstRead < 0) { g_fakeReadErrors++; errno = EIO; return -1; }
+    if ((unsigned)g_partialFirstRead < n) n = (unsigned)g_partialFirstRead;
+    const int got = g_realRead(fd, buf, n);
+    g_partialFirstRead = -1;                // 这一口已经给出去, 下一次起一律失败
+    if (got > 0) g_fakeBytesServed += got;
+    return got;
+}
+#define _read fakeRead
+#include "../core/SessionReport.h"
 
 static int g_passed = 0, g_failed = 0;
 
@@ -223,6 +251,43 @@ static void test_payload_d_section_qualifies_a_rejected_fit() {
     // 除了那一句限定, 两者逐字相同 —— 说明限定是【加上去的】, 没有动任何数
     CHECK(accepted.size() < rejected.size());
     CHECK(rejected.compare(0, accepted.size(), accepted) == 0);
+    PASS();
+}
+
+// ===== 负的 c_s_z: 标签里的符号必须由【数字自己】带出来 (N2) =====
+// cS 是法方程解出来的【原始解】, 没有做任何符号归一 (force/PayloadCalibration.cpp 的 cS 直接来自
+// 求解) —— 所以负的 c_s_z 与 run-001 的正值【一样可能】; 而这一节的论点恰恰是"符号不由数据定"。
+// 从前两个标签把 "+"/"−" 写死在格式串里, 于是这里会印出:
+//     c_s_z = +-55.556…   /   c_s_z = −-55.556…
+// —— 标签与紧挨着的那个数【互相打架】, 而且正好发生在那段论证"符号未定"的文字里面。
+// 这个用例把"负值也不许出现拼出来的符号"钉住 (既有用例只喂了正值, 所以从来没人走过这一支)。
+static void test_payload_d_section_negative_cs_prints_no_fabricated_signs() {
+    TEST(payload_d_section_negative_cs_prints_no_fabricated_signs);
+    const double czRobot = 68.699999999999989;
+    const double csZ     = -55.556000000000004;   // ← 负的 |c_s_z|, 与 run-001 一样大
+    const std::string s = SessionReport::payloadDSection(czRobot, csZ, true);
+
+    // 【不许有拼出来的符号】: "+-" 与 "−-" 都是"把一个数说成它自己的相反数"
+    CHECK(s.find("+-") == std::string::npos);
+    CHECK(s.find("−-") == std::string::npos);
+
+    // 【两个约定的真值都在】, 且各自带自己的符号 (约定二 = 约定一取负 —— 反向就是这么定义的)
+    char buf[128];
+    snprintf(buf, sizeof(buf), "= %.17g mm", csZ);   CHECK(s.find(buf) != std::string::npos);
+    snprintf(buf, sizeof(buf), "= %.17g mm", -csZ);  CHECK(s.find(buf) != std::string::npos);
+    // 两个标签本身还在 (它们区分的是【真事】: 同向/反向 —— 保留)
+    CHECK(s.find("约定一【同向") != std::string::npos);
+    CHECK(s.find("约定二【反向") != std::string::npos);
+
+    // 两个 d 照旧【都算、都打】, 结论相反这件事照旧照说 (负的 c_s_z 下同样成立)
+    snprintf(buf, sizeof(buf), "%.17g", czRobot - csZ); CHECK(s.find(buf) != std::string::npos);
+    snprintf(buf, sizeof(buf), "%.17g", czRobot + csZ); CHECK(s.find(buf) != std::string::npos);
+    CHECK(s.find("【相反】") != std::string::npos);
+
+    // 正值那一支也要照同一条规矩 (别只在负值上打补丁: 正的 csZ 下同样不许有拼出来的符号)
+    const std::string pos = SessionReport::payloadDSection(czRobot, -csZ, true);
+    CHECK(pos.find("+-") == std::string::npos);
+    CHECK(pos.find("−-") == std::string::npos);
     PASS();
 }
 
@@ -447,6 +512,53 @@ static void test_stderr_capture_end_read_failure_keeps_the_bytes() {
     PASS();
 }
 
+// 【读到一半失败 ≠ EOF】(N4) —— 第二条"收不回来"的路, 与上一条(_open 失败)不同:
+// 上一条连文件都没打开, 这一条是【已经读进来半截了才坏掉】(I/O 错误 / 杀软正占着这个文件)。
+// 旧代码里两者长得一模一样: `while ((n = _read(...)) > 0) {...}` 之后无条件 _close + _unlink ——
+// 读坏了与读完了分不出来: out 里是半截、ok 却是 true, 调用方把那半截当成整段发出去 (没有警告),
+// 临时文件还被删掉, 缺的尾巴【安静地没了】。
+// 修法: n < 0 与 _open 失败【同等对待】—— ok = false / 文件不删 / 路径报出去 / 半截一个字都不并入。
+// 这条用例【真的在读的那一步注错】(见本文件顶上的注错点): 先给 4 个字节 (制造"半截"), 再返回 -1。
+static void test_stderr_capture_end_read_error_is_a_failure_not_eof() {
+    TEST(stderr_capture_end_read_error_is_a_failure_not_eof);
+    const std::string path = tmpPath("cap_read_err.tmp");
+    _unlink(path.c_str());
+
+    CHECK(SessionReport::stderrCaptureBegin(path.c_str()));
+    const std::string line = "READ-ERROR: 这一段读到一半坏了 —— 半截不许当成整段发出去\n";
+    std::fprintf(stderr, "%s", line.c_str());
+    std::fflush(stderr);
+
+    // 从这一句起, 头文件里那一句 _read 先给 4 个字节, 再一律返回 -1 (= 中途 I/O 出错)
+    const int  callsBefore = g_fakeReadCalls;
+    const int  errsBefore  = g_fakeReadErrors;
+    const long bytesBefore = g_fakeBytesServed;
+    g_partialFirstRead = 4;
+    g_failRead = true;
+    std::string out;
+    const bool ok = SessionReport::stderrCaptureEnd(&out);
+    g_failRead = false;                     // 无论断言怎么走, 都不给后面的用例留状态
+    g_partialFirstRead = 0;
+
+    // 【先证明这条路径真的被走到了】: 头文件那一句 _read 确实过了注错点 ——
+    // 先交出去 4 个字节 (半截真的进过 out), 再返回 -1 (读坏了)。
+    CHECK(g_fakeReadCalls > callsBefore);
+    CHECK(g_fakeBytesServed == bytesBefore + 4);
+    CHECK(g_fakeReadErrors == errsBefore + 1);
+
+    CHECK(!ok);                                   // 读坏了 -> 照实返回 false (旧代码这里是 true)
+    CHECK(out.empty());                           // ← 半截【不许】出去 (旧代码这里是那 4 个字节)
+    CHECK(!SessionReport::stderrCaptureActive()); // 还原是无条件的
+
+    const std::string leftover = SessionReport::stderrCaptureLeftoverPath();
+    CHECK(leftover == path);                      // 路径报得出来 (调用方写进块尾)
+    CHECK(_access(leftover.c_str(), 0) == 0);     // 【文件还在】—— 旧代码把它 _unlink 掉了
+    CHECK(readWholeFile(leftover) == line);       // 一个字节不少 (半截那 4 个也在里面)
+
+    _unlink(leftover.c_str());                    // 收尾 (它本该留在盘上; 测试自己清)
+    PASS();
+}
+
 int main() {
     std::printf("=== SessionReport Tests ===\n");
     _mkdir(TMPDIR);
@@ -458,6 +570,7 @@ int main() {
     test_block_wraps_a_real_console_screen_verbatim();
     test_payload_d_section_prints_both_sign_conventions();
     test_payload_d_section_qualifies_a_rejected_fit();
+    test_payload_d_section_negative_cs_prints_no_fabricated_signs();
     test_append_preserves_existing_bytes();
     test_append_creates_missing_file();
     test_append_on_unreadable_file_reports_failure_without_truncating();
@@ -465,6 +578,7 @@ int main() {
     test_stderr_capture_roundtrip_and_restore();
     test_stderr_capture_begin_failure_leaves_stderr_alone();
     test_stderr_capture_end_read_failure_keeps_the_bytes();
+    test_stderr_capture_end_read_error_is_a_failure_not_eof();
 
     // 清理 (文件先删, 目录才删得掉)
     _unlink(tmpPath("append.md").c_str());

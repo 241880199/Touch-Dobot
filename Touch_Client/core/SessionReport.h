@@ -104,13 +104,20 @@ namespace SessionReport {
         s += "  (c_s 的 z 向【符号】不由数据决定: 模型在 g → −g, A → −A, c_s → −c_s 下逐字不变,\n"
              "   反向的约定给的是另一个数、不是负数。所以这里【不】给单一的勾/叉 —— 整节一个\n"
              "   勾都不出现, 谁也别想从块里摘出一个【通过】去。)\n";
+        // ⚠ 两个标签里的符号【由数字自己带出来】, 不许在格式串里写死 "+"/"−":
+        //   cS 是法方程解出来的【原始解】, 没有做任何符号归一 (force/PayloadCalibration.cpp 的
+        //   cS 直接来自求解), 而这一节的论点恰恰是【符号不由数据定】—— 所以负的 c_s_z 与 run-001
+        //   的正值【一样可能】。写死的符号 + 负值会印出 "c_s_z = +-55.556…" 与 "c_s_z = −-55.556…":
+        //   标签与紧挨着的那个数【互相打架】, 而且正好发生在那段论证"符号未定"的文字里面。
+        //   约定一 用 c_s_z 本身, 约定二 用它取负 (反向就是这一个数 —— 不是一个整体变号的 d);
+        //   两个约定【都印出那个约定的真值】, 谁也不加修饰。约定的区别(同向/反向)是真的, 标签保留。
         snprintf(buf, sizeof(buf),
-                 "    约定一【同向, c_s_z = +%.17g mm】: d = %.17g − %.17g = %.17g mm  %s\n",
+                 "    约定一【同向, c_s_z = %.17g mm】: d = %.17g − %.17g = %.17g mm  %s\n",
                  csZmm, czRobotMm, csZmm, dSameDir, sameIn ? "【在范围内】" : "【在范围外】");
         s += buf;
         snprintf(buf, sizeof(buf),
-                 "    约定二【反向, c_s_z = −%.17g mm】: d = %.17g + %.17g = %.17g mm  %s\n",
-                 csZmm, czRobotMm, csZmm, dFlipDir, flipIn ? "【在范围内】" : "【在范围外】");
+                 "    约定二【反向, c_s_z = %.17g mm】: d = %.17g + %.17g = %.17g mm  %s\n",
+                 -csZmm, czRobotMm, csZmm, dFlipDir, flipIn ? "【在范围内】" : "【在范围外】");
         s += buf;
         s += "  → 判据 0 < d < 31.5 mm: 两种约定下结论";
         s += (sameIn == flipIn) ? "相同" : "【相反】";
@@ -209,7 +216,8 @@ namespace SessionReport {
     }
 
     // 结束捕获: 【无条件还原 fd 2】, 并把窗口内收到的字节追加到 out (out 可为 nullptr = 只要还原)。
-    // 返回 false = 窗口里收到了内容但读不出来 (调用方据此照实报)。
+    // 返回 false = 窗口里收到了内容但【一个字都没并进 out】—— 打不开 (fd < 0) 或读到一半失败
+    // (n < 0, 见下) 都算; 两种情况下调用方都照实报, 并拿 stderrCaptureLeftoverPath() 去捡字节。
     //
     // 【读不出来时【不删】那个临时文件】: 上面那一句 fflush(stderr) 已经把 stderr 缓冲里的字节
     // 推进临时文件了 (fd 2 在窗口里就指着它), 所以此刻盘上那份【是这些字节唯一的副本】——
@@ -228,6 +236,8 @@ namespace SessionReport {
 
         st.leftoverPath[0] = '\0';
         bool ok = true;
+        // 本调用【之前】out 有多长: 中途读失败时, 本调用已经追加进去的那半截要退回去 (见下)。
+        const size_t outLen0 = out ? out->size() : 0;
         const int fd = _open(st.tmpPath, _O_RDONLY | _O_BINARY);
         if (fd < 0) {
             ok = false;
@@ -235,12 +245,25 @@ namespace SessionReport {
             snprintf(st.leftoverPath, sizeof(st.leftoverPath), "%s", st.tmpPath);
         } else {
             char buf[4096];
-            int n;
+            int n = 0;
             while ((n = _read(fd, buf, (unsigned)sizeof(buf))) > 0) {
                 if (out) out->append(buf, (size_t)n);
             }
             _close(fd);
-            _unlink(st.tmpPath);
+            // 【_read 返回负数 ≠ EOF】: `while (... > 0)` 分不出"读完了"与"读坏了"(I/O 错误 /
+            // 杀软正占着这个文件)。从前读坏了也一路走到 _unlink: out 里是【半截】、ok 却是 true,
+            // 调用方把它当成整段发出去 (没有警告), 临时文件还被删掉 —— 缺的尾巴【安静地没了】。
+            // 那正是本文件开头说的"诊断被安静地藏起来", 藏的只是尾巴而已。
+            // 所以与 _open 失败【同等对待】: 照实返回 false / 文件【不删】/ 路径报出去。
+            if (n < 0) {
+                ok = false;
+                // 半截不许发出去 —— 调用方那句"这一段没能并入本块"必须是真的 (与 _open 失败时
+                // 一模一样: 一个字都不并入)。字节没丢, 它们在【不删】的那个文件里, 路径照报。
+                if (out) out->resize(outLen0);
+                snprintf(st.leftoverPath, sizeof(st.leftoverPath), "%s", st.tmpPath);
+            } else {
+                _unlink(st.tmpPath);
+            }
         }
         st.tmpPath[0] = '\0';
         return ok;
