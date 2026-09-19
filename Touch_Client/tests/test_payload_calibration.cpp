@@ -11,6 +11,7 @@
 #include <cstring>
 #include <cstdlib>
 #include "../force/PayloadCalibration.h"
+#include "../force/RepeatPairRegistry.h"
 #include "../calibration/TcpCalibration.h"
 #include "../config/Config.h"
 
@@ -1159,6 +1160,46 @@ static void test_modelform_accepts_at_real_operating_point() {
 //   (b) 对数真的进了门限 (对数越多门限越紧, 但永不紧过 base)。
 // (从前按 'r' 是【覆盖】, 于是"判决贴着线时补一对"这个补救是空的: 补进来还是同一个 1 自由度
 //  估量, 尺子的离散一点没降。)
+// 采集侧的【重复对登记规则】(RepeatPairRegistry) —— 协议: 原地复采, 一对 = (上一笔, 这一笔)。
+// 这是本次协议变更里唯一有逻辑的一处, 所以钉在这里。上层的 BiasCheck 是胶水 + 打印, 不单测。
+static void test_repeat_pair_registration() {
+    TEST(repeat_pair_registration);
+
+    // (a) 正常: 上一笔 3, 这一笔 4 -> 一对 (3, 4)。first 不再是常量 0 (旧协议"恒为 pose 1")。
+    int f = -99, s = -99;
+    CHECK(RepeatPairRegistry::registerPair(3, 4, 0, 8, &f, &s) == RepeatPairRegistry::OK);
+    CHECK(f == 3);
+    CHECK(s == 4);
+
+    // (b) 最后一格可用 (n = max-1); 满了就拒, 且【不动】输出 —— 否则调用方会存下一个假下标。
+    f = -99; s = -99;
+    CHECK(RepeatPairRegistry::registerPair(6, 7, 7, 8, &f, &s) == RepeatPairRegistry::OK);
+    CHECK(f == 6 && s == 7);
+    f = -99; s = -99;
+    CHECK(RepeatPairRegistry::registerPair(6, 7, 8, 8, &f, &s) == RepeatPairRegistry::LIMIT);
+    CHECK(f == -99 && s == -99);
+
+    // (c) ★ 没有上一笔: 'r' 在任何 SPACE 之前按下 (prev = -1) -> 明确拒绝, 不登记 ——
+    //     留一对假尺子比少一对坏得多。
+    f = -99; s = -99;
+    CHECK(RepeatPairRegistry::registerPair(-1, 0, 0, 8, &f, &s) == RepeatPairRegistry::NO_PREVIOUS);
+    CHECK(f == -99 && s == -99);
+
+    // (d) 同一笔与自己配对 (prev >= cur) 走不到, 但同样归 NO_PREVIOUS ——
+    //     这一对会给出 d = 0 的假尺子, 比没有尺子更能骗过门限。
+    f = -99; s = -99;
+    CHECK(RepeatPairRegistry::registerPair(4, 4, 0, 8, &f, &s) == RepeatPairRegistry::NO_PREVIOUS);
+    CHECK(f == -99 && s == -99);
+
+    // (e) 连采三笔原地不动 -> 两对【首尾相接】(3,4) 与 (4,5): 允许 (换姿态前连着按两次 'r'
+    //     就是这个形状)。这里钉的是"不把它误判成同一笔而拒掉"。
+    f = -99; s = -99;
+    CHECK(RepeatPairRegistry::registerPair(4, 5, 1, 8, &f, &s) == RepeatPairRegistry::OK);
+    CHECK(f == 4 && s == 5);
+
+    PASS();
+}
+
 static void test_repeat_pairs_pool_and_carry_their_dof() {
     TEST(repeat_pairs_pool_and_carry_their_dof);
     static const int PAIRS = 3;
@@ -1760,6 +1801,7 @@ int main() {
     test_modelform_limit_is_a_chi2_quantile_times_a_yardstick_discount();
     test_modelform_accepts_at_real_operating_point();
     test_repeat_pairs_pool_and_carry_their_dof();
+    test_repeat_pair_registration();   // ★ 采集侧: 'r' 配的是【上一笔】(原地复采), 不是 pose 1
     test_dead_channel_covers_all_six_frozen();
       // ★ 没验过 -> 不给参数
     test_pose_residuals_mark_the_worst_pose();             // spec §3 表格第 4 行

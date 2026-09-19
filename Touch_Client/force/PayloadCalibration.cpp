@@ -817,7 +817,16 @@ namespace PayloadCalibration {
         }
 
         double xF[12], CF[144];
-        if (!solveNormal(AtA, Atb, PF, xF, CF)) return false;
+        // 【这一条从前也是静默返回的】—— 与上面那两条同一个病症: modelFormStatus 还停在
+        // rawFitZero 的默认值 NO_DOF 上, 调用方据此把真因说成"自由度不足", 而真正卡住的是
+        // 消元本身。走到这里说明 symExtremes/cond 那两道已经过了, 所以不是特征值意义上的
+        // 奇异, 而是消元主元在相对阈值 (最大对角元的 1e-10) 之下塌掉 —— AtA 仍是数值秩亏。
+        if (!solveNormal(AtA, Atb, PF, xF, CF)) {
+            fprintf(stderr, "[Payload] 自检拒绝: 力通道法方程消元时主元塌了 (AtA 数值上秩亏,"
+                            " 消元阈值为最大对角元的 1e-10) —— 姿态的【朝向】铺得不够开"
+                            " (或有两个姿态几乎共线), 多摆几个朝向不同的姿态再试。\n");
+            return false;
+        }
 
         double bF[3] = {xF[0], xF[1], xF[2]};
         double A[9];
@@ -892,7 +901,14 @@ namespace PayloadCalibration {
             }
         }
         double xM[6], CM[36];
-        if (!solveNormal(MtM, Mtb, PM, xM, CM)) return false;
+        // 同上: 从前也是静默的, 调用方读到的仍是默认的 NO_DOF。真因是消元主元在相对阈值
+        // (最大对角元的 1e-10) 之下塌掉 —— MtM 数值上秩亏 (给定 A 后设计矩阵只由姿态与 A 定)。
+        if (!solveNormal(MtM, Mtb, PM, xM, CM)) {
+            fprintf(stderr, "[Payload] 自检拒绝: 力矩通道法方程消元时主元塌了 (MtM 数值上秩亏,"
+                            " 消元阈值为最大对角元的 1e-10) —— 姿态的【朝向】铺得不够开"
+                            " (或有两个姿态几乎共线), 多摆几个朝向不同的姿态再试。\n");
+            return false;
+        }
 
         double bM[3] = {xM[0], xM[1], xM[2]};
         double cS[3] = {xM[3], xM[4], xM[5]};

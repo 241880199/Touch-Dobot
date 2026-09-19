@@ -19,6 +19,7 @@
 #include "force/ForceCalibration.h"
 #include "force/ForceCompensation.h"
 #include "force/PayloadCalibration.h"
+#include "force/RepeatPairRegistry.h"
 #include "robot/Kinematics.h"
 #include <cstdio>
 #include <ctime>
@@ -84,9 +85,18 @@ namespace BiasCheck {
     static int    samples[MAX_POSES];
 
     // ===== 重复姿态 (模型形式检验的尺子) =====
-    // 【协议】摆完所有姿态后回到【第 1 个姿态】(位置和姿态都回到第一次那个位姿), 按 'r' 再采
-    // 一次。同一姿态的这两次访问之差, 就是"回到同一个位姿再来一次, 读数能差多少" —— 模型形式
-    // 检验拿它当尺子 (PayloadCalibration::RepeatPair)。
+    // 【协议: 原地复采】(2026-09-19 修订)
+    //   摆姿态 → SPACE 采样 → ★【保持不动】→ 按 'r' → 再按 SPACE 采一次 (同一姿态)。
+    //   'r' 配的是【上一次采样】, 一对 = (上一笔的行号, 紧接着的这一笔); 两次采样之间机械臂
+    //   【不许移动】。同一姿态的这两次访问之差, 就是"同一个位姿上再来一次, 读数能差多少" ——
+    //   模型形式检验拿它当尺子 (PayloadCalibration::RepeatPair)。
+    // 【为什么不是"回到第 1 个姿态再采一次"】(旧协议, 已废)
+    //   姿态是【手拖】出来的, 拖不出两次一样的位姿 —— 旧协议在实机上根本执行不了。而更要命
+    //   的是它【坏在危险的那一侧】: 一对的两次访问落在不同位姿上时, 差值里混进两个位姿之间的
+    //   重力差 (零点几 N, 对着 0.0224 N 的残差), σ_rep 被抬到 ~0.5 N, χ²/dof 落到 ~0.002,
+    //   门限随之放宽到【无条件放行】—— 一把永远通过的尺子, 正是本模块要消灭的"绿色但不携带
+    //   信息"。原地复采与"拖不回去"这件事无关: 实机日志 (force_demo_log.csv) 里 16 段保持
+    //   不动的区间, 0 段发生姿态漂移, 所以这一对量的是除姿态变化之外的一切, 是合法的尺子。
     // 【按 'r' 是【追加】, 不是覆盖】: 尺子自己也有自由度 —— 一对只给 1 个, 而一双观测的
     // 离散很大 (两次凑巧对得很齐 vs 凑巧差很多都是常事)。多按几次 'r' 多采几对, 尺子才稳,
     // 判决的门限才收得紧 (见 PayloadCalibration::fitRaw 里的 modelFormLimit)。
@@ -98,7 +108,11 @@ namespace BiasCheck {
     //   · 忘按 'r' 是【可检出】的 (repeatCount == 0) —— 求解方会明确拒绝, 不会拿一把假尺子量;
     //   · 不靠距离容差判"是不是同一个姿态": 那既是预设, 又正好是这里要量的事情。
     static const int MAX_REPEATS = 8;  // 尺子的对数上限 (再多也停在 8: 够用, 免得占满姿态位)
-    static int  repeatIdx[MAX_REPEATS];// 每对里【第 2 次访问】落在哪一行 (第 1 次恒为 pose 1)
+    // 一对 = (repeatFirst[i], repeatIdx[i]) —— 两个下标都是【采集侧登记的】, 不再有"恒为 pose 1"
+    // 这种常量: first 就是按 'r' 时手上那一笔, second 是紧接着采的这一笔 (见 recordRepeat)。
+    // 登记规则本身抽在 RepeatPairRegistry 里 (纯函数, 有单测), 这里只存结果与计数。
+    static int  repeatFirst[MAX_REPEATS];  // 每对里【第 1 次访问】落在哪一行 ('r' 之前那一笔)
+    static int  repeatIdx[MAX_REPEATS];    // 每对里【第 2 次访问】落在哪一行 ('r' 之后那一笔)
     static int  repeatCount = 0;       // 已登记几对
     static bool pendingRepeat = false; // 本次采样结束后登记为重复访问
 
@@ -130,7 +144,7 @@ namespace BiasCheck {
         sampling = false;
         avgCount = 0;
         repeatCount = 0;
-        for (int i = 0; i < MAX_REPEATS; i++) repeatIdx[i] = -1;
+        for (int i = 0; i < MAX_REPEATS; i++) { repeatFirst[i] = -1; repeatIdx[i] = -1; }
         pendingRepeat = false;
         for (int i = 0; i < 6; i++) {
             accum[i] = 0.0; accumTcp[i] = 0.0; accumSix[i] = 0.0;
@@ -176,8 +190,11 @@ namespace BiasCheck {
         std::cout << "[BIAS] 采样 " << AVG_MS << "ms — 保持静止..." << std::endl;
     }
 
-    // 'r': 记录【重复姿态】—— 回到第 1 个姿态再采一次 (协议见上面的说明)。
-    // 与 SPACE 走【同一条采样路径】(record), 只是把这一次的结果登记成"第 1 个姿态的第 2 次访问"。
+    // 'r': 把【紧接着的下一次采样】登记为【上一次采样那个姿态】的重复访问 (协议见上面的说明)。
+    // 与 SPACE 走【同一条采样路径】(record), 只是给这一次的结果挂上"与上一笔配成一对"的旗标。
+    // ★ 按 'r' 时机械臂必须还在上一次那个位姿上, 并且到采完为止【不许移动】—— 中间一动, 这一
+    // 对量到的就是两个姿态之间的重力差, 不是复现性。程序侧不替操作员判"这是不是同一个姿态"
+    // (那既是预设, 又正好是这里要量的事情), 但结算时会把 Δ 与 σ_rep 当场打出来 (见 sample)。
     static void recordRepeat() {
         if (!mode) return;
         if (sampling) {
@@ -185,7 +202,8 @@ namespace BiasCheck {
             return;
         }
         if (count < 1) {
-            std::cout << "[BIAS] 还没有第 1 个姿态 —— 先按 SPACE 采一个, 收尾时再回到它" << std::endl;
+            std::cout << "[BIAS] 还没有可复采的上一笔 —— 'r' 配的是【上一次采样】。"
+                      << "先摆好姿态按 SPACE 采一次, 【保持不动】再按 'r' + SPACE。" << std::endl;
             return;
         }
         if (repeatCount >= MAX_REPEATS) {
@@ -196,8 +214,8 @@ namespace BiasCheck {
         record();
         if (sampling) {
             pendingRepeat = true;
-            std::cout << "[BIAS] 这一次将登记为【Pose 1 的第 " << repeatCount + 2
-                      << " 次访问】—— 中间必须有真实运动" << std::endl;
+            std::cout << "[BIAS] 这一次将与上一次 (Pose " << count
+                      << ") 配成一对 —— ★ 中间【不要移动机械臂】" << std::endl;
         }
     }
 
@@ -251,11 +269,36 @@ namespace BiasCheck {
             varSix[count][i] = sampleVar(accumSix[i], accumSixSq[i], avgCount);
         }
         samples[count] = avgCount;
-        // 这一次是不是"第 1 个姿态的重复访问": 由操作员按 'r' 时挂上的旗标决定,
+        // 这一次是不是"上一次采样的重复访问": 由操作员按 'r' 时挂上的旗标决定,
         // 结算在【采样真的成功之后】—— 作废的那几笔在上面已经清掉了旗标。
         const bool isRepeat = pendingRepeat;
         pendingRepeat = false;
-        if (isRepeat && repeatCount < MAX_REPEATS) repeatIdx[repeatCount++] = count;
+        // 一对 = (上一笔的行号, 这一笔的行号)。协议是【原地复采】(见 repeatFirst 的说明),
+        // 所以"上一笔"就是 count-1 —— 不再有"恒为 pose 1"的常量。判断本身抽在
+        // RepeatPairRegistry 里 (纯函数, 有单测); 这里只负责把结果存下 + 照实说没登记的原因。
+        int pairFirst = -1;
+        if (isRepeat) {
+            int repFirst = -1, repSecond = -1;
+            const int repSt = RepeatPairRegistry::registerPair(count - 1, count, repeatCount,
+                                                              MAX_REPEATS,
+                                                              &repFirst, &repSecond);
+            if (repSt == RepeatPairRegistry::OK) {
+                repeatFirst[repeatCount] = repFirst;
+                repeatIdx[repeatCount]   = repSecond;
+                repeatCount++;
+                pairFirst = repFirst;
+            } else {
+                // 【不登记】比登一对假的强得多。走到这里只有一种实况: 手上没有"上一笔"可配
+                // (例如按 'r' 之后 record() 发现整批数据属于旧负载、把 count 归了零) ——
+                // 上限那条在 recordRepeat 里已经先挡过。
+                std::cout << "[BIAS] 这一对【没有登记】("
+                          << (repSt == RepeatPairRegistry::NO_PREVIOUS
+                                  ? "找不到可复采的上一笔 —— 'r' 配的是【上一次采样】,"
+                                    "刚开的一批里它前面没有样本"
+                                  : "已达对数上限")
+                          << ")" << std::endl;
+            }
+        }
 
         EnterCriticalSection(&appState.robotPoseMutex);
         pose[count][0] = appState.robotActualPose.rx;
@@ -272,20 +315,19 @@ namespace BiasCheck {
         // 在线状态取自本帧快照 fd (已在锁内拷贝), 不再去读 appState。
         printf("[BIAS] Pose %d: R=(%+.1f,%+.1f,%+.1f)deg\n",
                count + 1, pose[count][0], pose[count][1], pose[count][2]);
-        // 登记为重复访问时把【与 Pose 1 的位姿差】照实打出来 (报告, 不是判据 —— 判"是不是
-        // 同一个姿态"要靠操作员的规矩, 不靠一个距离容差): 差得多说明没真回到那个位姿,
-        // 这一对量出来的就不是复现性而是两次不同姿态的差。
-        if (isRepeat) {
-            const int visit = repeatCount + 1;          // 这是 Pose 1 的第几次访问 (1 = 首次)
-            printf("       ^ 重复访问 (Pose 1 的第 %d 次): ΔR=(%+.1f,%+.1f,%+.1f)deg"
+        // 登记为重复访问时把【与配对那一笔的位姿差】照实打出来 (报告, 不是判据 —— 判"是不是
+        // 同一个姿态"要靠操作员的规矩, 不靠一个距离容差): 差得多说明中间动了, 这一对量出来的
+        // 就不是复现性而是两个姿态之间的重力差。
+        if (pairFirst >= 0) {
+            printf("       ^ 重复访问 (与 Pose %d 配成一对): ΔR=(%+.1f,%+.1f,%+.1f)deg"
                    "  Δxyz=(%+.1f,%+.1f,%+.1f)mm\n",
-                   visit,
-                   pose[count][0] - pose[0][0], pose[count][1] - pose[0][1],
-                   pose[count][2] - pose[0][2],
-                   pose[count][3] - pose[0][3], pose[count][4] - pose[0][4],
-                   pose[count][5] - pose[0][5]);
+                   pairFirst + 1,
+                   pose[count][0] - pose[pairFirst][0], pose[count][1] - pose[pairFirst][1],
+                   pose[count][2] - pose[pairFirst][2],
+                   pose[count][3] - pose[pairFirst][3], pose[count][4] - pose[pairFirst][4],
+                   pose[count][5] - pose[pairFirst][5]);
             // ★ 这一对的【尺子读数】当场打出来 (报告, 不判)。
-            // 为什么现在就要打: 操作员最容易犯的错是【没回到 Pose 1 就按 'r'】—— 那时 d 混的
+            // 为什么现在就要打: 操作员最容易犯的错是【按 'r' 之前先动了机械臂】—— 那时 d 混的
             // 是两个不同姿态的重力差 (零点几 N 的量级), σ_rep 被抬到 0.5 N 上下, 门限随之
             // 放宽到几乎不判, 而这一对【什么都不像】却在同一时刻被登记成了尺子。程序侧不去
             // 替操作员判"这是不是同一个姿态" (那既是预设, 又正好是这里要量的事情), 但把这两个
@@ -294,8 +336,9 @@ namespace BiasCheck {
             // 镜像那一步已经不在新模型里了, 见 solveAndApply 上面的说明)。
             double v0 = 0.0;
             for (int a = 0; a < 3; a++) {
-                const double d = biasSix[count][a] - biasSix[0][a];
-                const double s0 = (samples[0] > 0) ? varSix[0][a] / samples[0] : 0.0;
+                const double d = biasSix[count][a] - biasSix[pairFirst][a];
+                const double s0 = (samples[pairFirst] > 0)
+                                      ? varSix[pairFirst][a] / samples[pairFirst] : 0.0;
                 const double s1 = (samples[count] > 0) ? varSix[count][a] / samples[count] : 0.0;
                 double ex = 0.5 * (d * d - s0 - s1);
                 if (!(ex > 0.0)) ex = 0.0;
@@ -304,7 +347,7 @@ namespace BiasCheck {
                        "xyz"[a], d, sqrt(ex + 0.5 * (s0 + s1)));
             }
             printf("         (三个通道的 σ_rep 平方均值再开方 = %.4f N —— 求解侧就是拿它"
-                   " 当尺子的; 它若到了零点几 N, 说明这一对多半不是同一个位姿)\n",
+                   " 当尺子的; 它若到了零点几 N, 说明这一对两次采样之间机械臂动过)\n",
                    sqrt(v0 / 3.0));
         }
         printf("       @576  F=(%+.3f,%+.3f,%+.3f)  M=(%+.3f,%+.3f,%+.3f)\n",
@@ -426,12 +469,14 @@ namespace BiasCheck {
                   << "°   最大 sinθ: " << maxTiltSin << std::endl;
         // 尺子的来处照实报 —— 它是模型形式检验能不能做的【前提】, 不是可选步骤。
         if (repeatCount > 0) {
-            std::cout << "  重复姿态对 (" << repeatCount << " 对 = 尺子的自由度): pose 1 与";
-            for (int i = 0; i < repeatCount; i++) std::cout << " pose " << repeatIdx[i] + 1;
-            std::cout << " —— 同一姿态的多次访问, 姿态间复现性的尺子" << std::endl;
+            std::cout << "  重复姿态对 (" << repeatCount << " 对 = 尺子的自由度):";
+            for (int i = 0; i < repeatCount; i++)
+                std::cout << " (pose " << repeatFirst[i] + 1 << ", pose " << repeatIdx[i] + 1 << ")";
+            std::cout << " —— 原地复采, 同一姿态的两次访问: 姿态间复现性的尺子" << std::endl;
         } else {
             std::cout << "  重复姿态对: 【没有】—— 缺了它, 模型形式无从判定 (求解会拒给参数)。"
-                      << "收尾要回到第 1 个姿态按 'r' 再采一次" << std::endl;
+                      << "摆好姿态按 SPACE 采一次, 【保持不动】按 'r' 再按 SPACE 采一次"
+                      << std::endl;
         }
         std::cout << "  当前负载: load=" << mCfg << " kg  center=("
                   << cCfgNow[0] << ", " << cCfgNow[1] << ", " << cCfgNow[2] << ") mm"
@@ -494,7 +539,7 @@ namespace BiasCheck {
 
     // ModelFormStatus 的名字 —— 打印与落盘都要"哪一把尺子缺了就报哪一个"。
     // 【不合并成"没验过"一句话】: 缺噪声 / 缺重复姿态对 / 通道冻住 / 逐姿态有洞 / 自由度不足
-    // 是【五件不同的事】, 处置也各不相同 (补采 vs 回到 Pose 1 按 'r' vs 修通道 vs 多摆姿态),
+    // 是【五件不同的事】, 处置也各不相同 (补采 vs 原地复采按 'r' vs 修通道 vs 多摆姿态),
     // 糊成一句就等于把可行动的信息扔掉。
     static const char* modelFormStatusName(int s) {
         switch (s) {
@@ -671,10 +716,15 @@ namespace BiasCheck {
         // 【全部登记的对都写出来】(从前只写一对, 而按 'r' 会覆盖) —— 离线重放要还原的是
         // 【池化后的】那把尺子, 少写一对就还原不出来。
         if (repeatCount > 0) {
-            fprintf(f, "# repeat: first=1 seconds=");
+            // first/second 都是【逐对登记的】(协议: 原地复采, first = 'r' 之前那一笔) —— 不再
+            // 是一个恒定的 first=1。两列都是 1 基的行号, 第 i 个 first 与第 i 个 second 是一对。
+            fprintf(f, "# repeat: first=");
+            for (int i = 0; i < repeatCount; i++)
+                fprintf(f, "%s%d", (i ? "," : ""), repeatFirst[i] + 1);
+            fprintf(f, " seconds=");
             for (int i = 0; i < repeatCount; i++)
                 fprintf(f, "%s%d", (i ? "," : ""), repeatIdx[i] + 1);
-            fprintf(f, "  (共 %d 对: 同一姿态的多次访问, 每次之间都有真实运动)\n", repeatCount);
+            fprintf(f, "  (共 %d 对: 原地复采, 每一对两次采样之间机械臂不移动)\n", repeatCount);
         } else {
             fprintf(f, "# repeat: none  (没有重复姿态对 -> 模型形式检验没有尺子)\n");
         }
@@ -748,21 +798,24 @@ namespace BiasCheck {
         logPoseData();
         // 尺子的状态也照实说一句: 新求解路径 (fitRaw) 的模型形式检验【要它才成立】,
         // 而"没按 'r'"是操作员最容易漏的一步 —— 让它在控制台上可见, 别等到被拒才发现。
-        // 现在还要报出【尺子本身的值】(见 record 里那段说明): 尺子被误登记 (没真回到 Pose 1)
-        // 时它会大出一个数量级, 而门的宽度正比于它 —— 一个 0.5 N 的尺子必须当场看得见。
+        // 现在还要报出【尺子本身的值】(见 record 里那段说明): 尺子被误登记 (按 'r' 之前先动了
+        // 机械臂) 时它会大出一个数量级, 而门的宽度正比于它 —— 一个 0.5 N 的尺子必须当场看得见。
         if (repeatCount > 0) {
-            std::cout << "[BIAS] 重复姿态对 (" << repeatCount << " 对, = 尺子的自由度): pose 1 与";
-            for (int i = 0; i < repeatCount; i++) std::cout << " pose " << repeatIdx[i] + 1;
-            std::cout << " —— 姿态间复现性的尺子就位" << std::endl;
+            std::cout << "[BIAS] 重复姿态对 (" << repeatCount << " 对, = 尺子的自由度):";
+            for (int i = 0; i < repeatCount; i++)
+                std::cout << " (pose " << repeatFirst[i] + 1 << ", pose " << repeatIdx[i] + 1 << ")";
+            std::cout << " —— 原地复采的复现性尺子就位" << std::endl;
             // 逐对 + 池化后的尺子读数 (@1304 原始通道; 求解侧喂的是同一份【未镜像】的原始值,
-            // 所以这里的数与 fitRaw 算出的是同一个)。
+            // 所以这里的数与 fitRaw 算出的是同一个)。差值取【每一对自己的两笔】—— 与传给
+            // fitRaw 的 RepeatPair 逐字同源 (first = repeatFirst[i], 不再有"恒为 pose 1")。
             double pooled[3] = {0.0, 0.0, 0.0};
             for (int a = 0; a < 3; a++) {
                 printf("         力%c: ", "xyz"[a]);
                 for (int i = 0; i < repeatCount; i++) {
-                    const int r = repeatIdx[i];
-                    const double d = biasSix[r][a] - biasSix[0][a];
-                    const double s0 = (samples[0] > 0) ? varSix[0][a] / samples[0] : 0.0;
+                    const int r0 = repeatFirst[i];
+                    const int r  = repeatIdx[i];
+                    const double d = biasSix[r][a] - biasSix[r0][a];
+                    const double s0 = (samples[r0] > 0) ? varSix[r0][a] / samples[r0] : 0.0;
                     const double s1 = (samples[r] > 0) ? varSix[r][a] / samples[r] : 0.0;
                     double ex = 0.5 * (d * d - s0 - s1);
                     if (!(ex > 0.0)) ex = 0.0;
@@ -776,12 +829,13 @@ namespace BiasCheck {
             printf("         姿态级尺子 (三通道 σ_rep² 均值再开方) = %.4f N —— 判决门限正比于它\n",
                    sqrt((pooled[0] + pooled[1] + pooled[2]) / 3.0));
             if (repeatCount < 2)
-                std::cout << "[BIAS] 尺子只有 1 对 (自由度 1) —— 尺子自己不够稳, 门限会明显放宽。"
-                          << "回到第 1 个姿态再按一次 'r' 多采几对, 判决才收得紧。" << std::endl;
+                std::cout << "[BIAS] 尺子只有 1 对 (自由度 1) —— 尺子自己不够稳, 假拒率约 12%"
+                          << " (放宽置信水平后约 2%), 而 R=2 是 4.9%、R=3 是 2.5%。"
+                          << "再原地复采一两对 (保持不动按 'r' + SPACE), 判决才收得紧。" << std::endl;
         } else {
-            std::cout << "[BIAS] !! 没有重复姿态对 (采集收尾没按 'r') —— 模型形式检验"
-                      << " (fitRaw) 将【无从判定】并拒给参数。回到第 1 个姿态按 'r' 补一次即可。"
-                      << std::endl;
+            std::cout << "[BIAS] !! 没有重复姿态对 —— 模型形式检验 (fitRaw) 将【无从判定】并"
+                      << "拒给参数。摆好一个姿态按 SPACE 采一次, 【保持不动】按 'r' 再按 SPACE"
+                      << " 采一次即可 (建议 2~3 对)。" << std::endl;
         }
         // 采样中途不允许求解
         if (sampling) {
@@ -837,12 +891,12 @@ namespace BiasCheck {
                 nz[i].varM[a] = varSix[i][3 + a];
             }
         }
-        // 重复姿态对 = 模型形式检验的【尺子】。first 恒为 0 (协议: 摆完所有姿态后回到第 1 个
-        // 姿态再采), second 是登记的那一行; 按 'r' 是【追加】, 所以这里可能有多对。
-        // 一对都没有 -> 尺子没有 -> fitRaw 拒给参数 (不是"没验过也放行")。
+        // 重复姿态对 = 模型形式检验的【尺子】。first / second 【两个都是采集侧登记的】(协议:
+        // 原地复采, first 是 'r' 时手上那一笔, 即 second 的前一笔); 按 'r' 是【追加】, 所以
+        // 这里可能有多对。一对都没有 -> 尺子没有 -> fitRaw 拒给参数 (不是"没验过也放行")。
         static PayloadCalibration::RepeatPair reps[8];
         for (int i = 0; i < repeatCount; i++) {
-            reps[i].first = 0;
+            reps[i].first  = repeatFirst[i];
             reps[i].second = repeatIdx[i];
         }
 
@@ -988,7 +1042,8 @@ namespace BiasCheck {
                 printf("      → 拒因: 【尺子不齐】(%s) —— 模型形式【没有被检验】, 所以不给参数。",
                        modelFormStatusName(fit.modelFormStatus));
                 std::cout << std::endl;
-                std::cout << "        逐种处置: 缺重复对 -> 回到 Pose 1 再按 'r'; 缺噪声 -> 采样笔数"
+                std::cout << "        逐种处置: 缺重复对 -> 摆好姿态按 SPACE, 保持不动按 'r' 再"
+                          << "按 SPACE; 缺噪声 -> 采样笔数"
                           << "太少; 通道冻住/有洞 -> 查传感器读数;" << std::endl;
                 std::cout << "        自由度不足 -> 多摆几个姿态 (力通道 12 个未知, 3n−12 要 > 0)。"
                           << std::endl;
@@ -1733,12 +1788,13 @@ void keyboard(unsigned char key, int, int) {
                       << " 'm' 退出并输出报告\n"
                       << "       's' 用这批数据【求解原始通道】, 只打印、不改动任何东西"
                       << " (不写补偿 / 不写 json / 不下发机械臂)\n"
-                      << "       ★ 收尾: 摆完所有姿态后回到【第 1 个姿态】—— 位置和姿态都回到"
-                      << "第一次那个位姿 —— 按 'r' 采一次;\n"
-                      << "         【多按几次更好】(每次中间都要真的动一下再回来): 再按 'r' 是"
-                      << "【追加】一对, 尺子的自由度跟着涨。\n"
-                      << "         建议 2~4 对 —— 1 对时尺子自己太不稳, 门限只能放宽, 分辨力低。\n"
-                      << "         同一姿态的多次采样之差是【姿态间复现性】: 模型形式检验 (残差是否"
+                      << "       ★ 重复对 (模型形式检验的尺子): 摆姿态 → SPACE 采样;\n"
+                      << "         ★ 保持不动 → 按 'r' → 再按 SPACE 采一次（同一姿态）。\n"
+                      << "         两次采样之间机械臂【不许移动】—— 'r' 配的是【上一次采样】,"
+                      << " 一移动, 这一对量到的就是两个姿态之间的重力差, 不是复现性。\n"
+                      << "         每一对再按 'r' 是【追加】一对 (尺子的自由度跟着涨), 建议 2~3 对:"
+                      << " 模型正确时的假拒率 R=1 约 12%、R=2 4.9%、R=3 2.5% (放宽置信水平后 R=1 约 2%)。\n"
+                      << "         同一姿态的两次采样之差是【姿态间复现性】: 模型形式检验 (残差是否"
                       << "超出这台设备复现一个姿态的能力) 就拿它当尺子。\n"
                       << "         一对都没有的话, 模型形式无从判定, 求解会拒绝给参数 (不是少一个"
                       << "可有可无的步骤)。"
@@ -1786,7 +1842,8 @@ void keyboard(unsigned char key, int, int) {
         return;
     }
 
-    // 'r' in BiasCheck mode: 记录【重复姿态】(回到第 1 个姿态再采一次) —— 模型形式检验的尺子。
+    // 'r' in BiasCheck mode: 把【紧接着的下一次采样】登记为【上一次采样】的重复访问 —— 模型
+    // 形式检验的尺子 (协议: 原地复采, 从按 'r' 到采完为止机械臂不移动)。
     // 独立于 SPACE 的键, 理由见 BiasCheck::repeatIdx 的说明 (显式标记, 不靠位置也不靠距离)。
     // 每按一次【追加】一对 (不覆盖), 见那里的说明。
     if ((key == 'r' || key == 'R') && BiasCheck::mode) {
