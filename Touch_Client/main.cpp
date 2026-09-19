@@ -368,8 +368,11 @@ namespace BiasCheck {
         fclose(f);
     }
 
-    // 's': 用已采数据最小二乘求解负载参数 → 把【残余量】写进本地补偿的 force_calib.json
-    //      (机械臂内部负载从 TCP 口改不动, 所以不再靠"下发绝对负载"这条路)
+    // 's': 用已采数据最小二乘求解负载参数 → 把【残余量】装进本地补偿的本会话生效值;
+    //      force_calib.json 里落盘的 mass_kg 却是 0。
+    //      ⚠ 内存与落盘故意不同 (差的就是"本会话"), 缘由见下面 [本地补偿] 一节的说明 —— 别去"对齐"。
+    //      机械臂【是】接受负载参数的: 新值随连接时序的 EnableRobot(1.5,...) 下发。所以重启之后
+    //      由机械臂负责整份负载, 本地补偿不再减残余 —— 那就是落盘值写 0 的原因。
     static void solveAndApply() {
         if (solveLocked) {
             std::cout << "\n[BIAS] !! 已连续 " << consecutiveFails << " 次判定结果不合理, 已停止求解。\n"
@@ -439,13 +442,15 @@ namespace BiasCheck {
         // 操作者要看得到它: 换工具/重装传感器后这个数会变, 变了才说明标定真的重新定了模型。
         printf("  传感器安装偏转角 psi: %+.1f deg (扫描 [-180,180]/0.5°, 取自最小力残差)\n",
                r.sensorYawDeg);
-        // 【上面这两个"绝对"值只是记录/显示用】: 机械臂内部负载从 TCP 口改不动, 本标定也
-        // 不再依赖它是否被采纳。真正生效的输出是下面写进 force_calib.json 的【残余量】。
-        // CZ 符号: data 定不了它 (两种解释的拟合残差完全相同), 从前靠实机探针裁决, 探针已废除
-        // —— 现在【没有任何判据或下发依赖符号】。这里只把不确定性摆明, 供人工复核装夹。
-        printf("  CZ 符号提示: 数据区分不了两种解释 — 物理质心 Z = %+.1f mm (+1) / %+.1f mm (-1)"
-               " (仅供复核, 不影响结果)\n",
+        // 【上面这两个"绝对"值不再只是记录/显示】: comMm 随 payload_calib.json 持久化, 并在下次
+        // 启动的连接时序里下发 (RelayCore 的 EnableRobot)。符号一旦选错, 下发给机械臂的就是错
+        // 的那一份质心, 机械臂会照它补偿 —— 所以这里的不确定性必须由人核一次。
+        // CZ 符号: 数据定不了它 (两种解释的拟合残差完全相同), 从前靠实机探针裁决, 探针已废除
+        // —— 唯一的判据是外部锚点: 取靠近 Config::ROBOT_PAYLOAD_SEED_CZ_MM 的那个候选。
+        printf("  CZ 符号提示: 数据区分不了两种解释 — 物理质心 Z = %+.1f mm (+1) / %+.1f mm (-1)\n",
                r.cTrueZ[0], r.cTrueZ[1]);
+        printf("               ⚠ 此符号【现在会下发】, 必须核: 正确候选应靠近种子 %.1f mm;"
+               " 落在 ~195 mm 就是符号反了\n", Config::ROBOT_PAYLOAD_SEED_CZ_MM);
 
         // ===== 合理性判据 =====
         // 只剩一条: 拟合残差。符号探针废除之后, 没有任何"待实测裁决"的东西需要挡 ——
@@ -504,19 +509,29 @@ namespace BiasCheck {
         // (它同时把 psi 记进 PayloadCalibration 的生效值, 供 save() 落盘。)
         PayloadCalibration::applyResult(r);
 
-        // ===== 本次标定的输出: 把【残余】写进本地补偿 =====
-        // 机械臂内部那份负载参数从 TCP 侧【改不动】—— EnableRobot / Payload / LoadSwitch
-        // 三条通道实测全部无响应(0.25 kg 的变化只引起 0.0002 N·m 的读数变化)。所以它补不
-        // 干净的那一份, 只能由我们自己的 ForceCompensation 减掉。下面这两行就是标定结果,
-        // 上面那些绝对负载只是记录/显示用 —— 标定不依赖机械臂接不接受它们。
+        // ===== 本次标定的输出: 本地补偿的【本会话】值 ≠ force_calib.json 的【重启后】值 =====
+        // 两处数值故意不同, 别把它们"对齐" —— 对齐就是把同一个误差减两次。
+        //
+        //   · 本会话 (内存): 机械臂要到【下次重启】才拿到新负载, 这一整轮它用的还是旧值。所以
+        //     本地补偿必须继续把解出的残余量减掉 —— 不减, 这轮的读数就是错的。
+        //   · 落盘 (force_calib.json): 那份文件描述的是【重启之后】的稳态。那时机械臂已经背上
+        //     新负载, 残余量归零, 本地补偿不该再减任何东西, 所以 mass_kg 写 0。
+        //
+        // 从前两处都写残余量, 重启后机械臂的新负载与本地残余叠加, 同一份误差被减两次
+        // (~0.25 kg 量级)。这就是本次拆分修掉的 bug。
+        //
+        // 机械臂那边【确实会采用】这份负载: 连接时序里会下发 EnableRobot(1.5,...)。2026-09-19
+        // 实机证实它生效 —— 改 payload_calib.json 后重启, 机械臂快速撞向关节限位。所以重标定
+        // 要客户端重启之后才算真正闭环。
         //
         // 拟合出的 dm/dp 就是那一份【残余本身】(相对机械臂当前实际配置, 差商消掉了零偏),
-        // 所以这里不需要知道机械臂内部配的是什么值 —— 这正是它比"推出绝对值再下发"可靠的地方。
+        // 所以这里不需要知道机械臂内部配的是什么值。
         //
         // 符号: ForceCompensation 做 compensated = raw - mass*gTool, gTool = Rᵀ(0,0,+9.81),
         // 与求解器 gravityTool 同一约定, 所以 mass 直接取 dm 即可(可为负)。
         std::cout << "------------------------------------------------------" << std::endl;
-        std::cout << "  ✓ 标定结果 → 本地补偿 (机械臂没补干净的那一份由我们减掉):" << std::endl;
+        std::cout << "  ✓ 标定结果 → 本地补偿 (本会话生效; 机械臂没补干净的那一份由我们减掉):"
+                  << std::endl;
         // 两处落盘的成败都要进日志: 落盘失败却只记 DISPATCHED, "下次启动标定没了"在日志里
         // 看起来就像没发生过 —— 那样追溯就是假的。(机械臂侧同步失败【不算】: 它不影响标定。)
         bool calibWritesOk = true;
@@ -528,15 +543,20 @@ namespace BiasCheck {
             }
             double bF[3], bM[3];
             ForceCompensation::currentBias(bF, bM);
-            ForceCompensation::setMassCom(resMass, resCom);
+            ForceCompensation::setMassCom(resMass, resCom);   // 本会话生效 (机械臂还在用旧负载)
             if (ForceCalibration::saveToFile(CalibStore::fileFor("force_calib.json"),
-                                             resMass, bF, bM)) {
-                printf("  [本地补偿] 残余质量 %+.4f kg  残余质心 (%+.1f, %+.1f, %+.1f) mm\n",
+                                             0.0, bF, bM)) {   // 落盘 0 = 重启后由机械臂负责
+                printf("  [本地补偿] 本会话生效: 残余质量 %+.4f kg  残余质心 (%+.1f, %+.1f, %+.1f) mm\n",
                        resMass, resCom[0] * 1000.0, resCom[1] * 1000.0, resCom[2] * 1000.0);
-                std::cout << "  [本地补偿] 已写入 force_calib.json — 机械臂没补干净的那一份由我们减掉"
+                std::cout << "  [本地补偿] 落盘 mass_kg = 0 — 重启后机械臂背上新负载, 残余归零,"
+                          << " 本地不再减" << std::endl;
+                std::cout << "  [本地补偿] ⚠ 内存 " << resMass << " kg ≠ 落盘 0: 差的就是【本次会话】。"
+                          << "这是设计, 不是笔误" << std::endl;
+                std::cout << "             重启之前机械臂用的仍是【旧负载】, 所以这一轮必须继续减这份残余"
                           << std::endl;
             } else {
-                std::cerr << "  [本地补偿] !! force_calib.json 写入失败" << std::endl;
+                std::cerr << "  [本地补偿] !! force_calib.json 写入失败 (本会话内存中的残余补偿已生效,"
+                          << " 但它没能落盘)" << std::endl;
                 calibWritesOk = false;
             }
         }
@@ -555,6 +575,14 @@ namespace BiasCheck {
         std::cout << "  [机械臂侧] 本次【未】向机械臂下发负载 (运行时改负载会让机械臂动) —" << std::endl;
         std::cout << "             机械臂仍在用旧值 (由上面的本地补偿修正读数); "
                   << "新值要【下次重启】才随连接下发" << std::endl;
+        // 重启就是把 com_mm 交给机械臂的那一刻 —— 在那之前必须把上面那个不确定的符号核掉。
+        // 用命令句写, 因为这条只有在重启【之前】看才有意义。
+        std::cout << "  [重启前必查] 先确认上面那两个 CZ 候选里, 选中的是靠近 "
+                  << Config::ROBOT_PAYLOAD_SEED_CZ_MM << " mm 的那一个 —" << std::endl;
+        std::cout << "             重启会把 com_mm 下发出去; 符号反了就是 ~195 mm, 机械臂会"
+                  << "据此补偿并移动。" << std::endl;
+        std::cout << "             控制台滚掉也不要紧: calib\\calib_log.txt 每次尝试都记了"
+                  << " comZ_mm (就是会下发的那个值), 去那里核对。" << std::endl;
 
         // 这批姿态是在【旧负载】下采的。复验 (report) 必须拒绝它们,
         // 否则会拿旧数据骂新参数 (曾经报出假 FAIL: 求解残差 0.06 N,
