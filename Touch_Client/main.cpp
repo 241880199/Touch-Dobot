@@ -479,10 +479,26 @@ namespace BiasCheck {
             std::cout << "    · 力矩项偏大 → 质心不准 (但也可能只是质量误差漏进来的)" << std::endl;
         }
         if (!coverageOk || spanF >= 0.3 || drEq >= 10.0) {
-            std::cout << "   → 按 's' 用这批数据【求解】残余量, 写进本地补偿 (force_calib.json)"
-                      << std::endl;
+            std::cout << "   → 按 's' 用这批数据【求解原始通道】, 只打印、不改动任何东西"
+                      << " (不写补偿 / 不写 json / 不下发机械臂)" << std::endl;
         }
         std::cout << std::endl;
+    }
+
+    // ModelFormStatus 的名字 —— 打印与落盘都要"哪一把尺子缺了就报哪一个"。
+    // 【不合并成"没验过"一句话】: 缺噪声 / 缺重复姿态对 / 通道冻住 / 逐姿态有洞 / 自由度不足
+    // 是【五件不同的事】, 处置也各不相同 (补采 vs 回到 Pose 1 按 'r' vs 修通道 vs 多摆姿态),
+    // 糊成一句就等于把可行动的信息扔掉。
+    static const char* modelFormStatusName(int s) {
+        switch (s) {
+            case PayloadCalibration::MODEL_FORM_OK:           return "MODEL_FORM_OK";
+            case PayloadCalibration::MODEL_FORM_NO_NOISE:     return "MODEL_FORM_NO_NOISE";
+            case PayloadCalibration::MODEL_FORM_NO_REPEAT:    return "MODEL_FORM_NO_REPEAT";
+            case PayloadCalibration::MODEL_FORM_DEAD_CHANNEL: return "MODEL_FORM_DEAD_CHANNEL";
+            case PayloadCalibration::MODEL_FORM_NOISE_HOLES:  return "MODEL_FORM_NOISE_HOLES";
+            case PayloadCalibration::MODEL_FORM_NO_DOF:       return "MODEL_FORM_NO_DOF";
+            default:                                          return "MODEL_FORM_UNKNOWN";
+        }
     }
 
     // 每次负载求解尝试都落一行 —— 控制台会滚掉, 而"这次标定到底做了什么"必须能追溯。
@@ -492,9 +508,27 @@ namespace BiasCheck {
     // false, 会截断历次记录 —— 与"可追溯"的立意在字面上相反。打开方式也必须是 "a+",
     // 见下面的说明。
     //
-    // r 可为 nullptr: 求解【之前】就返回的出口 (已上锁 / 姿态数不足 / 正在采样) 没有 Result,
-    // 此时各数值列记 "-"。
-    static void logCalibAttempt(const char* outcome, const PayloadCalibration::Result* r)
+    // ===== 行格式 (2026-09-19 随原始通道求解器一起扩宽) =====
+    // 【前 9 列的列号与含义一字未动】—— 历史脚本按列号读, 挪一列就是静默读错:
+    //   time | poses | rmsF_N | rmsM_Nm | psi_deg | dm_kg | mass_kg | comZ_mm | outcome
+    //   · psi_deg / dm_kg / mass_kg / comZ_mm 是【旧模型】(psi 扫描 + 残余量 dm/dp) 才有的量。
+    //     新模型 (原始通道的线性解) 里【根本不存在】这四个量 -> 一律记 "-"。
+    //     "-" 不是"没算出来", 是"这个模型里没有这个量"; 别把它读成 0, 更别拿它去填别的数。
+    //   · rmsF_N / rmsM_Nm 是【本次所用模型】的拟合残差 (两个模型都有这个量)。
+    //   · outcome 现在以 PRINTED_ONLY 开头 = "解出来了、只打印、【没有应用任何东西】"
+    //     (从前是 DISPATCHED —— 那时确实往本地补偿与两个 json 里写了; 现在一个字都没写)。
+    // 【新列一律【追加在末尾】】—— 上面那 9 列一个都没挪, 历史行与历史读者照旧。
+    // 追加列 (13): solver | m_kg | sv1 | sv2 | sv3 | iso | parity
+    //              | cs_x_mm | cs_y_mm | cs_z_mm | cond | maxSigA | modelform
+    //   solver    = raw (原始通道线性解) / legacy (旧模型) / - (没走到求解)
+    //   modelform = ModelFormStatus 的名字 (哪一把尺子缺了就报哪一个), "-" = 没走到
+    //   maxSigA   = A 的 9 个分量里最大的 1σ (kg)。18 个 sigma 全写会把行撑得没法读, 而 A
+    //               是物理上最要紧的那一组; 要全量请用 calib_poses.txt 离线重放。
+    //
+    // fit 可为 nullptr: 求解【之前】就返回的出口 (已上锁 / 姿态数不足 / 正在采样) 没有结果,
+    // 此时各数值列记 "-"。poses 由调用方单独传 (被拒时 RawFit 里的计数不作数)。
+    static void logCalibAttempt(const char* outcome, const PayloadCalibration::RawFit* fit,
+                                int poses)
     {
         // fileFor 返回 static 缓冲, 调用方必须立即拷贝 (头文件已注明)。
         char path[512];
@@ -509,21 +543,12 @@ namespace BiasCheck {
         if (fseek(f, 0, SEEK_END) == 0) needHeader = (ftell(f) == 0);
         if (needHeader) {
             fprintf(f, "# 负载标定尝试记录 (每次按 's' 一行)\n");
+            // 前 9 列 = 历史格式 (列号未动); 第 10 列起是 2026-09-19 追加的原始通道列。
+            // 每列的含义见本函数上面的长注释 —— 尤其: "-" 是"这个模型里没有这个量", 不是 0。
             fprintf(f, "# time | poses | rmsF_N | rmsM_Nm | psi_deg | dm_kg | mass_kg"
-                       " | comZ_mm | outcome\n");
-        }
-        char sPoses[16], sRmsF[16], sRmsM[16], sPsi[16], sDm[16], sMass[16], sComZ[16];
-        if (r) {
-            snprintf(sPoses, sizeof(sPoses), "%d",    r->poses);
-            snprintf(sRmsF,  sizeof(sRmsF),  "%.4f",  r->rmsForceN);
-            snprintf(sRmsM,  sizeof(sRmsM),  "%.4f",  r->rmsMomentNm);
-            snprintf(sPsi,   sizeof(sPsi),   "%+.1f", r->sensorYawDeg);
-            snprintf(sDm,    sizeof(sDm),    "%+.4f", r->dm);
-            snprintf(sMass,  sizeof(sMass),  "%.4f",  r->massKg);
-            snprintf(sComZ,  sizeof(sComZ),  "%+.1f", r->comMm[2]);
-        } else {
-            char* cols[7] = {sPoses, sRmsF, sRmsM, sPsi, sDm, sMass, sComZ};
-            for (int i = 0; i < 7; i++) strcpy(cols[i], "-");
+                       " | comZ_mm | outcome");
+            fprintf(f, " | solver | m_kg | sv1 | sv2 | sv3 | iso | parity"
+                       " | cs_x_mm | cs_y_mm | cs_z_mm | cond | maxSigA | modelform\n");
         }
         char ts[24];
         const std::time_t now = std::time(nullptr);
@@ -531,8 +556,36 @@ namespace BiasCheck {
         localtime_s(&tmInfo, &now);
         strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", &tmInfo);
 
-        fprintf(f, "%s | %s | %s | %s | %s | %s | %s | %s | %s\n",
-                ts, sPoses, sRmsF, sRmsM, sPsi, sDm, sMass, sComZ, outcome);
+        // 逐列直接写, 【不先攒进一个定长缓冲】: 攒缓冲就得给每个数定一个宽度, 而任何一个数
+        // 变长 (比如 c_s 解飞了) 都会把【后面】的列静默挤掉 —— 而落盘的意义正是"控制台滚掉
+        // 之后还查得到", 悄悄少一列比不写更坏。fprintf 自己按内容增长。
+        // 第 5..8 列 (psi_deg / dm_kg / mass_kg / comZ_mm) 【恒为 "-"】: 新模型里没有这四个量。
+        if (!fit) {
+            fprintf(f, "%s | - | - | - | - | - | - | - | %s", ts, outcome);
+            fprintf(f, " | - | - | - | - | - | - | - | - | - | - | - | - | -\n");
+            fclose(f);
+            return;
+        }
+        // 奇异值 / m / parity / 各向同性比从 A 自己来 (与 decompose 同一份口径, 不另算一份)。
+        // A 奇异时它们【无从给出】—— 记 "-", 而不是记 0 (0 会被读成"各向同性比 = 0",
+        // 那是另一个意思, 更糟)。
+        PayloadCalibration::Decomp d;
+        const bool haveD = PayloadCalibration::decompose(fit->A, d);
+        double maxSigA = 0.0;
+        for (int k = 0; k < 9; k++)
+            if (fit->paramSigma[k] > maxSigA) maxSigA = fit->paramSigma[k];
+        fprintf(f, "%s | %d | %.4f | %.4f | - | - | - | - | %s",
+                ts, poses, fit->rmsForceN, fit->rmsMomentNm, outcome);
+        fprintf(f, " | raw");
+        if (haveD) {
+            fprintf(f, " | %.6f | %.5f | %.5f | %.5f | %.5f | %+.0f",
+                    d.m, d.sv[0], d.sv[1], d.sv[2], d.isotropyRatio, d.parity);
+        } else {
+            fprintf(f, " | - | - | - | - | - | -");
+        }
+        fprintf(f, " | %.3f | %.3f | %.3f | %.4g | %.6g | %s\n",
+                fit->cS[0] * 1000.0, fit->cS[1] * 1000.0, fit->cS[2] * 1000.0,
+                fit->cond, maxSigA, modelFormStatusName(fit->modelFormStatus));
         fclose(f);
     }
 
@@ -602,18 +655,30 @@ namespace BiasCheck {
         fclose(f);
     }
 
-    // 's': 用已采数据最小二乘求解负载参数 → 把【残余量】装进本地补偿的本会话生效值;
-    //      force_calib.json 里落盘的 mass_kg 却是 0。
-    //      ⚠ 内存与落盘故意不同 (差的就是"本会话"), 缘由见下面 [本地补偿] 一节的说明 —— 别去"对齐"。
-    //      机械臂【是】接受负载参数的: 新值随连接时序的 EnableRobot(1.5,...) 下发。所以重启之后
-    //      由机械臂负责整份负载, 本地补偿不再减残余 —— 那就是落盘值写 0 的原因。
+    // 's': 用已采数据【拟合原始力通道】并把结果全部打印出来 —— 【随后什么也不做】。
+    //
+    // ===== 2026-09-19 起这条路的性质变了 (Task 4) =====
+    // 从前的 's' 会: 求解残余量 → setMassCom 写本地补偿 → 写 force_calib.json 与
+    // payload_calib.json → (下次启动的连接时序里) 下发机械臂。现在【一个字都不写】。
+    // 理由不是"暂时关掉", 而是【两个量的原点根本不同】:
+    //   · 这里解出的 m / A / c_s 描述的是【传感器测量原点以下】那一段负载 (传感器内部
+    //     质量分布 + 笔夹 + 笔) —— 数据能定的也只有这一段, 因为传感器就装在中间;
+    //   · 机械臂的负载模型 (EnableRobot 的 load/center) 描述的是【挂在它法兰上的整条链】。
+    //   从"测量原点以下"换到"法兰系整条链"要走过 c_s 的原点到底在哪 + 法兰→测量系那一步,
+    //   而这一步【未定】(spec §6b 末: 标定给出的 c_s = 54.55 mm 与解析几何反推的 75.8 mm
+    //   对不上, 而传感器总高只有 31.5 mm)。把原点未定的量当法兰系负载写下去, 就是拿一个
+    //   没标定过的变换去改机械臂 —— 正是本项目被咬得最惨的那种"安静地错"。
+    //   下发路径的开通条件写在 plan Task 9; 在此之前【别好心把写入接回来】。
+    // 于是本次的产出只有两样: 控制台上那一屏 (够判"这次标定到底成不成") 和
+    // calib\calib_log.txt 里的一行 (够在控制台滚掉之后回看)。
     static void solveAndApply() {
         if (solveLocked) {
             std::cout << "\n[BIAS] !! 已连续 " << consecutiveFails << " 次判定结果不合理, 已停止求解。\n"
-                      << "       [BIAS] !! 判据只剩一条: 拟合残差 (力) 超阈。检查装夹是否松动"
-                      << " / 力传感器是否受挤压 / 姿态覆盖是否足够。\n"
+                      << "       [BIAS] !! 判据: 模型形式检验 (残差 vs 姿态间复现性) / 质量尺度"
+                      << " / 条件数。查装夹是否松动 / 传感器是否受挤压 / 姿态覆盖是否够"
+                      << " / 采集收尾有没有按 'r'。\n"
                       << "       [BIAS] !! 处理后按 'm' 重新采集 (计数会清零)。" << std::endl;
-            logCalibAttempt("REJECTED locked_out", nullptr);
+            logCalibAttempt("REJECTED locked_out", nullptr, count);
             return;
         }
         if (count < 4) {
@@ -621,7 +686,7 @@ namespace BiasCheck {
                       << "), 建议 6~8 个" << std::endl;
             char outcome[128];
             snprintf(outcome, sizeof(outcome), "REJECTED too_few_poses (count=%d)", count);
-            logCalibAttempt(outcome, nullptr);
+            logCalibAttempt(outcome, nullptr, count);
             return;
         }
         // 姿态数够了就落盘 —— 【在任何拒绝判据之前】: 被拒绝的那几次同样要留下数据,
@@ -635,7 +700,7 @@ namespace BiasCheck {
             std::cout << "[BIAS] 重复姿态对 (" << repeatCount << " 对, = 尺子的自由度): pose 1 与";
             for (int i = 0; i < repeatCount; i++) std::cout << " pose " << repeatIdx[i] + 1;
             std::cout << " —— 姿态间复现性的尺子就位" << std::endl;
-            // 逐对 + 池化后的尺子读数 (@1304 原始通道; 求解侧的 z 镜像不改变 |d| 与方差,
+            // 逐对 + 池化后的尺子读数 (@1304 原始通道; 求解侧喂的是同一份【未镜像】的原始值,
             // 所以这里的数与 fitRaw 算出的是同一个)。
             double pooled[3] = {0.0, 0.0, 0.0};
             for (int a = 0; a < 3; a++) {
@@ -667,11 +732,280 @@ namespace BiasCheck {
         // 采样中途不允许求解
         if (sampling) {
             std::cout << "[BIAS] 正在采样, 稍后再求解" << std::endl;
-            logCalibAttempt("REJECTED sampling_in_progress", nullptr);
+            logCalibAttempt("REJECTED sampling_in_progress", nullptr, count);
             return;
         }
 
-        // ===== 求解基线 (m_cfg / c_cfg): 机械臂【自报】它当前在用的负载 =====
+        // ============================================================
+        // ===== 新模型: 原始 @1304 通道的【全线性】解 (无 psi / 无镜像 / 无基线) =====
+        // ============================================================
+        // spec §2 的力学关系 (不是猜测, 是力学):
+        //     F_i = b_F + A · g_i            A: 3×3, 【9 个元素全部由数据定】
+        //     M_i = b_M + c_s × (A · g_i)     c_s: 3, 质心 (传感器测量系)
+        //     g_i = TcpCalibration::gravitySensorFrameAtYaw(pose_i, 0.0, g)   <- psi 传 0
+        // 未知量 9+3+3+3 = 18, 姿态数 n 给 6n 个方程, 【全部线性】-> 一次求解, 不扫描。
+        // 分解 (m / Q / parity) 由 decompose(A) 给出, 也不是扫出来的 (spec §3)。
+        //
+        // 【喂 biasSix[] 原始值, 不做 z 镜像】
+        //   镜像那一步的由来是【旧模型】只有 psi 一个自由度, 装不下反射, 只好在边界上手工
+        //   把 z 翻过去 (旧路径那段长注释就在下面的 #if 0 里)。新模型的 A 是自由 3×3,
+        //   反射与非正交一起吸收, 手系由 det(A) 的符号【报出来】。再镜像一次等于替数据
+        //   预定了手系 —— 那正是本轮要拆掉的预设 (spec §1 表格 "z 符号 / 边界手工对齐")。
+        //
+        // 【也不做基线差商】
+        //   旧模型解的是"机械臂没补干净的那一份"(真值 − 机械臂配置值), 所以要拿 @1168 自报
+        //   负载当基线才能折回绝对值。新模型解的是【绝对量】: b_F 自己吸收传感器零偏, A 就是
+        //   响应本身, 式子里根本没有"基线"这一项 —— 于是也不再依赖机械臂自报的是什么。
+        static double sp[12][6];
+        static double sf[12][3];
+        static double sm[12][3];
+        for (int i = 0; i < count; i++) {
+            // 姿态转成求解器要的 [x,y,z,rx,ry,rz]: 本模块存的是 [rx,ry,rz,x,y,z]。
+            // ⚠ 这个置换排错的话, 求解器会把【位置】当成角度去算重力, 而解出来的 A 依旧长得
+            //   像一个合法的响应矩阵 (只是错的) —— 又一次"安静地解错"。离线金标那条用例
+            //   (test_payload_calibration.cpp) 用的是逐字相同的重排, 别在这里改顺序。
+            sp[i][0] = pose[i][3]; sp[i][1] = pose[i][4]; sp[i][2] = pose[i][5];
+            sp[i][3] = pose[i][0]; sp[i][4] = pose[i][1]; sp[i][5] = pose[i][2];
+            for (int a = 0; a < 3; a++) {
+                sf[i][a] = biasSix[i][a];         // 力: 原始未镜像
+                sm[i][a] = biasSix[i][3 + a];     // 力矩: 原始未镜像
+            }
+        }
+
+        // 逐姿态【实测】噪声 (与上面的均值同一批样本、同一时间窗采下来的; 不是从残差反推的,
+        // 所以没有"自己量自己"的毛病)。它有两个用途: 报"这个姿态采得稳不稳"; 以及当尺子的
+        // 扣噪项 —— 重复对的差值里要扣掉姿态内噪声那一份, 剩下的才是姿态【间】的复现性。
+        static PayloadCalibration::PoseNoise nz[12];
+        for (int i = 0; i < count; i++) {
+            nz[i].n = samples[i];
+            for (int a = 0; a < 3; a++) {
+                nz[i].varF[a] = varSix[i][a];
+                nz[i].varM[a] = varSix[i][3 + a];
+            }
+        }
+        // 重复姿态对 = 模型形式检验的【尺子】。first 恒为 0 (协议: 摆完所有姿态后回到第 1 个
+        // 姿态再采), second 是登记的那一行; 按 'r' 是【追加】, 所以这里可能有多对。
+        // 一对都没有 -> 尺子没有 -> fitRaw 拒给参数 (不是"没验过也放行")。
+        static PayloadCalibration::RepeatPair reps[8];
+        for (int i = 0; i < repeatCount; i++) {
+            reps[i].first = 0;
+            reps[i].second = repeatIdx[i];
+        }
+
+        PayloadCalibration::RawFit fit;
+        // MODEL_FORM_REQUIRED: 尺子不齐【就拒给参数】。生产路径不得传 I_ACCEPT_UNVERIFIED_
+        // MODEL_FORM 那个令牌 —— 这里手上就有采集现场 (逐姿态方差与重复对都是刚刚采的),
+        // 没有理由接受一个"从未被检验过形式"的模型。令牌只属于离线重放。
+        const bool fitOk = PayloadCalibration::fitRaw(sp, sf, sm, count, fit, nz, reps,
+                                                      repeatCount,
+                                                      PayloadCalibration::MODEL_FORM_REQUIRED);
+
+        // ===== 打印: 所有量都带【互相分得开】的标签 =====
+        // 这一屏是本次唯一的产出 —— 人靠它判"这次标定到底成不成", 所以宁可长, 不可糊:
+        // 质量尺度 / A 的 9 个元素 / 奇异值 / 各向同性比 / parity / 安装旋转 Q / c_s /
+        // 两个 rms / 条件数 / 逐参数不确定度 / 模型形式判决 (拒绝时是哪一种尺子缺了)。
+        // 逐姿态残差的表由 fitRaw 自己打到 stderr (含"最差是哪个姿态"), 不在这里重复。
+        PayloadCalibration::Decomp d;
+        d.m = 0.0; d.parity = 0.0; d.isotropyRatio = 0.0;
+        for (int k = 0; k < 3; k++) d.sv[k] = 0.0;
+        for (int k = 0; k < 9; k++) d.Q[k] = 0.0;
+        // 【无论 fitRaw 通不通过都做分解】: 被拒时 fit.A 里是【未经自检的线性解】(头文件的
+        // 调用契约明文如此), 而 m / 奇异值 / parity 恰恰是判断"这次到底错在哪"最要紧的几个数。
+        // 从前这里写成 `if (fitOk)`, 于是"模型形式被拒"时它们一个都不打印 —— 把最有信息量的
+        // 那几个数藏在了最需要它们的时刻。A 真的是全 0 (线性层就没解出来) 时 decompose 自己
+        // 会失败, 不需要在这里替它挡。
+        const bool decompOk = PayloadCalibration::decompose(fit.A, d);
+        // det(A) —— parity 就是它的符号; 单独算一份是为了把它【照实打出来】给人看。
+        // 只在 fitOk 时有意义 (线性层就失败时 A 是全 0)。
+        const double detA = fit.A[0] * (fit.A[4] * fit.A[8] - fit.A[5] * fit.A[7])
+                          - fit.A[1] * (fit.A[3] * fit.A[8] - fit.A[5] * fit.A[6])
+                          + fit.A[2] * (fit.A[3] * fit.A[7] - fit.A[4] * fit.A[6]);
+
+        std::cout << "\n======================================================" << std::endl;
+        std::cout << "  原始通道 (@1304 SixForceValue) 线性解 — " << count << " 个姿态" << std::endl;
+        std::cout << "======================================================" << std::endl;
+        std::cout << "  模型:  F = b_F + A·g        M = b_M + c_s × (A·g)" << std::endl;
+        std::cout << "         g = 重力在【传感器测量系】的表示 = R_iᵀ(0,0,9.81); 这个模型里【没有 psi】"
+                  << std::endl;
+        std::cout << "  A 的 9 个元素全部自由: 不预设旋转 / 不预设手系 / 不预设偏航;" << std::endl;
+        std::cout << "  无 z 镜像, 无基线差商 (绝对量直接解出) —— 见 solveAndApply 顶上的说明。" << std::endl;
+        std::cout << "------------------------------------------------------" << std::endl;
+        std::cout << "  A (3×3, row-major; 行 = 力分量 x/y/z, 列 = g 的 x/y/z; 量纲 kg):" << std::endl;
+        for (int r = 0; r < 3; r++) {
+            printf("      [ %+.7f   %+.7f   %+.7f ]\n",
+                   fit.A[3 * r], fit.A[3 * r + 1], fit.A[3 * r + 2]);
+        }
+        printf("  b_F (力零偏, N):     (%+.5f, %+.5f, %+.5f)\n", fit.bF[0], fit.bF[1], fit.bF[2]);
+        printf("  b_M (力矩零偏, N·m): (%+.5f, %+.5f, %+.5f)\n", fit.bM[0], fit.bM[1], fit.bM[2]);
+        std::cout << "------------------------------------------------------" << std::endl;
+        if (decompOk) {
+            printf("  质量尺度 m = (σ1σ2σ3)^(1/3)               = %.6f kg\n", d.m);
+            printf("  A 的奇异值 (降序)  σ1/σ2/σ3               = %.6f / %.6f / %.6f  (kg)\n",
+                   d.sv[0], d.sv[1], d.sv[2]);
+            printf("  各向同性比 σ1/σ3                          = %.5f\n", d.isotropyRatio);
+            std::cout << "      ↑ 【报告量, 不作门限】: A 没有任何正交约束, 非正交是"
+                      << "\"这只传感器的响应长这样\"" << std::endl;
+            std::cout << "        的测量结果 (物理属性), 不是模型形式错的证据。" << std::endl;
+            printf("  parity = sign(det A)                      = %+.0f   (det A = %+.7f)\n",
+                   d.parity, detA);
+            std::cout << "      ↑ 【手系由数据给出】: +1 = 无反射; -1 = 含一次反射 (实机这批就是 -1)。"
+                      << std::endl;
+            printf("  安装旋转 Q = S·A/m  (S = diag(1,1,parity); det Q = +1, 行/列同 A):\n");
+            std::cout << "      ↑ 它【恰好】是旋转矩阵只在 A 正交 (各向同性比 = 1) 时成立; 一般地它是"
+                      << "含手系的安装姿态," << std::endl;
+            std::cout << "        非正交的那一部分照实留在 Q 里 (与 A 的各向同性比是同一件事的两面)。"
+                      << std::endl;
+            for (int r = 0; r < 3; r++) {
+                printf("      [ %+.7f   %+.7f   %+.7f ]\n",
+                       d.Q[3 * r], d.Q[3 * r + 1], d.Q[3 * r + 2]);
+            }
+        } else {
+            std::cout << "  【decompose 没做成 (A 奇异 / 线性层就没解出来)】—— m、奇异值、各向同性比、"
+                      << std::endl;
+            std::cout << "  parity、安装旋转 Q 【一律无从给出】。这不是 0, 是【没有】。" << std::endl;
+        }
+        printf("  c_s (质心, 【传感器测量系】)              = (%+.3f, %+.3f, %+.3f) mm\n",
+               fit.cS[0] * 1000.0, fit.cS[1] * 1000.0, fit.cS[2] * 1000.0);
+        printf("      |c_s|                                = %.3f mm\n",
+               sqrt(fit.cS[0] * fit.cS[0] + fit.cS[1] * fit.cS[1] + fit.cS[2] * fit.cS[2]) * 1000.0);
+        std::cout << "      ↑ 【原点 = 传感器的测量原点】, 不是法兰面、不是整条工具链 —— 见下面 ★。"
+                  << std::endl;
+        printf("  拟合残差  rmsForceN                       = %.6f N\n", fit.rmsForceN);
+        printf("  拟合残差  rmsMomentNm                     = %.6f N·m\n", fit.rmsMomentNm);
+        printf("  条件数    cond (力通道设计矩阵 σmax/σmin) = %.4f\n", fit.cond);
+        std::cout << "      ↑ 姿态激发够不够: 数值大 = 某几个 A 的分量没被姿态覆盖好,"
+                  << " 参数定不下来。" << std::endl;
+        {
+            double sigA = 0.0, sigB = 0.0, sigC = 0.0, sigM = 0.0;
+            for (int k = 0; k < 9; k++) if (fit.paramSigma[k] > sigA) sigA = fit.paramSigma[k];
+            for (int k = 0; k < 3; k++) {
+                if (fit.paramSigma[9 + k]  > sigB) sigB = fit.paramSigma[9 + k];
+                if (fit.paramSigma[12 + k] > sigC) sigC = fit.paramSigma[12 + k];
+                if (fit.paramSigma[15 + k] > sigM) sigM = fit.paramSigma[15 + k];
+            }
+            printf("  参数 1σ 不确定度 (18 个; 量纲随参数):\n");
+            printf("      A   最大 %.3g  逐元素 %.3g %.3g %.3g / %.3g %.3g %.3g / %.3g %.3g %.3g\n",
+                   sigA,
+                   fit.paramSigma[0], fit.paramSigma[1], fit.paramSigma[2],
+                   fit.paramSigma[3], fit.paramSigma[4], fit.paramSigma[5],
+                   fit.paramSigma[6], fit.paramSigma[7], fit.paramSigma[8]);
+            printf("      b_F 最大 %.3g N    c_s 最大 %.3g (= %.3g mm)    b_M 最大 %.3g N·m\n",
+                   sigB, sigC, sigC * 1000.0, sigM);
+            std::cout << "      ↑ 【不参与任何接受/拒绝判据】: 它来自拟合残差, 拿它当门限就是自指"
+                      << " (模型形式错 -> 残差涨 -> 门限跟着松)。" << std::endl;
+        }
+        // 姿态级尺子 (与 fitRaw 内部同一个口径: 三通道 σ_rep² 的均值再开方) —— 判决的宽窄
+        // 正比于它, 所以它必须与判决一起打印, 否则"离门限多远"无从判读。
+        const double yardF = (fit.repeatPairCount > 0)
+            ? sqrt((fit.repeatSigmaF[0] + fit.repeatSigmaF[1] + fit.repeatSigmaF[2]) / 3.0) : 0.0;
+        const double yardM = (fit.repeatPairCount > 0)
+            ? sqrt((fit.repeatSigmaM[0] + fit.repeatSigmaM[1] + fit.repeatSigmaM[2]) / 3.0) : 0.0;
+
+        std::cout << "------------------------------------------------------" << std::endl;
+        printf("  模型形式检验 (fitRaw 的判决): %s\n", fitOk ? "通过" : "【拒绝】");
+        printf("      尺子状态 modelFormStatus = %s\n",
+               modelFormStatusName(fit.modelFormStatus));
+        printf("      重复姿态对 (尺子的自由度) = %d 对;  逐姿态噪声来自采集时的样本方差\n",
+               fit.repeatPairCount);
+        if (fit.modelFormChecked) {
+            printf("      力通道:   残差÷尺子 χ²/dof = %.4g  <  门限 %.4g   (dof=%d, 尺子 %.4g N)\n",
+                   fit.chi2RepForceRatio, fit.chi2RepForceLimit, fit.chi2DofForce, yardF);
+            printf("      力矩通道: 失拟统计量     = %.4g  <  门限 %.4g   (dof=%d, 尺子 %.4g N·m)\n",
+                   fit.lackOfFitMomentRatio, fit.lackOfFitMomentLimit, fit.lackOfFitMomentDof, yardM);
+            printf("      对照 (姿态内噪声, 【只报告不判】): 力 %.4g N / 力矩 %.4g N·m;"
+                   " χ²/dof = %.4g / %.4g\n",
+                   fit.noiseForceN, fit.noiseMomentNm, fit.chi2ForceRatio, fit.chi2MomentRatio);
+            std::cout << "      ↑ 残差若明显大于姿态内噪声、却与【姿态间复现性】相符, 那是"
+                      << "采集现场的复现性差, 不是模型错。" << std::endl;
+        } else {
+            // 拒绝时必须说清【是哪一种】—— "没验过"与"验了没过"是两回事, 处置也完全不同。
+            if (fit.modelFormStatus != PayloadCalibration::MODEL_FORM_OK) {
+                printf("      → 拒因: 【尺子不齐】(%s) —— 模型形式【没有被检验】, 所以不给参数。",
+                       modelFormStatusName(fit.modelFormStatus));
+                std::cout << std::endl;
+                std::cout << "        逐种处置: 缺重复对 -> 回到 Pose 1 再按 'r'; 缺噪声 -> 采样笔数"
+                          << "太少; 通道冻住/有洞 -> 查传感器读数;" << std::endl;
+                std::cout << "        自由度不足 -> 多摆几个姿态 (力通道 12 个未知, 3n−12 要 > 0)。"
+                          << std::endl;
+            } else {
+                printf("      → 拒因: 尺子齐备, 但力通道 χ²/dof = %.4g 超过门限 %.4g"
+                       " (残差 %.4g N / 尺子 %.4g N)\n",
+                       fit.chi2RepForceRatio, fit.chi2RepForceLimit, fit.rmsForceN, yardF);
+                printf("        力矩通道失拟 = %.4g 对门限 %.4g (尺子 %.4g N·m)\n",
+                       fit.lackOfFitMomentRatio, fit.lackOfFitMomentLimit, yardM);
+                std::cout << "        先看上面 stderr 的逐姿态残差表: 【只有一两个姿态高】-> 重采那几个;"
+                          << " 个个都高 -> 模型形式错。" << std::endl;
+                std::cout << "        (若这两条的差值也不大, 那拒绝来自 fitRaw 的其它自检 ——"
+                          << " 质量尺度越界 / cond 过大 / 设计矩阵秩亏, 具体见上面的 [Payload] 行。)"
+                          << std::endl;
+            }
+        }
+        if (!fitOk) {
+            std::cout << "      注: 上面的 A / b_F / b_M / c_s 与由 A 分解出的 m / 奇异值 / parity / Q"
+                      << " 仍是【线性解】——" << std::endl;
+            std::cout << "          被拒的是它【通不通得过自检】, 不是它没解出来。这些数照看,"
+                      << " 但【不得】据此下任何结论;" << std::endl;
+            std::cout << "          线性层本身失败时 (姿态数不足 / 秩亏) 这些字段是全 0, 不携带信息。"
+                      << std::endl;
+        }
+
+        // ===== 到此为止: 本次【什么都不应用】 =====
+        std::cout << "------------------------------------------------------" << std::endl;
+        std::cout << "  ★ 以上全部是【传感器测量原点以下】的量 —— 不是整条工具链。" << std::endl;
+        std::cout << "    m / A / c_s 描述的是传感器【测量原点向下】那一段负载 (传感器内部质量分布"
+                  << " + 笔夹 + 笔);" << std::endl;
+        std::cout << "    机械臂的负载模型 (EnableRobot 的 load/center) 描述的是【挂在它法兰上的"
+                  << "整条链】。" << std::endl;
+        std::cout << "    两者原点不同, 换算要走过 c_s 的原点在哪 + 法兰→测量系那一步 ——"
+                  << " 这一步【未定】" << std::endl;
+        std::cout << "    (spec §6b 末: 标定 c_s = 54.55 mm 与解析几何反推的 75.8 mm 对不上,"
+                  << " 而传感器总高只有 31.5 mm)。" << std::endl;
+        std::cout << "  ★ 本次【什么也没应用】: 不写本地补偿 (setMassCom)、不写 payload_calib.json /"
+                  << " force_calib.json、不发 EnableRobot / PayLoad / LoadSwitch。" << std::endl;
+        std::cout << "    【别好心把它们接回来】—— 接回来就是把一个原点未定的量当成法兰系负载"
+                  << "下发, 那会改机械臂的补偿并让它动 (2026-09-18 1.5 kg 那次突动的同一类)。"
+                  << std::endl;
+        std::cout << "    下发路径的开通条件在 plan Task 9; 在那之前这一屏就是全部产出。"
+                  << std::endl;
+
+        // 这批数据【仍然有效】, 所以【不】动 dataUnderCurrentPayload: 从前把它置 false 是因为
+        // 求解会改本地补偿, 同一份数据在新补偿下不再可比; 现在没有任何东西被改, 复验照旧可用。
+        std::cout << "  → 复验: 直接按 'm' 即可 (本次没有改动任何生效值, 已采数据不作废)"
+                  << std::endl;
+        std::cout << std::endl;
+
+        // 连续失败计数与上锁照旧: 拒绝的理由 (形式不匹配 / 尺子不齐 / 激发不足) 每一条都是
+        // "回去重采", 反复按 's' 不会变好; 按 'm' 重新采集会清零 (见 reset)。
+        if (!fitOk) {
+            consecutiveFails++;
+            if (consecutiveFails >= Config::CALIB_MAX_CONSECUTIVE_FAILS) {
+                solveLocked = true;
+                std::cout << "  [BIAS] !! 已连续 " << consecutiveFails << " 次拒绝, 停止求解。"
+                          << " 按 'm' 重新采集 (计数清零)。" << std::endl << std::endl;
+            }
+        } else {
+            consecutiveFails = 0;
+        }
+
+        // outcome 用 PRINTED_ONLY 开头: 这一行【不代表任何东西被应用了】。
+        // (从前这里是 DISPATCHED —— 那时确实写了两处文件与本地补偿; 现在一个字都没写。)
+        char outcome[160];
+        snprintf(outcome, sizeof(outcome), "PRINTED_ONLY %s modelform=%s rmsF=%.4f",
+                 fitOk ? "fit_ok" : "fit_rejected",
+                 modelFormStatusName(fit.modelFormStatus), fit.rmsForceN);
+        logCalibAttempt(outcome, &fit, count);
+
+#if 0  // ================= 旧模型 (psi 扫描 + 残余量 dm/dp) —— 已停用 =================
+       // 【保留不删, 待 Task 11 统一移除】。停用理由 (两行版的 spec §1): 这个模型预设了
+       // "传感器安装 = 绕 z 的纯偏航 psi" + 边界上手工对齐的 z 符号, 而 2026-09-19 的实机
+       // 数据把这两个预设都证伪了 —— 它只好把质量符号翻过去 (解出 dm = -0.417 kg, 被非物理
+       // 门限拒掉); 更要命的是【它安静地错】: 形式错 0.018 N, 标量残差报不出来。
+       // 新模型 (上面一段) 把 A 放开成自由 3×3, 这两个预设都不需要了。
+       //
+       // 注意: 这一段里的 logCalibAttempt 调用已按新签名改成 nullptr (不再传 Result) ——
+       // 重新启用时要把旧模型那几列接回去, 否则日志里只会留下一排 "-"。
+       //
+       // ===== 求解基线 (m_cfg / c_cfg): 机械臂【自报】它当前在用的负载 =====
         // 求解器测的是"真值 − 基线"的差 (dp = m_true·c_true − m_cfg·c_cfg), 所以要把 dp 折回
         // 【绝对】质心, 就必须知道基线是谁。机械臂自报的值 (30004 帧 @1168) 才是权威:
         //   · 它说的是"机械臂实际在用什么", 不是"我们以为它该用什么" —— 实测过两者不一致
@@ -748,7 +1082,7 @@ namespace BiasCheck {
             char outcome[128];
             snprintf(outcome, sizeof(outcome),
                      "REJECTED degenerate_or_nonphysical (count=%d)", count);
-            logCalibAttempt(outcome, nullptr);
+            logCalibAttempt(outcome, nullptr, count);
             return;
         }
 
@@ -822,7 +1156,7 @@ namespace BiasCheck {
             // 任何东西动过机械臂), 内存生效值也从头到尾没改过。
             char outcome[128];
             snprintf(outcome, sizeof(outcome), "REJECTED rmsF=%.4f", r.rmsForceN);
-            logCalibAttempt(outcome, &r);
+            logCalibAttempt(outcome, nullptr, count);
             return;
         }
         consecutiveFails = 0;   // 成功一次即清零
@@ -924,7 +1258,8 @@ namespace BiasCheck {
         char outcome[128];
         snprintf(outcome, sizeof(outcome), "DISPATCHED%s",
                  calibWritesOk ? "" : " write_failed");
-        logCalibAttempt(outcome, &r);
+        logCalibAttempt(outcome, nullptr, count);
+#endif  // ============== 旧模型 (psi 扫描 + 残余量 dm/dp) —— 已停用 ==============
     }
 }
 
@@ -1386,7 +1721,8 @@ void keyboard(unsigned char key, int, int) {
         return;
     }
 
-    // 's' in BiasCheck mode: 求解残余量 → 写本地补偿 (force_calib.json)
+    // 's' in BiasCheck mode: 拟合原始 @1304 通道并【全部打印】—— 不写补偿 / 不写 json / 不下发
+    // (为什么只打印不应用: 见 BiasCheck::solveAndApply 顶上的说明, 原点未定)
     if ((key == 's' || key == 'S') && BiasCheck::mode) {
         BiasCheck::solveAndApply();
         return;
