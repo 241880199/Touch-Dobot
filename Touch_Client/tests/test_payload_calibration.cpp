@@ -1507,19 +1507,23 @@ static void test_decompose_rejects_singular_A() {
 //   (fitRaw 的线性解 + decompose 的物理量)。
 //
 // 【为什么需要它】: 本文件其余每一条用例的数据都是【合成】的 —— 生成器与估计器虽然刻意不
-//   共用代码, 却终究出自同一套约定。calib_poses.txt 是运行期产物 (main.cpp 的 BiasCheck
-//   落盘), 它【早于】本轮的模型形式协议存在 (没有重复姿态对, 也没有逐姿态方差), 是手上
-//   唯一一份"我们没有参与制造"的数据。把它拟合出的 12 + 6 个参数钉死, 是"实现真的在解
-//   实机上那件事"的硬证据。
+//   共用代码, 却终究出自同一套约定。夹具 fixtures/calib_poses_2026-09-19.txt 是实机采集的
+//   原件 (main.cpp 的 BiasCheck 落盘后【冻结进仓库】的只读副本), 它【早于】本轮的模型形式
+//   协议存在 (没有重复姿态对, 也没有逐姿态方差), 是手上唯一一份"我们没有参与制造"的数据。
+//   把它拟合出的 12 + 6 个参数钉死, 是"实现真的在解实机上那件事"的硬证据。
 //
 // ⚠ 【这些数是金标, 不是快照】: 它们由控制器用 Python 独立算出、经两轮独立复算确认
 //   (task-2-brief 的表)。**不得为了迁就将来某次改动而修改** —— 对不上就是实现回归了,
 //   要查的是实现, 不是这张表。谁在这里改数, 这条用例就死了 (从此对什么都不敏感)。
 //   每段尾注是控制器的表: 那边给 5~6 位小数, 这里是同一批数据的全精度值 (逐位核对过)。
 //
-// ⚠ 【文件是运行期产物, 未纳入版本控制】: 不在 => SKIP (不算失败), 但【必须把"跳过了"
-//   打出来】, 否则一次绿色会被误读成"这条覆盖率跑过了"。在、但姿态数不是 7 => 那是另一次
-//   采集, 金标对它不成立: 【大声失败】, 而不是拿新数据去对旧金标 (那会退化成"什么都能过")。
+// ⚠ 【夹具是【已入库】的只读副本, 不是运行期产物】: 它在 tests/fixtures/ 下, 随仓库分发,
+//   任何一次干净检出上都【必然存在】—— 所以这条用例【不需要】SKIP 就能跑, 真跳过了就是
+//   检出坏了 (文件缺失), 不是"这台机器上没采过"。别改回去读 calib/: 那是运行期目录, 会被
+//   下一次采集覆盖或整个清掉, 守卫的绿/红就成了"这台机器上碰巧有没有那个文件"的函数 ——
+//   那种绿不携带任何信息 (本项目已被这类绿色的空跑咬过多次)。
+//   文件在、但姿态数不是 7 => 那是另一次采集, 金标对它不成立: 【大声失败】, 而不是拿新数据
+//   去对旧金标 (那会退化成"什么都能过")。
 //
 // 列布局 (文件头自己写着, 已逐行核对, 18 列):
 //   rx,ry,rz,x,y,z,F576*,M576*,F1304*,M1304*
@@ -1529,8 +1533,9 @@ static void test_decompose_rejects_singular_A() {
 //   main.cpp 只在喂给实时求解器的那一份拷贝上做镜像; 落盘与离线分析用的都是没动过的原件。
 // =====================================================================================
 
-// 金标只对 2026-09-19 12:38:19 那次采集 (7 姿态) 成立。
+// 金标只对 2026-09-19 12:38:19 那次采集 (7 姿态) 成立 —— 就是下面这份冻结夹具里的那一批。
 static const int REF_POSES = 7;
+static const char* REF_FIXTURE = "calib_poses_2026-09-19.txt";
 
 // 参考值 (全精度; 括号里是控制器表上的 5~6 位小数版本)
 static const double REF_M     = 0.4223567251;          // 0.422357 kg
@@ -1584,12 +1589,13 @@ static void repackPoseRow(const double src[6], double dst[6]) {
 static void test_replay_real_capture() {
     std::cout << "  replay_real_capture... ";
 
-    // 候选路径: 本 exe 从 tests\ 跑 (构建脚本就会 cd 到那里), 或从 Touch_Client\ / 仓库根跑。
+    // 候选路径: 夹具【已入库】, 本 exe 从 tests\ 跑 (构建脚本就会 cd 到那里), 或从
+    // Touch_Client\ / 仓库根跑。刻意【不列 calib/ 下的运行期文件】—— 见上面的说明。
     static const char* CAND[] = {
-        "calib/calib_poses.txt",
-        "../calib/calib_poses.txt",
-        "Touch_Client/calib/calib_poses.txt",
-        "../../Touch_Client/calib/calib_poses.txt"
+        "fixtures/calib_poses_2026-09-19.txt",
+        "tests/fixtures/calib_poses_2026-09-19.txt",
+        "Touch_Client/tests/fixtures/calib_poses_2026-09-19.txt",
+        "../../Touch_Client/tests/fixtures/calib_poses_2026-09-19.txt"
     };
     FILE* fp = nullptr;
     const char* used = nullptr;
@@ -1598,11 +1604,11 @@ static void test_replay_real_capture() {
         if (fp) used = CAND[i];
     }
     if (!fp) {
-        // 运行期产物: 这台机器上没有那次采集, 不是失败。
-        // 【但"跳过了"必须打出来】—— 绿不等于这条覆盖率真跑过。
-        std::cout << "SKIP (四个候选路径都没有 calib_poses.txt; 它是运行期产物, 允许不存在。"
-                     "本次【没有】校验实机拟合 —— 想要这条覆盖率, 先在实机上采一次,"
-                     " 或把那份夹具放回来) " << std::endl;
+        // 夹具随仓库分发, 本该【必然存在】—— 四个候选路径都找不到 = 这次检出是坏的。
+        // 【但"跳过了"必须打出来】—— 否则一次绿色会被误读成"这条覆盖率跑过了"。
+        std::cout << "SKIP (四个候选路径都没有 " << REF_FIXTURE << " —— 它是【已入库】的"
+                     "只读副本, 缺了说明这次检出是坏的 (不是这台机器没采过)。"
+                     "本次【没有】校验实机拟合。) " << std::endl;
         g_passed++;
         return;
     }
@@ -1643,8 +1649,9 @@ static void test_replay_real_capture() {
     if (n != REF_POSES) {
         std::cout << "FAIL: 文件里有 " << n << " 个姿态, 而金标只对 " << REF_POSES
                   << " 个姿态那一批 (2026-09-19 12:38:19) 成立。" << std::endl
-                  << "      这是【另一次采集】, 不是实现回归 —— 要么把那份夹具放回来,"
-                     " 要么【显式】重新导出金标并在报告里说明; 不要就地改数。" << std::endl;
+                  << "      这是【另一次采集】, 不是实现回归 —— 要么换回那份冻结夹具,"
+                     " 要么【新增】一份夹具并【显式】重新导出金标、在报告里说明来由;"
+                     " 不要就地改数。" << std::endl;
         g_failed++;
         return;
     }
@@ -1759,7 +1766,8 @@ int main() {
     test_rawfit_rejects_too_few_poses();
     test_rawfit_rejects_degenerate_poses();
     test_rawfit_rejects_bad_mass_scale();
-    // ★ 实机回归: 7 个真实姿态的采集文件重放, 逐项对金标 (文件不在则 SKIP)。
+    // ★ 实机回归: 7 个真实姿态的【冻结夹具】重放, 逐项对金标 (夹具已入库, 本该必然跑;
+    //   真 SKIP 了 = 检出缺文件)。
     // 【放在最后】: 它会把 [Payload] 的逐姿态残差表与"接受未检验模型形式"的告警打到
     // stderr, 排在最后免得那些输出插在别的用例中间。
     test_replay_real_capture();
