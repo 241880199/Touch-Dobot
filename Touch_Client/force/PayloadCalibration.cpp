@@ -801,9 +801,20 @@ namespace PayloadCalibration {
         double AtAcopy[144];
         for (int i = 0; i < PF * PF; i++) AtAcopy[i] = AtA[i];
         double lamMin = 0.0, lamMax = 0.0;
-        if (!symExtremes(AtAcopy, PF, lamMin, lamMax)) return false;   // λ ≤ 0 -> 秩亏
+        // 【这两条从前是静默返回的】—— 那时 modelFormStatus 还停在 rawFitZero 的默认值
+        // NO_DOF 上, 调用方据此把真因说成"自由度不足", 而真正卡住的是设计矩阵本身。
+        if (!symExtremes(AtAcopy, PF, lamMin, lamMax)) {   // λ ≤ 0 -> 秩亏
+            fprintf(stderr, "[Payload] 自检拒绝: 力通道设计矩阵秩亏 (最小特征值 <= 0) ——"
+                            " 姿态的【朝向】铺得不够开, 多摆几个朝向不同的姿态再试。\n");
+            return false;
+        }
         const double condJ = sqrt(lamMax / lamMin);
-        if (!(condJ < RAW_SINGULAR_REL)) return false;                 // 数值上奇异
+        if (!(condJ < RAW_SINGULAR_REL)) {                 // 数值上奇异
+            fprintf(stderr, "[Payload] 自检拒绝: 力通道设计矩阵数值奇异 (cond=%.3g >= %.3g)"
+                            " —— 姿态的【朝向】铺得不够开, 多摆几个朝向不同的姿态再试。\n",
+                    condJ, RAW_SINGULAR_REL);
+            return false;
+        }
 
         double xF[12], CF[144];
         if (!solveNormal(AtA, Atb, PF, xF, CF)) return false;
@@ -865,8 +876,20 @@ namespace PayloadCalibration {
             double MtMcopy[36];
             for (int i = 0; i < PM * PM; i++) MtMcopy[i] = MtM[i];
             double lo = 0.0, hi = 0.0;
-            if (!symExtremes(MtMcopy, PM, lo, hi)) return false;
-            if (!(sqrt(hi / lo) < RAW_SINGULAR_REL)) return false;
+            // 同上: 这两条从前也是静默的, 调用方读到的仍是默认的 NO_DOF。
+            if (!symExtremes(MtMcopy, PM, lo, hi)) {
+                fprintf(stderr, "[Payload] 自检拒绝: 力矩通道设计矩阵秩亏 (最小特征值 <= 0)"
+                                " —— 姿态的【朝向】铺得不够开, 多摆几个朝向不同的姿态"
+                                "再试。\n");
+                return false;
+            }
+            if (!(sqrt(hi / lo) < RAW_SINGULAR_REL)) {
+                fprintf(stderr, "[Payload] 自检拒绝: 力矩通道设计矩阵数值奇异"
+                                " (cond=%.3g >= %.3g) —— 姿态的【朝向】铺得不够开,"
+                                " 多摆几个朝向不同的姿态再试。\n",
+                        sqrt(hi / lo), RAW_SINGULAR_REL);
+                return false;
+            }
         }
         double xM[6], CM[36];
         if (!solveNormal(MtM, Mtb, PM, xM, CM)) return false;

@@ -569,6 +569,11 @@ namespace BiasCheck {
                 }
             }
         }
+        // 【读完必须重新定位再写】: C99 7.19.5.3 不允许 update stream 上"读紧接写"而中间
+        // 不隔着 fflush 或定位调用 —— 上面这段扫描 (提前 break 时停在文件中间) 正是本轮
+        // 改动新引入的读, 而紧接着就是 fprintf。实测无碍 ("a+" 在两种 CRT 上都把写落在
+        // EOF), 但那个前提没必要留着; fseek 归位是免费的。
+        fseek(f, 0, SEEK_END);
         if (needHeader) {
             fprintf(f, "# 负载标定尝试记录 (每次按 's' 一行)\n");
             // 前 9 列 = 历史格式 (列号未动); 第 10 列起是追加的原始通道列 (下一行的说明)。
@@ -726,8 +731,8 @@ namespace BiasCheck {
         // 意思是"已经连续被拒这么多次了"。真正的上锁语义属于【被停用的应用路径】(Task 11 处理)。
         if (solveLocked) {
             std::cout << "\n[BIAS] 提示: 已连续 " << consecutiveFails << " 次被拒 ——"
-                      << " 仍照常求解并打印全部诊断 (本模式【不写任何东西】, 不存在"
-                      << " \"写坏\" 的风险)。\n"
+                      << " 仍照常求解并打印全部诊断 (不写补偿 / 不写 json / 不下发机械臂,"
+                      << " 不存在 \"写坏\" 的风险)。\n"
                       << "       反复按 's' 不会变好; 按 'm' 重新采集会把计数清零。" << std::endl;
         }
         if (count < 4) {
@@ -970,10 +975,14 @@ namespace BiasCheck {
             // 拒绝时必须说清【是哪一种】—— "没验过"与"验了没过"是两回事, 处置也完全不同。
             if (fit.modelFormStatus != PayloadCalibration::MODEL_FORM_OK) {
                 // ⚠ 这一行解释的是 modelFormStatus, 而它【不一定是最先卡住的那一步】:
-                // fitRaw 因【非】模型形式的原因被拒时 (A 奇异 / cond 过大 / 质量尺度越界) 会在
-                // 动 modelFormStatus 之前就返回, 于是这里读到的仍是默认值 NO_DOF —— 而真因
-                // 已经由库打到 stderr 的 [Payload] 那一行上。这里【不复述库里的常量】(复制一份
-                // 判据就会与库各说各话), 只把人指向那一行。
+                // 这个状态由 fitRawLinear 判定并赋值, 而 fitRawLinear 是 fitRaw 的【第一步】
+                // (@1066) —— 所以 fitRaw 后面那几道【非模型形式的】自检 (A 奇异 @1069 /
+                // cond @1079 / 质量尺度 @1095) 拒绝时, 这里读到的仍是 fitRawLinear 当时判的
+                // 那个值, 通常就是 MODEL_FORM_OK —— 那种情形【进不了本分支】, 走的是下面的
+                // else。读到的状态与"真正卡住的那一步"不符的其余情形, 是尺子一侧的判决先
+                // 落了地 (DEAD_CHANNEL / NOISE_HOLES / NO_REPEAT), 而不是这里的默认值。
+                // 无论哪一种, 真因都已由库打到 stderr 的 [Payload] 那一行上。这里【不复述库
+                // 里的常量】(复制一份判据就会与库各说各话), 只把人指向那一行。
                 std::cout << "      (若上面有 [Payload] 自检拒绝行, 【以那一行为准】—— 本行解释的"
                           << "只是 modelFormStatus。)" << std::endl;
                 printf("      → 拒因: 【尺子不齐】(%s) —— 模型形式【没有被检验】, 所以不给参数。",
