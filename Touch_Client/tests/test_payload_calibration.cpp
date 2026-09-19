@@ -1604,12 +1604,13 @@ static void test_replay_real_capture() {
         if (fp) used = CAND[i];
     }
     if (!fp) {
-        // 夹具随仓库分发, 本该【必然存在】—— 四个候选路径都找不到 = 这次检出是坏的。
-        // 【但"跳过了"必须打出来】—— 否则一次绿色会被误读成"这条覆盖率跑过了"。
-        std::cout << "SKIP (四个候选路径都没有 " << REF_FIXTURE << " —— 它是【已入库】的"
-                     "只读副本, 缺了说明这次检出是坏的 (不是这台机器没采过)。"
-                     "本次【没有】校验实机拟合。) " << std::endl;
-        g_passed++;
+        // 夹具随仓库分发, 本该【必然存在】—— 四个候选路径都找不到 = 这次检出是坏的
+        // (不是"这台机器没采过")。
+        // 【记失败, 不是跳过】: 夹具入库后 SKIP 的理由已经不存在了, 再记 pass 就成了一次
+        // 什么都没验的绿跑 —— 那正是本项目被咬过多次的"不携带任何信息的绿色"。
+        std::cout << "FAIL: 四个候选路径都没有 " << REF_FIXTURE << " —— 它是【已入库】的只读"
+                     "副本, 缺了说明这次检出是坏的。本次【没有】校验实机拟合。" << std::endl;
+        g_failed++;
         return;
     }
     std::cout << "[" << used << "] ";
@@ -1678,7 +1679,7 @@ static void test_replay_real_capture() {
     // ---- 金标: 12 + 6 个参数与派生的物理量, 逐项对 ----
     int bad = 0;
     for (int i = 0; i < 9; i++) {
-        char what[16];
+        char what[24];
         snprintf(what, sizeof(what), "A[%d][%d]", i / 3, i % 3);
         nearRef(bad, what, fit.A[i], REF_A[i], RTOL * REF_A_SCALE);
     }
@@ -1698,7 +1699,7 @@ static void test_replay_real_capture() {
     PayloadCalibration::Decomp d;
     CHECK(PayloadCalibration::decompose(fit.A, d));
     for (int k = 0; k < 3; k++) {
-        char what[16];
+        char what[24];
         snprintf(what, sizeof(what), "sv[%d]", k);
         nearRef(bad, what, d.sv[k], REF_SV[k], RTOL * fabs(REF_SV[k]));
     }
