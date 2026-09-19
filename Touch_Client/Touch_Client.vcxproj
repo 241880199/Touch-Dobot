@@ -137,6 +137,8 @@
     <ClCompile Include="force\ForceLogger.cpp" />
     <ClInclude Include="force\PayloadCalibration.h" />
     <ClCompile Include="force\PayloadCalibration.cpp" />
+    <ClInclude Include="force\InertiaIdentification.h" />
+    <ClCompile Include="force\InertiaIdentification.cpp" />
     <!-- calibration -->
     <ClInclude Include="calibration\CalibrationSolver.h" />
     <ClCompile Include="calibration\CalibrationSolver.cpp" />
