@@ -1677,9 +1677,14 @@ void RelayCore::pollForce() {
         for (int i = 0; i < 3; i++) app.forceData.hapticOut[i] = 0.0;
     }
 
-    // Run calibration state machine if active (uses raw data directly)
+    // Run calibration state machine if active.
+    // ⚠ 喂的是 @1304 (sixForceRaw) —— 调零定的零偏是【全量模型那个通道】的零偏
+    //   (ForceCompensation::step 现在补偿 @1304, 见 Task 6)。继续喂 @576 会让 TARE
+    //   平均出另一路量的零偏, 而两路的零偏不是一回事 (12:38 那份夹具上逐轴均值差
+    //   19.8 / 1.6 / 1.7 N, 见 tests/fixtures/calib_poses_2026-09-19.txt):
+    //   扣错以后读数依旧是个 N, 不报错。
     if (ForceCalibration::isRunning()) {
-        ForceCalibration::update(0.033, app.forceData.raw, pose);
+        ForceCalibration::update(0.033, app.forceData.sixForceRaw, pose);
         if (ForceCalibration::isDone()) {
             // Apply results handled in idle() / keyboard callback
         }

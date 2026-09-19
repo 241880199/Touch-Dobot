@@ -1050,8 +1050,11 @@ namespace BiasCheck {
     // 's': 用已采数据【拟合原始力通道】并把结果全部打印出来 —— 【随后什么也不做】。
     //
     // ===== 2026-09-19 起这条路的性质变了 (Task 4) =====
-    // 从前的 's' 会: 求解残余量 → setMassCom 写本地补偿 → 写 force_calib.json 与
+    // 从前的 's' 会: 求解残余量 → 写本地补偿的本会话值 → 写 force_calib.json 与
     // payload_calib.json → (下次启动的连接时序里) 下发机械臂。现在【一个字都不写】。
+    // (那个"写本地补偿本会话值"的入口 setMassCom 已在 Task 6 随残余模型一并删除 ——
+    //  本地补偿现在是全量模型 compensated = sixForceRaw(@1304) − b_F − A·g, 它的参数由
+    //  force_calib.json 的 version 3 格式提供; 本条路径仍然一个字节都不写。)
     // 理由不是"暂时关掉", 而是【两个量的原点根本不同】:
     //   · 这里解出的 m / A / c_s 描述的是【传感器测量原点以下】那一段负载 (传感器内部
     //     质量分布 + 笔夹 + 笔) —— 数据能定的也只有这一段, 因为传感器就装在中间;
@@ -1517,7 +1520,7 @@ namespace BiasCheck {
                   << " 这一步【未定】" << std::endl;
         diagOut() << "    (spec §6b 末: 标定 c_s = 54.55 mm 与解析几何反推的 75.8 mm 对不上,"
                   << " 而传感器总高只有 31.5 mm)。" << std::endl;
-        diagOut() << "  ★ 本次【什么也没应用】: 不写本地补偿 (setMassCom)、不写 payload_calib.json /"
+        diagOut() << "  ★ 本次【什么也没应用】: 不写本地补偿、不写 payload_calib.json /"
                   << " force_calib.json、不发 EnableRobot / PayLoad / LoadSwitch。" << std::endl;
         diagOut() << "    【别好心把它们接回来】—— 接回来就是把一个原点未定的量当成法兰系负载"
                   << "下发, 那会改机械臂的补偿并让它动 (2026-09-18 1.5 kg 那次突动的同一类)。"
@@ -2648,9 +2651,11 @@ int main(int argc, char* argv[]) {
     } else {
         // 末端负载参数必须在使能之前加载 —— EnableRobot 要用它 (见 PayloadCalibration)
         if (PayloadCalibration::load(CalibStore::fileFor("payload_calib.json"))) {
-            // ψ 必须在这里装上 —— 本地补偿 (ForceCompensation::step) 与负载求解共用
-            // TcpCalibration::gravitySensorFrame 这一个重力模型, 装错角度等于把重力矢量
-            // 整个转歪。放在负载加载之后、任何一帧力处理之前。
+            // ⚠ 2026-09-19 (Task 6) 起, 本地补偿【不再读 ψ】: 全量模型走
+            // TcpCalibration::gravitySensorFrameAtYaw(pose, 0.0, ·), 安装旋转由自由 3×3 的
+            // A 吸收。这里装上的 ψ 只剩一个消费者 —— 已停用的 psi 扫描求解路径
+            // (PayloadCalibration::solve, 见 main.cpp 的 #if 0 块) 与夹具回归用例。
+            // 仍然装上: 它是 payload_calib.json 的一部分, 撤掉会改变那条路径读到的状态。
             TcpCalibration::setSensorYawDeg(PayloadCalibration::sensorYawDeg);
             std::cout << "[Payload] Loaded payload_calib.json (mass=" << PayloadCalibration::massKg
                       << "kg, com=(" << PayloadCalibration::comMm[0] << ","
@@ -2683,17 +2688,21 @@ int main(int argc, char* argv[]) {
         RelayCore::instance().initForceReader();
     }
 
-    // 4.6 加载力传感器标定文件
+    // 4.6 加载力传感器标定文件 (全量模型: A / b_F / b_M / c_s —— Task 6 起的格式)
     {
-        double massKg, biasF[3], biasM[3];
+        double A[9], biasF[3], biasM[3], cS[3];
         if (ForceCalibration::loadFromFile(CalibStore::fileFor("force_calib.json"),
-                                           massKg, biasF, biasM)) {
+                                           A, biasF, biasM, cS)) {
             g_hasStoredZeroCalib = true;   // 有存储零偏, 启动漂移检查才有得比
-            double comZero[3] = {0};
-            ForceCompensation::setCalibration(massKg, comZero, biasF, biasM);
-            std::cout << "[Force] Loaded force_calib.json (mass=" << massKg
-                      << "kg, bias=" << biasF[0] << "," << biasF[1] << "," << biasF[2] << "N)" << std::endl;
+            ForceCompensation::setCalibration(A, biasF, biasM, cS);
+            std::cout << "[Force] Loaded force_calib.json (mass scale="
+                      << ForceCompensation::currentMassKg()
+                      << "kg, bias=" << biasF[0] << "," << biasF[1] << "," << biasF[2] << "N"
+                      << ", c_s=(" << cS[0] * 1000.0 << "," << cS[1] * 1000.0 << ","
+                      << cS[2] * 1000.0 << ")mm)" << std::endl;
         } else {
+            // 旧格式被拒时 loadFromFile 已经在 stderr 上响亮地说过是哪一种不兼容,
+            // 这里只补一句"现在能做什么", 不重复那一段。
             std::cout << "[Force] 无可用 force_calib.json — 按 'z' 调零。" << std::endl;
         }
     }

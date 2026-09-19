@@ -161,25 +161,27 @@ bool update(double dt, const double raw[6], const double pose[6]) {
                    g_biasForce[0], g_biasForce[1], g_biasForce[2],
                    g_biasTorque[0], g_biasTorque[1], g_biasTorque[2]);
 
-            // ===== 仅调零: 直接应用+存盘, 保留现有惯性补偿质量, 不进 MOTION、不开拖拽 =====
+            // ===== 仅调零: 直接应用+存盘, 保留现有全量模型 (A / c_s), 不进 MOTION、不开拖拽 =====
             if (g_tareOnly) {
-                double mass = ForceCompensation::currentMassKg();
-                // CR3 内部已补偿重力/惯性, 正常情况这里的质量应 ≈0 (见 force-compensation 设计)。
-                // 若 force_calib.json 里带着一个非零质量 (上一次 'k' 全流程, 或换装工具前留下的),
-                // 保留它会让 compensated = raw - 零偏 - m·g_tool 随姿态漂移,
-                // 而且这个错误零偏会被写进文件。这时该做的是 'k' 重标, 不是 'z'。
-                if (mass > 0.05) {
-                    printf("[Force] WARNING: 保留的惯性补偿质量 %.3f kg 非零 —— "
-                           "残余 %.2f N 的姿态相关误差会被当成零偏存盘。\n"
-                           "        换装工具后应先用 'k' 全流程重标质量, 再用 'z' 调零。\n",
-                           mass, mass * 9.81);
+                double A[9], cS[3];
+                ForceCompensation::currentModel(A, cS);
+                // 调零只定【零偏】。若手上还没有全量模型 (A 全 0 —— 从没跑过 'm'+'s' 的
+                // @1304 标定), 这次调零会写出一份【没有重力项】的模型: 补偿后的读数会随姿态
+                // 漂 (整个 A·g 那一项都没减)。这是"换装工具后应该先重标模型"的信号。
+                bool aIsZero = true;
+                for (int i = 0; i < 9; i++) if (A[i] != 0.0) aIsZero = false;
+                if (aIsZero) {
+                    printf("[Force] WARNING: 当前没有全量模型 (A 全 0) —— 本文件里的重力项为空, "
+                           "补偿后的读数会随姿态漂移。\n"
+                           "        换装工具 (笔夹/笔) 后应先按 'm' 采多姿态 + 's' 解出 A, 再按 'z' 调零。\n");
                 }
-                double comZero[3] = {0};
-                ForceCompensation::setCalibration(mass, comZero, g_biasForce, g_biasTorque);
-                ForceCalibration::saveToFile(CalibStore::fileFor("force_calib.json"), mass, g_biasForce, g_biasTorque);
-                printf("[Force] ZERO complete (mass %.4f kg kept): "
+                ForceCompensation::setCalibration(A, g_biasForce, g_biasTorque, cS);
+                ForceCalibration::saveToFile(CalibStore::fileFor("force_calib.json"),
+                                             A, g_biasForce, g_biasTorque, cS);
+                printf("[Force] ZERO complete (A / c_s kept, mass scale %.4f kg): "
                        "force bias=(%+.3f,%+.3f,%+.3f) N, torque bias=(%+.4f,%+.4f,%+.4f) Nm\n",
-                       mass, g_biasForce[0], g_biasForce[1], g_biasForce[2],
+                       ForceCompensation::currentMassKg(),
+                       g_biasForce[0], g_biasForce[1], g_biasForce[2],
                        g_biasTorque[0], g_biasTorque[1], g_biasTorque[2]);
                 printf("[Force] Saved force_calib.json\n");
                 g_state = State::DONE;
@@ -302,15 +304,40 @@ bool update(double dt, const double raw[6], const double pose[6]) {
             }
         }
 
-        printf("[Force] SOLVE: mass=%.4f kg\n", g_massKg);
+        printf("[Force] SOLVE: motion-fit mass=%.4f kg\n", g_massKg);
 
-        // Apply results
-        double comZero[3] = {0};
-        ForceCompensation::setCalibration(g_massKg, comZero, g_biasForce, g_biasTorque);
-        ForceCalibration::saveToFile(CalibStore::fileFor("force_calib.json"), g_massKg, g_biasForce, g_biasTorque);
+        // ⚠ 这个标量质量【不进补偿】。全量模型 (Task 6) 的参数表里没有标量质量 ——
+        //   它由 A 分解出来 (m = |det A|^(1/3), 见 ForceCompensation::currentMassKg),
+        //   而 A 是从 @1304 多姿态数据解出的 (按 'm' 采 + 's' 解)。上面这个 F=m·a 的拟合
+        //   属于【残余模型】那条路 (那时本地减的是 raw@576 − mass·g_ψ), 它现在只剩诊断价值:
+        //   它拿 @1304 的力模长与运动加速度比一个标量, 若与 3×3 模型的 |det A|^(1/3) 相差
+        //   很远, 说明其中有一步不对。照实打出来, 但【不写进任何东西】。
+        //   (本任务不动 MOTION/SOLVE 两相的结构; 把这两相连同残余时代一起删掉是后续的事。)
+        {
+            double A[9], cS[3];
+            ForceCompensation::currentModel(A, cS);
+            const double modelMass = ForceCompensation::currentMassKg();
+            if (modelMass > 0.0) {
+                printf("[Force] 对照: 全量模型的质量尺度 |det A|^(1/3) = %.4f kg "
+                       "(差值 %+.4f kg; 上面那个【不参与补偿】)\n",
+                       modelMass, g_massKg - modelMass);
+            } else {
+                printf("[Force] WARNING: 全量模型为空 (A 全 0) —— 本次只更新零偏, "
+                       "重力项仍为空。\n"
+                       "        按 'm' 采多姿态 + 's' 解出 A 之后, 补偿才有重力那一项。\n");
+            }
+        }
 
-        printf("[Force] Calibration complete! bias=(%+.3f,%+.3f,%+.3f)N  mass=%.3f kg\n",
-               g_biasForce[0], g_biasForce[1], g_biasForce[2], g_massKg);
+        // Apply results: 只更新零偏, 全量模型 (A / c_s) 原样保留。
+        double A_keep[9], cS_keep[3];
+        ForceCompensation::currentModel(A_keep, cS_keep);
+        ForceCompensation::setCalibration(A_keep, g_biasForce, g_biasTorque, cS_keep);
+        ForceCalibration::saveToFile(CalibStore::fileFor("force_calib.json"),
+                                     A_keep, g_biasForce, g_biasTorque, cS_keep);
+
+        printf("[Force] Calibration complete! bias=(%+.3f,%+.3f,%+.3f)N  "
+               "(A / c_s kept unchanged)\n",
+               g_biasForce[0], g_biasForce[1], g_biasForce[2]);
         g_state = State::DONE;
         break;
     }
@@ -324,18 +351,31 @@ bool update(double dt, const double raw[6], const double pose[6]) {
 
 // ===== Persistence =====
 
-bool saveToFile(const char* path, double massKg,
-                const double biasForce[3], const double biasTorque[3])
+// ===== 落盘格式 (version 3, 2026-09-19 Task 6) =====
+//
+// 存全量模型的四个参数块。为什么【不】留一个 "mass_kg" 字段: 全量模型的参数表里没有
+// 标量质量 —— 它由 A 分解出来 (m = |det A|^(1/3))。多写一个字段就等于多一份可以与 A
+// 漂开的副本, 而"两份一旦漂移就是安静地解错"是本项目栽过多次的一类。
+//
+// ⚠ 格式变了, 所以 version 从 2 递增到 3, 而【旧文件被拒】—— 这是有意的, 不是不兼容的
+//   副作用: 旧文件里是 {mass_kg, b_F, b_M}, 拿它当新格式读会得到 A = 全 0 而零偏照读,
+//   于是补偿里【没有重力项】却看起来一切正常 (读数依旧是 N, 不会爆掉) —— 正是本项目最
+//   怕的那种"安静地错"。拒掉它, 并且【响亮地说出来】(见 loadFromFile)。
+bool saveToFile(const char* path, const double A[9], const double biasForce[3],
+                const double biasTorque[3], const double comSensor[3])
 {
     FILE* f = fopen(path, "w");
     if (!f) return false;
     fprintf(f, "{\n");
-    fprintf(f, "  \"version\": 2,\n");
-    fprintf(f, "  \"mass_kg\": %.6g,\n", massKg);
+    fprintf(f, "  \"version\": 3,\n");
+    fprintf(f, "  \"a_matrix\": [%.9g, %.9g, %.9g, %.9g, %.9g, %.9g, %.9g, %.9g, %.9g],\n",
+            A[0], A[1], A[2], A[3], A[4], A[5], A[6], A[7], A[8]);
     fprintf(f, "  \"bias_force_n\": [%.6g, %.6g, %.6g],\n",
             biasForce[0], biasForce[1], biasForce[2]);
-    fprintf(f, "  \"bias_torque_nm\": [%.6g, %.6g, %.6g]\n",
+    fprintf(f, "  \"bias_torque_nm\": [%.6g, %.6g, %.6g],\n",
             biasTorque[0], biasTorque[1], biasTorque[2]);
+    fprintf(f, "  \"com_sensor_m\": [%.9g, %.9g, %.9g]\n",
+            comSensor[0], comSensor[1], comSensor[2]);
     fprintf(f, "}\n");
     fclose(f);
     return true;
@@ -352,44 +392,92 @@ static const char* jsonFind(const char* buf, const char* key) {
     return p;  // points to '[' or first digit/'-'
 }
 
-bool loadFromFile(const char* path, double& massKg,
-                  double biasForce[3], double biasTorque[3])
+// 读一个长度为 n 的浮点数组 (jsonFind 已定位到 '[' 之后的第一个字符)。
+static bool jsonReadArray(const char* p, double* out, int n) {
+    if (!p) return false;
+    if (*p == '[') p++;
+    for (int i = 0; i < n; i++) {
+        char* end = nullptr;
+        out[i] = strtod(p, &end);
+        if (end == p) return false;
+        p = end;
+        while (*p == ',' || *p == ' ' || *p == '\n' || *p == '\r' || *p == '\t' || *p == ']') p++;
+    }
+    return true;
+}
+
+// 响亮地说出"这份文件不是本格式" —— 不许安静地退化成"没有标定"。
+// 为什么必须响: 静默拒绝与静默接受【在控制台上长得一样】(两种情况下都只剩一条
+// "无可用 force_calib.json"), 而它们要做的事完全不同 —— 前者是"去按 'z'", 后者是
+// "去按 'm'+'s' 重标模型"。这条消息就是这两者的分界, 所以它必须指名道姓地说出
+// 看到了什么、该做什么。
+static void rejectOldFormat(const char* path, const char* why) {
+    fprintf(stderr,
+            "[Force] !! force_calib.json 【格式不兼容, 已拒绝】: %s\n"
+            "[Force] !!   文件: %s\n"
+            "[Force] !!   本版 (Task 6 起) 期望 version=3 的全量模型: "
+            "a_matrix(9) + bias_force_n(3) + bias_torque_nm(3) + com_sensor_m(3)。\n"
+            "[Force] !!   旧格式 (version 2: mass_kg + 零偏) 【不能】拿新版读 —— "
+            "它没有 A, 读进来会得到一份【没有重力项】的模型,\n"
+            "[Force] !!   而补偿后的读数依旧是 N, 不会报错 —— 那正是本项目最怕的\"安静地错\"。\n"
+            "[Force] !!   处理: 本地补偿【未启用】。先按 'm' 采多姿态 → 's' 解出 A, "
+            "再按 'z' 调零存盘。\n",
+            why, (path && *path) ? path : "(null)");
+    fflush(stderr);
+}
+
+bool loadFromFile(const char* path, double A[9], double biasForce[3],
+                  double biasTorque[3], double comSensor[3])
 {
     FILE* f = fopen(path, "r");
-    if (!f) return false;
+    if (!f) return false;   // 文件不存在 = 还没有标定过, 这是正常路径, 不吵
 
-    char buf[4096];
+    char buf[8192];
     size_t n = fread(buf, 1, sizeof(buf) - 1, f);
     fclose(f);
     if (n == 0) return false;
     buf[n] = '\0';
 
-    const char* p = jsonFind(buf, "\"mass_kg\"");
-    if (!p) return false;
-    massKg = strtod(p, nullptr);
+    // ===== 先把版本号判掉, 再读任何一个参数 =====
+    // 顺序是要紧的: 先读参数再判版本, 就会在返回 false 之前把半份数据写进调用方的数组里。
+    const char* pv = jsonFind(buf, "\"version\"");
+    if (!pv) {
+        rejectOldFormat(path, "文件里没有 version 字段 (是 version 1 的旧文件, 或根本不是本文件)");
+        return false;
+    }
+    const long ver = strtol(pv, nullptr, 10);
+    if (ver != 3) {
+        char why[128];
+        snprintf(why, sizeof(why),
+                 "version=%ld (本版要 3; version 2 是旧的 mass_kg + 零偏格式)", ver);
+        rejectOldFormat(path, why);
+        return false;
+    }
 
+    const char* p = jsonFind(buf, "\"a_matrix\"");
+    if (!jsonReadArray(p, A, 9)) {
+        fprintf(stderr, "[Force] !! force_calib.json 写着 version=3, 但 a_matrix 读不出来 —— "
+                        "文件被截断或改坏了。本地补偿【未启用】。\n");
+        return false;
+    }
     p = jsonFind(buf, "\"bias_force_n\"");
-    if (!p) return false;
-    if (*p == '[') p++;  // skip opening bracket
-    for (int i = 0; i < 3; i++) {
-        char* end = nullptr;
-        biasForce[i] = strtod(p, &end);
-        if (end == p) return false;
-        p = end;
-        while (*p == ',' || *p == ' ' || *p == '\n' || *p == '\r' || *p == '\t' || *p == ']') p++;
+    if (!jsonReadArray(p, biasForce, 3)) {
+        fprintf(stderr, "[Force] !! force_calib.json 的 bias_force_n 读不出来 —— "
+                        "文件被截断或改坏了。本地补偿【未启用】。\n");
+        return false;
     }
-
     p = jsonFind(buf, "\"bias_torque_nm\"");
-    if (!p) return false;
-    if (*p == '[') p++;
-    for (int i = 0; i < 3; i++) {
-        char* end = nullptr;
-        biasTorque[i] = strtod(p, &end);
-        if (end == p) return false;
-        p = end;
-        while (*p == ',' || *p == ' ' || *p == '\n' || *p == '\r' || *p == '\t' || *p == ']') p++;
+    if (!jsonReadArray(p, biasTorque, 3)) {
+        fprintf(stderr, "[Force] !! force_calib.json 的 bias_torque_nm 读不出来 —— "
+                        "文件被截断或改坏了。本地补偿【未启用】。\n");
+        return false;
     }
-
+    p = jsonFind(buf, "\"com_sensor_m\"");
+    if (!jsonReadArray(p, comSensor, 3)) {
+        fprintf(stderr, "[Force] !! force_calib.json 的 com_sensor_m 读不出来 —— "
+                        "文件被截断或改坏了。本地补偿【未启用】。\n");
+        return false;
+    }
     return true;
 }
 

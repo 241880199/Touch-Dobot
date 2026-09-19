@@ -12,14 +12,24 @@
 static CRITICAL_SECTION g_calibMutex;
 static bool g_mutexInit = false;
 static bool g_isCalibrated = false;
-static double g_massKg = 0.0;
-static double g_comSensor[3] = {0};
+static double g_A[9] = {0};            // 全量模型的 3×3 力响应 (kg, row-major)
+static double g_comSensor[3] = {0};    // c_s (m, 传感器测量系)
 static double g_biasForce[3] = {0};
 static double g_biasTorque[3] = {0};
 static MotionEstimator g_motion;
 
+// 质量尺度 m = |det A|^(1/3)。A = m·S·Q (见 PayloadCalibration::decompose), 所以它的
+// 三个奇异值的几何平均恰好是 m —— 而几何平均 = |det|^(1/3), 不需要 SVD。
+// 就是 decompose() 报的 massScale, 这里现算一份的理由见头文件 currentMassKg。
+static double massScaleOf(const double A[9]) {
+    const double det = A[0] * (A[4] * A[8] - A[5] * A[7])
+                     - A[1] * (A[3] * A[8] - A[5] * A[6])
+                     + A[2] * (A[3] * A[7] - A[4] * A[6]);
+    return cbrt(fabs(det));
+}
+
 // ===== Euler angles (deg) to rotation matrix =====
-// ⚠ 本文件里【当前没有调用方】了: 重力的唯一去处已改成 TcpCalibration::gravitySensorFrame
+// ⚠ 本文件里【当前没有调用方】了: 重力的唯一去处已改成 TcpCalibration::gravitySensorFrameAtYaw
 //   (约定只能有一份实现)。此函数与下面的 matTransposeMulVec 保留未删 —— 删不删由所有者定;
 //   但【不要】再用它们在这里重新展开一遍重力, 那正是本文件以前和求解器各写一份的老毛病。
 // R = Rz(rz_deg) * Ry(ry_deg) * Rx(rx_deg)
@@ -164,7 +174,7 @@ void init() {
         g_mutexInit = true;
     }
     g_isCalibrated = false;
-    g_massKg = 0.0;
+    for (int i = 0; i < 9; i++) g_A[i] = 0.0;
     for (int i = 0; i < 3; i++) {
         g_comSensor[i] = 0.0;
         g_biasForce[i] = 0.0;
@@ -173,11 +183,11 @@ void init() {
     g_motion.reset();
 }
 
-void setCalibration(double massKg, const double comSensor[3],
-                    const double biasForce[3], const double biasTorque[3])
+void setCalibration(const double A[9], const double biasForce[3],
+                    const double biasTorque[3], const double comSensor[3])
 {
     EnterCriticalSection(&g_calibMutex);
-    g_massKg = massKg;
+    for (int i = 0; i < 9; i++) g_A[i] = A[i];
     for (int i = 0; i < 3; i++) {
         g_comSensor[i] = comSensor[i];
         g_biasForce[i] = biasForce[i];
@@ -187,14 +197,10 @@ void setCalibration(double massKg, const double comSensor[3],
     LeaveCriticalSection(&g_calibMutex);
 }
 
-// 只换质量/质心, 零偏不动 —— 见头文件里为什么需要它。
-// 注意 massKg 是【残余】质量, 可以带符号: 本地做的是 compensated = raw - mass·gTool,
-// 所以 mass = 拟合出的残余系数 k (= P_robot - m_true) 正好把机械臂漏补的那一份减掉。
-void setMassCom(double massKg, const double comSensor[3]) {
+void currentModel(double A[9], double comSensor[3]) {
     EnterCriticalSection(&g_calibMutex);
-    g_massKg = massKg;
-    for (int i = 0; i < 3; i++) g_comSensor[i] = comSensor[i];
-    g_isCalibrated = true;   // 质量/质心与零偏本来就分开存, 不碰后者
+    for (int i = 0; i < 9; i++) A[i] = g_A[i];
+    for (int i = 0; i < 3; i++) comSensor[i] = g_comSensor[i];
     LeaveCriticalSection(&g_calibMutex);
 }
 
@@ -221,9 +227,10 @@ bool isCalibrated() {
 
 double currentMassKg() {
     EnterCriticalSection(&g_calibMutex);
-    double m = g_massKg;
+    double A[9];
+    for (int i = 0; i < 9; i++) A[i] = g_A[i];
     LeaveCriticalSection(&g_calibMutex);
-    return m;
+    return massScaleOf(A);   // A 全 0 -> det 0 -> 报 0
 }
 
 void step(AppState::ForceData& fd, const double poseRxyz[6]) {
@@ -233,16 +240,20 @@ void step(AppState::ForceData& fd, const double poseRxyz[6]) {
     double dt = 1.0 / static_cast<double>(Config::FORCE_EFFECTIVE_SAMPLE_RATE);
     g_motion.update(poseRxyz[0], poseRxyz[1], poseRxyz[2], dt);
 
-    // 2. Copy raw to compensated as default (no-op if uncalibrated)
+    // 2. Copy the raw channel to compensated as default (no-op if uncalibrated)
+    //    默认值取 @1304 (与下面标定后的公式【同一个通道】)。从前这里是 fd.raw (@576) ——
+    //    切换通道时漏掉这一行, 未标定时的读数就会来自另一个物理量, 而"标定前后读到的
+    //    不是同一件事"是查不出来的 (两边的量纲都是 N)。
     for (int i = 0; i < 6; i++) {
-        fd.compensated[i] = fd.raw[i];
+        fd.compensated[i] = fd.sixForceRaw[i];
     }
 
     if (!g_isCalibrated) return;
 
     // 3. Snapshot calibration globals under mutex
     EnterCriticalSection(&g_calibMutex);
-    double mass = g_massKg;
+    double A[9];
+    for (int i = 0; i < 9; i++) A[i] = g_A[i];
     double com[3] = {g_comSensor[0], g_comSensor[1], g_comSensor[2]};
     double bF[3] = {g_biasForce[0], g_biasForce[1], g_biasForce[2]};
     double bM[3] = {g_biasTorque[0], g_biasTorque[1], g_biasTorque[2]};
@@ -251,27 +262,29 @@ void step(AppState::ForceData& fd, const double poseRxyz[6]) {
 
     if (!calib) return; // setCalibration cleared calibration mid-flight
 
-    // 4-5. Gravity in the SENSOR frame: g_tool = Rz(-psi)·Rᵀ·(0, 0, +9.81)
-    //    (sensor sees positive Z when supporting a hanging tool).
-    //    含传感器相对法兰的安装偏转角 psi —— 与负载求解 (PayloadCalibration) 共用
-    //    TcpCalibration::gravitySensorFrame 这【唯一一份】实现。这里从前自己算过
-    //    matTransposeMulVec(eulerToRotation(...), (0,0,9.81)), 与求解器各写一遍约定;
-    //    两份一旦漂移就是"安静地解错" (残差不会爆掉, 只会缓慢漂移)。别在这里再展开乘一遍。
+    // 4-5. Gravity in the SENSOR frame, then through the fitted response A.
+    //    g = gravitySensorFrameAtYaw(pose, 0.0, g) —— 【psi 传 0】: 全量模型的 A 是自由 3×3,
+    //    安装旋转/反射/非正交全被它吸收, 所以补偿式子里【没有 ψ】, 模块态不再参与。
+    //    (残余模型走的是 gravitySensorFrame: 读模块态里的 ψ, 再乘一个【标量】质量。)
+    //    ⚠ 走共享实现, 别在这里自己展开 Rᵀ(0,0,9.81): 模块自己实现过两次重力约定, 一份写
+    //      成 R、一份写成 Rᵀ, 求解器因此安静地解错 —— 约定只能有一份实现。
     double gTool[3];
-    TcpCalibration::gravitySensorFrame(poseRxyz, gTool);
+    TcpCalibration::gravitySensorFrameAtYaw(poseRxyz, 0.0, gTool);
 
-    // Gravity force: sensor reads +m*g support force when tool hangs
-    // (same direction as gTool — not a reaction force)
+    // Gravity force through the fitted response: Fg = A · g
+    // (残余模型是标量质量乘 g —— A 的每一行都是一个"分量怎么随重力方向变"的响应。)
     double Fg[3];
-    Fg[0] = mass * gTool[0];
-    Fg[1] = mass * gTool[1];
-    Fg[2] = mass * gTool[2];
+    for (int a = 0; a < 3; a++) {
+        Fg[a] = A[3 * a] * gTool[0] + A[3 * a + 1] * gTool[1] + A[3 * a + 2] * gTool[2];
+    }
 
-    // Gravity torque: r_com x Fg
+    // Gravity torque: c_s × (A·g) —— 与 Fg 同一个 w = A·g (叉乘结构, 不是独立的 3×3)。
     double Mg[3];
     cross(com, Fg, Mg);
 
-    // 6. Inertia force (only if moving)
+    // 6. Inertia force (only if moving) —— 语义、时机、系数一字未改 (仍是 mass·a);
+    //    mass 现在取自全量模型的质量尺度 |det A|^(1/3) (见 currentMassKg)。
+    const double mass = massScaleOf(A);
     double Fi[3] = {0, 0, 0};
     if (!g_motion.isStill()) {
         double vel[3], acc[3];
@@ -281,24 +294,27 @@ void step(AppState::ForceData& fd, const double poseRxyz[6]) {
         Fi[2] = mass * acc[2];
     }
 
-    // 7. Compensate: compensated = raw - bias - gravity - inertia
-    fd.compensated[0] = fd.raw[0] - bF[0] - Fg[0] - Fi[0];
-    fd.compensated[1] = fd.raw[1] - bF[1] - Fg[1] - Fi[1];
-    fd.compensated[2] = fd.raw[2] - bF[2] - Fg[2] - Fi[2];
-    fd.compensated[3] = fd.raw[3] - bM[0] - Mg[0];
-    fd.compensated[4] = fd.raw[4] - bM[1] - Mg[1];
-    fd.compensated[5] = fd.raw[5] - bM[2] - Mg[2];
+    // 7. Compensate: compensated = sixForceRaw − bias − gravity − inertia
+    fd.compensated[0] = fd.sixForceRaw[0] - bF[0] - Fg[0] - Fi[0];
+    fd.compensated[1] = fd.sixForceRaw[1] - bF[1] - Fg[1] - Fi[1];
+    fd.compensated[2] = fd.sixForceRaw[2] - bF[2] - Fg[2] - Fi[2];
+    fd.compensated[3] = fd.sixForceRaw[3] - bM[0] - Mg[0];
+    fd.compensated[4] = fd.sixForceRaw[4] - bM[1] - Mg[1];
+    fd.compensated[5] = fd.sixForceRaw[5] - bM[2] - Mg[2];
 
-    // 8. Online EMA bias update (only when still)
+    // 8. Online EMA bias update (only when still) — 作用/时机/系数一字未改, 只有输入量
+    //    跟着换成了 @1304。零偏是【这个通道】的零偏: 拿 @576 去更新它, 就是给另一路量的
+    //    零偏做 EMA —— 两路的零偏不是一回事。实测出处: tests/fixtures/calib_poses_2026-09-19.txt
+    //    7 个姿态的逐通道均值差 (@1304 − @576) = 19.8 / 1.6 / 1.7 N (x/y/z)。
     if (g_motion.isStill()) {
         double alpha = Config::FORCE_BIAS_EMA_ALPHA;
         // Update local copy, then write back under mutex
-        bF[0] += alpha * (fd.raw[0] - Fg[0] - bF[0]);
-        bF[1] += alpha * (fd.raw[1] - Fg[1] - bF[1]);
-        bF[2] += alpha * (fd.raw[2] - Fg[2] - bF[2]);
-        bM[0] += alpha * (fd.raw[3] - Mg[0] - bM[0]);
-        bM[1] += alpha * (fd.raw[4] - Mg[1] - bM[1]);
-        bM[2] += alpha * (fd.raw[5] - Mg[2] - bM[2]);
+        bF[0] += alpha * (fd.sixForceRaw[0] - Fg[0] - bF[0]);
+        bF[1] += alpha * (fd.sixForceRaw[1] - Fg[1] - bF[1]);
+        bF[2] += alpha * (fd.sixForceRaw[2] - Fg[2] - bF[2]);
+        bM[0] += alpha * (fd.sixForceRaw[3] - Mg[0] - bM[0]);
+        bM[1] += alpha * (fd.sixForceRaw[4] - Mg[1] - bM[1]);
+        bM[2] += alpha * (fd.sixForceRaw[5] - Mg[2] - bM[2]);
 
         EnterCriticalSection(&g_calibMutex);
         g_biasForce[0] = bF[0];
@@ -312,9 +328,9 @@ void step(AppState::ForceData& fd, const double poseRxyz[6]) {
 
     // 9. Update calib params in ForceData for HUD display / MATLAB relay
     fd.isCalibrated = true;
-    fd.calibMassKg = mass;
+    fd.calibMassKg = mass;              // 质量尺度 |det A|^(1/3), 不是调用方传进来的
     for (int i = 0; i < 3; i++) {
-        fd.calibComSensor[i] = com[i];
+        fd.calibComSensor[i] = com[i];  // c_s (m, 传感器测量系)
         fd.calibBiasForce[i] = bF[i];
         fd.calibBiasTorque[i] = bM[i];
     }

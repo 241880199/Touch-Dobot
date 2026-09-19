@@ -1,11 +1,27 @@
 // Standalone test: ForceCompensation + ForceCalibration core logic
+//
+// 2026-09-19 (Task 6): 补偿模型从【残余】换成【全量】——
+//   旧: compensated = fd.raw(@576) − b_F − mass·g(ψ)          mass = 可带符号的残余质量
+//   新: compensated = fd.sixForceRaw(@1304) − b_F − A·g − Fi  A = 自由 3×3 (kg)
+//       compensated_M = fd.sixForceRaw − b_M − c_s × (A·g)
+// 所以下面凡是设参数的地方都改成 setCalibration(A, b_F, b_M, c_s), 凡是喂读数的地方
+// 都改成 fd.sixForceRaw。断言里凡与模型形式有关的, 都重算过 (不是把旧的期望值搬过来)。
 #include <iostream>
 #include <cassert>
 #include <cmath>
+#include <cstdio>
 #include <windows.h>
 #include "../force/ForceCompensation.h"
 #include "../force/ForceCalibration.h"
+#include "../calibration/TcpCalibration.h"
 #include "../config/Config.h"
+
+// 3×3 对角 A = m·I: 这是【残余模型】在新模型里的等价物 (各向同性、无安装旋转), 用来
+// 把"换通道/换写法"与"换模型本身"分开 —— 用它能逐位复算出旧测试的期望值。
+static void diagA(double m, double A[9]) {
+    for (int i = 0; i < 9; i++) A[i] = 0.0;
+    A[0] = A[4] = A[8] = m;
+}
 
 static int g_passed = 0, g_failed = 0;
 
@@ -52,14 +68,18 @@ static void test_comp_no_calib() {
     TEST(comp_no_calib);
     ForceCompensation::init();
     AppState::ForceData fd;
+    // 未标定时 compensated 必须照抄【新模型的输入通道】@1304, 不是 @576。
+    // 两个通道都是"力", 抄错了不会报错, 所以这里刻意让两者不同, 并把 raw 也填上。
+    fd.sixForceRaw[0] = -20.65; fd.sixForceRaw[1] = -2.07; fd.sixForceRaw[2] = 3.055;
+    fd.sixForceRaw[3] = -0.27;  fd.sixForceRaw[4] = 0.42;  fd.sixForceRaw[5] = -0.025;
     fd.raw[0] = -0.65; fd.raw[1] = -1.07; fd.raw[2] = 0.055;
     fd.raw[3] = -0.02; fd.raw[4] = 0.02;  fd.raw[5] = 0.005;
 
-    // No calibration -> compensated should mirror raw
     double pose[6] = {0, 0, 0, 0, 0, 0};
     ForceCompensation::step(fd, pose);
-    CHECK(fabs(fd.compensated[0] - (-0.65)) < 0.01);
-    CHECK(fabs(fd.compensated[1] - (-1.07)) < 0.01);
+    CHECK(fabs(fd.compensated[0] - (-20.65)) < 1e-9);
+    CHECK(fabs(fd.compensated[1] - (-2.07)) < 1e-9);
+    CHECK(fabs(fd.compensated[5] - (-0.025)) < 1e-9);
     CHECK(fd.isCalibrated == false);
     PASS();
 }
@@ -67,23 +87,99 @@ static void test_comp_no_calib() {
 static void test_comp_gravity_only() {
     TEST(comp_gravity_only);
     ForceCompensation::init();
-    // Calibrate: mass=1kg, com at origin, zero bias
-    double mass = 1.0;
+    // A = 1·I (质量尺度 1 kg), c_s 在原点, 零偏全 0 —— 新模型里它退化成"标量质量 × g",
+    // 与残余模型同形, 所以期望值可以直接与旧测试对照。
+    double A[9]; diagA(1.0, A);
     double com[3] = {0, 0, 0};
     double biasF[3] = {0, 0, 0};
     double biasM[3] = {0, 0, 0};
-    ForceCompensation::setCalibration(mass, com, biasF, biasM);
+    ForceCompensation::setCalibration(A, biasF, biasM, com);
 
     AppState::ForceData fd;
-    // Tool pointing straight down: Rx=0, Ry=0, Rz=0 -> g_tool = (0, 0, -9.81)
-    // Expected: Fz sensor reads +9.81 (supporting weight), gravity comp subtracts it -> 0
-    fd.raw[0] = 0.0; fd.raw[1] = 0.0; fd.raw[2] = 9.81;
-    fd.raw[3] = 0.0; fd.raw[4] = 0.0; fd.raw[5] = 0.0;
+    // pose 0 (R=I) -> g = Rᵀ(0,0,9.81) = (0, 0, +9.81) —— 传感器吊着工具时读到的是 +Z 支撑力。
+    // 期望: Fz 读 +9.81, 重力项把它减掉 -> 0。
+    fd.sixForceRaw[0] = 0.0; fd.sixForceRaw[1] = 0.0; fd.sixForceRaw[2] = 9.81;
+    fd.sixForceRaw[3] = 0.0; fd.sixForceRaw[4] = 0.0; fd.sixForceRaw[5] = 0.0;
 
     double pose[6] = {0, 0, 0, 0, 0, 0};
     ForceCompensation::step(fd, pose);
     CHECK(fabs(fd.compensated[2]) < 0.1); // gravity compensated away
     CHECK(fd.isCalibrated == true);
+    // 质量尺度就是 |det A|^(1/3) —— 参数表里没有标量质量, 这个数由 A 现算。
+    CHECK(fabs(ForceCompensation::currentMassKg() - 1.0) < 1e-12);
+    PASS();
+}
+
+// ★ 重力必须【过 A】, 不是过标量 —— 这是本任务换掉的那件事本身。
+// A 只有 (0,2) 一个非零元: 它把 g 的 z 分量映到力的 x 分量。标量模型无论如何都做不到
+// 这件事 (它只会给出 Fg ∥ g)。姿态取 R=I 与一个绕 z 转过的姿态, 两次都要减干净。
+static void test_comp_gravity_goes_through_A() {
+    TEST(comp_gravity_goes_through_A);
+    ForceCompensation::init();
+    double A[9] = {0};
+    A[2] = 1.0;                       // F_x = g_z
+    double com[3] = {0, 0, 0};
+    double bF[3] = {0, 0, 0}, bM[3] = {0, 0, 0};
+    ForceCompensation::setCalibration(A, bF, bM, com);
+
+    AppState::ForceData fd;
+    double pose[6] = {0, 0, 0, 0, 0, 0};
+    // pose 0: g = (0,0,9.81) -> Fg = (9.81, 0, 0)。读数正是它 -> 补偿到 0。
+    fd.sixForceRaw[0] = 9.81; fd.sixForceRaw[1] = 0.0; fd.sixForceRaw[2] = 0.0;
+    fd.sixForceRaw[3] = 0.0;  fd.sixForceRaw[4] = 0.0; fd.sixForceRaw[5] = 0.0;
+    ForceCompensation::step(fd, pose);
+    CHECK(fabs(fd.compensated[0]) < 1e-9);
+    CHECK(fabs(fd.compensated[1]) < 1e-9);
+    CHECK(fabs(fd.compensated[2]) < 1e-9);
+
+    // 绕 z 转任意角: g 沿基座 z, Rz 不动它 -> 补偿结果必须一模一样。
+    // (这一条同时钉住"ψ 不在补偿路径里": 若还有人拿模块态 ψ 去转重力, Rz 一改结果就变。)
+    double pose2[6] = {0, 0, 0, 0, 0, 137.0};
+    AppState::ForceData fd2;
+    fd2.sixForceRaw[0] = 9.81;
+    ForceCompensation::step(fd2, pose2);
+    CHECK(fabs(fd2.compensated[0]) < 1e-9);
+
+    // 绕 y 转 90°: 期望值【由共享的重力函数现算】, 不在这里另写一份约定
+    // (重力的约定只能有一份实现 —— 测试里再展开一遍正是历史上安静解错的样子)。
+    double pose3[6] = {0, 0, 0, 0, 90.0, 0};
+    double g[3];
+    TcpCalibration::gravitySensorFrameAtYaw(pose3, 0.0, g);
+    CHECK(fabs(g[2]) < 1e-9);          // Ry(90) 把 g 转到水平面内 -> g_z = 0
+    AppState::ForceData fd3;
+    fd3.sixForceRaw[0] = g[2];         // = Fg_x, 因为 A 的 (0,2) = 1
+    ForceCompensation::step(fd3, pose3);
+    CHECK(fabs(fd3.compensated[0]) < 1e-9);
+    PASS();
+}
+
+// 力矩: Mg = c_s × (A·g) —— 与 Fg 【同一个 w = A·g】, 不是独立的 3×3, 也不是 dp×g。
+static void test_comp_moment_is_cross_of_Ag() {
+    TEST(comp_moment_is_cross_of_Ag);
+    ForceCompensation::init();
+    double A[9]; diagA(1.0, A);        // w = A·g = g
+    double bF[3] = {0, 0, 0}, bM[3] = {0, 0, 0};
+    double pose[6] = {0, 0, 0, 0, 0, 0};   // g = (0, 0, 9.81) -> w = (0, 0, 9.81)
+
+    // (a) c_s 沿 z (与 w 平行): 叉乘为 0 -> 力矩补偿量恒 0。读数原样留到 compensated。
+    double cS_z[3] = {0.0, 0.0, 0.05};     // 单位【米】= 50 mm
+    ForceCompensation::setCalibration(A, bF, bM, cS_z);
+    AppState::ForceData fd;
+    fd.sixForceRaw[4] = 0.4905;
+    ForceCompensation::step(fd, pose);
+    CHECK(fabs(fd.compensated[4] - 0.4905) < 1e-9);
+
+    // (b) c_s 沿 x: c_s × w = (0.05,0,0) × (0,0,9.81) = (0, −0.4905, 0)
+    //     读数正好是这个力矩 -> 被减干净。这一条同时钉住【叉乘的顺序/符号】:
+    //     写成 w × c_s 会得到 +0.4905, 于是补偿后的读数变成 −0.981 而不是 0。
+    double cS_x[3] = {0.05, 0.0, 0.0};
+    ForceCompensation::setCalibration(A, bF, bM, cS_x);
+    AppState::ForceData fd2;
+    fd2.sixForceRaw[4] = -0.4905;
+    ForceCompensation::step(fd2, pose);
+    CHECK(fabs(fd2.compensated[4]) < 1e-9);
+    CHECK(fabs(fd2.compensated[3]) < 1e-9);
+    CHECK(fabs(fd2.compensated[5]) < 1e-9);
     PASS();
 }
 
@@ -95,13 +191,14 @@ static void countDrag(bool enable) {
     if (enable) g_dragOnCalls++;
 }
 
-// 调零: 静置采集 → 直接应用零偏 + 存盘; 不开拖拽、不进 MOTION、保留惯性质量
+// 调零: 静置采集 → 直接应用零偏 + 存盘; 不开拖拽、不进 MOTION、【A / c_s 原样保留】
 static void test_zero_only_no_motion() {
     TEST(zero_only_no_motion);
     ForceCompensation::init();
-    double com[3] = {0, 0, 0};
+    double A[9]; diagA(0.42, A);                            // 预置全量模型 (质量尺度 0.42 kg)
+    double cS[3] = {0.0, 0.0, 0.03};
     double bF[3] = {0, 0, 0}, bM[3] = {0, 0, 0};
-    ForceCompensation::setCalibration(0.42, com, bF, bM);   // 预置惯性质量
+    ForceCompensation::setCalibration(A, bF, bM, cS);
 
     g_dragOnCalls = 0;
     ForceCalibration::setDragModeCallback(countDrag);
@@ -120,17 +217,23 @@ static void test_zero_only_no_motion() {
     CHECK(!ForceCalibration::isZeroing());
     CHECK(!ForceCalibration::isRunning());
     CHECK(g_dragOnCalls == 0);                                      // 未开拖拽模式
-    CHECK(fabs(ForceCompensation::currentMassKg() - 0.42) < 1e-9);  // 质量保留
+    CHECK(fabs(ForceCompensation::currentMassKg() - 0.42) < 1e-9);  // 模型保留 (质量尺度)
 
-    // 零偏已生效。pose 全 0 → 重力项 = m*g 只在 Z 轴, X/Y 纯看零偏。
+    // ★ 调零【只】动零偏: A 与 c_s 必须逐位不变 (调零前把 A/c_s 弄脏一点再比)。
+    double A2[9], cS2[3];
+    ForceCompensation::currentModel(A2, cS2);
+    for (int i = 0; i < 9; i++) CHECK(fabs(A2[i] - A[i]) < 1e-15);
+    for (int i = 0; i < 3; i++) CHECK(fabs(cS2[i] - cS[i]) < 1e-15);
+
+    // 零偏已生效。pose 全 0 → 重力项 A·g 只在 Z 轴 (A 是对角), X/Y 纯看零偏。
     AppState::ForceData fd;
-    for (int i = 0; i < 6; i++) fd.raw[i] = 5.0;
+    for (int i = 0; i < 6; i++) fd.sixForceRaw[i] = 5.0;
     ForceCompensation::step(fd, pose);
     CHECK(fabs(fd.compensated[0] - (5.0 - (-0.48))) < 0.02);
     CHECK(fabs(fd.compensated[1] - (5.0 - (-1.35))) < 0.02);
-    // Z: 5.0 - (-0.02) - 0.42*9.81 ≈ 0.90 — 同时证明保留的质量确实进了 setCalibration
+    // Z: 5.0 - (-0.02) - 0.42*9.81 ≈ 0.90 — 同时证明保留的 A 确实进了 setCalibration
     CHECK(fabs(fd.compensated[2] - 0.90) < 0.05);
-    // 力矩零偏也已应用 (Mx 零偏 0.010); com=0 → 重力力矩为 0
+    // 力矩零偏也已应用 (Mx 零偏 0.010); c_s 沿 z 与 A·g 平行 → 重力力矩为 0
     CHECK(fabs(fd.compensated[3] - (5.0 - 0.010)) < 0.02);
 
     ForceCalibration::setDragModeCallback(nullptr);
@@ -141,9 +244,10 @@ static void test_zero_only_no_motion() {
 static void test_zero_abort_not_applied() {
     TEST(zero_abort_not_applied);
     ForceCompensation::init();
-    double com[3] = {0, 0, 0};
+    double A[9] = {0};                                     // 空模型 → 无重力项
+    double cS[3] = {0, 0, 0};
     double bF[3] = {0, 0, 0}, bM[3] = {0, 0, 0};
-    ForceCompensation::setCalibration(0.0, com, bF, bM);   // 质量 0 → 无重力项
+    ForceCompensation::setCalibration(A, bF, bM, cS);
 
     CHECK(ForceCalibration::startZero());
     double raw[6] = {-0.48, -1.35, -0.02, 0.010, -0.020, 0.005};
@@ -155,7 +259,7 @@ static void test_zero_abort_not_applied() {
     CHECK(!ForceCalibration::isZeroing());
 
     AppState::ForceData fd;
-    for (int i = 0; i < 6; i++) fd.raw[i] = 5.0;
+    for (int i = 0; i < 6; i++) fd.sixForceRaw[i] = 5.0;
     ForceCompensation::step(fd, pose);
     CHECK(fabs(fd.compensated[0] - 5.0) < 0.02);   // 零偏未被应用
     PASS();
@@ -192,9 +296,10 @@ static void test_sweep_still_enters_motion() {
 static void test_zero_restartable() {
     TEST(zero_restartable);
     ForceCompensation::init();
-    double com[3] = {0, 0, 0};
+    double A[9] = {0};
+    double cS[3] = {0, 0, 0};
     double bF[3] = {0, 0, 0}, bM[3] = {0, 0, 0};
-    ForceCompensation::setCalibration(0.0, com, bF, bM);
+    ForceCompensation::setCalibration(A, bF, bM, cS);
 
     double raw[6] = {0.1, 0.2, 0.3, 0, 0, 0};
     double pose[6] = {0, 0, 0, 0, 0, 0};
@@ -218,16 +323,117 @@ static void test_zero_restartable() {
     PASS();
 }
 
+// ===== force_calib.json 的格式 (Task 6: version 2 -> 3) =====
+//
+// 文件写在【当前目录】(测试 exe 从 tests/ 跑), 跑完即删 —— .gitignore 里已经有一条
+// force_calib.json, 所以即使中途崩了也不会污染仓库。
+
+static const char* TMP_NEW = "force_calib.json";        // 与 .gitignore 里那一条同名
+static const char* TMP_OLD = "force_calib.json";        // 旧格式也写同一个名字 (先覆盖再读)
+
+static void test_calib_file_roundtrip() {
+    TEST(calib_file_roundtrip);
+    double A[9]  = { 0.3645611253, 0.2105461118, -0.0000294763,
+                    -0.2182776660, 0.3733052719,  0.0029763987,
+                    -0.0115452228, -0.0149328140, -0.4139021828 };
+    double bF[3] = { -21.9, -1.4, 2.6 };
+    double bM[3] = { -0.18, 0.38, -0.025 };
+    double cS[3] = { 0.0005981153, -0.0005015476, 0.0545494358 };
+
+    CHECK(ForceCalibration::saveToFile(TMP_NEW, A, bF, bM, cS));
+
+    double A2[9], bF2[3], bM2[3], cS2[3];
+    CHECK(ForceCalibration::loadFromFile(TMP_NEW, A2, bF2, bM2, cS2));
+
+    // A 用 %.9g 落盘 -> 相对误差 ~1e-9, 取 1e-8 相对量级作容差。
+    for (int i = 0; i < 9; i++) CHECK(fabs(A2[i] - A[i]) < 1e-8);
+    for (int i = 0; i < 3; i++) {
+        CHECK(fabs(bF2[i] - bF[i]) < 1e-6);
+        CHECK(fabs(bM2[i] - bM[i]) < 1e-6);
+        CHECK(fabs(cS2[i] - cS[i]) < 1e-9);
+    }
+    remove(TMP_NEW);
+    PASS();
+}
+
+// 旧文件 (version 2: mass_kg + 零偏) 必须【被拒】。
+// 这是有意的: 旧文件里没有 A, 拿新版读会安静地得到一份【没有重力项】的模型 ——
+// 补偿后的读数依旧是 N, 不会报错。所以这条用例断言的是"拒", 不是"兼容"。
+static void test_calib_file_rejects_old_format() {
+    TEST(calib_file_rejects_old_format);
+    static const char* V2 =
+        "{\n"
+        "  \"version\": 2,\n"
+        "  \"mass_kg\": 0.25,\n"
+        "  \"bias_force_n\": [-0.48, -1.35, -0.02],\n"
+        "  \"bias_torque_nm\": [0.01, -0.02, 0.005]\n"
+        "}\n";
+    FILE* f = fopen(TMP_OLD, "w");
+    CHECK(f != nullptr);
+    fputs(V2, f);
+    fclose(f);
+
+    double A[9], bF[3], bM[3], cS[3];
+    // 上面的拒绝消息会打到 stderr —— 但【不是静默】就够了, 这里断言的是返回值。
+    bool ok = ForceCalibration::loadFromFile(TMP_OLD, A, bF, bM, cS);
+    remove(TMP_OLD);
+    CHECK(!ok);
+
+    // 同一件事的另一半: 文件【根本不存在】时也返回 false, 但那是正常路径 (还没标定过),
+    // 不是格式不兼容 —— 两者的返回值相同, 区别只在 stderr 上那一段。这里顺手钉住返回值,
+    // 免得将来有人把"文件不存在"也改成大声报错而淹没真正的格式错。
+    CHECK(!ForceCalibration::loadFromFile("no_such_force_calib_file.json", A, bF, bM, cS));
+    PASS();
+}
+
+// version 字段缺失 (更老的文件) 同样被拒。
+static void test_calib_file_rejects_no_version() {
+    TEST(calib_file_rejects_no_version);
+    static const char* V1 =
+        "{ \"bias_force_n\": [0, 0, 0], \"bias_torque_nm\": [0, 0, 0] }\n";
+    FILE* f = fopen(TMP_NEW, "w");
+    CHECK(f != nullptr);
+    fputs(V1, f);
+    fclose(f);
+
+    double A[9], bF[3], bM[3], cS[3];
+    CHECK(!ForceCalibration::loadFromFile(TMP_NEW, A, bF, bM, cS));
+    remove(TMP_NEW);
+    PASS();
+}
+
+// version 写着 3 但内容是半截的 -> 也不能被当成"读成功了"。
+static void test_calib_file_rejects_truncated() {
+    TEST(calib_file_rejects_truncated);
+    static const char* V3_BAD =
+        "{ \"version\": 3, \"a_matrix\": [1,0,0], \"bias_force_n\": [0,0,0] }\n";
+    FILE* f = fopen(TMP_NEW, "w");
+    CHECK(f != nullptr);
+    fputs(V3_BAD, f);
+    fclose(f);
+
+    double A[9], bF[3], bM[3], cS[3];
+    CHECK(!ForceCalibration::loadFromFile(TMP_NEW, A, bF, bM, cS));
+    remove(TMP_NEW);
+    PASS();
+}
+
 int main() {
     std::cout << "=== ForceCompensation + Calibration Tests ===" << std::endl;
     test_motion_still();
     test_motion_moving();
     test_comp_no_calib();
     test_comp_gravity_only();
+    test_comp_gravity_goes_through_A();
+    test_comp_moment_is_cross_of_Ag();
     test_zero_only_no_motion();
     test_zero_abort_not_applied();
     test_sweep_still_enters_motion();
     test_zero_restartable();
+    test_calib_file_roundtrip();
+    test_calib_file_rejects_old_format();
+    test_calib_file_rejects_no_version();
+    test_calib_file_rejects_truncated();
     std::cout << "\nResults: " << g_passed << " passed, " << g_failed << " failed" << std::endl;
     return g_failed ? 1 : 0;
 }

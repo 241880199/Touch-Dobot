@@ -17,6 +17,8 @@
 #endif
 #include "../force/PayloadCalibration.h"
 #include "../force/RepeatPairRegistry.h"
+#include "../force/ForceCompensation.h"     // ★ Task 6 验收: 跑生产补偿代码本身
+#include "../core/AppState.h"
 #include "../calibration/TcpCalibration.h"
 #include "../config/Config.h"
 
@@ -462,8 +464,9 @@ static void test_sensor_yaw_state() {
 
 // 两条公共路径必须落在同一个重力约定上。
 // 这里够得着的两条是: 负载求解 (PayloadCalibration::solve, 内部经由本文件的 gravityTool)
-// 与共享函数 (TcpCalibration::gravitySensorFrame); ForceCompensation::step 需要 AppState
-// 且未链进本可执行文件, 它那一路只由"step 已改成调用同一个函数"这一事实保证。
+// 与共享函数 (TcpCalibration::gravitySensorFrame)。
+// (2026-09-19 Task 6 起 ForceCompensation.cpp 也链进了本可执行文件 —— 见文件末尾的验收
+//  用例 test_runtime_compensation_pose_independence, 它跑的就是生产补偿代码本身。)
 // 测法: 用【测试自己展开的】传感器系模型造数据 → 求解器若同约定, 残差应到机器精度。
 static void test_solver_uses_shared_gravity_convention() {
     TEST(solver_uses_shared_gravity_convention);
@@ -2661,6 +2664,353 @@ static void test_moment_gate_null_false_reject_rate() {
     PASS();
 }
 
+// =====================================================================================
+// ★★★ Task 6 验收 —— 本地补偿的【姿态无关性】: 全量 (新) vs 残余 (旧), 逐通道, 四份采集
+// =====================================================================================
+//
+// 【为什么是这条判据, 而不是"门过不过"】
+//   本地补偿的定义就是"补偿后的读数应当与姿态无关"(负载正确时, 残余读数与姿态无关)。
+//   门 (chi2Rep / lackOfFit) 问的是"模型形式与数据的复现性一致吗", 它与"补偿后还剩多少
+//   姿态相关"不是同一个量 —— 用门来判这次切换, 是拿另一件事的尺子量这件事。
+//
+// 【量的是什么】
+//   对每一份采集: 用【该次采集解出的】参数做全量补偿, 再量补偿后读数在姿态之间的散布。
+//     dep = sqrt( (1/(3n)) Σ_a Σ_i ( c[a,i] − mean_i c[a,i] )² )     [N] 或 [N·m]
+//   力三轴合并成一个数、力矩三轴合并成一个数 —— 【不合成一个总账】: 力矩通道的模型本项目
+//   自己记录为不完整 (docs: moment-gate-diagnosis-report.md), 合成会把它的缺点摊到力上,
+//   读起来像"两个通道一起好/一起坏"。
+//   两侧都用【同一个 dep】—— 口径一致才有可比性。
+//
+// 【新 (全量) 这一侧跑的是生产代码本身】
+//   ForceCompensation::setCalibration(fit.A, fit.bF, fit.bM, fit.cS) + step() —— 不是把公式
+//   抄一遍。每调用一次前重做 init()+setCalibration(), 于是读到的是【纯模型】:
+//   step() 的输出在第 7 步就算完, 在线 EMA 与惯性项都在其后 (第 8 步), 且新初始化的运动
+//   估计器判"静止"(vel=acc=0)⇒ Fi=0。所以这个读数逐位等于 sixForceRaw − b_F − A·g
+//   (力矩 − b_M − c_s×(A·g)), 不含任何在线漂移。
+//
+// 【旧 (残余) 这一侧是"它最好的样子", 不是稻草人】
+//   旧模型: compensated = fd.raw(@576) − b_F − Δm·g_ψ ; 力矩 − b_M − Δp × g_ψ。
+//   现场那次标定把 Δm/Δp/ψ 连同 TARE 零偏一起写下, 而离线只有这份采集, 所以这里在
+//   【同一份采集】上按最小二乘把 (ψ, Δm, Δp, b_F, b_M) 全部重新定一遍:
+//     · ψ 扫 [-180,180]/0.5° 取力+力矩残差平方和最小者 —— 与生产 old-solver 的判据同式
+//       (PayloadCalibration::solve 的 fitAtYaw); 给它最优的 ψ 只会让"新模型更好"更难成立;
+//     · b_F / b_M 也按 LS 定 (现场是 TARE 采的, 离线没有那一次采样——只能给最有利的值)。
+//   因为 b 是截距, LS 残差的均值恒为 0 ⇒ dep_old 就是 LS 残差的 RMS, 与 dep_new 同口径。
+//
+// 【第二个口径: 留一交叉验证 (LOO)】
+//   有人会问"全量模型 12 个自由参数对旧模型 4 个, 在样本内当然拟合得更好"。这条质疑是
+//   对的, 所以再加一列: 每次留出一个姿态、在其余姿态上重新定【两侧的参数】, 再量【被留出
+//   那个姿态】的补偿后读数 (的散布)。样本内拟合优度不能靠"多几个参数"赢下这一列。
+//   (旧模型的 ψ 在 LOO 里固定为整份采集扫出来的那个 —— ψ 是模型形式参数, 每折重扫 721 次
+//   既无必要也慢; 留出姿态对 ψ 的影响本来就只有半个步长量级。)
+//
+// ⚠ 两侧吃的是【不同通道】(@576 对 @1304) —— 这正是本次切换的内容, 不是不公平:
+//   问题是"哪一条补偿路径留下的读数更与姿态无关", 而两条路径各自的输入就是它们各自的输入。
+
+static const int T6_MAXN = 16;
+
+struct T6Capture {
+    const char* label;
+    const char* file;
+    int    n;
+    double poses[T6_MAXN][6];                       // [x,y,z,rx,ry,rz] (求解器序)
+    double F576[T6_MAXN][3],  M576[T6_MAXN][3];     // 旧模型的输入 (@576)
+    double F1304[T6_MAXN][3], M1304[T6_MAXN][3];    // 新模型的输入 (@1304)
+};
+
+// 读一份采集。列布局由【列数】判: 18 列 (12:38 那批) 或 25 列 (15:xx 那批, 多了 N 与 sd)。
+// 两种布局的前 18 列逐列相同 —— 这也是为什么可以共存 (夹具头部自己写着列名)。
+static bool t6Load(T6Capture& cap) {
+    static const char* DIRS[4] = { "fixtures/", "tests/fixtures/",
+                                   "Touch_Client/tests/fixtures/",
+                                   "../../Touch_Client/tests/fixtures/" };
+    FILE* fp = nullptr;
+    for (int i = 0; i < 4 && !fp; i++) {
+        char path[512];
+        snprintf(path, sizeof(path), "%s%s", DIRS[i], cap.file);
+        fp = fopen(path, "r");
+    }
+    if (!fp) return false;
+
+    cap.n = 0;
+    char line[1024];
+    while (fgets(line, sizeof(line), fp)) {
+        const char* q = line;
+        while (*q == ' ' || *q == '\t') q++;
+        if (*q == '\0' || *q == '\r' || *q == '\n' || *q == '#') continue;
+        if (cap.n >= T6_MAXN) { fclose(fp); return false; }
+        double c[25];
+        const int nc = mgSplitRow(q, c, 25);
+        // 【不静默跳行】: 列数不是这两种 = 布局变了, 拿它去作结论只会得出一个假的
+        if (nc != 18 && nc != 25) { fclose(fp); return false; }
+        double src[6];
+        for (int a = 0; a < 6; a++) src[a] = c[a];
+        repackPoseRow(src, cap.poses[cap.n]);
+        for (int a = 0; a < 3; a++) {
+            cap.F576[cap.n][a]  = c[6 + a];
+            cap.M576[cap.n][a]  = c[9 + a];
+            cap.F1304[cap.n][a] = c[12 + a];
+            cap.M1304[cap.n][a] = c[15 + a];
+        }
+        cap.n++;
+    }
+    fclose(fp);
+    return cap.n >= 4;   // 少于 4 个姿态连 12 个参数都定不下来
+}
+
+// K×K 正规方程 (Gauss 消元, 部分主元)。退化返回 false。K ≤ 6。
+static bool t6SolveNormal(int K, double AtA[6][6], const double Atb[6], double x[6]) {
+    double M[6][7];
+    for (int r = 0; r < K; r++) {
+        for (int c = 0; c < K; c++) M[r][c] = AtA[r][c];
+        M[r][K] = Atb[r];
+    }
+    for (int col = 0; col < K; col++) {
+        int piv = col;
+        for (int r = col + 1; r < K; r++) if (fabs(M[r][col]) > fabs(M[piv][col])) piv = r;
+        if (fabs(M[piv][col]) < 1e-12) return false;
+        if (piv != col) for (int c = col; c <= K; c++) { double t = M[col][c]; M[col][c] = M[piv][c]; M[piv][c] = t; }
+        const double d = M[col][col];
+        for (int c = col; c <= K; c++) M[col][c] /= d;
+        for (int r = 0; r < K; r++) {
+            if (r == col) continue;
+            const double f = M[r][col];
+            for (int c = col; c <= K; c++) M[r][c] -= f * M[col][c];
+        }
+    }
+    for (int i = 0; i < K; i++) x[i] = M[i][K];
+    return true;
+}
+
+// 旧 (残余) 模型在给定 ψ 下的最小二乘。
+//   F_i = b_F + Δm·g_i(ψ)          -> 未知 [bFx,bFy,bFz,Δm]
+//   M_i = b_M + Δp × g_i(ψ)        -> 未知 [bMx,bMy,bMz,dp0,dp1,dp2]
+// 力矩那三个方程按叉乘展开 (cross(dp,g)): Mx = bMx + dp1·g2 − dp2·g1, 等等。
+// skip = 要在拟合中【排除】的姿态下标 (-1 = 不排除), 供 LOO 用。
+// 输出 ssF/ssM = 拟合残差平方和 (只在【参与拟合的姿态】上累计)。
+static bool t6FitOldAtYaw(const T6Capture& cap, double psiDeg, int skip,
+                          double bF[3], double bM[3], double dp[3],
+                          double& ssF, double& ssM) {
+    double A4[6][6] = {{0}}; double b4[6] = {0};
+    double A6[6][6] = {{0}}; double b6[6] = {0};
+    for (int i = 0; i < cap.n; i++) {
+        if (i == skip) continue;
+        double g[3];
+        TcpCalibration::gravitySensorFrameAtYaw(cap.poses[i], psiDeg, g);
+        for (int a = 0; a < 3; a++) {
+            double row[4] = {0, 0, 0, 0};
+            row[a] = 1.0; row[3] = g[a];
+            for (int r = 0; r < 4; r++) {
+                for (int c = 0; c < 4; c++) A4[r][c] += row[r] * row[c];
+                b4[r] += row[r] * cap.F576[i][a];
+            }
+        }
+        const double rows[3][6] = {
+            { 1.0, 0.0, 0.0,   0.0,   g[2], -g[1] },
+            { 0.0, 1.0, 0.0,  -g[2],  0.0,   g[0] },
+            { 0.0, 0.0, 1.0,   g[1], -g[0],  0.0  }
+        };
+        for (int r = 0; r < 3; r++) {
+            for (int c1 = 0; c1 < 6; c1++) {
+                for (int c2 = 0; c2 < 6; c2++) A6[c1][c2] += rows[r][c1] * rows[r][c2];
+                b6[c1] += rows[r][c1] * cap.M576[i][r];
+            }
+        }
+    }
+    double x4[6], x6[6];
+    if (!t6SolveNormal(4, A4, b4, x4)) return false;
+    if (!t6SolveNormal(6, A6, b6, x6)) return false;
+    for (int a = 0; a < 3; a++) { bF[a] = x4[a]; bM[a] = x6[a]; }
+    dp[0] = x6[3]; dp[1] = x6[4]; dp[2] = x6[5];
+    const double dm = x4[3];
+
+    ssF = 0.0; ssM = 0.0;
+    for (int i = 0; i < cap.n; i++) {
+        if (i == skip) continue;
+        double g[3];
+        TcpCalibration::gravitySensorFrameAtYaw(cap.poses[i], psiDeg, g);
+        for (int a = 0; a < 3; a++) {
+            const double e = bF[a] + dm * g[a] - cap.F576[i][a];
+            ssF += e * e;
+        }
+        const double mx = bM[0] + dp[1] * g[2] - dp[2] * g[1];
+        const double my = bM[1] + dp[2] * g[0] - dp[0] * g[2];
+        const double mz = bM[2] + dp[0] * g[1] - dp[1] * g[0];
+        const double e0 = mx - cap.M576[i][0];
+        const double e1 = my - cap.M576[i][1];
+        const double e2 = mz - cap.M576[i][2];
+        ssM += e0 * e0 + e1 * e1 + e2 * e2;
+    }
+    return true;
+}
+
+// 扫 ψ 找最优 (判据 = 力 + 力矩残差平方和最小, 与生产旧求解器同式)。
+static bool t6ScanYaw(const T6Capture& cap, int skip, double& psiBest,
+                      double bF[3], double bM[3], double dp[3],
+                      double& ssF, double& ssM) {
+    double best[3], bbF[3], bbM[3], bdp[3];
+    bool have = false;
+    double bestSum = 0.0;
+    for (int s = 0; s <= 720; s++) {
+        const double psi = -180.0 + s * 0.5;
+        double fF[3], fM[3], fdp[3], sF = 0.0, sM = 0.0;
+        if (!t6FitOldAtYaw(cap, psi, skip, fF, fM, fdp, sF, sM)) continue;
+        if (!have || sF + sM < bestSum) {
+            have = true; bestSum = sF + sM; psiBest = psi;
+            for (int a = 0; a < 3; a++) { bbF[a] = fF[a]; bbM[a] = fM[a]; bdp[a] = fdp[a]; }
+        }
+    }
+    if (!have) return false;
+    // 用最优 ψ 重跑一次, 把残差与参数一并取出 (扫描时存的是 bestSum, 这里要的是分量)
+    if (!t6FitOldAtYaw(cap, psiBest, skip, bbF, bbM, bdp, ssF, ssM)) return false;
+    for (int a = 0; a < 3; a++) { bF[a] = bbF[a]; bM[a] = bbM[a]; dp[a] = bdp[a]; }
+    return true;
+}
+
+// 散布 (姿态无关性的反面): 补偿后读数对姿态均值的 RMS, 三轴合并。
+static double t6Spread(const double c[T6_MAXN][6], int n, int i0) {
+    if (n <= 1) return 0.0;
+    double mean[3] = {0, 0, 0};
+    for (int i = 0; i < n; i++) for (int a = 0; a < 3; a++) mean[a] += c[i][i0 + a] / n;
+    double ss = 0.0;
+    for (int i = 0; i < n; i++)
+        for (int a = 0; a < 3; a++) { const double d = c[i][i0 + a] - mean[a]; ss += d * d; }
+    return sqrt(ss / (3.0 * n));
+}
+
+static void test_runtime_compensation_pose_independence() {
+    TEST(runtime_compensation_pose_independence);
+
+    static const char* FILES[4] = {
+        "calib_poses_2026-09-19.txt",       // 12:38:19, 7 姿态, 18 列
+        "calib_poses_2026-09-19_1525.txt",  // 15:25:23, 9 姿态, 25 列 (含重复姿态对)
+        "calib_poses_2026-09-19_1530.txt",  // 15:30:xx, 10 姿态
+        "calib_poses_2026-09-19_1533.txt"   // 15:33:xx, 10 姿态
+    };
+    static const char* LABELS[4] = { "12:38", "15:25", "15:30", "15:33" };
+
+    int worseF = 0, worseM = 0;
+    std::cout << std::endl;
+    for (int k = 0; k < 4; k++) {
+        T6Capture cap;
+        cap.label = LABELS[k];
+        cap.file  = FILES[k];
+        if (!t6Load(cap)) {
+            std::cout << "    FAIL: 夹具 " << FILES[k] << " 读不到 (它是已入库的只读副本;"
+                         " 缺了说明检出坏了, 不是这台机器没采过)" << std::endl;
+            g_failed++;
+            return;
+        }
+
+        // ---------- 新 (全量) ----------
+        PayloadCalibration::RawFit fit;
+        // fitRawLinear: 只做线性拟合, 不做任何自检 —— 采样本地的量测就该用它
+        // (自检是"能不能采纳"的门, 与本验收无关; 用 fitRaw 会被门拦住而量不成)。
+        if (!PayloadCalibration::fitRawLinear(cap.poses, cap.F1304, cap.M1304, cap.n, fit)) {
+            std::cout << "    FAIL: " << cap.label << " 的 @1304 线性拟合失败 (秩亏)" << std::endl;
+            g_failed++;
+            return;
+        }
+        static double compNew[T6_MAXN][6];
+        for (int i = 0; i < cap.n; i++) {
+            AppState::ForceData fd;
+            for (int a = 0; a < 3; a++) {
+                fd.sixForceRaw[a]     = cap.F1304[i][a];   // 力 x,y,z
+                fd.sixForceRaw[3 + a] = cap.M1304[i][a];   // 力矩 x,y,z
+            }
+            ForceCompensation::init();                       // 干净的估计器状态 (见文件头说明)
+            ForceCompensation::setCalibration(fit.A, fit.bF, fit.bM, fit.cS);
+            ForceCompensation::step(fd, cap.poses[i]);
+            for (int a = 0; a < 6; a++) compNew[i][a] = fd.compensated[a];
+        }
+        const double depNewF = t6Spread(compNew, cap.n, 0);
+        const double depNewM = t6Spread(compNew, cap.n, 3);
+        // 口径自校: b_F / b_M 都是截距 ⇒ 拟合残差的均值恒为 0 ⇒ 上面的散布应该逐位等于
+        // fitRawLinear 报的 rms (残差 = 补偿后读数)。对不上就说明"量的东西"与"拟合的东西"
+        // 不是同一件事 —— 那这条验收的整个读数都不可信。
+        if (!(fabs(depNewF - fit.rmsForceN) < 1e-9 && fabs(depNewM - fit.rmsMomentNm) < 1e-9)) {
+            std::cout << "    FAIL: " << cap.label << " 口径自校不过: 散布 ("
+                      << depNewF << ", " << depNewM << ") vs fitRawLinear 的 rms ("
+                      << fit.rmsForceN << ", " << fit.rmsMomentNm << ") —— 量错了东西"
+                      << std::endl;
+            g_failed++;
+            return;
+        }
+
+        // ---------- 旧 (残余) ----------
+        double psi = 0.0, ssF = 0.0, ssM = 0.0, bF[3], bM[3], dp[3];
+        if (!t6ScanYaw(cap, -1, psi, bF, bM, dp, ssF, ssM)) {
+            std::cout << "    FAIL: " << cap.label << " 的旧 (残余) 模型拟合失败" << std::endl;
+            g_failed++;
+            return;
+        }
+        const double depOldF = sqrt(ssF / (3.0 * cap.n));
+        const double depOldM = sqrt(ssM / (3.0 * cap.n));
+
+        // ---------- 留一交叉验证 ----------
+        static double looNew[T6_MAXN][6], looOld[T6_MAXN][6];
+        int looN = 0;
+        for (int i = 0; i < cap.n; i++) {
+            // 新: 在其余姿态上重解 A / b / c_s
+            PayloadCalibration::RawFit f2;
+            static double p2[T6_MAXN][6], F2[T6_MAXN][3], M2[T6_MAXN][3];
+            int m = 0;
+            for (int j = 0; j < cap.n; j++) {
+                if (j == i) continue;
+                for (int a = 0; a < 6; a++) p2[m][a] = cap.poses[j][a];
+                for (int a = 0; a < 3; a++) { F2[m][a] = cap.F1304[j][a]; M2[m][a] = cap.M1304[j][a]; }
+                m++;
+            }
+            if (!PayloadCalibration::fitRawLinear(p2, F2, M2, m, f2)) continue;
+            AppState::ForceData fd;
+            for (int a = 0; a < 3; a++) {
+                fd.sixForceRaw[a]     = cap.F1304[i][a];
+                fd.sixForceRaw[3 + a] = cap.M1304[i][a];
+            }
+            ForceCompensation::init();
+            ForceCompensation::setCalibration(f2.A, f2.bF, f2.bM, f2.cS);
+            ForceCompensation::step(fd, cap.poses[i]);
+            for (int a = 0; a < 6; a++) looNew[looN][a] = fd.compensated[a];
+
+            // 旧: ψ 固定为整份采集扫出来的那个, 只重定零偏与 Δm/Δp
+            double fF[3], fM[3], fdp[3], sF = 0.0, sM = 0.0;
+            if (!t6FitOldAtYaw(cap, psi, i, fF, fM, fdp, sF, sM)) continue;
+            double g[3];
+            TcpCalibration::gravitySensorFrameAtYaw(cap.poses[i], psi, g);
+            for (int a = 0; a < 3; a++) looOld[looN][a] = cap.F576[i][a] - fF[a];
+            looOld[looN][3] = cap.M576[i][0] - (fM[0] + fdp[1] * g[2] - fdp[2] * g[1]);
+            looOld[looN][4] = cap.M576[i][1] - (fM[1] + fdp[2] * g[0] - fdp[0] * g[2]);
+            looOld[looN][5] = cap.M576[i][2] - (fM[2] + fdp[0] * g[1] - fdp[1] * g[0]);
+            looN++;
+        }
+        const double looNewF = t6Spread(looNew, looN, 0);
+        const double looNewM = t6Spread(looNew, looN, 3);
+        const double looOldF = t6Spread(looOld, looN, 0);
+        const double looOldM = t6Spread(looOld, looN, 3);
+
+        printf("    %s (n=%2d, psi_old=%+7.1f deg)  力: 旧 %.4f -> 新 %.4f N   (%.2fx)   "
+               "力矩: 旧 %.4f -> 新 %.4f N·m (%.2fx)\n",
+               cap.label, cap.n, psi, depOldF, depNewF, depOldF / depNewF,
+               depOldM, depNewM, depOldM / depNewM);
+        printf("    %s  LOO                     力: 旧 %.4f -> 新 %.4f N   (%.2fx)   "
+               "力矩: 旧 %.4f -> 新 %.4f N·m (%.2fx)\n",
+               cap.label, looOldF, looNewF, looOldF / looNewF,
+               looOldM, looNewM, looOldM / looNewM);
+
+        if (!(depNewF < depOldF)) worseF++;
+        if (!(depNewM < depOldM)) worseM++;
+    }
+    std::cout << "    (x 倍 = 旧/新, 越大越好; 力与力矩分开报, 不合账)" << std::endl;
+
+    // 断言【两个通道都变好】。四份采集上量出来的就是两个都变好 (逐份的数字见上面的表,
+    // 报告里也逐份列了), 所以这里两条都断言 —— 不是"力过了就算数"。
+    // 若将来某一份的力矩那一侧翻转: 这条会红, 而表就在上面。先读表, 再决定是改模型还是
+    // 改断言 —— 【不许】把力矩那条断言删掉换成一句打印: 那就是把"没变好"藏进一个绿的里面。
+    CHECK(worseF == 0);
+    CHECK(worseM == 0);
+    PASS();
+}
+
 int main() {
     std::cout << "=== PayloadCalibration Tests ===" << std::endl;
     test_recovers_true_payload();
@@ -2729,6 +3079,11 @@ int main() {
     std::cout << "--- moment gate calibration (real captures, production fitRaw) ---" << std::endl;
     test_moment_gate_real_captures_golden();
     test_moment_gate_null_false_reject_rate();
+
+    // ★★★ Task 6 验收: 本地补偿的姿态无关性 (全量 vs 残余, 逐通道, 四份采集)。
+    // 【放在最后】: 它要跑生产补偿代码 (ForceCompensation::step), 并且会打一张表。
+    std::cout << "--- Task 6 acceptance: pose-independence of local compensation ---" << std::endl;
+    test_runtime_compensation_pose_independence();
 
     std::cout << "\n" << g_passed << " passed, " << g_failed << " failed" << std::endl;
     return g_failed ? 1 : 0;
