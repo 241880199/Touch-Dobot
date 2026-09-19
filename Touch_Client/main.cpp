@@ -1382,14 +1382,25 @@ namespace BiasCheck {
             // [Payload] 行为准 (这条规矩的出处见下面 MODEL_FORM_NO_DOF 那个分支的注释)。
             diagEmitf("      力通道:   残差÷尺子 χ²/dof = %.4g  门限 %.4g   (dof=%d, 尺子 %.4g N)\n",
                       fit.chi2RepForceRatio, fit.chi2RepForceLimit, fit.chi2DofForce, yardF);
-            if (fit.lackOfFitMomentDof > 0) {
+            // 【按库的标志分两支, 而不是在本地重推库的规矩】: momentFormChecked 是库专为
+            // "力矩那一半到底验没验"设的标志 —— 它自己的注释说, 这两个标志存在的意义就是让
+            // "没验过"与"验过了"分得开 (PayloadCalibration.cpp:1288-1292)。本地若改用
+            // lackOfFitMomentDof > 0 去重推这条规矩, 库哪天改了 dof 的约定 (比如改用别的自由度
+            // 口径), 这一支就会【不声不响地按旧规矩分错】—— 正是本提交与 fd4eead 要消灭的
+            // 那种"库里的规矩在本地又抄了一份"。两支等价: 库在通过那一支先无条件置
+            // modelFormChecked = true, 紧接着置 momentFormChecked = (lackOfFitMomentDof > 0)
+            // (PayloadCalibration.cpp:1291-1292), 而本分支已经知道 modelFormChecked 为真。
+            if (fit.momentFormChecked) {
                 diagEmitf("      力矩通道: 失拟统计量     = %.4g  门限 %.4g   (dof=%d, 尺子 %.4g N·m)\n",
                           fit.lackOfFitMomentRatio, fit.lackOfFitMomentLimit,
                           fit.lackOfFitMomentDof, yardM);
             } else {
                 // dof = 0 是【这一次没验】, 不是"验了得 0"。这里【不许】印比较 —— 0 < 0 是假的,
-                // 而它会被读成"力矩通道也过了"。(此刻 momentFormChecked 同样是 false: 两个标志
-                // 在库里同进同退。)
+                // 而它会被读成"力矩通道也过了"。
+                // 【两个标志正是在本分支处分道扬镳】, 走得到这里就是因为它们不同进同退: 库在通过
+                // 那一支无条件把 modelFormChecked 置 true, 而 momentFormChecked 按 dof > 0 置
+                // (PayloadCalibration.cpp:1291-1292) —— 所以读到本行时前者是 true、后者是 false。
+                // 这个分岔正是这个 else 存在的理由 (从前这里把因果写反了, 说"两个标志同进同退")。
                 diagEmitf("      力矩通道: 【没有检验】(dof=0) —— 自由 12 参数模型在这批姿态上"
                           "秩亏, 失拟统计量【无从给出】;\n");
                 diagEmitf("                这一半不是【通过】, 是【没做】—— 库已在 stderr 的"
@@ -1398,8 +1409,16 @@ namespace BiasCheck {
             diagEmitf("      对照 (姿态内噪声, 【只报告不判】): 力 %.4g N / 力矩 %.4g N·m;"
                       " χ²/dof = %.4g / %.4g\n",
                       fit.noiseForceN, fit.noiseMomentNm, fit.chi2ForceRatio, fit.chi2MomentRatio);
-            diagOut() << "      ↑ 上面两行只是【数】, 不是【结论】—— 过没过【以 stderr 的 [Payload]"
-                      << " 行为准】: 判据在库里只有一份, 本行不替它说。" << std::endl;
+            // 【按"带没带数"锚定, 不按"上面第几行"锚定】: 本行与那两行之间还夹着判决【对照】
+            // 那一行 (它也是"数"); 而力矩通道 dof=0 时, 那两行里的第二行印的是【没有检验】——
+            // 一句【一个数都没有】的话, 把它叫"只是【数】"是说不通的 (2026-09-19 复审)。
+            // 所以这里说的是"凡带着判据里的数的那几行": dof>0 与 dof=0 两支下都成立, 也不会
+            // 因为将来在中间再插一行而指错。
+            diagOut() << "      ↑ 上面【凡带着判据里的数的那几行】只是【数】, 不是【结论】 ——"
+                      << " 过没过【以 stderr 的 [Payload] 行为准】: 判据在库里只有一份, 本行不替"
+                      << "它说。" << std::endl;
+            diagOut() << "        (力矩通道 dof=0 时上面【没有】带数的那一行, 只有【没有检验】那句"
+                      << " —— 它同样不是结论。)" << std::endl;
             diagOut() << "      ↑ 残差若明显大于姿态内噪声、却与【姿态间复现性】相符, 那是"
                       << "采集现场的复现性差, 不是模型错。" << std::endl;
         } else {
@@ -1436,15 +1455,31 @@ namespace BiasCheck {
                           "造成的】; 但是哪一道自检卡住的,【以上面 stderr 的 [Payload] 自检"
                           "拒绝行为准】。\n",
                           modelFormStatusName(fit.modelFormStatus));
-                diagOut() << "        下面两行只是把判据里的两个数照抄在旁边 (写出来的是【门限】而不是"
-                          << "结论):" << std::endl;
+                // 【与通过那一支同一处境, 就说同一句话】(2026-09-19 复审: 同一件事在两支下
+                // 曾读出两个样子)。dof = 0 是【没验】, 不是"验了得 0" —— 印 "失拟 = 0 门限 0"
+                // 与通过那一支从前的 "0 < 0" 是同一个读法陷阱 ("0, 那力矩通道没事"), 只是那一支
+                // 更危险 (假通过)。锚点同样改成"带没带数", 不数"下面第几行"。
+                diagOut() << "        下面【凡带着判据里的数的那几行】只是把数照抄在旁边 (写出来的"
+                          << "是【门限】而不是结论):" << std::endl;
                 diagEmitf("          力通道:   残差÷尺子 χ²/dof = %.4g  门限 %.4g   (dof=%d, 残差 %.4g N"
                           " / 尺子 %.4g N)\n",
                           fit.chi2RepForceRatio, fit.chi2RepForceLimit, fit.chi2DofForce,
                           fit.rmsForceN, yardF);
-                diagEmitf("          力矩通道: 失拟             = %.4g  门限 %.4g   (dof=%d, 尺子 %.4g N·m)\n",
-                          fit.lackOfFitMomentRatio, fit.lackOfFitMomentLimit,
-                          fit.lackOfFitMomentDof, yardM);
+                // 力矩这一行【不能】像通过那一支那样读 momentFormChecked: 判决被拒时它按构造
+                // 必为 false (库只在通过那一支才置 true, PayloadCalibration.cpp:1291-1292),
+                // 拿它分会把"失拟真的算出来且正是拒因"也读成"没做"。这里问的是【有没有这个数】,
+                // 所以按 dof > 0 分。
+                if (fit.lackOfFitMomentDof > 0) {
+                    diagEmitf("          力矩通道: 失拟             = %.4g  门限 %.4g   (dof=%d,"
+                              " 尺子 %.4g N·m)\n",
+                              fit.lackOfFitMomentRatio, fit.lackOfFitMomentLimit,
+                              fit.lackOfFitMomentDof, yardM);
+                } else {
+                    diagEmitf("          力矩通道: 【没有检验】(dof=0) —— 自由 12 参数模型在这批姿态"
+                              "上秩亏, 失拟统计量【无从给出】;\n");
+                    diagEmitf("                    这一半不是【通过】, 是【没做】—— 库已在 stderr 的"
+                              " [Payload] 行上说明。\n");
+                }
                 diagOut() << "        本行不给【超过/通过】这个结论 —— 是哪一种, 按上面 [Payload] 行分:"
                           << std::endl;
                 diagOut() << "          · 力通道被拒 -> 先看上面 stderr 的逐姿态残差表: 【只有一两个"

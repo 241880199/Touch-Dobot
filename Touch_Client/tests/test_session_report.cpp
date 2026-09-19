@@ -445,13 +445,25 @@ static std::string printedTextStream(const std::string& code) {
     return out;
 }
 
-// 去掉一个字面量里的 ASCII 箭头 (-> 与 =>): 它是指路, 不是比较算子。
+// 去掉一个字面量里的箭头 (ASCII 的 -> 与 =>, 以及 U+2192 的 →): 它是指路, 不是比较算子。
+// 【为什么必须把箭头剥掉, 而不是拿它当算子】: `->` 里的那个 '>' 会【假冒】比较算子 ——
+// `门限 %.4g -> 通过` 若原样交给下面的邻接判据, 命中的是那个无关的 '>' 而不是结论本身。
+// 也正因为剥了, 箭头【两侧】的东西会被拉近: 这正是"门限 X -> 通过"这类写法上一版能全绿的
+// 原因 (剥掉 '->' 后又没有"通过"这个令牌, 于是无词可用)。所以这里剥箭头与下面加【结论词】
+// 是一对, 缺一个就漏。
+// 【局限】只认这三种: 别的箭头字形 (⇒ U+21D2 / ➔ / ⟶ …) 与英文措辞一样在盲区里, 见下面
+// 那一段"这条闸门到底管到哪"。
 static std::string withoutArrows(const std::string& s) {
     std::string out;
     out.reserve(s.size());
     for (size_t i = 0; i < s.size(); i++) {
         if (s[i] == '-' && i + 1 < s.size() && s[i + 1] == '>') { i++; continue; }
         if (s[i] == '=' && i + 1 < s.size() && s[i + 1] == '>') { i++; continue; }
+        // → = UTF-8 E2 86 92 (三个字节一起吃掉, 否则留下半截字节会变成乱码碎片)
+        if ((unsigned char)s[i] == 0xE2 && i + 2 < s.size()
+            && (unsigned char)s[i + 1] == 0x86 && (unsigned char)s[i + 2] == 0x92) {
+            i += 2; continue;
+        }
         out += s[i];
     }
     return out;
@@ -459,17 +471,26 @@ static std::string withoutArrows(const std::string& s) {
 
 // 【类级判据: 本地不许替库下"统计量与门限"的结论】。
 // 命中就返回那一段文字 (给失败信息看), 没命中返回空串。
-//   · 门限词: 门限 / 越线 / 超线 / 过线 —— 后三个【自带】那个"线", 只能由"与门限比过"得出,
-//     所以它们一旦出现就命中 (不必旁边还有"门限"二字);
-//   · 比较算子: < > ≤ ≥ 超过 大于 小于 低于 高于 —— 单独一个词不算, 必须与门限词【挨着】。
-//   · 判据: 一个门限词与一个比较算子相距不到 W 字节 = 本地替库下了结论。
+//   · 门限词: 门限 / 门槛 / 越线 / 超线 / 过线 —— 后三个【自带】那个"线", 只能由"与门限比过"
+//     得出, 所以它们一旦出现就命中 (不必旁边还有"门限"二字); "门槛"是"门限"的同义词
+//     (2026-09-19 复审补: 同义替换曾是盲区)。
+//   · 结论词: 单独一个不算, 必须与门限词【挨着】。两类:
+//       (a) 比较算子 < > ≤ ≥ 超过 大于 小于 低于 高于 / 越线 超线 过线;
+//       (b) 说结论的措辞 以内 通过 拒绝 √ 未超 未越 —— 2026-09-19 复审补的一组。
+//     补 (b) 的理由: 上一版只收算子, 于是"在门限 X 以内" / "门限 X -> 通过" / "门限 X √" /
+//     "未超门限 X" 四种【都带结论】的写法全让闸门保持全绿 (实测)。箭头那一类尤其阴: 箭头被
+//     withoutArrows 剥掉之后, 连它自带的 '>' 都不在了, 只剩"门限 X 通过"这种无处落脚的形状。
+//     "拒绝" 是"通过"的同位词 (判决那一支两边都禁), "未越"是"未超"的同源写法。
+//   · 判据: 一个门限词与一个结论词相距不到 W 字节 = 本地替库下了结论。
 // 为什么按字节距离而不是"同一个字面量": 一行打印常被拆成两个字面量, 只看单个字面量会漏掉
 // 这样写的 `"...= %.4g  <" "  门限 %.4g..."` —— 而这类回归正是闸门要拦的。W 取小: 措辞的
-// 邻接是【很近】的 ("超过门限"/"= %.4g 门限"), 拉大只会把无关的两句话配成对。
+// 邻接是【很近】的 ("超过门限"/"= %.4g 门限"), 拉大只会把无关的两句话配成对。W=10 也因此
+// 是这条闸门的量纲: 中间插进别的话就漏 (见下面"这条闸门到底管到哪")。
 static std::string localVerdictExcerpt(const std::string& stream) {
-    static const char* kLimit[] = {"门限", "越线", "超线", "过线"};
-    static const char* kCmp[]   = {"<", ">", "≤", "≥", "超过", "大于", "小于", "低于", "高于",
-                                   "越线", "超线", "过线"};
+    static const char* kLimit[]   = {"门限", "门槛", "越线", "超线", "过线"};
+    static const char* kConcl[]   = {"<", ">", "≤", "≥", "超过", "大于", "小于", "低于", "高于",
+                                     "越线", "超线", "过线",
+                                     "以内", "通过", "拒绝", "√", "未超", "未越"};
     const size_t W = 10;
     for (size_t li = 0; li < sizeof(kLimit) / sizeof(kLimit[0]); li++) {
         const size_t llen = strlen(kLimit[li]);
@@ -477,10 +498,10 @@ static std::string localVerdictExcerpt(const std::string& stream) {
              p = stream.find(kLimit[li], p + 1)) {
             const size_t lo = (p > W) ? p - W : 0;      // 窗口: 门限词前后各 W 字节
             const size_t hi = p + llen + W;
-            for (size_t ci = 0; ci < sizeof(kCmp) / sizeof(kCmp[0]); ci++) {
-                const size_t clen = strlen(kCmp[ci]);
-                for (size_t q = stream.find(kCmp[ci]); q != std::string::npos;
-                     q = stream.find(kCmp[ci], q + 1)) {
+            for (size_t ci = 0; ci < sizeof(kConcl) / sizeof(kConcl[0]); ci++) {
+                const size_t clen = strlen(kConcl[ci]);
+                for (size_t q = stream.find(kConcl[ci]); q != std::string::npos;
+                     q = stream.find(kConcl[ci], q + 1)) {
                     if (q < hi && q + clen > lo) {      // 与窗口相交 -> 命中
                         size_t a = (lo > 30) ? lo - 30 : 0;
                         size_t b = (hi + 30 < stream.size()) ? hi + 30 : stream.size();
@@ -520,9 +541,25 @@ static std::string localVerdictExcerpt(const std::string& stream) {
 // (3n > 12, PayloadCalibration.cpp 明说"力矩通道的失拟检验【没做成】") 从未被检验,
 // lackOfFitMomentDof = 0, 于是屏幕上印出 "0  <  0": 一个【假通过】, 还 append 进了
 // calib_report.md。假失败把人支去查没坏的通道; 【假通过让人什么都不查】。
-// 所以现在扫的是【打给人看的那条文字流】(见上面的 printedTextStream): 一个【门限词】与一个
-// 【比较算子】(或一个自带"线"的判据词) 挨在一起就红 —— 通过/拒绝两支、拆成几个字面量、
-// 换成哪个同义词, 都跑不掉。
+// 所以现在扫的是【打给人看的那条文字流】(见上面的 printedTextStream): 一个【门限/门槛词】与一个
+// 【结论词】(比较算子, 或"以内/通过/拒绝/√/未超/未越"这类直接说结论的措辞) 挨在一起就红。
+// 拆成几个字面量骗不过它 (文字流是首尾相接的, 见上面为什么按字节距离判)。
+//
+// ===== 【这条闸门到底管到哪】—— 2026-09-19 复审: 这里原来写着"通过/拒绝两支、拆成几个字面量、
+//   换成哪个同义词, 都跑不掉"。那句话【是假的】, 已删。复审实测【全绿漏过】的五种写法:
+//     `… 在门限 %.4g 以内` / `… 门限 %.4g -> 通过` / `… 门限 %.4g √` / `未超门限 %.4g` / `门槛`
+//   —— 其中 `… 门限 %.4g -> 通过` 就是一次【假通过】被写进 calib_report.md 这份永久记录, 而
+//   闸门照旧全绿。前四种现已收进令牌表 (箭头两种字形 -> 与 → 都收), "门槛"收进门限词。
+//   现在它能抓什么、抓不到什么, 一次说清 (别再让注释比代码能打):
+//     · 抓得住: 门限词 ±10 字节内出现令牌表里任何一个【结论词/算子】—— 无论哪一支、无论拆成
+//       几个字面量、无论中间夹着 -> 还是 →。这是【中文措辞的令牌匹配 + 邻接】。
+//     · 抓不住 (明确的盲区): 令牌表外的措辞 —— 任何【英文写法】("below the limit" / "pass"),
+//       以及换了说法又不带门限词的中文 ("合格" / "没超标" / "在允许范围内" / "不存在显著差异");
+//       把比较藏在代码里 (先算 bool, 再印 "结论" 二字) —— 本闸门读的是【字面量】, 不是控制流;
+//       窗口外的措辞 (门限 X, 详见附表, 以内 —— 中间插进别的话就把邻接撑破);
+//       别的箭头字形 (⇒ U+21D2 / ⟶ …) 与别的同义词。
+//   ⇒ 它是一道【中文措辞的绊线】, 不是"本地再也不会替库下结论"的证明。改这一屏时人还是要读一遍。
+//      (上面 (2)(2b)(3) 那几条正面断言是同一条防线, 各自钉住"该说的话还在不在"。)
 static void test_reject_line_does_not_restate_the_library_verdict() {
     TEST(reject_line_does_not_restate_the_library_verdict);
     const std::string src = readWholeFile("../main.cpp");
@@ -562,7 +599,16 @@ static void test_reject_line_does_not_restate_the_library_verdict() {
     // (2b) 【判决通过那一支】也要有对症的话 —— 这是正面证据: 少了它, 上面的类级闸门可以靠
     //      "把那一行整个删掉"满足, 而那一屏就再也不报数了。
     CHECK(stream.find("【没有检验】") != std::string::npos);   // dof=0 = 没验过 -> 必须明说
-    CHECK(code.find("fit.lackOfFitMomentDof > 0") != std::string::npos);  // 按"验没验"分两支
+    // 【按"验没验"分两支, 而且两支各按【库自己的那个标志/那个数】分】:
+    //   · 通过那一支读库的标志 momentFormChecked —— 库设它就是为了让"没验过"与"验过了"分得开
+    //     (PayloadCalibration.cpp:1288-1292)。本地若改用 lackOfFitMomentDof > 0 去【重推】这条
+    //     规矩, 就是本提交与 fd4eead 要消灭的那种"本地替库下规矩": 库改了 dof 的约定, 这里会
+    //     【不声不响地分错支】。(两者在该分支下等价 —— 库里 modelFormChecked 置 true 之后紧跟
+    //     一句 momentFormChecked = (lackOfFitMomentDof > 0)。)
+    //   · 拒绝那一支【只能】按 lackOfFitMomentDof > 0 分: 判决被拒时 momentFormChecked 按构造
+    //     必为 false (库只在通过那一支置 true), 拿它分会把"失拟真的被算出来且拒了"也读成"没做"。
+    CHECK(code.find("fit.momentFormChecked") != std::string::npos);
+    CHECK(code.find("fit.lackOfFitMomentDof > 0") != std::string::npos);
     CHECK(code.find("fit.lackOfFitMomentLimit") != std::string::npos);    // 门限照旧摆出来 (报数)
     CHECK(code.find("门限 %.4g") != std::string::npos);                   // 报数的格式还在
     CHECK(stream.find("以 stderr 的 [Payload] 行为准") != std::string::npos);  // 通过那一支也指向库
