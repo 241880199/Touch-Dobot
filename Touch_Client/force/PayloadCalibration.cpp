@@ -409,11 +409,6 @@ namespace PayloadCalibration {
     //     改动的真实代价, 见 momentFormLimit 上面那一段的第三个验证点。上表里走【力门】的那两行
     //     (转置重力约定 1107.23 : 2.775、单个坏姿态 90.65 : 2.157) —— 印的是【力门】的那对
     //     (统计量 : 门限), 它们的【拒绝原因来自力门】, 而力门未改 ⇒ 那两行的余量仍然逐位成立。
-    //     ⚠⚠ 2026-09-19 【联合估计 A】之后, "力矩非叉乘结构"那一行的余量再变一次:
-    //       9.09x → 【1.68x】(统计量 28.92 : 门限 17.18), 而且【力门也同时被拒】
-    //       (力 29.53 : 3.75) —— A 现在由两个通道联合估, 一份远超噪声的力矩结构错会把 A
-    //       拖歪。出处: moment_lack_of_fit_rejects_non_cross_product 那一行 (本模块测试)
-    //       与 .superpowers/sdd/joint-A-prod-report.md。
     //     ⚠ 但"不经过力矩门"是错的: 力矩失拟在这两行上【也照算】—— 单个坏姿态的力矩统计量
     //     71.0140 在出厂力矩门限 16.5285 下【也会被拒】(4.30×), 转置重力约定的力矩失拟是
     //     1.2393 : 19.1008 (不过)。出处: D:\tmp\limitprod\wrong.txt 的 (3b) 段逐行括注,
@@ -819,15 +814,6 @@ namespace PayloadCalibration {
     //     离线报告 §5 的 11.25× 是【另一套构造】的数 (统计量 172.6156, 门限 15.3416), 与上面
     //     那两个数不是同一个统计量, 不能拿来当本模块的余量。
     //     另两条走【力门】(本任务未改), 余量逐位不变 (295.53× / 33.17×)。
-    //   ⚠⚠ 【2026-09-19 联合估计 A 之后, 上面那两个数只对 A_F 那一版成立】。实测 (改动后):
-    //     非叉乘结构的力矩余量 9.09× → 【1.68×】(统计量 155.53 → 28.92, 门限 17.11 → 17.18),
-    //     而且【力门也同时超限】(力 χ²rep/dof 0.47 → 29.53, 门限 3.75) —— 因为 A 现在由两个
-    //     通道联合估, 一份远超噪声的力矩结构错会把 A 拖歪, 力通道于是跟着超限。
-    //     判决方向【没变】(错模型照样被拒, 现在是两把门一起拒), 变的是理由与余量。
-    //     出处: 本模块测试 test_payload_calibration.exe 的
-    //     moment_lack_of_fit_rejects_non_cross_product 那一行; 全表见
-    //     .superpowers/sdd/joint-A-prod-report.md。上面那句 295.53×/33.17× 经本次改动后仍是
-    //     295.3×(转置约定: 1107.4 / 3.75) —— 那两条走力门, 不受影响。
     //
     // ===== 五条限制 (要求写进代码, 不是可选) =====
     //   (1) 【最大残余敏感项: c0 其实还随 r = σ_sysM²/floor_M² 变 ~2 倍, 这里并成了一个
@@ -866,8 +852,6 @@ namespace PayloadCalibration {
     //     (iii) 它同时是离线报告 §7.1/§7.2 用来读"生产会打印哪个数"的那一列
     //     (18:49:55 的新门限 11.1571、错模型余量 11.25×【离线那套构造】都是这一列;
     //     本模块测试自己那套构造上同一条错模型的余量是 9.09×, 见上面第三个验证点)。
-    //     ⚠ 2026-09-19 联合估计 A 之后, 本模块那份构造上的余量是 1.68× (且力门同时被拒),
-    //     见 modelFormLimit 上面那一段里的 ⚠⚠ 与 .superpowers/sdd/joint-A-prod-report.md。
     //     离线报告 §4 的 "B 行" (Σ 再加 σ_sys,F²) 是另一套口径, 验收时另列, 不作为生产行为。
     // =================================================================================
 
@@ -981,13 +965,6 @@ namespace PayloadCalibration {
     //            —— 【这一步是真做了的】: 提案原式只算 sym(T) 那一项, 实测偏大 1.49~2.97 倍
     //            (倍率随 cond 单调: cond 207→2.97, cond 18→1.50), 不是"取哪一项"的问题
     //            (moment-gate-dA-correction-report.md §2)。
-    //   ⚠ 2026-09-19: 这个 e 现在在【联合估出来的 A】上求值 (从前是力通道线性解 A_F), 因为
-    //     "生产在一次 fitRaw 里全都有"的那四样东西里, fit.A 已经换成了联合解。Σ_A 仍然是
-    //     【力通道】的三明治 —— 严格说 Â 与 Σ_A 不再出自同一个估计器了, 这是本次改动留下的
-    //     一处【已知不闭合】(量级: 三个夹具上 e 挪 −0.97%~+0.19% 相对, 门限跟着挪 κ·Δe,
-    //     即 14.68333151→14.68881044 / 10.50518393→10.48251310 / 11.02378921→11.02029958,
-    //     相对 −0.22%~+0.04%)。
-    //     ⚠ 门限的形式与 c0/κ 一个字没动 —— 不许在本任务里动它。
     //   物理意义: 力矩模型 M = b_M + c_s × (A·g) 复用的是【力通道估出来的】A; Â ≠ A 时叉乘
     //   结构吃不掉那一份, 统计量因此系统性抬高 —— e 就是这一份抬高的期望值。
     //
@@ -1185,394 +1162,6 @@ namespace PayloadCalibration {
         return c0 * modelFormLimit(6.0, repPairs, sys2, floor2) + kappa * excess;
     }
 
-    // =====================================================================================
-    // ★ 联合估计 A (2026-09-19): 力方程与力矩方程放进【同一个】加权最小二乘
-    // =====================================================================================
-    //
-    // 【要解决的问题】从前 A 只从力通道估 (F = b_F + A·g), 力矩通道再复用它。实测 A_F 与
-    // 力矩通道【不自洽】—— 差到了超出申报噪声能解释的那一份 —— 而【存在一个 A 让两把门
-    // 同时接受】。所以"力矩门拒绝好数据"的根因是 A 的估计口径, 不是叉乘模型的错。
-    // 离线研究: Docs/superpowers/evidence/joint-A-report.md / lambda-scan-report.md。
-    //
-    // θ = [ A(9) | b_F(3) | c_s(3) | b_M(3) ]   (vec A 行主序; 与 paramSigma 的字段布局同序,
-    //                                            所以 (JᵀWJ)⁻¹ 的对角可以直接摊进去)
-    //
-    //   χ²(θ) = Σ_i Σ_a ( F_ia − b_Fa − (A·g_i)_a )² / s²_F,ia
-    //         + Σ_i Σ_a ( M_ia − b_Ma − (c_s × (A·g_i))_a )² / s²_M,ia
-    //
-    //   s²_F,ia = varF_ia / N_i ,  s²_M,ia = varM_ia / N_i    ← 实测逐姿态逐通道的【均值】方差
-    //   g_i = TcpCalibration::gravitySensorFrameAtYaw(pose_i, 0.0, ·)   (即 gravityNoYaw)
-    //
-    // ★★ 【权重的口径就是这一改动的全部要害, 写死在这里】★★
-    //   权重的唯一来源是 【实测的逐姿态 var/N (对角)】—— 就是 PoseNoise 里存的那个量、
-    //   meanVar() 返回的那个量。它**不是** sandwich (JᵀJ)⁻¹JᵀΣJ(JᵀJ)⁻¹, **不是**传播的
-    //   Cov(B_free), **也不是** paramSigma 那一套池化 s²_F。生成头条数字的离线研究用的就是
-    //   这一档 (joint-A-report §2/§3)。
-    //   ⚠ 判决【是权重相关的, 不是无条件的】: 把 sandwich Cov(A_F) + 传播 Cov(B_free) 那一档
-    //     (同为先验合理) 做成融合估计器, 力矩门【超限 1.4%】而拒绝 (4.975 / 4.909); 力矩块
-    //     权重减半 (k=2) 也从接受翻成拒绝 (7.757 / 4.909)。详见 joint-A-report §7 与 §7.1。
-    //     ⚠ 【那两个分母 4.909 是【重标定之前】的门限】; 出厂的力矩门限现在是 11.150389
-    //     (18:49:55), 所以这两档在【出厂】门限下都【不会】被拒 —— 把话说准: "通过是权重
-    //     相关的"这句话在旧门限下成立、在出厂门限下不成立。敏感性的全表 (含这两行) 在
-    //     .superpowers/sdd/joint-A-prod-report.md §9。
-    //     本实现【不许】为了过门而挑权重 —— 权重由噪声模型定, 与"这一份能不能过"无关。
-    //
-    // 【非线性】M = b_M + c_s ×(A·g) 对 (c_s, A) 双线性 ⇒ Gauss–Newton + 解析 Jacobian。
-    // 【收敛被验证, 不是"跑几轮看着像收敛"】两个【不同起点】必须各自满足步长/Δχ² 判据,
-    //   且收敛到同一点 (‖ΔA‖_F ≤ JOINT_RESTART_TOL)。任一不成立 ⇒ 不采用联合解, 退回线性解
-    //   并在 stderr 说清楚 (退回是【可见的降级】, 不是悄悄换口径)。
-    static const int    JOINT_P          = 18;
-    static const int    JOINT_MAX_ITER   = 100;    // 实测 5 轮收敛, 留足余量
-    static const double JOINT_STEP_TOL   = 1.0e-11; // 相对 (1+‖θ‖₂) 的步长判据
-    static const double JOINT_CHI2_TOL   = 1.0e-12; // 相对 (1+χ²) 的 |Δχ²| 判据
-    static const double JOINT_RESTART_TOL= 1.0e-6;  // 两个起点收敛到同一点: ‖ΔA‖_F 的上界
-
-    // 一次 χ² 求值 (+ 可选的正规方程 NW 与梯度 grad)。NW/grad 传 nullptr 就只算 χ²。
-    static double jointCost(const double poses[][6], const double forces[][3],
-                            const double moments[][3], int n, const PoseNoise* noise,
-                            const double th[JOINT_P], double* NW, double* grad)
-    {
-        double chi2 = 0.0;
-        if (NW)   for (int i = 0; i < JOINT_P * JOINT_P; i++) NW[i] = 0.0;
-        if (grad) for (int i = 0; i < JOINT_P; i++) grad[i] = 0.0;
-
-        for (int i = 0; i < n; i++) {
-            double g[3];
-            gravityNoYaw(poses[i], g);
-            double w[3];                       // w = A·g  (分量 a 用 A 的第 a 行)
-            for (int a = 0; a < 3; a++)
-                w[a] = th[a * 3 + 0] * g[0] + th[a * 3 + 1] * g[1] + th[a * 3 + 2] * g[2];
-            const double c0 = th[12], c1 = th[13], c2 = th[14];
-            // MA[a*3+a'] = ∂(c_s × w)[a] / ∂w[a'] = (c_s × e_{a'})[a]  (力矩方程对 A 的那一块)
-            const double MA[9] = {  0.0,  -c2,   c1,
-                                      c2,  0.0,  -c0,
-                                     -c1,   c0,  0.0 };
-            // MC[a*3+k] = ∂(c_s × w)[a] / ∂c_s[k] = (e_k × w)[a]  (与 :1304 那三行的展开同一个约定)
-            const double MC[9] = {  0.0,  w[2], -w[1],
-                                   -w[2],   0.0,  w[0],
-                                    w[1], -w[0],  0.0 };
-
-            for (int a = 0; a < 3; a++) {
-                const double sF2 = meanVar(noise[i], a, false);   // 实测 var/N, 单位 N²
-                const double sM2 = meanVar(noise[i], a, true);    // 实测 var/N, 单位 (N·m)²
-                const double wF = 1.0 / sF2, wM = 1.0 / sM2;
-
-                double jF[JOINT_P] = {0.0}, jM[JOINT_P] = {0.0};
-                jF[9 + a] = 1.0;
-                for (int c = 0; c < 3; c++) jF[a * 3 + c] = g[c];
-                jM[15 + a] = 1.0;
-                for (int k = 0; k < 3; k++) jM[12 + k] = MC[a * 3 + k];
-                for (int ap = 0; ap < 3; ap++)
-                    for (int c = 0; c < 3; c++) jM[ap * 3 + c] = MA[a * 3 + ap] * g[c];
-
-                const double predF = th[9 + a] + w[a];
-                // (c_s × w) 按分量展开 —— 与 fitRawLinear 里受约束模型的预测式逐字同形
-                const double cross[3] = { c1 * w[2] - c2 * w[1],
-                                          c2 * w[0] - c0 * w[2],
-                                          c0 * w[1] - c1 * w[0] };
-                const double eF = predF - forces[i][a];
-                const double eM = (th[15 + a] + cross[a]) - moments[i][a];
-                chi2 += eF * eF * wF + eM * eM * wM;
-
-                if (NW) {
-                    for (int p = 0; p < JOINT_P; p++) {
-                        const double vF = jF[p] * wF, vM = jM[p] * wM;
-                        if (vF == 0.0 && vM == 0.0) continue;
-                        double* row = NW + p * JOINT_P;
-                        for (int q = 0; q < JOINT_P; q++) row[q] += vF * jF[q] + vM * jM[q];
-                    }
-                }
-                if (grad)
-                    for (int p = 0; p < JOINT_P; p++) grad[p] += eF * wF * jF[p] + eM * wM * jM[p];
-            }
-        }
-        return chi2;
-    }
-
-    // 18×18 对称正规方程的 Gauss–Jordan 消元 (带部分主元) —— 同时给出逆矩阵。
-    // 与 solveNormal 同一个套路, 但那个的缓冲是 [12][24] (p ≤ 12), 这里 p = 18 —— 不动它,
-    // 免得碰力通道那一条已经冻结的支路。
-    static bool jointSolveNormal(const double* A, const double* b, double* x, double* Cinv) {
-        double M[JOINT_P][2 * JOINT_P];
-        double scale = 0.0;
-        for (int i = 0; i < JOINT_P; i++) if (A[i * JOINT_P + i] > scale) scale = A[i * JOINT_P + i];
-        if (!(scale > 0.0)) return false;
-        for (int r = 0; r < JOINT_P; r++) {
-            for (int c = 0; c < JOINT_P; c++) M[r][c] = A[r * JOINT_P + c];
-            for (int c = 0; c < JOINT_P; c++) M[r][JOINT_P + c] = (r == c) ? 1.0 : 0.0;
-        }
-        for (int col = 0; col < JOINT_P; col++) {
-            int piv = col;
-            for (int r = col + 1; r < JOINT_P; r++)
-                if (fabs(M[r][col]) > fabs(M[piv][col])) piv = r;
-            if (!(fabs(M[piv][col]) > 1e-12 * scale)) return false;
-            if (piv != col)
-                for (int c = 0; c < 2 * JOINT_P; c++) {
-                    const double t = M[col][c]; M[col][c] = M[piv][c]; M[piv][c] = t;
-                }
-            const double d = M[col][col];
-            for (int c = 0; c < 2 * JOINT_P; c++) M[col][c] /= d;
-            for (int r = 0; r < JOINT_P; r++) {
-                if (r == col) continue;
-                const double f = M[r][col];
-                if (f == 0.0) continue;
-                for (int c = 0; c < 2 * JOINT_P; c++) M[r][c] -= f * M[col][c];
-            }
-        }
-        for (int r = 0; r < JOINT_P; r++) {
-            if (Cinv)
-                for (int c = 0; c < JOINT_P; c++) Cinv[r * JOINT_P + c] = M[r][JOINT_P + c];
-            double acc = 0.0;
-            for (int c = 0; c < JOINT_P; c++) acc += M[r][JOINT_P + c] * b[c];
-            x[r] = acc;
-        }
-        return true;
-    }
-
-    // 从一个给定起点跑一次 Gauss–Newton。返回 false = 正规方程秩亏/奇异。
-    // converged 由调用方通过 outConverged 读 (步长或 Δχ² 判据; 迭代用尽不算收敛)。
-    static bool jointRunOne(const double poses[][6], const double forces[][3],
-                            const double moments[][3], int n, const PoseNoise* noise,
-                            double th[JOINT_P], double* paramOut,
-                            bool* outConverged, int* outIters,
-                            double* outChi2, double* outGradInf, double* outGradInf0)
-    {
-        double chi2 = jointCost(poses, forces, moments, n, noise, th, nullptr, nullptr);
-        bool converged = false;
-        int it = 0;
-        double step = 1.0e300;                 // 第 1 轮就"找不到下降点"时, 不许算收敛
-        double thNorm = 0.0;
-        for (int p = 0; p < JOINT_P; p++) thNorm += th[p] * th[p];
-        thNorm = sqrt(thNorm);
-        double grad0 = 0.0;                    // 起点的 |∇χ²|∞ (给收敛证据做归一化)
-        {
-            double NW0[JOINT_P * JOINT_P], gr0[JOINT_P];
-            jointCost(poses, forces, moments, n, noise, th, NW0, gr0);
-            for (int p = 0; p < JOINT_P; p++) if (fabs(gr0[p]) > grad0) grad0 = fabs(gr0[p]);
-        }
-
-        for (; it < JOINT_MAX_ITER; it++) {
-            double NW[JOINT_P * JOINT_P], gr[JOINT_P], inv[JOINT_P * JOINT_P];
-            jointCost(poses, forces, moments, n, noise, th, NW, gr);
-            double d[JOINT_P];
-            if (!jointSolveNormal(NW, gr, d, inv)) {
-                if (outConverged) *outConverged = false;
-                if (outIters) *outIters = it;
-                if (outChi2) *outChi2 = chi2;
-                if (outGradInf) *outGradInf = 0.0;
-                return false;
-            }
-            for (int p = 0; p < JOINT_P; p++) d[p] = -d[p];       // 牛顿方向 d = −(JᵀWJ)⁻¹·∇χ²
-
-            double lam = 1.0, cn = chi2, thn[JOINT_P];
-            bool improved = false;
-            for (int trial = 0; trial < 60; trial++) {
-                for (int p = 0; p < JOINT_P; p++) thn[p] = th[p] + lam * d[p];
-                cn = jointCost(poses, forces, moments, n, noise, thn, nullptr, nullptr);
-                if (cn < chi2) { improved = true; break; }
-                lam *= 0.5;
-            }
-            if (!improved) {
-                // 连一个下降点都找不到: 要么已在极小上 (梯度到可分辨精度为 0), 要么阻尼到头。
-                // 【只有上一步已经很小】才认它收敛 —— 否则这就是失败, 由调用方决定怎么办。
-                converged = (step <= JOINT_STEP_TOL * (1.0 + thNorm));
-                break;
-            }
-            step = 0.0;
-            for (int p = 0; p < JOINT_P; p++) {
-                const double v = thn[p] - th[p];
-                step += v * v;
-            }
-            step = sqrt(step);
-            const double dchi = chi2 - cn;
-            chi2 = cn;
-            for (int p = 0; p < JOINT_P; p++) th[p] = thn[p];
-            if (step <= JOINT_STEP_TOL * (1.0 + thNorm)
-             || dchi <= JOINT_CHI2_TOL * (1.0 + chi2)) { converged = true; break; }
-        }
-
-        if (!converged) {
-            if (outConverged) *outConverged = false;
-            if (outIters) *outIters = it;
-            if (outChi2) *outChi2 = chi2;
-            if (outGradInf) *outGradInf = 0.0;
-            return true;
-        }
-
-        // 解处重算一次正规方程: (JᵀWJ)⁻¹ 的对角就是参数的协方差 (权重是实测方差),
-        // |∇χ²|∞ 是给收敛证据用的 (离线研究在解处读到 1.8e-04 量级)。
-        double NW[JOINT_P * JOINT_P], gr[JOINT_P], inv[JOINT_P * JOINT_P];
-        jointCost(poses, forces, moments, n, noise, th, NW, gr);
-        if (paramOut) {
-            double dummy[JOINT_P];
-            if (jointSolveNormal(NW, gr, dummy, inv)) {
-                // 再乘一个【过散因子】φ = χ²_W/dof —— 与模块原来那个 paramSigma 的口径同形
-                // (那里的 σ² = SSR/(方程数 − 参数数); 在这里方程组是带实测权的那个, 所以
-                // "SSR" 就是 χ²_W)。模型对时 φ ≈ 1, 协方差退化成 (JᵀWJ)⁻¹ 自己; 模型错时
-                // 残差把它撑大 —— 那正是 paramSigma 一直以来的语义 (它来自拟合残差, 所以
-                // 【不参与任何接受/拒绝判据】, 见 RawFit 的说明)。
-                const int dofJ = 6 * n - JOINT_P;
-                const double phi = (dofJ > 0) ? chi2 / (double)dofJ : 0.0;
-                for (int p = 0; p < JOINT_P; p++) paramOut[p] = inv[p * JOINT_P + p] * phi;
-            } else {
-                for (int p = 0; p < JOINT_P; p++) paramOut[p] = 0.0;
-            }
-        }
-        double gi = 0.0;
-        for (int p = 0; p < JOINT_P; p++) if (fabs(gr[p]) > gi) gi = fabs(gr[p]);
-        if (outConverged) *outConverged = true;
-        if (outIters) *outIters = it + 1;
-        if (outChi2) *outChi2 = chi2;
-        if (outGradInf) *outGradInf = gi;
-        // 起点的 |∇χ²|∞ 只用于把收敛证据【归一化】—— 绝对值本身没有尺度:
-        // 解处那个数由"停了半步"决定, 而力矩块的权重是 1/σ_M² ~ 4e6, 于是解上差 1e-9
-        // 就能把 |∇χ²|∞ 从 1.8e-04 抬到 4.4e-03 (同一个极小点)。比值才说明收敛掉了多少。
-        if (outGradInf0) *outGradInf0 = grad0;
-        return true;
-    }
-
-    // 联合估计 A 的入口: 两个起点各自收敛 + 落在同一点才算数。
-    //   A0/bF0   = 生产线性解 (力通道 12 参数)   bM0/cS0 = 给定 A0 的力矩 6 参数线性解
-    //   Aout     = A_joint (仅在返回 true 时有意义)
-    //   paramOut = (JᵀWJ)⁻¹ 的对角, 布局 [A(9) | b_F(3) | c_s(3) | b_M(3)] ⇒ 直接摊进 paramSigma
-    static bool jointEstimateA(const double poses[][6], const double forces[][3],
-                               const double moments[][3], int n, const PoseNoise* noise,
-                               const double A0[9], const double bF0[3],
-                               const double bM0[3], const double cS0[3],
-                               double Aout[9], double paramOut[18],
-                               int* itOut, double* chiOut, double* gradOut)
-    {
-        double th1[JOINT_P];
-        for (int i = 0; i < 9; i++) th1[i] = A0[i];
-        for (int i = 0; i < 3; i++) { th1[9 + i] = bF0[i]; th1[12 + i] = cS0[i]; th1[15 + i] = bM0[i]; }
-
-        double sig1[JOINT_P];
-        bool ok1 = false; int it1 = 0; double chi1 = 0.0, gr1 = 0.0, gr10 = 0.0;
-        if (!jointRunOne(poses, forces, moments, n, noise, th1, sig1, &ok1, &it1, &chi1, &gr1, &gr10)
-            || !ok1) {
-            fprintf(stderr, "[Payload] 联合估计未采用: Gauss–Newton 从生产线性解出发【没有收敛】"
-                            " (迭代 %d 轮) —— A 退回力通道线性解, 力矩判据与从前一样。\n", it1);
-            return false;
-        }
-
-        // 第 2 个起点: A·1.05 (+5%, 与"±2e-2"同一量级) 且 c_s 减半、b_M 归零。
-        // 它【不是】为了求另一个解, 是为了证明解不挂在起点上。
-        double th2[JOINT_P];
-        for (int i = 0; i < 9; i++) th2[i] = A0[i] * 1.05;
-        for (int i = 0; i < 3; i++) { th2[9 + i] = bF0[i]; th2[12 + i] = 0.5 * cS0[i]; th2[15 + i] = 0.0; }
-
-        double sig2[JOINT_P];
-        bool ok2 = false; int it2 = 0; double chi2b = 0.0, gr2 = 0.0, gr20 = 0.0;
-        if (!jointRunOne(poses, forces, moments, n, noise, th2, sig2, &ok2, &it2, &chi2b, &gr2, &gr20)
-            || !ok2) {
-            fprintf(stderr, "[Payload] 联合估计未采用: Gauss–Newton 从【扰动起点】出发没有收敛"
-                            " (迭代 %d 轮) —— A 退回力通道线性解。\n", it2);
-            return false;
-        }
-
-        double dA = 0.0;
-        for (int i = 0; i < 9; i++) {
-            const double v = th1[i] - th2[i];
-            dA += v * v;
-        }
-        dA = sqrt(dA);
-        if (!(dA <= JOINT_RESTART_TOL)) {
-            fprintf(stderr, "[Payload] 联合估计未采用: 两个起点收敛到【不同的点】"
-                            " (‖ΔA‖_F = %.3g > %.3g) —— 解挂在起点上, 不能采信;"
-                            " A 退回力通道线性解。\n", dA, JOINT_RESTART_TOL);
-            return false;
-        }
-
-        for (int i = 0; i < 9; i++) Aout[i] = th1[i];
-        if (paramOut) for (int i = 0; i < JOINT_P; i++) paramOut[i] = sig1[i];
-        if (itOut) *itOut = it1;
-        if (chiOut) *chiOut = chi1;
-        if (gradOut) *gradOut = gr1;
-        // 【收敛证据】照实打出来: 两个起点的轮数、收敛点的 χ²、解处 |∇χ²|∞ 与它相对起点的
-        // 下降倍数、两个起点的距离、以及这次 A 换掉之后 c_s 挪了多少。
-        // 口径自校 (离线研究, Docs/superpowers/evidence/joint-A-report.md §3.1 + D:\tmp\jointA\
-        // out_1849.txt §18:49:55): 那份在 18:49:55 上读到 χ² = 94.1422334612722、解处
-        // |∇χ²|∞ = 1.769e-04、5 次随机扰动重启的 ‖ΔA‖_F = 7.5e-10。⚠ 它报告里写"9 轮", 那是
-        // 【它自己打印的下标】—— jointA.cpp:421 的循环体里有一个额外的 `it++`, 所以真实步数
-        // 是 5, 与本实现的 5 一致 (本实现打的是真实轮数)。⚠ |∇χ²|∞ 的【绝对值】不能跨实现比:
-        // 力矩块的权重是 1/σ_M² ≈ 4e6, 解上差 1e-9 就能把它抬 25 倍 —— 所以下面同时报它与
-        // 起点 (1.1e+05 量级) 的比值。
-        fprintf(stderr, "[Payload] 联合估计 A: 两起点各 %d / %d 轮收敛, χ² = %.12g,"
-                        " |∇χ²|∞ = %.3g (起点 %.3g, 降 %.3g 倍), ‖ΔA‖_F(起点间) = %.3g,"
-                        " |Δc_s| = %.3g mm。\n",
-                it1, it2, chi1, gr1, gr10, (gr1 > 0.0) ? gr10 / gr1 : 0.0, dA,
-                1000.0 * sqrt((th1[12] - cS0[0]) * (th1[12] - cS0[0])
-                            + (th1[13] - cS0[1]) * (th1[13] - cS0[1])
-                            + (th1[14] - cS0[2]) * (th1[14] - cS0[2])));
-        return true;
-    }
-
-    // 给定 A 之后解力矩通道的 6 参数线性最小二乘 y = [b_M(3), c_s(3)] (每个姿态 3 个方程)。
-    // 【这一段原本内联在 fitRawLinear 里, 是原样搬移】—— 三条 stderr 与措辞一个字没改。
-    // 搬出来是因为联合估计需要"给定 A_F 的 b_M / c_s"当【起点】, 而那要先解一遍: 两个调用点,
-    // 起点那一次 report=false (不出声; 真出问题最终那一次会照旧报)。
-    // CMout = (JᵀJ)⁻¹, 传 nullptr 就是不要。返回 false = 秩亏 / 数值奇异 / 消元主元塌陷。
-    static bool momentLinearAtA(const double posesIn[][6], const double moments[][3], int n,
-                                const double A[9], double bM[3], double cS[3],
-                                double* CMout, bool report)
-    {
-        const int PM = 6;
-        double MtM[36] = {0}, Mtb[6] = {0};
-        for (int i = 0; i < n; i++) {
-            double g[3];
-            gravityNoYaw(posesIn[i], g);
-            double w[3];                                  // w = A·g (传感器系的重力响应)
-            for (int a = 0; a < 3; a++)
-                w[a] = A[a * 3 + 0] * g[0] + A[a * 3 + 1] * g[1] + A[a * 3 + 2] * g[2];
-            for (int a = 0; a < 3; a++) {
-                double row[6] = {0};
-                row[a] = 1.0;
-                // (c_s × w) 的第 a 个分量 —— 叉乘结构写成分量, 不是独立的 3×3
-                if (a == 0) { row[3 + 1] =  w[2]; row[3 + 2] = -w[1]; }
-                if (a == 1) { row[3 + 2] =  w[0]; row[3 + 0] = -w[2]; }
-                if (a == 2) { row[3 + 0] =  w[1]; row[3 + 1] = -w[0]; }
-                for (int c = 0; c < PM; c++) {
-                    for (int e = 0; e < PM; e++) MtM[c * PM + e] += row[c] * row[e];
-                    Mtb[c] += row[c] * moments[i][a];
-                }
-            }
-        }
-        {   // 力矩通道同样要能判秩亏 (给定 A 后设计矩阵只由姿态与 A 定)
-            double MtMcopy[36];
-            for (int i = 0; i < PM * PM; i++) MtMcopy[i] = MtM[i];
-            double lo = 0.0, hi = 0.0;
-            // 同上: 这两条从前也是静默的, 调用方读到的仍是默认的 NO_DOF。
-            if (!symExtremes(MtMcopy, PM, lo, hi)) {
-                if (report)
-                    fprintf(stderr, "[Payload] 自检拒绝: 力矩通道设计矩阵秩亏 (最小特征值 <= 0)"
-                                    " —— 姿态的【朝向】铺得不够开, 多摆几个朝向不同的姿态"
-                                    "再试。\n");
-                return false;
-            }
-            if (!(sqrt(hi / lo) < RAW_SINGULAR_REL)) {
-                if (report)
-                    fprintf(stderr, "[Payload] 自检拒绝: 力矩通道设计矩阵数值奇异"
-                                    " (cond=%.3g >= %.3g) —— 姿态的【朝向】铺得不够开,"
-                                    " 多摆几个朝向不同的姿态再试。\n",
-                            sqrt(hi / lo), RAW_SINGULAR_REL);
-                return false;
-            }
-        }
-        double xM[6], CM[36];
-        // 同上: 从前也是静默的, 调用方读到的仍是默认的 NO_DOF。真因是消元主元在相对阈值
-        // (最大对角元的 1e-10) 之下塌掉 —— MtM 数值上秩亏 (给定 A 后设计矩阵只由姿态与 A 定)。
-        if (!solveNormal(MtM, Mtb, PM, xM, CM)) {
-            if (report)
-                fprintf(stderr, "[Payload] 自检拒绝: 力矩通道法方程消元时主元塌了 (MtM 数值上"
-                                "秩亏, 消元阈值为最大对角元的 1e-10) —— 姿态的【朝向】铺得"
-                                "不够开 (或有两个姿态几乎共线), 多摆几个朝向不同的姿态再试。\n");
-            return false;
-        }
-        for (int i = 0; i < 3; i++) { bM[i] = xM[i]; cS[i] = xM[3 + i]; }
-        if (CMout) for (int i = 0; i < PM * PM; i++) CMout[i] = CM[i];
-        return true;
-    }
-
     bool fitRawLinear(const double posesIn[][6], const double forces[][3],
                       const double moments[][3], int n, RawFit& out,
                       const PoseNoise* noiseIn, const RepeatPair* repeatsIn, int repeatCount)
@@ -1672,50 +1261,6 @@ namespace PayloadCalibration {
         double A[9];
         for (int i = 0; i < 9; i++) A[i] = xF[3 + i];
 
-        // ===== ★ 联合估计 A (构造、权重口径、收敛判据见上面那一大段) =====
-        // 起点 = 生产自己的线性解 (b_F, A_F, b_M, c_s) —— 与离线研究 §3.1 的迭代表同一个起点,
-        // 所以两边的 χ² 轨迹可以逐位对 (18:49:55 上 χ²₀ = 207.054284058101)。
-        // 【只有实测逐姿态噪声可用时】才做这一步: 权重就是那些表说话 (见上)。没有它, 联合
-        // 加权最小二乘【没有权重可用】—— 不许退化成"等权" (那是 [S2]: 力矩门 27.08 拒)。
-        bool   jointUsed = false;
-        double jointParam[18] = {0.0};
-        {
-            double bM0[3], cS0[3];
-            // 起点里的 (b_M, c_s) = 给定 A_F 的 6 参数线性解。【静默】调用 —— 真解不出来时,
-            // 下面正式那一次会照旧打那三条 stderr 并返回 false。
-            const bool startOk = momentLinearAtA(posesIn, moments, n, A, bM0, cS0, nullptr, false);
-            if (!noiseUsable) {
-                fprintf(stderr, "[Payload] 注意: 没有可用的逐姿态噪声 (var/N) —— 联合估计 A"
-                                "【没做】, A 仍是力通道线性解 (力矩判据与从前一样)。\n");
-            } else if (!startOk) {
-                fprintf(stderr, "[Payload] 注意: 力矩通道在 A_F 上解不出 (b_M, c_s) ——"
-                                " 联合估计 A【没做】。\n");
-            } else {
-                double Aj[9];
-                int itJ = 0; double chiJ = 0.0, grJ = 0.0;
-                if (jointEstimateA(posesIn, forces, moments, n, noiseIn, A, bF, bM0, cS0,
-                                   Aj, jointParam, &itJ, &chiJ, &grJ)) {
-                    for (int i = 0; i < 9; i++) A[i] = Aj[i];
-                    jointUsed = true;
-                    // A 换了, 力通道的 b_F 必须【在同一个 A 上】重拟 —— 否则 (b_F, A) 不再是
-                    // 那一个 A 下的最小二乘解。权重只经由 σ_rep,F 的逐通道常数进来, 所以它
-                    // 就是逐通道均值。这与离线研究在 A≠A_F 时"只重拟 b_F、除数仍取 3n−12"
-                    // 的口径逐字一致 (lambda-scan-report §5 注 2)。
-                    for (int a = 0; a < 3; a++) bF[a] = 0.0;
-                    for (int i = 0; i < n; i++) {
-                        double g[3];
-                        gravityNoYaw(posesIn[i], g);
-                        for (int a = 0; a < 3; a++) {
-                            double pred = 0.0;
-                            for (int c = 0; c < 3; c++) pred += A[a * 3 + c] * g[c];
-                            bF[a] += forces[i][a] - pred;
-                        }
-                    }
-                    for (int a = 0; a < 3; a++) bF[a] /= (double)n;
-                }
-            }
-        }
-
         // 力通道残差与参数不确定度。同一个循环里顺手累加三样东西:
         //   · chi2F     = Σ(e/σ_in)², σ_in = 该姿态该通道【均值】的实测 1σ  -> 【报告量】
         //   · chi2RepF  = Σ(e/σ_rep)², σ_rep = 姿态间复现性 (重复对测出来的)  -> 【判据】
@@ -1745,9 +1290,57 @@ namespace PayloadCalibration {
 
         // ===== 力矩通道: 给定 A 后 y = [b_M(3), c_s(3)], 每个姿态 3 个方程 =====
         const int PM = 6;
-        double CM[36];
-        double bM[3], cS[3];
-        if (!momentLinearAtA(posesIn, moments, n, A, bM, cS, CM, true)) return false;
+        double MtM[36] = {0}, Mtb[6] = {0};
+        for (int i = 0; i < n; i++) {
+            double g[3];
+            gravityNoYaw(posesIn[i], g);
+            double w[3];                                  // w = A·g (传感器系的重力响应)
+            for (int a = 0; a < 3; a++)
+                w[a] = A[a * 3 + 0] * g[0] + A[a * 3 + 1] * g[1] + A[a * 3 + 2] * g[2];
+            for (int a = 0; a < 3; a++) {
+                double row[6] = {0};
+                row[a] = 1.0;
+                // (c_s × w) 的第 a 个分量 —— 叉乘结构写成分量, 不是独立的 3×3
+                if (a == 0) { row[3 + 1] =  w[2]; row[3 + 2] = -w[1]; }
+                if (a == 1) { row[3 + 2] =  w[0]; row[3 + 0] = -w[2]; }
+                if (a == 2) { row[3 + 0] =  w[1]; row[3 + 1] = -w[0]; }
+                for (int c = 0; c < PM; c++) {
+                    for (int e = 0; e < PM; e++) MtM[c * PM + e] += row[c] * row[e];
+                    Mtb[c] += row[c] * moments[i][a];
+                }
+            }
+        }
+        {   // 力矩通道同样要能判秩亏 (给定 A 后设计矩阵只由姿态与 A 定)
+            double MtMcopy[36];
+            for (int i = 0; i < PM * PM; i++) MtMcopy[i] = MtM[i];
+            double lo = 0.0, hi = 0.0;
+            // 同上: 这两条从前也是静默的, 调用方读到的仍是默认的 NO_DOF。
+            if (!symExtremes(MtMcopy, PM, lo, hi)) {
+                fprintf(stderr, "[Payload] 自检拒绝: 力矩通道设计矩阵秩亏 (最小特征值 <= 0)"
+                                " —— 姿态的【朝向】铺得不够开, 多摆几个朝向不同的姿态"
+                                "再试。\n");
+                return false;
+            }
+            if (!(sqrt(hi / lo) < RAW_SINGULAR_REL)) {
+                fprintf(stderr, "[Payload] 自检拒绝: 力矩通道设计矩阵数值奇异"
+                                " (cond=%.3g >= %.3g) —— 姿态的【朝向】铺得不够开,"
+                                " 多摆几个朝向不同的姿态再试。\n",
+                        sqrt(hi / lo), RAW_SINGULAR_REL);
+                return false;
+            }
+        }
+        double xM[6], CM[36];
+        // 同上: 从前也是静默的, 调用方读到的仍是默认的 NO_DOF。真因是消元主元在相对阈值
+        // (最大对角元的 1e-10) 之下塌掉 —— MtM 数值上秩亏 (给定 A 后设计矩阵只由姿态与 A 定)。
+        if (!solveNormal(MtM, Mtb, PM, xM, CM)) {
+            fprintf(stderr, "[Payload] 自检拒绝: 力矩通道法方程消元时主元塌了 (MtM 数值上秩亏,"
+                            " 消元阈值为最大对角元的 1e-10) —— 姿态的【朝向】铺得不够开"
+                            " (或有两个姿态几乎共线), 多摆几个朝向不同的姿态再试。\n");
+            return false;
+        }
+
+        double bM[3] = {xM[0], xM[1], xM[2]};
+        double cS[3] = {xM[3], xM[4], xM[5]};
 
         double ssM = 0.0, chi2M = 0.0, sig2SumM = 0.0;
         double ssMCh[3] = {0.0, 0.0, 0.0};       // 逐通道的力矩残差平方和 (失拟要逐通道折算)
@@ -1789,17 +1382,8 @@ namespace PayloadCalibration {
         out.rmsMomentNm = sqrt(ssM / (3.0 * n));
         out.cond        = condJ;
         // 布局与 RawFit 的字段同序: [0..8] = A, [9..11] = bF, [12..14] = cS, [15..17] = bM
-        // 【联合路径】A 与 b_F 是联合加权最小二乘解出来的 ⇒ 它们的 1σ 走【产出它们的那个系统】
-        // 的 (JᵀWJ)⁻¹ (权重是实测方差, 所以它本身就是绝对协方差, 不再乘 s²); c_s / b_M 仍然
-        // 是【给定 A 后】的 6 参数线性解, 1σ 照旧走 CM·s2M。各自出自产出自己的那个系统 ——
-        // 若 A 已经换成 A_joint 却仍报线性解的 CF, 那个数描述的就不是 out.A 了。
-        if (jointUsed) {
-            for (int i = 0; i < 9; i++) out.paramSigma[i] = sqrt(fabs(jointParam[i]));
-            for (int i = 0; i < 3; i++) out.paramSigma[9 + i] = sqrt(fabs(jointParam[9 + i]));
-        } else {
-            for (int i = 0; i < 9; i++) out.paramSigma[i] = sqrt(CF[(3 + i) * PF + (3 + i)] * s2F);
-            for (int i = 0; i < 3; i++) out.paramSigma[9 + i]  = sqrt(CF[i * PF + i] * s2F);
-        }
+        for (int i = 0; i < 9; i++) out.paramSigma[i] = sqrt(CF[(3 + i) * PF + (3 + i)] * s2F);
+        for (int i = 0; i < 3; i++) out.paramSigma[9 + i]  = sqrt(CF[i * PF + i] * s2F);
         for (int i = 0; i < 3; i++) out.paramSigma[12 + i] = sqrt(CM[(3 + i) * PM + (3 + i)] * s2M);
         for (int i = 0; i < 3; i++) out.paramSigma[15 + i] = sqrt(CM[i * PM + i] * s2M);
 
