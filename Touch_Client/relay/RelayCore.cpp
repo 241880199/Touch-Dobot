@@ -67,8 +67,10 @@ static DWORD WINAPI forceReaderThread(LPVOID) {
             // 一次性回读: 机械臂实际上在用哪份负载参数 (下发成功 ≠ 机械臂采纳;
             // EnableRobot 的返回码只能说明语法对了)。
             // 30004 布局: Load @1168 (1×double), CenterX/Y/Z @1176~1199 (3×double)。
-            // ⚠ 现在只报不判: 实机实测那份负载从 TCP 口根本改不动 (见 applyPayloadToRobot),
-            //   所以"与下发的值不符"是常态, 不影响标定 —— 真正生效的是本地补偿。
+            // ⚠ 现在只报不判: 与本客户端的值对不上【不】当故障 —— 负载确实是生效的
+            //   (连接时序里随 EnableRobot 下发, 2026-09-19 实机证实运行中改负载会让机械臂动),
+            //   但早先的探针里 ActualTCPForce @576 没跟着 0.25 kg 的配置变化走, 为什么还不清楚。
+            //   本回读仅供诊断, 不影响标定 —— 真正生效的是本地补偿。
             static bool loadEchoReported = false;
             if (!loadEchoReported) {
                 loadEchoReported = true;
@@ -86,10 +88,11 @@ static DWORD WINAPI forceReaderThread(LPVOID) {
                     if (fabs(echo[0] - mWant) > 0.01 || fabs(echo[3] - cWant[2]) > 1.0) {
                         std::cout << msg << "\n[Relay] · 与客户端的 "
                                   << mWant << " kg / (" << cWant[0] << "," << cWant[1] << ","
-                                  << cWant[2] << ") mm 不一致 — 这是【正常】的: 机械臂内部那份"
-                                  << "负载从 TCP 口改不动" << std::endl;
+                                  << cWant[2] << ") mm 不一致 — 负载只在连接时下发, 运行中"
+                                  << "【不】改 (改负载会让机械臂动), 所以对不上是常见情形"
+                                  << std::endl;
                         std::cout << "[Relay]   重力/惯性补偿由 ForceCompensation 在本地做"
-                                  << " (见 applyPayloadToRobot 上的实测记录)" << std::endl;
+                                  << " (差值来源尚未查清, 见上方注释)" << std::endl;
                     } else {
                         std::cout << msg << std::endl;
                     }
@@ -158,26 +161,6 @@ static bool enableRobotWithPayload() {
               << (PayloadCalibration::enabled ? "  (实机标定值)" : "  (种子值, 未标定)")
               << std::endl;
     return robotSendEnable(cmd);
-}
-
-// 把内存里的生效负载重发给机械臂 (EnableRobot)。
-// ⚠ 实机实测(2026-09-18): 机械臂内部的负载参数从 TCP 口【改不动】—— EnableRobot(load,..) /
-//   Payload() / LoadSwitch(1) 三条通道全无响应。所以这一发【不是】标定的必要步骤, 也【不是】
-//   标定结果生效的途径: 真正生效的是 [本地补偿] (ForceCompensation 减掉残余量 dm/dp)。
-//   留着它只是让机械臂侧的显示值与我们对齐, 失败也不算错 (调用方按"参考"报)。
-bool RelayCore::applyPayloadToRobot() {
-    if (!isRobotConnected()) {
-        std::cout << "[Payload] 机械臂未连接, 无法下发" << std::endl;
-        return false;
-    }
-    robotDrainEnable();
-    bool ok = enableRobotWithPayload();
-    Sleep(200);
-    robotDrainEnable();
-    if (!ok) {
-        std::cerr << "[Payload] 下发失败 — 重启客户端会用新值重试" << std::endl;
-    }
-    return ok;
 }
 
 RelayCore& RelayCore::instance() {

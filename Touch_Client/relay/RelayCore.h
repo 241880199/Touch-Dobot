@@ -45,11 +45,6 @@ public:
     bool isForceCalibrationDone() const;
     const char* forceCalibStatus() const;
 
-    // 把内存里的生效负载重发给机械臂 —— 只让机械臂侧的显示值跟上来。
-    // ⚠ 不是标定的必要步骤: 实机实测(2026-09-18) 机械臂内部负载从 TCP 口改不动
-    //   (EnableRobot / Payload / LoadSwitch 全无响应), 真正生效的是本地补偿。
-    bool applyPayloadToRobot();
-
     // 奇异脱困 (可在运行中手动触发)
     bool triggerEscape();
 

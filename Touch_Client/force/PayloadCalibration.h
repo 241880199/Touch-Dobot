@@ -40,9 +40,10 @@ namespace PayloadCalibration {
         double dc[3];        // 绝对质心相对当前配置的增量 (mm, 带符号)
         double dp[3];        // 残余一阶矩 (kg·m, 带符号) —— 力/力矩方程的右端项
         double massKg;       // 换算出的绝对质量 (kg) = mCfg + dm
-        // 按传入的 signZ 约定折算出的绝对质心 (mm, 法兰系)。⚠ 只用于让机械臂侧的显示值
-        // 跟上来 (applyPayloadToRobot / payload_calib.json), 本标定不依赖它是否被采纳,
-        // 也不依赖这个符号约定选得对不对 —— 本地补偿只用 dm / dp。
+        // 按传入的 signZ 约定折算出的绝对质心 (mm, 法兰系)。⚠ 只用于记录与显示
+        // (payload_calib.json; 机械臂侧那份负载要【下次重启】才随连接时序更新, 运行时下发会让
+        // 机械臂动), 本标定不依赖它是否被采纳, 也不依赖这个符号约定选得对不对 ——
+        // 本地补偿只用 dm / dp。
         double comMm[3];
         double rmsForceN;    // 力通道拟合残差 (N)
         double rmsMomentNm;  // 力矩通道拟合残差 (N·m)

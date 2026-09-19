@@ -547,16 +547,14 @@ namespace BiasCheck {
         } else {
             std::cout << "  已保存 payload_calib.json (下次启动自动加载)" << std::endl;
         }
-        // 顺带把解出的绝对负载发给机械臂, 让机械臂侧的显示值跟上来 —— 仅此而已。
-        // 实机实测那份负载从 TCP 口改不动 (见 RelayCore::applyPayloadToRobot), 所以这一发
-        // 成功与否【都不影响本次标定】: 真正生效的是上面的 [本地补偿]。别把它读成"已下发修正"。
-        if (RelayCore::instance().applyPayloadToRobot()) {
-            printf("  [参考] 已同步机械臂侧负载显示: 质量 %.3f kg, 质心 (%.1f, %.1f, %+.1f) mm\n",
-                   r.massKg, r.comMm[0], r.comMm[1], r.comMm[2]);
-        } else {
-            std::cout << "  [参考] 机械臂侧负载显示未同步 (未连接 / 使能口失败) — "
-                      << "不影响本次标定结果" << std::endl;
-        }
+        // 机械臂侧那份负载【不在运行时下发】—— 2026-09-19 实机证实: 运行中改负载会让机械臂
+        // 猛地动起来 (改 payload_calib.json 后重启, 连接时序下发 EnableRobot(1.5,...), 机械臂
+        // 快速撞向关节限位并报错)。所以新负载只在【下次启动的连接时序】里下发
+        // (RelayCore.cpp 的 enableRobotWithPayload), 本次【一发都不发】。
+        // 本次真正生效的只有上面的 [本地补偿]; 在下次重启之前, 机械臂那边用的仍是旧值。
+        std::cout << "  [机械臂侧] 本次【未】向机械臂下发负载 (运行时改负载会让机械臂动) —" << std::endl;
+        std::cout << "             机械臂仍在用旧值 (由上面的本地补偿修正读数); "
+                  << "新值要【下次重启】才随连接下发" << std::endl;
 
         // 这批姿态是在【旧负载】下采的。复验 (report) 必须拒绝它们,
         // 否则会拿旧数据骂新参数 (曾经报出假 FAIL: 求解残差 0.06 N,
