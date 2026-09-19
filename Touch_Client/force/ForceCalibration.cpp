@@ -7,7 +7,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <ctime>
 #include <algorithm>
 
 // ===== Internal state =====
@@ -331,9 +330,7 @@ bool saveToFile(const char* path, double massKg,
     FILE* f = fopen(path, "w");
     if (!f) return false;
     fprintf(f, "{\n");
-    fprintf(f, "  \"version\": 3,\n");
-    // CalibStore 按这个字段判有效期; 缺了它整份标定会被判过期。
-    fprintf(f, "  \"saved_at_unix\": %ld,\n", (long)time(NULL));
+    fprintf(f, "  \"version\": 2,\n");
     fprintf(f, "  \"mass_kg\": %.6g,\n", massKg);
     fprintf(f, "  \"bias_force_n\": [%.6g, %.6g, %.6g],\n",
             biasForce[0], biasForce[1], biasForce[2]);

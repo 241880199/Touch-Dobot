@@ -5,7 +5,6 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
-#include <ctime>
 
 namespace PayloadCalibration {
 
@@ -270,8 +269,7 @@ namespace PayloadCalibration {
         FILE* f = fopen(filepath, "w");
         if (!f) return false;
         fprintf(f, "{\n");
-        fprintf(f, "  \"version\": 2,\n");
-        fprintf(f, "  \"saved_at_unix\": %ld,\n", (long)time(NULL));
+        fprintf(f, "  \"version\": 1,\n");
         fprintf(f, "  \"mass_kg\": %.6g,\n", massKg);
         fprintf(f, "  \"com_mm\": [%.6g, %.6g, %.6g],\n", comMm[0], comMm[1], comMm[2]);
         fprintf(f, "  \"rms_force_n\": %.6g,\n", rmsForceN);
@@ -296,8 +294,7 @@ namespace PayloadCalibration {
         return p;
     }
 
-    // 只负责解析, 不判有效期 —— 调用方必须先过 CalibStore::resolve(),
-    // 由它挡掉缺 saved_at_unix 或已过期的文件。
+    // 只负责解析 —— 文件不存在或读不出就直接返回 false。
     bool load(const char* filepath) {
         FILE* f = fopen(filepath, "r");
         if (!f) return false;

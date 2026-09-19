@@ -1219,8 +1219,7 @@ int main(int argc, char* argv[]) {
         std::cout << "Robot: SKIPPED (--no-robot)" << std::endl;
     } else {
         // 末端负载参数必须在使能之前加载 —— EnableRobot 要用它 (见 PayloadCalibration)
-        const char* payloadPath = CalibStore::resolve("payload_calib.json");
-        if (payloadPath && PayloadCalibration::load(payloadPath)) {
+        if (PayloadCalibration::load(CalibStore::fileFor("payload_calib.json"))) {
             // ψ 必须在这里装上 —— 本地补偿 (ForceCompensation::step) 与负载求解共用
             // TcpCalibration::gravitySensorFrame 这一个重力模型, 装错角度等于把重力矢量
             // 整个转歪。放在负载加载之后、任何一帧力处理之前。
@@ -1259,8 +1258,8 @@ int main(int argc, char* argv[]) {
     // 4.6 加载力传感器标定文件
     {
         double massKg, biasF[3], biasM[3];
-        const char* forcePath = CalibStore::resolve("force_calib.json");
-        if (forcePath && ForceCalibration::loadFromFile(forcePath, massKg, biasF, biasM)) {
+        if (ForceCalibration::loadFromFile(CalibStore::fileFor("force_calib.json"),
+                                           massKg, biasF, biasM)) {
             double comZero[3] = {0};
             ForceCompensation::setCalibration(massKg, comZero, biasF, biasM);
             std::cout << "[Force] Loaded force_calib.json (mass=" << massKg
@@ -1286,8 +1285,7 @@ int main(int argc, char* argv[]) {
     }
 
     // 6.6 加载 TCP 偏移标定 (如存在)
-    const char* tcpPath = CalibStore::resolve("tcp_calib.json");
-    if (tcpPath && TcpCalibration::load(tcpPath)) {
+    if (TcpCalibration::load(CalibStore::fileFor("tcp_calib.json"))) {
         std::cout << "[TCP] Loaded tcp_calib.json (offset="
                   << TcpCalibration::offset[0] << "," << TcpCalibration::offset[1] << "," << TcpCalibration::offset[2]
                   << "mm, RMS=" << TcpCalibration::rmsError << "mm)" << std::endl;

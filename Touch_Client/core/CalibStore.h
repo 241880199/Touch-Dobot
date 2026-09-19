@@ -1,13 +1,14 @@
 #pragma once
 #include <cstddef>
 
-// 标定文件的生命周期: 放哪、还能不能用。
+// 标定文件放哪。
 //
 // 为什么需要它: 三个标定文件原本都用相对路径 ("./payload_calib.json") 读写,
 // 落在【当前工作目录】—— 从 Touch_Client\ 启动和从 x64\Release\ 启动会拿到
-// 两份不同的文件。而且标定结果永不过期, 一份几天前的数据会被当成权威值。
-// 路径解析和有效期判定放在同一个模块, 因为它们回答的是同一个问题:
-// "该不该用这份标定"。
+// 两份不同的文件。
+//
+// 注: 本模块【不管有效期】。标定是否仍然可信由启动自检实测判定 (见 main.cpp),
+//     不用时间闸门 —— 时间只是代理指标, 而这里能直接测。
 namespace CalibStore {
 
     // 纯函数: 由可执行文件全路径推出标定目录 (结尾带反斜杠)。
@@ -21,21 +22,5 @@ namespace CalibStore {
     const char* dir();
 
     // 拼接标定文件绝对路径。静态缓冲, 下次调用即失效。
-    // 只拼路径, 不做任何新鲜度判定 —— 写入用这个。
     const char* fileFor(const char* name);
-
-    // 解析一个标定文件是否可用。
-    //   可用   → 返回绝对路径 (静态缓冲, 下次调用即失效)
-    //   过期   → 改名为 <name>.expired, 打印醒目提示, 返回 nullptr
-    //   不存在 → 返回 nullptr (静默; 首次启动没有标定文件是正常情况)
-    // 判据见 isFresh: 没有 saved_at_unix 字段一律视为过期。
-    const char* resolve(const char* name);
-
-    // 同 resolve, 但标定目录由调用方给出 —— 单测用临时目录走这个。
-    // 生产代码用 resolve(name), 它等价于 resolveIn(dir(), name)。
-    const char* resolveIn(const char* dirPath, const char* name);
-
-    // 纯函数, 便于单测。nowUnix 由调用方传入, 内部不读时钟。
-    // savedAtUnix <= 0 (缺字段/解析失败) 判过期; 时钟回拨按 0 年龄处理。
-    bool isFresh(long savedAtUnix, long nowUnix, long maxAgeSec);
 }

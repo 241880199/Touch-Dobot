@@ -109,11 +109,6 @@ namespace Config {
     // 消费者仍是唯一一份实现: TcpCalibration::gravitySensorFrame (力补偿与负载求解【共用】)。
     const double SENSOR_MOUNT_YAW_DEG = 90.0;
 
-    // ========== 标定文件有效期 ==========
-    // 力传感器零偏随温度/时间漂移; 负载解算又依赖力数据。
-    // 超过这个时长的标定一律作废, 启动时要求重新标定。
-    const long CALIB_MAX_AGE_SEC = 24 * 3600;   // 24 小时
-
     // 连续多少次"结果不合理"就打红字错误并停止接受求解。
     // 防的是操作者反复按 's' 却每次被拒的空转 —— 那种情况下问题在硬件/采集, 不在求解器。
     const int CALIB_MAX_CONSECUTIVE_FAILS = 3;
