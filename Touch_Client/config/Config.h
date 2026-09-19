@@ -83,6 +83,12 @@ namespace Config {
     const int FORCE_FILTER_CUTOFF = 30;          // Butterworth 截止频率 (Hz)
     const int FORCE_STALE_MS = 200;              // 数据超时阈值 (ms)
     const double FORCE_RESIDUAL_DEADZONE_N = 0.20; // 补偿后死区 (N) — 略高于运动噪声 0.17N
+
+    // 启动零偏漂移检查的告警阈值 (N)。
+    // 负载正确时残余力与姿态无关, 所以任意静止姿态下 "补偿后读数" 就是零偏漂移量。
+    // 取 0.5 N: 明显高于死区 0.20 N 与噪声本底 (~0.05 N), 免得天天误报。
+    const double FORCE_ZERO_DRIFT_WARN_N = 0.5;
+
     const double FORCE_MAX_SENSOR_N = 200.0;     // 传感器量程 (N)
     const double FORCE_MAX_TOUCH_N = 3.3;        // Touch 最大安全力 (N)
     const double FORCE_REFLECTION_GAIN = 5.0;    // 力反射增益 — 放大传感器力到可感知范围

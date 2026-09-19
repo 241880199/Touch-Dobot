@@ -575,6 +575,62 @@ namespace BiasCheck {
     }
 }
 
+// ===== 启动零偏漂移检查 =====
+// 负载参数是工具的物理属性、不随时间漂移, 所以启动【不】验证负载 —— 它按需重标。
+// 会漂的是力传感器零偏, 这里便宜地查它:
+//   负载正确时残余力与姿态无关, 因此任意静止姿态读一次 "补偿后读数" 就是漂移量。
+// 零操作负担: 不摆姿态、不阻断、不写盘。
+static bool g_zeroCheckDone = false;
+static DWORD g_zeroCheckStartMs = 0;
+static double g_zeroCheckAccum[3] = {0, 0, 0};
+static int g_zeroCheckCount = 0;
+
+// 启动加载 force_calib.json 是否成功 (成功才有"存储零偏"可比, 否则无可查)
+static bool g_hasStoredZeroCalib = false;
+
+static void runZeroDriftCheck(bool hasStoredZero) {
+    if (g_zeroCheckDone || !hasStoredZero) return;
+    // --no-robot 下没有力数据可读, 本就没有可查的东西: 直接定稿, 免得每帧空转。
+    if (g_noRobot) { g_zeroCheckDone = true; return; }
+
+    DWORD now = GetTickCount();
+    if (g_zeroCheckStartMs == 0) { g_zeroCheckStartMs = now; return; }
+
+    AppState::ForceData fd;
+    EnterCriticalSection(&appState.forceDataMutex);
+    fd = appState.forceData;
+    LeaveCriticalSection(&appState.forceDataMutex);
+
+    // 启动后前 2s 让读数稳定, 之后取 1s 均值
+    if (fd.isStale || now - g_zeroCheckStartMs < 2000) return;
+
+    for (int i = 0; i < 3; i++) g_zeroCheckAccum[i] += fd.filtered[i];
+    g_zeroCheckCount++;
+    if (now - g_zeroCheckStartMs < 3000) return;
+
+    // 定稿
+    g_zeroCheckDone = true;
+    if (g_zeroCheckCount < 10) return;   // 数据太少, 本次不作结论
+
+    const double drift = sqrt(
+        (g_zeroCheckAccum[0] / g_zeroCheckCount) * (g_zeroCheckAccum[0] / g_zeroCheckCount) +
+        (g_zeroCheckAccum[1] / g_zeroCheckCount) * (g_zeroCheckAccum[1] / g_zeroCheckCount) +
+        (g_zeroCheckAccum[2] / g_zeroCheckCount) * (g_zeroCheckAccum[2] / g_zeroCheckCount));
+
+    if (drift > Config::FORCE_ZERO_DRIFT_WARN_N) {
+        std::cout << "\n[Force] ⚠ 零偏漂移检查: 补偿后读数 " << drift
+                  << " N, 超过阈值 " << Config::FORCE_ZERO_DRIFT_WARN_N << " N" << std::endl;
+        std::cout << "[Force]   两种可能:" << std::endl;
+        std::cout << "[Force]     · 零偏漂了 (温度/时间)  -> 按 'z' 重新调零" << std::endl;
+        std::cout << "[Force]     · 硬件有变化 (加装/拆装) -> 按 'm' 采多姿态后 's' 重标负载"
+                  << std::endl;
+        std::cout << "[Force]   两种都不影响继续操作, 但建议尽快处理。" << std::endl;
+    } else {
+        std::cout << "[Force] 零偏漂移检查: 补偿后读数 " << drift
+                  << " N, 正常 (< " << Config::FORCE_ZERO_DRIFT_WARN_N << " N)" << std::endl;
+    }
+}
+
 // ===== 采集类模式互斥 =====
 // 坐标标定 / TCP 标定 / 多姿态检查 / FK 验证都靠 SPACE 采点, 同时开着会互相吞按键
 // (最坏情况: MOTION 相在等 SPACE 收尾却被别的模式吃掉, 拖拽模式一直开着)。
@@ -617,6 +673,9 @@ void idle() {
         // Poll force data at ~30Hz alongside feedback (robot mode only)
         if (!g_noRobot) {
             RelayCore::instance().pollForce();
+
+            // 启动零偏漂移检查 (一次性, 只查零偏, 不阻断)
+            runZeroDriftCheck(g_hasStoredZeroCalib);
 
             // 多姿态零偏检查采样 (负载参数验证)
             if (BiasCheck::mode) {
@@ -1260,6 +1319,7 @@ int main(int argc, char* argv[]) {
         double massKg, biasF[3], biasM[3];
         if (ForceCalibration::loadFromFile(CalibStore::fileFor("force_calib.json"),
                                            massKg, biasF, biasM)) {
+            g_hasStoredZeroCalib = true;   // 有存储零偏, 启动漂移检查才有得比
             double comZero[3] = {0};
             ForceCompensation::setCalibration(massKg, comZero, biasF, biasM);
             std::cout << "[Force] Loaded force_calib.json (mass=" << massKg
