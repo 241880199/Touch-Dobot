@@ -647,6 +647,10 @@ static void runZeroDriftCheck(bool hasStoredZero) {
 // 所以这里启动后打 30 行实测量, 【一个力帧一行】(见下), 好让上面这个 10Hz 位姿 / 125Hz dt
 // 的错配直接出现在输出里 —— 连续几帧 pos 一模一样、vel 恰为 0.000000, 然后一帧大跳 ——
 // 而不是靠读代码去推断。原先每 1s 打一行, 30 帧里只采到 1 帧, 那个节奏根本看不出阶梯。
+// 2026-09-19 追加: 同时并排打印 30004 帧里的 ToolVectorActual @624 (tcp=) 与 GetPose() 的
+// pos=, 用来判定前者的坐标系 —— 名字含 "Tool", 但重力模型假定的是基座系 (见 AppState.h
+// tcpPoseActual 的说明)。两边数值一对上, 就说明帧里的位姿可以直接当基座系位姿用 (那就能
+// 甩掉 100ms 一次的仪表盘查询)。列 TCPSpeedActual @672 (tcpV=) 是顺手带上, 供同一帧核对。
 // 【这是临时诊断: 等 dt/采样节奏与阈值这两件事有了结论并修好, 本段连同
 //   ForceCompensation::motionState 一起删除。】
 static bool g_motionProbeDone = false;
@@ -687,13 +691,16 @@ static void runMotionProbe() {
 
     double vel[3], acc[3];
     int still = ForceCompensation::motionState(vel, acc) ? 1 : 0;
-    printf("[Force] 运动检测 #%02d: pos=(%.3f,%.3f,%.3f)mm  vel=%.6f m/s (阈值 %.4f)  acc=%.6f m/s² (阈值 %.4f)  isStill=%d\n",
+    // tcp= / tcpV= 取自上面那份 ForceData 快照 (同一个 forceDataMutex 临界区), 不再二次加锁。
+    printf("[Force] 运动检测 #%02d: pos=(%.3f,%.3f,%.3f)mm  tcp=(%.3f,%.3f,%.3f)mm  vel=%.6f m/s (阈值 %.4f)  acc=%.6f m/s² (阈值 %.4f)  tcpV=(%.4f,%.4f,%.4f)  isStill=%d\n",
            g_motionProbeCount + 1,
            px, py, pz,
+           fd.tcpPoseActual[0], fd.tcpPoseActual[1], fd.tcpPoseActual[2],
            sqrt(vel[0]*vel[0] + vel[1]*vel[1] + vel[2]*vel[2]),
            Config::FORCE_MOTION_VEL_THRESH_MS,
            sqrt(acc[0]*acc[0] + acc[1]*acc[1] + acc[2]*acc[2]),
            Config::FORCE_MOTION_ACC_THRESH_MSS,
+           fd.tcpSpeedActual[0], fd.tcpSpeedActual[1], fd.tcpSpeedActual[2],
            still);
 
     // 30 行后永久停: 够看出阶梯节奏, 又不至于一直刷屏。

@@ -130,6 +130,15 @@ public:
         // 一直在量一个与被配置负载无关的量。此字段用于对比确认。
         double tcpForce[6] = {0};
 
+        // 30004 帧里的 ToolVectorActual @624 = "TCP笛卡尔实际坐标值" (6×double)。
+        // 与 robotActualPose (来自 100ms 一次的 GetPose() 仪表盘查询) 是【两个不同的来源】:
+        // 这个在 125Hz 的帧里, 但我们还没用它。**坐标系未确认** —— 名字含 "Tool",
+        // 而重力模型 (ForceCompensation / TcpCalibration::gravitySensorFrame) 假定的是
+        // 【基座系】(与 GetPose 一致)。并排打印两者即可判定。
+        double tcpPoseActual[6] = {0};
+        // 30004 帧里的 TCPSpeedActual @672 = "TCP笛卡尔实际速度值" (6×double)。
+        double tcpSpeedActual[6] = {0};
+
         // 标定参数 (由 ForceCalibration 求解, ForceCompensation 读取)
         bool isCalibrated = false;
         double calibMassKg = 0.0;           // 末端等效质量 (kg)

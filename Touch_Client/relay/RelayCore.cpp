@@ -101,10 +101,16 @@ static DWORD WINAPI forceReaderThread(LPVOID) {
             // 同一帧里的 TCPForce @720 —— 与 @576 是两个不同的量 (见 AppState.h 的说明)。
             // 实测改 EnableRobot 的负载时 @576 不变, 所以两路都留着, 供以后对比/诊断。
             double* tcpForcePtr = reinterpret_cast<double*>(buf + 720);
+            // 同一帧里的 ToolVectorActual @624 / TCPSpeedActual @672 —— 坐标系未确认
+            // (见 AppState.h 的说明)。现在只镜像进 ForceData, 供运动探针并排打印对照。
+            const double* tcpPosePtr = reinterpret_cast<const double*>(buf + 624);
+            const double* tcpSpeedPtr = reinterpret_cast<const double*>(buf + 672);
             EnterCriticalSection(&app.forceDataMutex);
             for (int i = 0; i < 6; i++) {
                 app.forceData.raw[i] = forcePtr[i];
                 app.forceData.tcpForce[i] = tcpForcePtr[i];
+                app.forceData.tcpPoseActual[i] = tcpPosePtr[i];
+                app.forceData.tcpSpeedActual[i] = tcpSpeedPtr[i];
             }
             app.forceData.lastUpdateMs = GetTickCount();
             app.forceData.isStale = false;
