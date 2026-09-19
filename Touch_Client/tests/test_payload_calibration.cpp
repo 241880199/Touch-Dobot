@@ -640,8 +640,18 @@ static double rhoFromFit(const PayloadCalibration::RawFit& f) {
 }
 
 // 逐姿态的噪声申报 —— 测试【自己知道】它往均值里加了多少噪声 (addRawNoise 的 sigF/sigM),
-// 所以它把加进去的量如实申报成"这个输入值的 1σ"。N = 1 = 没有做平均 (噪声是直接加在均值上
-// 的), var = σ² -> σ_mean = σ。
+// 所以它把加进去的量申报成"这个输入值的噪声尺度"。N = 1 = 没有做平均 (噪声是直接加在均值上
+// 的), var = 申报值² -> σ_mean = 申报值。
+//
+// ⚠ 【申报的 floor² 是真实姿态内方差的 3 倍, 读 r 时必须知道】: addRawNoise 加的是
+//   【均匀分布】uniform(±sigF), 它的【标准差是 sigF/√3】, 方差只有 sigF²/3; 而这里申报的
+//   varF = sigF² —— 也就是申报值是真实方差的 3 倍, 而申报值的开方 (sigF) 并不是加进去那份
+//   噪声的标准差。后果只有一个: 门限读到的 r̂ = Σσ_sys²/Σfloor² 比物理比值【小 3 倍】。
+//   具体到 modelform_accepts_at_real_operating_point: 那里打印出来的 r≈3.02【不是物理比值】,
+//   物理比值 ≈ 9 (那个用例给每一次访问加的离散是半宽 3·sigF 的均匀分布, sd = √3·sigF)。
+//   【结论一个都不变】: 统计量与门限各自除以同一个申报值, 比值自洽, 判决不受影响; 但别拿
+//   打印出来的 r 去对物理直觉 —— 它一律偏小 3 倍。
+//
 // 【这不是"把答案喂给判据"】: 判据要的是"输入有多准"这个事实, 而这件事在生产路径上来自
 // 采集时的样本方差 (BiasCheck), 在测试里只能来自"我知道我加了什么"。申报值与被测代码
 // 如何拟合无关 —— 生成器与估计器仍然不共用代码。
@@ -1094,13 +1104,19 @@ static void test_realistic_spread_accepted_with_measured_noise() {
 }
 
 // ★★★ 第三次修复的【核心用例】(brief I4 点名要的那一条): 实机工况点。
-// 前面那些"接受"用例全都落在 r ≈ 0 —— 申报噪声与实际加进去的噪声一样大, 而重复的那两行
-// 只带自己那份姿态内噪声, 于是 sigma_sys 被夹到 0、尺子取到它的下限 (floor), 统计量就是
-// 残差/floor。那种条件下【过是必定的】, 门根本不用判 —— 它验不了任何东西。
+// 前面那些"接受"用例全都落在 r ≈ 0 —— 那里【没有】额外的姿态间离散, 而申报的 floor² 又比
+// 真实姿态内方差大 3 倍 (见 declareNoise), 重复的那两行只带自己那份姿态内噪声, 于是
+// sigma_sys 被夹到 0、尺子取到它的下限 (floor), 统计量就是残差/floor。那种条件下【过是必定的】,
+// 门根本不用判 —— 它验不了任何东西。
 // 这一条把数据挪到实机真正所在的工况: 每一次【访问】另有一份姿态间离散 s, 取 s = 根号3·sigma_in
-// (即 r ≈ 3), 残差与重复对的差值【同时】被抬高。模型形式仍然是对的 —— 所以它必须被接受。
+// (即申报口径 r̂ ≈ 3), 残差与重复对的差值【同时】被抬高。模型形式仍然是对的 —— 必须被接受。
 // 【旧门限下这一条是红的】: 旧门限 1 + 3·sqrt(2/dof) 压在零分布的中位数附近, 这个统计量
 // 越过去是常事。下面把这一点直接写成断言 —— 那段历史只有钉在这儿才不会重演。
+//
+// ⚠ 【打印出来的 r 不是物理比值】: 这里是【申报口径】的 r̂ = Σσ_sys²/Σfloor², 而 declareNoise
+//   申报的 floor² 是真实姿态内方差的 3 倍, 所以物理比值约是它的 3 倍 —— 这一段 r̂≈3.02 对应的
+//   物理比值 ≈ 9 (3.0·sigF 那份均匀离散 sd = √3·sigF, 姿态内噪声 sd = sigF/√3)。
+//   断言用的一律是 r̂; 报告里那张"实测冤枉率"表列的也是 r̂。两者别混着读。
 static void test_modelform_accepts_at_real_operating_point() {
     TEST(modelform_accepts_at_real_operating_point);
     double A[9];
@@ -1191,7 +1207,10 @@ static void test_repeat_pairs_pool_and_carry_their_dof() {
                                                            fit.repeatSysF, fit.repeatFloorF);
     CHECK(lim1 > lim3);
     CHECK(lim3 >= limBase);
-    CHECK(limBase > 1.9);        // base = chi2(dof,0.997)/dof, 与旧式 1 + 3·sqrt(2/dof) 同量级
+    // base = chi2(dof,0.9999)/dof (本用例 dof=9 -> 3.747), 比旧式 1 + 3·sqrt(2/dof) (dof 9 时
+    // 2.414) 高一截 —— 置信水平从 0.997 调到 0.9999 的结果, 不是回归。1.9 这条线只钉"base
+    // 仍然是个 O(1~4) 的数", 别把它读成"与旧式等值"。
+    CHECK(limBase > 1.9);
     // 尺子有 3 个自由度时判决照样通过 (门限放宽的幅度小了, 但仍然容得下正常散布)
     CHECK(PayloadCalibration::fitRaw(poses, F, M, NQR, fit, nz, REP_PAIRS, PAIRS));
     CHECK(fit.modelFormChecked);
@@ -1207,23 +1226,24 @@ static void test_modelform_limit_is_a_chi2_quantile_times_a_yardstick_discount()
     TEST(modelform_limit_is_a_chi2_quantile_times_a_yardstick_discount);
     const double sys2[3]   = {1.0, 1.0, 1.0};     // sigma_sys^2 = floor^2 -> r = 1
     const double floor2[3] = {1.0, 1.0, 1.0};
-    // base = chi2(dof, 0.997)/dof, 参考值 (chi2 分布表):
-    CHECK(fabs(PayloadCalibration::modelFormLimit(6.0, 0, sys2, floor2)  - 3.3007754) < 1e-6);
-    CHECK(fabs(PayloadCalibration::modelFormLimit(9.0, 0, sys2, floor2)  - 2.7748965) < 1e-6);
-    CHECK(fabs(PayloadCalibration::modelFormLimit(12.0, 0, sys2, floor2) - 2.4827379) < 1e-6);
-    CHECK(fabs(PayloadCalibration::modelFormLimit(18.0, 0, sys2, floor2) - 2.1574164) < 1e-6);
-    // r = 1, 对数 = 1: 折扣 = (1+1)/(1 + (1/chi2(1,0.997))·1), chi2(1,0.997) = 8.8074684
-    CHECK(fabs(PayloadCalibration::modelFormLimit(12.0, 1, sys2, floor2) - 4.4591804) < 1e-6);
-    // r = 1, 对数 = 4: chi2(4,0.997) = 16.0143263
-    CHECK(fabs(PayloadCalibration::modelFormLimit(12.0, 4, sys2, floor2) - 3.9730914) < 1e-6);
+    // base = chi2(dof, 0.9999)/dof, 参考值 (chi2 分布表)。⚠ 置信水平从 0.997 调到 0.9999 之后
+    // 这些数【整体变大】—— 方向别搞反: 两个 chi2 分位数都随 α 单调增, **调大 α 才是放宽门限**。
+    CHECK(fabs(PayloadCalibration::modelFormLimit(6.0, 0, sys2, floor2)  - 4.6427235393) < 1e-6);
+    CHECK(fabs(PayloadCalibration::modelFormLimit(9.0, 0, sys2, floor2)  - 3.7466609377) < 1e-6);
+    CHECK(fabs(PayloadCalibration::modelFormLimit(12.0, 0, sys2, floor2) - 3.2612003235) < 1e-6);
+    CHECK(fabs(PayloadCalibration::modelFormLimit(18.0, 0, sys2, floor2) - 2.7327441373) < 1e-6);
+    // r = 1, 对数 = 1: 折扣 = (1+1)/(1 + (1/chi2(1,0.9999))·1), chi2(1,0.9999) = 15.1379
+    CHECK(fabs(PayloadCalibration::modelFormLimit(12.0, 1, sys2, floor2) - 6.1182040929) < 1e-6);
+    // r = 1, 对数 = 4: chi2(4,0.9999) = 23.5127
+    CHECK(fabs(PayloadCalibration::modelFormLimit(12.0, 4, sys2, floor2) - 5.5741272191) < 1e-6);
     // 【尺子说复现性差多少, 门限就放宽多少】: r 越大折扣越大
     const double s2big[3] = {9.0, 9.0, 9.0};
     CHECK(PayloadCalibration::modelFormLimit(12.0, 1, s2big, floor2)
           > PayloadCalibration::modelFormLimit(12.0, 1, sys2, floor2));
     // 没有量到复现性差 -> 不打折, 就是 base
     const double zero[3] = {0.0, 0.0, 0.0};
-    CHECK(fabs(PayloadCalibration::modelFormLimit(12.0, 1, zero, floor2) - 2.4827379) < 1e-6);
-    printf("[门限 = chi2(dof,0.997)/dof × (1+r)/(1+(R/chi2(R,0.997))·r): dof=12 base=%.4f,"
+    CHECK(fabs(PayloadCalibration::modelFormLimit(12.0, 1, zero, floor2) - 3.2612003235) < 1e-6);
+    printf("[门限 = chi2(dof,0.9999)/dof × (1+r)/(1+(R/chi2(R,0.9999))·r): dof=12 base=%.4f,"
            " r=1 时 1 对 %.4f / 4 对 %.4f] ",
            PayloadCalibration::modelFormLimit(12.0, 0, sys2, floor2),
            PayloadCalibration::modelFormLimit(12.0, 1, sys2, floor2),
