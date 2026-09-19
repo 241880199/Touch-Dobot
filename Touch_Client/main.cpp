@@ -21,6 +21,8 @@
 #include "force/PayloadCalibration.h"
 #include "robot/Kinematics.h"
 #include <cstdio>
+#include <ctime>
+#include <cstring>
 
 // ===== 运行模式 =====
 static bool g_noRobot = false;
@@ -315,6 +317,56 @@ namespace BiasCheck {
         std::cout << std::endl;
     }
 
+    // 每次负载求解尝试都落一行 —— 控制台会滚掉, 而"这次标定到底做了什么"必须能追溯。
+    // 一行一次尝试, 便于 grep 与表格工具直接读。
+    //
+    // 表头只在【文件不存在或为空】时写。不要用进程内 static 标志位: 那个标志每次启动都是
+    // false, 会让 fopen 用 "w" 把历次记录整个截断 —— 与"可追溯"的立意在字面上相反。
+    //
+    // r 可为 nullptr: 求解【之前】就返回的出口 (已上锁 / 姿态数不足 / 正在采样) 没有 Result,
+    // 此时各数值列记 "-"。
+    static void logCalibAttempt(const char* outcome, const PayloadCalibration::Result* r)
+    {
+        // fileFor 返回 static 缓冲, 调用方必须立即拷贝 (头文件已注明) —— 下面要 fopen 两次。
+        char path[512];
+        snprintf(path, sizeof(path), "%s", CalibStore::fileFor("calib_log.txt"));
+
+        bool needHeader = true;
+        if (FILE* existing = fopen(path, "r")) {
+            needHeader = (fgetc(existing) == EOF);   // 存在但为空 → 仍然写表头
+            fclose(existing);
+        }
+        FILE* f = fopen(path, needHeader ? "w" : "a");
+        if (!f) return;
+        if (needHeader) {
+            fprintf(f, "# 负载标定尝试记录 (每次按 's' 一行)\n");
+            fprintf(f, "# time | poses | rmsF_N | rmsM_Nm | psi_deg | dm_kg | mass_kg"
+                       " | comZ_mm | outcome\n");
+        }
+        char sPoses[16], sRmsF[16], sRmsM[16], sPsi[16], sDm[16], sMass[16], sComZ[16];
+        if (r) {
+            snprintf(sPoses, sizeof(sPoses), "%d",    r->poses);
+            snprintf(sRmsF,  sizeof(sRmsF),  "%.4f",  r->rmsForceN);
+            snprintf(sRmsM,  sizeof(sRmsM),  "%.4f",  r->rmsMomentNm);
+            snprintf(sPsi,   sizeof(sPsi),   "%+.1f", r->sensorYawDeg);
+            snprintf(sDm,    sizeof(sDm),    "%+.4f", r->dm);
+            snprintf(sMass,  sizeof(sMass),  "%.4f",  r->massKg);
+            snprintf(sComZ,  sizeof(sComZ),  "%+.1f", r->comMm[2]);
+        } else {
+            char* cols[7] = {sPoses, sRmsF, sRmsM, sPsi, sDm, sMass, sComZ};
+            for (int i = 0; i < 7; i++) strcpy(cols[i], "-");
+        }
+        char ts[24];
+        const std::time_t now = std::time(nullptr);
+        const std::tm* lt = std::localtime(&now);
+        if (lt) strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", lt);
+        else    strcpy(ts, "?");
+
+        fprintf(f, "%s | %s | %s | %s | %s | %s | %s | %s | %s\n",
+                ts, sPoses, sRmsF, sRmsM, sPsi, sDm, sMass, sComZ, outcome);
+        fclose(f);
+    }
+
     // 's': 用已采数据最小二乘求解负载参数 → 把【残余量】写进本地补偿的 force_calib.json
     //      (机械臂内部负载从 TCP 口改不动, 所以不再靠"下发绝对负载"这条路)
     static void solveAndApply() {
@@ -323,16 +375,21 @@ namespace BiasCheck {
                       << "       [BIAS] !! 判据只剩一条: 拟合残差 (力) 超阈。检查装夹是否松动"
                       << " / 力传感器是否受挤压 / 姿态覆盖是否足够。\n"
                       << "       [BIAS] !! 处理后按 'm' 重新采集 (计数会清零)。" << std::endl;
+            logCalibAttempt("REJECTED locked_out", nullptr);
             return;
         }
         if (count < 4) {
             std::cout << "[BIAS] 求解至少需要 4 个姿态 (当前 " << count
                       << "), 建议 6~8 个" << std::endl;
+            char outcome[128];
+            snprintf(outcome, sizeof(outcome), "REJECTED too_few_poses (count=%d)", count);
+            logCalibAttempt(outcome, nullptr);
             return;
         }
         // 采样中途不允许求解
         if (sampling) {
             std::cout << "[BIAS] 正在采样, 稍后再求解" << std::endl;
+            logCalibAttempt("REJECTED sampling_in_progress", nullptr);
             return;
         }
 
@@ -361,6 +418,10 @@ namespace BiasCheck {
             std::cout << "[BIAS] 求解失败 — 姿态数不足/退化(姿态太接近)/解非物理。\n"
                       << "       请确认各姿态差异足够大 (跨度≥30°, 且笔有水平/朝上的姿态)"
                       << std::endl;
+            char outcome[128];
+            snprintf(outcome, sizeof(outcome),
+                     "REJECTED degenerate_or_nonphysical (count=%d)", count);
+            logCalibAttempt(outcome, nullptr);
             return;
         }
 
@@ -426,6 +487,9 @@ namespace BiasCheck {
             std::cout << std::endl;
             // 不需要"恢复机械臂原参数": 判据跑在任何下发【之前】(探针已废除, 这条路里没有
             // 任何东西动过机械臂), 内存生效值也从头到尾没改过。
+            char outcome[128];
+            snprintf(outcome, sizeof(outcome), "REJECTED rmsF=%.4f", r.rmsForceN);
+            logCalibAttempt(outcome, &r);
             return;
         }
         consecutiveFails = 0;   // 成功一次即清零
@@ -452,6 +516,9 @@ namespace BiasCheck {
         // 与求解器 gravityTool 同一约定, 所以 mass 直接取 dm 即可(可为负)。
         std::cout << "------------------------------------------------------" << std::endl;
         std::cout << "  ✓ 标定结果 → 本地补偿 (机械臂没补干净的那一份由我们减掉):" << std::endl;
+        // 两处落盘的成败都要进日志: 落盘失败却只记 DISPATCHED, "下次启动标定没了"在日志里
+        // 看起来就像没发生过 —— 那样追溯就是假的。(机械臂侧同步失败【不算】: 它不影响标定。)
+        bool calibWritesOk = true;
         {
             const double resMass = r.dm;              // 残余质量 (kg, 带符号)
             double resCom[3] = {0.0, 0.0, 0.0};       // 残余质心 (m)
@@ -469,11 +536,13 @@ namespace BiasCheck {
                           << std::endl;
             } else {
                 std::cerr << "  [本地补偿] !! force_calib.json 写入失败" << std::endl;
+                calibWritesOk = false;
             }
         }
 
         if (!PayloadCalibration::save(CalibStore::fileFor("payload_calib.json"))) {
             std::cerr << "[BIAS] !! payload_calib.json 写入失败" << std::endl;
+            calibWritesOk = false;
         } else {
             std::cout << "  已保存 payload_calib.json (下次启动自动加载)" << std::endl;
         }
@@ -496,6 +565,12 @@ namespace BiasCheck {
         std::cout << "  → 复验: 摆姿态按 SPACE 采集 (第一次 SPACE 会自动开新一批,"
                   << " 旧数据作废)" << std::endl;
         std::cout << std::endl;
+
+        // 成功出口: 在【两处写入尝试之后】才记 —— 这样 write_failed 才能落在同一行里。
+        char outcome[128];
+        snprintf(outcome, sizeof(outcome), "DISPATCHED%s",
+                 calibWritesOk ? "" : " write_failed");
+        logCalibAttempt(outcome, &r);
     }
 }
 
