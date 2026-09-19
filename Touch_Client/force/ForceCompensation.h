@@ -45,6 +45,14 @@ namespace ForceCompensation {
     // 取出当前零偏 (供把新质量落盘时复用)
     void currentBias(double biasForce[3], double biasTorque[3]);
 
+    // 诊断用: 把运动检测器的当前状态与判定读出来。返回 isStill() 的当前值。
+    // 存在的理由: isStill() 疑似在生产中永远为假 (那样在线 EMA 零偏更新就不跑),
+    // 需要用实机噪声量级来判定, 而不是靠读代码猜。
+    // 注意 vel/acc 实际单位是 m/s 与 m/s² (MotionEstimator::update 里已 mm→m 换算),
+    // 与阈值常量同量纲 —— 可疑的不是单位, 是 update() 的 dt 与 pollForce() 实际
+    // 33ms/100ms 的采样节奏不符 (见 main.cpp 里 runMotionProbe 的注释)。
+    bool motionState(double vel[3], double acc[3]);
+
     // Check if calibration is active
     bool isCalibrated();
 

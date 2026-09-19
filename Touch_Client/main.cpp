@@ -631,6 +631,55 @@ static void runZeroDriftCheck(bool hasStoredZero) {
     }
 }
 
+// ===== 启动运动检测器诊断 =====
+// 诊断【只测不改】: 怀疑 isStill() (ForceCompensation.cpp:150) 在生产中永远为假 —— 那样的话
+// step() 第 8 步的在线 EMA 零偏更新从来不跑, 而第 6 步的惯性项则一直在跑。
+// 读代码判不了这件事, 得看实机静止时的噪声量级。两个可疑点, 都不是"单位写错了":
+//   · vel/acc 实际就是 m/s 与 m/s² —— MotionEstimator::update 里已 mm→m 换算
+//     (position * 0.001), 所以 0.002 / 0.005 的量纲命名是对的。
+//   · 真正可疑的是 dt 与实际采样间隔不符: update() 固定用 dt=1/125s, 而 step() 的唯一
+//     调用方 pollForce() 自我节流到 33ms、且它读的 robotActualPose 只由 queryPose()
+//     每 100ms 刷新一次 (RelayCore.cpp:1599, main.cpp poseQueryTimer)。即每 3 帧里约 2 帧
+//     位姿没变 (vel 恰为 0), 第 3 帧却把 100ms 的位移除以 8ms ⇒ 速度高估 ~12 倍,
+//     加速度经 1/dt² 放大更多。这会把 isStill() 往"永远为假"推。
+// 所以这里启动后打 5 行实测量, 用实测 vel/acc 量级来判定, 而不是靠读代码猜。
+// 【阈值问题有结论后本段连同 ForceCompensation::motionState 一起删除。】
+static bool g_motionProbeDone = false;
+static DWORD g_motionProbeStartMs = 0;
+static int g_motionProbeCount = 0;
+
+static void runMotionProbe() {
+    if (g_motionProbeDone) return;
+    // --no-robot 下没有力数据/位姿流, 没有可测的东西: 直接定稿, 免得每帧空转。
+    if (g_noRobot) { g_motionProbeDone = true; return; }
+
+    DWORD now = GetTickCount();
+    if (g_motionProbeStartMs == 0) { g_motionProbeStartMs = now; return; }
+
+    AppState::ForceData fd;
+    EnterCriticalSection(&appState.forceDataMutex);
+    fd = appState.forceData;
+    LeaveCriticalSection(&appState.forceDataMutex);
+
+    // 与零偏漂移检查同理: 启动后前 2s 等读数稳住再开始, 免得第一行量的是启动瞬态。
+    if (fd.isStale || now - g_motionProbeStartMs < 2000) return;
+
+    // 之后每秒一行, 共 5 行, 打完永久停。
+    if (now - g_motionProbeStartMs < static_cast<DWORD>(2000 + g_motionProbeCount * 1000)) return;
+
+    double vel[3], acc[3];
+    int still = ForceCompensation::motionState(vel, acc) ? 1 : 0;
+    printf("[Force] 运动检测: vel=%.4f mm/s (阈值 %.4f)  acc=%.4f mm/s² (阈值 %.4f)  isStill=%d\n",
+           sqrt(vel[0]*vel[0] + vel[1]*vel[1] + vel[2]*vel[2]),
+           Config::FORCE_MOTION_VEL_THRESH_MS,
+           sqrt(acc[0]*acc[0] + acc[1]*acc[1] + acc[2]*acc[2]),
+           Config::FORCE_MOTION_ACC_THRESH_MSS,
+           still);
+
+    g_motionProbeCount++;
+    if (g_motionProbeCount >= 5) g_motionProbeDone = true;
+}
+
 // ===== 采集类模式互斥 =====
 // 坐标标定 / TCP 标定 / 多姿态检查 / FK 验证都靠 SPACE 采点, 同时开着会互相吞按键
 // (最坏情况: MOTION 相在等 SPACE 收尾却被别的模式吃掉, 拖拽模式一直开着)。
@@ -676,6 +725,9 @@ void idle() {
 
             // 启动零偏漂移检查 (一次性, 只查零偏, 不阻断)
             runZeroDriftCheck(g_hasStoredZeroCalib);
+
+            // 启动运动检测器诊断 (一次性 5 行, 只为量 isStill 的阈值问题 — 见定义处注释)
+            runMotionProbe();
 
             // 多姿态零偏检查采样 (负载参数验证)
             if (BiasCheck::mode) {

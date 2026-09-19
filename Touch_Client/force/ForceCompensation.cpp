@@ -207,6 +207,14 @@ void currentBias(double biasForce[3], double biasTorque[3]) {
     LeaveCriticalSection(&g_calibMutex);
 }
 
+// 诊断用: 见头文件里为什么需要它。
+// 有意【不】取 g_calibMutex: MotionEstimator 的状态不由它保护, step() 里读它
+// (下面的惯性与 EMA 分支) 同样是无锁的, 这里跟着一致即可。
+bool motionState(double vel[3], double acc[3]) {
+    g_motion.getState(vel, acc);
+    return g_motion.isStill();
+}
+
 bool isCalibrated() {
     return g_isCalibrated;
 }
