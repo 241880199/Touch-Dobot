@@ -1353,7 +1353,9 @@ namespace BiasCheck {
         // 平方, 于是屏幕上这个"尺子"与同一屏库打的那一行对不上: 实机 2026-09-19 18:49:55 那次
         // 库说 0.0208 N, 这里说 0.1349 N (sqrt(Σσ/3) 而不是 sqrt(Σσ²/3), 差 6.5 倍) —— 同一个
         // 名字、同一屏、两个数。库的 poseLevelYardstick 就是带平方的那个口径, 照抄它。
-        // 【这只是显示量的算法, 不参与任何判决】: 它只出现在下面两处 diagEmitf 里。
+        // 【这只是显示量的算法, 不参与任何判决】: 它是【报告量】, 只喂给下面【四处】diagEmitf ——
+        // 判决【通过】那一支两处 (力通道 / 力矩通道各一行) 与判决【拒绝】那一支两处 (照抄判据里
+        // 那两个数的那两行)。四处都只把它当"数"印出来, 没有一处拿它去比门限。
         const double yardF = (fit.repeatPairCount > 0)
             ? sqrt((fit.repeatSigmaF[0] * fit.repeatSigmaF[0]
                   + fit.repeatSigmaF[1] * fit.repeatSigmaF[1]
@@ -1370,13 +1372,34 @@ namespace BiasCheck {
         diagEmitf("      重复姿态对 (尺子的自由度, 每对须取不同姿态) = %d 对;  逐姿态噪声来自采集时的样本方差\n",
                   fit.repeatPairCount);
         if (fit.modelFormChecked) {
-            diagEmitf("      力通道:   残差÷尺子 χ²/dof = %.4g  <  门限 %.4g   (dof=%d, 尺子 %.4g N)\n",
+            // ⚠ 【本分支不复述判据, 只报数 —— 与下面那个 else 分支同一条规矩】。
+            // 从前这两行印的是 "X  <  门限 Y"。那是本地替库下结论, 而且【力矩那一半根本没验时
+            // 也照印】: 自由 12 参数模型秩亏时 (3n > 12, 见 force/PayloadCalibration.cpp 那一支)
+            // 库把 lackOfFitMomentDof 置 0 并明说"力矩通道的失拟检验【没做成】", 而这一行照印
+            // "0  <  0" —— 一个【假通过】, 还随正文 append 进 calib_report.md 这份永久记录。
+            // 假通过比假失败更坏: 假失败把人支去查一个【没坏】的通道, 假通过让人【什么都不查】。
+            // 判据只在库里有一份才不会各说各话, 所以这里只把数摆出来, 过没过以 stderr 的
+            // [Payload] 行为准 (这条规矩的出处见下面 MODEL_FORM_NO_DOF 那个分支的注释)。
+            diagEmitf("      力通道:   残差÷尺子 χ²/dof = %.4g  门限 %.4g   (dof=%d, 尺子 %.4g N)\n",
                       fit.chi2RepForceRatio, fit.chi2RepForceLimit, fit.chi2DofForce, yardF);
-            diagEmitf("      力矩通道: 失拟统计量     = %.4g  <  门限 %.4g   (dof=%d, 尺子 %.4g N·m)\n",
-                      fit.lackOfFitMomentRatio, fit.lackOfFitMomentLimit, fit.lackOfFitMomentDof, yardM);
+            if (fit.lackOfFitMomentDof > 0) {
+                diagEmitf("      力矩通道: 失拟统计量     = %.4g  门限 %.4g   (dof=%d, 尺子 %.4g N·m)\n",
+                          fit.lackOfFitMomentRatio, fit.lackOfFitMomentLimit,
+                          fit.lackOfFitMomentDof, yardM);
+            } else {
+                // dof = 0 是【这一次没验】, 不是"验了得 0"。这里【不许】印比较 —— 0 < 0 是假的,
+                // 而它会被读成"力矩通道也过了"。(此刻 momentFormChecked 同样是 false: 两个标志
+                // 在库里同进同退。)
+                diagEmitf("      力矩通道: 【没有检验】(dof=0) —— 自由 12 参数模型在这批姿态上"
+                          "秩亏, 失拟统计量【无从给出】;\n");
+                diagEmitf("                这一半不是【通过】, 是【没做】—— 库已在 stderr 的"
+                          " [Payload] 行上说明。\n");
+            }
             diagEmitf("      对照 (姿态内噪声, 【只报告不判】): 力 %.4g N / 力矩 %.4g N·m;"
                       " χ²/dof = %.4g / %.4g\n",
                       fit.noiseForceN, fit.noiseMomentNm, fit.chi2ForceRatio, fit.chi2MomentRatio);
+            diagOut() << "      ↑ 上面两行只是【数】, 不是【结论】—— 过没过【以 stderr 的 [Payload]"
+                      << " 行为准】: 判据在库里只有一份, 本行不替它说。" << std::endl;
             diagOut() << "      ↑ 残差若明显大于姿态内噪声、却与【姿态间复现性】相符, 那是"
                       << "采集现场的复现性差, 不是模型错。" << std::endl;
         } else {
@@ -1428,9 +1451,15 @@ namespace BiasCheck {
                           << "姿态高】-> 重采那几个; 个个都高 -> 模型形式错。" << std::endl;
                 diagOut() << "          · 力矩通道失拟被拒 -> c_s × (A·g) 这个叉乘结构不成立 (自由模型"
                           << "显著解释得更好), 重采个别姿态救不回来。" << std::endl;
-                diagOut() << "          · 上面【没有】模型形式的自检拒绝行 (你自己把这两个数与门限比"
-                          << "一比, 都没越线) -> 拒绝来自 fitRaw 的其它自检: 质量尺度越界 / cond"
-                          << " 过大 / A 奇异(秩亏) —— 同样见 [Payload] 行。" << std::endl;
+                // ⚠ 这一条从前写的是 "(你自己把这两个数与门限比一比, 都没越线)" —— 又一个
+                // 【本地替库下结论】: 走到这一支时模型形式那一块【可能压根没跑过】(cond / 质量
+                // 尺度 / A 奇异那几道自检排在它前面, 见 fitRaw 的次序), 那两个数就是【没比过】
+                // 的; "都没越线"于是可以是一句假通过。而且它与本分支上面自己那句 "本行不给
+                // 【超过/通过】这个结论" 互相打架。这里只留【结构】: 上面没有模型形式的自检拒绝
+                // 行 -> 拒绝来自后面那几道自检, 是哪一道见 [Payload] 行。
+                diagOut() << "          · 上面【没有】模型形式的自检拒绝行 -> 拒绝来自 fitRaw 的其它自检:"
+                          << " 质量尺度越界 / cond 过大 / A 奇异(秩亏) —— 同样见 [Payload] 行。"
+                          << std::endl;
             }
         }
         if (!fitOk) {

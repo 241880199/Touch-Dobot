@@ -427,6 +427,75 @@ static std::string stripLineComments(const std::string& s) {
     return out;
 }
 
+// ===== 取"打给人看的文字" (给下面的类级闸门用) =====
+// 从(已剥注释的)代码里取出所有【字符串字面量】的内容, 按出现次序首尾相接。屏幕上/文档里出现的
+// 就是这些字面量连起来的样子 (相邻的还会被编译器直接粘成一条), 所以判断"这一屏写了什么措辞"
+// 扫这一条流就够了 —— 不必解析哪个字面量喂给哪一次打印。转义按编译器那样去掉那个反斜杠。
+static std::string printedTextStream(const std::string& code) {
+    std::string out;
+    for (size_t i = 0; i < code.size(); i++) {
+        if (code[i] != '"') continue;
+        for (i++; i < code.size(); i++) {
+            const char c = code[i];
+            if (c == '\\' && i + 1 < code.size()) { out += code[i + 1]; i++; continue; }
+            if (c == '"') break;
+            out += c;
+        }
+    }
+    return out;
+}
+
+// 去掉一个字面量里的 ASCII 箭头 (-> 与 =>): 它是指路, 不是比较算子。
+static std::string withoutArrows(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    for (size_t i = 0; i < s.size(); i++) {
+        if (s[i] == '-' && i + 1 < s.size() && s[i + 1] == '>') { i++; continue; }
+        if (s[i] == '=' && i + 1 < s.size() && s[i + 1] == '>') { i++; continue; }
+        out += s[i];
+    }
+    return out;
+}
+
+// 【类级判据: 本地不许替库下"统计量与门限"的结论】。
+// 命中就返回那一段文字 (给失败信息看), 没命中返回空串。
+//   · 门限词: 门限 / 越线 / 超线 / 过线 —— 后三个【自带】那个"线", 只能由"与门限比过"得出,
+//     所以它们一旦出现就命中 (不必旁边还有"门限"二字);
+//   · 比较算子: < > ≤ ≥ 超过 大于 小于 低于 高于 —— 单独一个词不算, 必须与门限词【挨着】。
+//   · 判据: 一个门限词与一个比较算子相距不到 W 字节 = 本地替库下了结论。
+// 为什么按字节距离而不是"同一个字面量": 一行打印常被拆成两个字面量, 只看单个字面量会漏掉
+// 这样写的 `"...= %.4g  <" "  门限 %.4g..."` —— 而这类回归正是闸门要拦的。W 取小: 措辞的
+// 邻接是【很近】的 ("超过门限"/"= %.4g 门限"), 拉大只会把无关的两句话配成对。
+static std::string localVerdictExcerpt(const std::string& stream) {
+    static const char* kLimit[] = {"门限", "越线", "超线", "过线"};
+    static const char* kCmp[]   = {"<", ">", "≤", "≥", "超过", "大于", "小于", "低于", "高于",
+                                   "越线", "超线", "过线"};
+    const size_t W = 10;
+    for (size_t li = 0; li < sizeof(kLimit) / sizeof(kLimit[0]); li++) {
+        const size_t llen = strlen(kLimit[li]);
+        for (size_t p = stream.find(kLimit[li]); p != std::string::npos;
+             p = stream.find(kLimit[li], p + 1)) {
+            const size_t lo = (p > W) ? p - W : 0;      // 窗口: 门限词前后各 W 字节
+            const size_t hi = p + llen + W;
+            for (size_t ci = 0; ci < sizeof(kCmp) / sizeof(kCmp[0]); ci++) {
+                const size_t clen = strlen(kCmp[ci]);
+                for (size_t q = stream.find(kCmp[ci]); q != std::string::npos;
+                     q = stream.find(kCmp[ci], q + 1)) {
+                    if (q < hi && q + clen > lo) {      // 与窗口相交 -> 命中
+                        size_t a = (lo > 30) ? lo - 30 : 0;
+                        size_t b = (hi + 30 < stream.size()) ? hi + 30 : stream.size();
+                        // 别切在多字节字的中间: 失败信息是给人看的, 半截字节只会印成乱码
+                        while (a < b && (stream[a] & 0xC0) == 0x80) a++;
+                        while (b > a && (stream[b] & 0xC0) == 0x80) b--;
+                        return stream.substr(a, b - a);
+                    }
+                }
+            }
+        }
+    }
+    return std::string();
+}
+
 // 【同源闸门 (二): 不许替库复述判据 —— 屏幕上那句"拒因"曾经断言了一个它没判过的东西】
 // 那一屏末尾的 "→ 拒因: ..." 从前【无条件地】写着 "力通道 χ²/dof = X 超过门限 Y"。而它所在
 // 的那个 else 分支, 力通道【完全可以是过了的】: 实机 2026-09-19 18:49:55 那次力 0.6508
@@ -437,8 +506,23 @@ static std::string stripLineComments(const std::string& s) {
 // 规矩), 所以这里把它做成闸门。
 // 【这条闸门的局限, 说在前面】: 它读的是 main.cpp 的【源文本】, 所以钉死的是"那句话怎么写",
 // 不是"solveAndApply 跑起来会印出什么" —— 后者要实机数据才走得到, 本测试到不了那一步。
-// 另外几处 find 的串都取得短 (不与换行/缩进较劲), 但改那几行时若把串拆到两个字面量里,
-// 这里会红 —— 那是【故意的】: 它逼改动者回来读一遍这段话。
+// 下面 (2)(3) 里那几处 find 的串都取得短 (不与换行/缩进较劲), 但改那几行时若把串拆到两个字面量
+// 里, 这里会红 —— 那是【故意的】: 它逼改动者回来读一遍这段话。(这些是【词组级】的正面断言;
+// 类级的那条规矩在 (1), 它按"文字流上的邻接"判, 拆字面量骗不过它。)
+//
+// ===== 2026-09-19 加固: 从一个词组升到【一个类】 =====
+// 上一版这条闸门只钉死四个字 (`超过门限`), 于是它只看得见【同一个词组】的回归:
+//   `χ²/dof = %.4g > 门限 %.4g → 力通道被拒` / `超过 门限` (中间多个空格) / `大于门限` /
+//   `越线` —— 四种写法都能骗过它, 而屏幕上照旧误导操作员。
+// 更要命的是它【结构上看不见反方向的那个缺陷】: 判决【通过】那一支 (main.cpp 里
+// `if (fit.modelFormChecked)`) 从前印的是 "χ²/dof = %.4g  <  门限 %.4g", 一个字都没提
+// "超过门限", 却是同一类错 —— 而且错得更危险。力矩那一半在【自由 12 参数模型秩亏】时
+// (3n > 12, PayloadCalibration.cpp 明说"力矩通道的失拟检验【没做成】") 从未被检验,
+// lackOfFitMomentDof = 0, 于是屏幕上印出 "0  <  0": 一个【假通过】, 还 append 进了
+// calib_report.md。假失败把人支去查没坏的通道; 【假通过让人什么都不查】。
+// 所以现在扫的是【打给人看的那条文字流】(见上面的 printedTextStream): 一个【门限词】与一个
+// 【比较算子】(或一个自带"线"的判据词) 挨在一起就红 —— 通过/拒绝两支、拆成几个字面量、
+// 换成哪个同义词, 都跑不掉。
 static void test_reject_line_does_not_restate_the_library_verdict() {
     TEST(reject_line_does_not_restate_the_library_verdict);
     const std::string src = readWholeFile("../main.cpp");
@@ -454,9 +538,15 @@ static void test_reject_line_does_not_restate_the_library_verdict() {
     const std::string code = stripLineComments(body);
     CHECK(code.size() < body.size());          // 剥掉过东西 -> helper 真的在干活
 
-    // (1) 【核心】"超过门限"是【库】判定的措辞 (PayloadCalibration.cpp 的 [Payload] 行)。屏幕上
-    //     再出现一次 = 判据被抄了第二份, 而抄的这一份是无条件的 —— 力通道没超时它照样这么说。
-    CHECK(code.find("超过门限") == std::string::npos);
+    // (1) 【核心, 类级】打给人看的那条文字流里, 不许有【本地替库下的比较结论】。
+    //     (上一版这里是 `code.find("超过门限") == npos` —— 词组级, 看得见那四个字, 看不见
+    //      `> 门限` / `大于门限` / `越线`, 也看不见判决通过那一支的 `0 < 0`。)
+    const std::string stream = withoutArrows(printedTextStream(code));
+    CHECK(stream.size() > 3000);                    // 真的取到了那一屏的字 (取不到先红)
+    CHECK(stream.find("门限") != std::string::npos);  // 反面: 门限词确实在流里 (否命题谁都能满足)
+    const std::string hit = localVerdictExcerpt(stream);
+    if (!hit.empty()) std::printf("\n    本地替库下结论: ...%s...\n", hit.c_str());
+    CHECK(hit.empty());
 
     // (2) 正面要求 (否命题谁都能满足): 还得把人指向权威的那一行, 而且【三种情形】都要有对症的话,
     //     数字也要还在 (钉子只钉"断言", 不钉"报数")。
@@ -468,6 +558,14 @@ static void test_reject_line_does_not_restate_the_library_verdict() {
     CHECK(code.find("chi2RepForceRatio") != std::string::npos);           // 两个判据数照旧摆出来
     CHECK(code.find("lackOfFitMomentRatio") != std::string::npos);
     CHECK(code.find("尺子 %.4g N") != std::string::npos);                 // 连同尺子一起
+
+    // (2b) 【判决通过那一支】也要有对症的话 —— 这是正面证据: 少了它, 上面的类级闸门可以靠
+    //      "把那一行整个删掉"满足, 而那一屏就再也不报数了。
+    CHECK(stream.find("【没有检验】") != std::string::npos);   // dof=0 = 没验过 -> 必须明说
+    CHECK(code.find("fit.lackOfFitMomentDof > 0") != std::string::npos);  // 按"验没验"分两支
+    CHECK(code.find("fit.lackOfFitMomentLimit") != std::string::npos);    // 门限照旧摆出来 (报数)
+    CHECK(code.find("门限 %.4g") != std::string::npos);                   // 报数的格式还在
+    CHECK(stream.find("以 stderr 的 [Payload] 行为准") != std::string::npos);  // 通过那一支也指向库
 
     // (3) 同一屏上另一个对不上账的数: 姿态级尺子必须【先平方, 再平均, 最后开方】—— repeatSigmaF[]
     //     装的是 σ (N), 不是 σ² (装方差的那个字段叫 repeatSysF[])。从前漏了平方, 于是同一屏上
