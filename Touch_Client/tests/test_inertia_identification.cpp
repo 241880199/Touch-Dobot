@@ -7,8 +7,13 @@
 // 所以本文件:
 //   · 自己写 RPY->R (从定义展开, 不调 TcpCalibration::rpyToMatrix)
 //   · 自己写基座系重力在传感器系里的表示 (Rᵀ·(0,0,G), 不调 gravitySensorFrameAtYaw)
-//   · 自己写解析轨迹与解析导数 —— 【这是关键的独立性】: 被测代码要从【拟合】里把运动学
-//     反推出来, 而这里直接给出真值。拟合若有偏差, 差异立刻显形。
+//   · 自己写解析轨迹与解析导数 —— 这一半的独立性【只覆盖"拟合 -> 运动学"这一段】: 被测
+//     代码要从【拟合】里把运动学反推出来, 而这里直接给出真值。拟合若有偏差, 差异立刻显形。
+//     ⚠ 【但 ω/α 那一半不是独立的】: 下面的 tAngular 是模块里 angularState 的转写 (同一个
+//     "RPY 变化率 -> 机体角速度" 的映射), 所以那一处映射若有【共同的概念错】, 两边同错相消,
+//     本文件抓不到。它同时意味着 angSpeedCheckRms 那条交叉检查也证明不了这个映射 (两边都
+//     过同一个 angularState)。真正被独立校验的是【设计矩阵】那条路 (真正出过 bug 的地方);
+//     这一条是覆盖缺口, 不是已知错误 —— 记在这里, 不让上面那句"独立性"无限延伸。
 //   · 自己写力旋量模型 (显式公式), 不调 identifyInertia 的任何东西。
 // 唯一的"共享"是物理约定本身 —— 那是被测对象的前提, 不是实现细节; 它由零运动一致性
 // 用例钉死 (那条用例把两边接在静力学模型上)。
@@ -114,10 +119,15 @@ struct Traj {
     }
 };
 
-// 轨迹的角速度与角加速度 —— 从定义独立展开:
+// 轨迹的角速度与角加速度 —— 从定义展开:
 //   ω_B = ẑ·ṙz + Rz·(ŷ·ṙy) + Rz·Ry·(x̂·ṙx)
 //   ω̇_B = ẑ·r̈z + ṙz(ẑ×Rzŷ)·ṙy + Rzŷ·r̈y + ṙz(ẑ×RzRy x̂)·ṙx + ṙy·Rz(ŷ×(Ry x̂))·ṙx + RzRy x̂·r̈x
 // 代回: ω_S = Rᵀω_B, α_S = Rᵀω̇_B (推导: Ṙ = [ω_B]ₓR ⟹ Ṙᵀω_B = 0, 只剩 Rᵀω̇_B)
+// ⚠ 【这段与模块里的 angularState 逐行同构 —— 它不是独立实现】: 公式是从定义推的, 但
+//   落地写法 (哪些是列矢量、哪一步先转置、ċ3 的那两项) 是照着被测代码写的。所以:
+//   · 它能抓"拟合 -> ω/α"这一段 (输入不同 -> 输出必须相同), 这是它的价值;
+//   · 它【抓不到】这个映射本身的共同概念错 (两边一起错则同错相消)。
+//   angSpeedCheckRms 那条交叉检查同理 (两边共用同一个 angularState), 这两处不能互相背书。
 static void tAngular(const double rpy[3], const double rdot[3], const double rddot[3],
                      double omegaS[3], double alphaS[3])
 {
@@ -733,24 +743,62 @@ static void test_anisotropic_response_is_flagged()
     PASS();
 }
 
-// ★ 角速度那一半的独立检查必须真的能咬 —— 力矩方程吃的就是它, 而它没有第二个来源。
-//   (线性那一半的污染由上一个用例管; 这里只污染角速度, 线性通道、谐波拟合、力矩方程
-//    全都不动, 于是红的那一关只可能是角速度的交叉检查。)
-static void test_rejects_corrupted_angular_speed_channel()
+// ★ 角速度那一半的交叉检查是【诊断量, 不进 ok】—— 这个用例把这条边界钉死。
+//   (线性那一半的污染由上一个用例管, 它必须仍然拒。)
+//   为什么只报不判: 这一路把 TCPSpeedActual @672 的角分量当作【RPY 变化率】送进 angularState,
+//   而 @672 的坐标系【尚未确认】(core/AppState.h 对 @624/@672 明写"坐标系未确认",
+//   RelayCore.cpp 并排打印两者就是为判它)。若实际约定是机体/基座系角速度, 两边就是两个
+//   物理量, 差值 O(信号) —— 拿它当门会在实机上把【每一段】数据都拒掉, 还怪数据。
+//   本用例只污染角速度 (线性通道、谐波拟合、力矩方程全不动), 于是:
+//     · 诊断量必须把污染【看见】(≈520 度/s);
+//     · 但它【不许】因此拒绝这段本来干净的数据。
+//   约定在实机上定下来之后 (留下证据), 这条用例要反过来写成"必须拒"。
+static void test_angular_speed_diagnostic_is_reported_not_gated()
 {
-    TEST(test_rejects_corrupted_angular_speed_channel);
+    TEST(test_angular_speed_diagnostic_is_reported_not_gated);
     Model md; defaultModel(md, 0.42, -1.0);
     Traj tr; defaultTraj(tr, 0.5);
     Scene sc; sc.md = md; sc.tr = tr; sc.n = 750;
 
     static InertiaSample s[MAXS];
     makeSamples(sc, s, 0.0, 1.0 / 125.0, 0.0, 0.0);
+
+    // 【对照】同一段干净数据: 诊断量本来就该小 (≈1e-13 度/s), 且数据通过。
+    InertiaFit fc = runFit(sc, s, sc.n, 0.5);
+    CHECK(fc.ok);
+    CHECK(fc.angSpeedCheckRms < 1.0);
+
     for (int i = 0; i < sc.n; i++) s[i].speed[3] += 900.0;      // 度/s 的假角速度 (只动角速度)
     InertiaFit f = runFit(sc, s, sc.n, 0.5);
-    CHECK(!f.ok);
-    CHECK(!f.kinematicsOk);
-    CHECK(f.speedCheckRms < 1.0);            // 线性那一半没被动过 -> 它不该红
-    CHECK(f.angSpeedCheckRms > 400.0);       // 900/sqrt(3) ≈ 520 度/s
+    CHECK(f.speedCheckRms < 1.0);            // 线性那一半没被动过 -> 它还是干净的
+    CHECK(f.kinematicsOk);                   // 判据只吃线性那一半
+    CHECK(f.angSpeedCheckRms > 400.0);       // 900/sqrt(3) ≈ 520 度/s —— 诊断量必须看得见
+    CHECK(f.ok);                             // 但【不允许】拿一个未确认的约定去拒这段数据
+    PASS();
+}
+
+// ★ 谐波阶数顶到搜索上限 (bestK == HARM_MAX_ORDER) 时【不许整体拒绝】—— 从前那是条死胡同:
+//   q0 = bestK+1 > HARM_MAX_ORDER, 量带外的循环一次都不跑 -> NOISE_FLOOR_NO_ORDER ->
+//   无论什么数据都拒; 而 K = HARM_MAX_ORDER−1 的同一处境 (同样没有更高的阶) 却是收下并标
+//   upperBound=true。两种情形面对的是同一件事, 现在给出【同一把尺子】。
+static void test_order_at_search_limit_is_not_a_dead_end()
+{
+    TEST(test_order_at_search_limit_is_not_a_dead_end);
+    Model md; defaultModel(md, 0.42, -1.0);
+    Traj tr; defaultTraj(tr, 0.5);
+    tr.kP[2] = 6; tr.kR[2] = 6;          // 数据本身含 6 次谐波 -> BIC 必然顶到搜索上限
+    Scene sc; sc.md = md; sc.tr = tr; sc.n = 750;
+
+    static InertiaSample s[MAXS];
+    makeSamples(sc, s, 0.0, 1.0 / 125.0, 0.01, 0.004);
+    InertiaFit f = runFit(sc, s, sc.n, tr.freqHz);
+
+    CHECK(f.harmonicOrder == 6);                                  // 前提: 确实顶到了上限
+    CHECK(f.noiseFloorStatus == InertiaIdentification::NOISE_FLOOR_OK);
+    CHECK(f.noiseFloorUpperBound);                                // 尺子是上界 -> 必须照实标
+    CHECK(f.noiseFloorOrder == 6);
+    std::cout << "(尺子 " << f.momentNoiseFloorNm << " N·m = 6 阶残差, 失配度 "
+              << f.momentLackOfFitRatio << ") ";
     PASS();
 }
 
@@ -810,9 +858,10 @@ int main()
     std::cout << "--- 拒绝 ---" << std::endl;
     test_rejects_wrong_excitation_frequency();
     test_rejects_corrupted_speed_channel();
-    test_rejects_corrupted_angular_speed_channel();
+    test_angular_speed_diagnostic_is_reported_not_gated();
     test_rejects_single_axis_excitation();
     test_rejects_nonphysical_negative_inertia();
+    test_order_at_search_limit_is_not_a_dead_end();
 
     std::cout << "\n" << g_passed << " passed, " << g_failed << " failed" << std::endl;
     return g_failed ? 1 : 0;
