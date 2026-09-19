@@ -1021,11 +1021,17 @@ namespace BiasCheck {
                  "  横向分量 c_s_x / c_s_y = %.17g / %.17g mm。parity = sign(det A) = %.17g\n",
                  cz, cx, cy, parity);
         s += buf;
+        // ⚠ 这一句【不许替 c_s_z 假定符号】: 本次解出的是 c_s_z 本身, 它的符号不由数据
+        //   定 (上面那一段), 所以"反向约定给的是另一个正数 / 不是变负"这种话只在
+        //   c_s_z > 0 时成立 —— 而 126cadc 起负值那一支是【明写在测的】
+        //   (test_session_report.cpp 的 ..._negative_cs_prints_no_fabricated_signs)。
+        //   下面只说【两支的关系】: 约定二 = 约定一 + 2·c_s_z, 谁大谁落进判据全随符号反转。
         s += "  ⚠ 该系 z 轴与工具轴的【指向】是否同向, 数据定不了: 模型在 g → −g, A → −A,\n"
              "    c_s → −c_s 下逐字不变 (A 是自由 3×3, 反射由 parity 报出; 实机上解出\n"
-             "    parity = −1), 所以【只有 |c_s_z| 是数据定的, 符号不是】。反向的约定把\n"
-             "    cz_robot − c_s_z 变成 cz_robot + |c_s_z| —— 那是【另一个正数】, 不是变负\n"
-             "    (run-001: 68.700 + 55.556 = 124.256 mm)。所以下面 d 的两支都算、都打。\n";
+             "    parity = −1), 所以【只有 |c_s_z| 是数据定的, 符号不是】。下面两支的关系是\n"
+             "    【约定二 = 约定一 + 2·c_s_z】(即 cz_robot − c_s_z 与 cz_robot + c_s_z):\n"
+             "    c_s_z 为正则约定二偏大, 为负则约定一偏大 —— 谁更大、谁落到零以下, 都随本次\n"
+             "    解出的符号反过来。所以下面 d 的两支都算、都打。\n";
 
         if (echoOk) {
             // 【两个约定都算】—— 见 SessionReport::payloadDSection 顶上那段说明:
@@ -1212,6 +1218,11 @@ namespace BiasCheck {
         // 所以在这里开一个捕获窗口: 窗口内 fd 2 指向临时文件, 收完【先无条件还原】, 再把收到的
         // 字节【从同一个出口】发出去 (diagEmit) —— 屏幕上的字节序列与块里因此仍然逐字相同。
         // 失败时 stderr 一个字节都不动, 只在块尾照实说一句"这一段没并进来" (不许静默省略)。
+        // ⚠ 这个字符串是临时文件的【基名】, 不是最终路径: Begin 会用它派生一个【本次专属】的名字
+        //   (基名 + .pid_序号; 见 SessionReport::captureTmpPathFor), 而且【绝不截断已存在的文件】
+        //   (_O_EXCL) —— 否则操作员"再按一次 's'"这个最自然的动作, 会把上一次那条"字节还在
+        //   临时文件里"的警告所指的【唯一副本】当场截成 0 字节 (两处都说了它没进控制台)。
+        //   报出去给操作员看的路径取自 stderrCaptureLeftoverPath(), 所以与盘上那个文件必然一致。
         char errTmp[512];
         snprintf(errTmp, sizeof(errTmp), "%s", CalibStore::fileFor("calib_stderr.tmp"));
         std::string errText;

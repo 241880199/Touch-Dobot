@@ -494,7 +494,13 @@ static void test_stderr_capture_end_read_failure_keeps_the_bytes() {
     CHECK(!SessionReport::stderrCaptureActive());       // 还原是无条件的
 
     const std::string leftover = SessionReport::stderrCaptureLeftoverPath();
-    CHECK(leftover == rel);                             // 路径报得出来 (调用方要写进块尾)
+    // 路径报得出来 (调用方要写进块尾), 而且【报的就是盘上那个文件】—— 它不再是基名本身, 而是基名
+    // 的一个本次专属变体 (F2): 那个固定名字会被下一次 Begin 截掉, 所以名字必须每次都不一样 (见
+    // test_stderr_capture_leftover_survives_a_second_begin)。基名还在里面, 看得出是谁留下的。
+    const std::string stem = rel.substr(0, rel.size() - 4);   // 去掉 ".tmp"
+    CHECK(leftover.compare(0, stem.size(), stem) == 0);
+    CHECK(leftover.size() > rel.size());                // ≠ 那个固定名字
+    CHECK(_access(rel.c_str(), 0) != 0);                // 基名【从来没被建过】—— 不留残骸
     CHECK(_access(leftover.c_str(), 0) == 0);           // 【文件还在】—— 没被删掉
     // 【字节一个不少】: 这一段此刻只有这一个副本, 读回来就是"可捡回"的证明
     CHECK(readWholeFile(leftover) == "END-READ-FAIL 这一段收不回来, 但必须留在盘上\n");
@@ -551,11 +557,83 @@ static void test_stderr_capture_end_read_error_is_a_failure_not_eof() {
     CHECK(!SessionReport::stderrCaptureActive()); // 还原是无条件的
 
     const std::string leftover = SessionReport::stderrCaptureLeftoverPath();
-    CHECK(leftover == path);                      // 路径报得出来 (调用方写进块尾)
+    const std::string stem = path.substr(0, path.size() - 4);   // 去掉 ".tmp"
+    CHECK(leftover.compare(0, stem.size(), stem) == 0);         // 路径报得出来 (调用方写进块尾)
+    CHECK(leftover.size() > path.size());                       // 本次专属变体, 不是那个固定名字
+    CHECK(_access(path.c_str(), 0) != 0);                       // 基名【从来没被建过】
     CHECK(_access(leftover.c_str(), 0) == 0);     // 【文件还在】—— 旧代码把它 _unlink 掉了
     CHECK(readWholeFile(leftover) == line);       // 一个字节不少 (半截那 4 个也在里面)
 
     _unlink(leftover.c_str());                    // 收尾 (它本该留在盘上; 测试自己清)
+    PASS();
+}
+
+// ===== F2: 一次捕获的残留【必须扛得住下一次 Begin】=====
+//
+// 失败那一路的临时文件是那些字节的【唯一副本】: 窗口里 fd 2 指着它, 所以它们【没进控制台】;
+// 文档块里只落了一句"收不回来"。而它的路径刚被写进块尾交给操作员。此时操作员最可能做的下一件
+// 事就是【再按一次 's' 看一遍】—— 从前那个名字是【固定的】(calib_stderr.tmp)、Begin 又是
+// _O_CREAT|_O_TRUNC, 于是那一次按键【当场把刚刚指着的那份副本截成 0 字节】: 两头都没有了。
+// 这个用例把"同一个基名再开一次, 残留一个字节不少"钉死 (名字每次不同 + _O_EXCL 不碰已存在文件)。
+static void test_stderr_capture_leftover_survives_a_second_begin() {
+    TEST(stderr_capture_leftover_survives_a_second_begin);
+    const std::string base = tmpPath("cap_leftover.tmp");
+    _unlink(base.c_str());
+
+    // --- 第一次捕获: 用"换工作目录"把 End 里那一句 _open 弄失效, 留下残留 ---
+    CHECK(SessionReport::stderrCaptureBegin(base.c_str()));
+    const std::string keep = "LEFT-OVER-1 这是唯一副本, 下一次 Begin 一个字节也不许动它\n";
+    std::fprintf(stderr, "%s", keep.c_str());
+    std::fflush(stderr);
+
+    char cwd[1024];
+    CHECK(_getcwd(cwd, sizeof(cwd)) != nullptr);
+    CHECK(_chdir(TMPDIR) == 0);
+    std::string out1;
+    CHECK(!SessionReport::stderrCaptureEnd(&out1));
+    CHECK(_chdir(cwd) == 0);
+    CHECK(out1.empty());
+
+    const std::string leftover1 = SessionReport::stderrCaptureLeftoverPath();
+    CHECK(!leftover1.empty());
+    CHECK(_access(leftover1.c_str(), 0) == 0);
+    CHECK(readWholeFile(leftover1) == keep);        // 残留此刻是完好的
+    CHECK(_access(base.c_str(), 0) != 0);           // 而且用的不是那个固定名字
+
+    // --- 第二次捕获: 【同一个基名】再开一次 (= 操作员"再按一次 's'") ---
+    CHECK(SessionReport::stderrCaptureBegin(base.c_str()));
+    const std::string second = "窗口二的内容\n";
+    std::fprintf(stderr, "%s", second.c_str());
+    std::fflush(stderr);
+    std::string out2;
+    CHECK(SessionReport::stderrCaptureEnd(&out2));
+    CHECK(out2 == second);                          // 没串台: 只收到第二次的字节
+
+    // --- 残留【一个字节没少】: 旧的 _O_CREAT|_O_TRUNC + 固定名字在这里会把它截成 0 ---
+    CHECK(_access(leftover1.c_str(), 0) == 0);
+    CHECK(readWholeFile(leftover1) == keep);
+    CHECK(SessionReport::stderrCaptureLeftoverPath()[0] == '\0');   // 成功的那次不留东西
+
+    _unlink(leftover1.c_str());                     // 收尾 (它本该留在盘上; 测试自己清)
+    _unlink(base.c_str());
+    PASS();
+}
+
+// 命名规则本身 (纯函数): 每次捕获一个专属名字, 基名与扩展名都还认得出
+static void test_capture_tmp_path_is_unique_and_recognizable() {
+    TEST(capture_tmp_path_is_unique_and_recognizable);
+    const std::string a = SessionReport::captureTmpPathFor("calib\\calib_stderr.tmp", 4188, 1);
+    const std::string b = SessionReport::captureTmpPathFor("calib\\calib_stderr.tmp", 4188, 2);
+    CHECK(a != b);                                             // 序号不同 -> 名字不同
+    const std::string pfx = "calib\\calib_stderr.";
+    CHECK(a.compare(0, pfx.size(), pfx) == 0);                 // 基名还在 (看得出是谁留下的)
+    CHECK(a.find("4188_1") != std::string::npos);              // 进程号 + 序号
+    CHECK(a.compare(a.size() - 4, 4, ".tmp") == 0);            // 扩展名还认得出
+    CHECK(a.size() > strlen("calib\\calib_stderr.tmp"));       // ≠ 那个固定名字
+
+    // 没有扩展名 -> 接在末尾; 目录名里的 '.'【不算】扩展名 (别插到目录上去)
+    CHECK(SessionReport::captureTmpPathFor("no_ext_name", 7, 3) == "no_ext_name.7_3");
+    CHECK(SessionReport::captureTmpPathFor("D:\\a.b\\cap", 7, 3) == "D:\\a.b\\cap.7_3");
     PASS();
 }
 
@@ -579,6 +657,8 @@ int main() {
     test_stderr_capture_begin_failure_leaves_stderr_alone();
     test_stderr_capture_end_read_failure_keeps_the_bytes();
     test_stderr_capture_end_read_error_is_a_failure_not_eof();
+    test_stderr_capture_leftover_survives_a_second_begin();
+    test_capture_tmp_path_is_unique_and_recognizable();
 
     // 清理 (文件先删, 目录才删得掉)
     _unlink(tmpPath("append.md").c_str());

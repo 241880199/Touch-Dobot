@@ -21,10 +21,12 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <cerrno>      // errno / EEXIST (临时文件撞名 -> 换名重试, 见 stderrCaptureBegin)
 #ifdef _WIN32
 #include <io.h>        // _dup / _dup2 / _close / _open / _read / _unlink
-#include <fcntl.h>     // _O_CREAT / _O_TRUNC / _O_WRONLY / _O_RDONLY / _O_BINARY
+#include <fcntl.h>     // _O_CREAT / _O_EXCL / _O_WRONLY / _O_RDONLY / _O_BINARY
 #include <sys/stat.h>  // _S_IREAD / _S_IWRITE
+#include <process.h>   // _getpid (临时文件名里的进程号)
 #endif
 
 namespace SessionReport {
@@ -173,6 +175,8 @@ namespace SessionReport {
     //   纯计算, 时长短到无需为它上锁。
     struct StderrCaptureState {
         int  savedFd = -1;
+        // 本次窗口【真正】用的临时文件路径 —— 不是调用方给的那个基名, 而是它的一个本次专属的
+        // 变体 (见 captureTmpPathFor)。留给操作员的路径 (leftoverPath) 取的是它。
         char tmpPath[512] = {0};
         // 上一次 End 【读不出来】因而【故意没删】的那个临时文件 (空 = 没有)。
         // 它不是"没搭起窗口"(那时根本没有文件), 而是"字节已经写进去了、只是收不回来" ——
@@ -189,7 +193,34 @@ namespace SessionReport {
     // 只在那个失败的场合非空; 报给操作员, 那一段诊断还能被人从盘上捡回来。
     inline const char* stderrCaptureLeftoverPath() { return stderrCaptureState().leftoverPath; }
 
-    // 开始捕获。tmpPath = 临时文件路径 (调用方给; 捕获结束后会被删掉)。
+    // ===== 本次捕获【专属】的临时文件名 (F2) =====
+    //
+    // 为什么【必须每次都不一样】: 读失败时那个临时文件是【故意不删】的 —— 它此刻是那些字节的
+    // 唯一副本 (窗口里 fd 2 指着它, 所以它们压根没进控制台), 而它的路径刚被写进块尾交给操作员
+    // ("原始字节没有丢, 它们还在临时文件里: …")。可见的操作员最可能做的下一件事就是【再按一次
+    // 's' 看一遍】。而这个名字从前是【固定的】(calib_stderr.tmp), Begin 又是 _O_CREAT|_O_TRUNC
+    // —— 于是那一次按键【当场把刚刚指着的那份副本截成 0 字节】, 控制台与文档块两头都没有了。
+    //
+    // 做法: 真正的文件名 = 基名 + ".<pid>_<序号>" + 扩展名 (序号每次 Begin 递增), 再配合
+    // _O_EXCL (绝不打开已存在的文件, 见 stderrCaptureBegin) —— 残留因此不可能被后一次抹掉。
+    // 基名里【没有 '.'】(或 '.' 只出现在目录名里) 时, 后缀直接接在末尾。
+    inline unsigned long& captureSeqCounter() { static unsigned long s = 0; return s; }
+
+    inline std::string captureTmpPathFor(const char* base, unsigned long pid, unsigned long seq) {
+        std::string s = (base && *base) ? base : "capture.tmp";
+        const std::string tag = "." + std::to_string(pid) + "_" + std::to_string(seq);
+        const size_t slash = s.find_last_of("/\\");
+        const size_t dot   = s.find_last_of('.');
+        if (dot != std::string::npos && (slash == std::string::npos || dot > slash))
+            s.insert(dot, tag);            // 插在末一个 '.' 之前: 扩展名还认得出
+        else
+            s += tag;                      // 没有扩展名 (目录里的 '.' 不算) -> 接在末尾
+        return s;
+    }
+
+    // 开始捕获。tmpPath = 临时文件的【基名】(调用方给, 通常是 CalibStore::fileFor(...)) ——
+    // 真正建出来的是它一个【本次专属】的变体 (见 captureTmpPathFor), 捕获成功后会被删掉;
+    // 读失败时不删, 那条路径由 stderrCaptureLeftoverPath() 报出去 (报的【就是】盘上那个文件)。
     inline bool stderrCaptureBegin(const char* tmpPath) {
         StderrCaptureState& st = stderrCaptureState();
         if (tmpPath == nullptr || *tmpPath == '\0') return false;
@@ -198,8 +229,24 @@ namespace SessionReport {
 
 #ifdef _WIN32
         fflush(stderr);                                    // 窗口之前已经在缓冲里的字节, 不进窗口
-        const int fd = _open(tmpPath, _O_CREAT | _O_TRUNC | _O_WRONLY | _O_BINARY,
-                             _S_IREAD | _S_IWRITE);
+        // ===== 造一个【不碰任何已存在文件】的名字 =====
+        // _O_EXCL 而不是 _O_TRUNC: 候选名已经被占着 (上一次的残留 / pid 被复用 / 盘上本来就有
+        // 个同名文件) 时 _open 以 EEXIST 失败 —— 那就【换下一个序号重试】, 一个字节都不动它。
+        // 于是"后一次 's' 把前一次残留的副本截掉"这件事在文件系统这一层就不可能发生。
+        // 试满 64 个还不行就【什么都不改地失败】(调用方照实报"窗口没搭起来"), 不猜、不覆盖。
+        int fd = -1;
+        for (int attempt = 0; attempt < 64; attempt++) {
+            const std::string cand = captureTmpPathFor(tmpPath, (unsigned long)_getpid(),
+                                                      ++captureSeqCounter());
+            if (cand.size() >= sizeof(st.tmpPath)) break;   // 放不下 -> 不做半个路径的猜测
+            fd = _open(cand.c_str(), _O_CREAT | _O_EXCL | _O_WRONLY | _O_BINARY,
+                       _S_IREAD | _S_IWRITE);
+            if (fd >= 0) {
+                snprintf(st.tmpPath, sizeof(st.tmpPath), "%s", cand.c_str());
+                break;
+            }
+            if (errno != EEXIST) break;                     // 不是撞名 (目录不可写…) -> 重试没意义
+        }
         if (fd < 0) return false;
         const int saved = _dup(2);
         if (saved < 0) { _close(fd); return false; }
@@ -207,7 +254,8 @@ namespace SessionReport {
         // fd 2 已指向同一个打开文件, 这个多余的句柄可以关掉 (文件因 fd 2 仍然开着)
         _close(fd);
         st.savedFd = saved;
-        snprintf(st.tmpPath, sizeof(st.tmpPath), "%s", tmpPath);
+        // (st.tmpPath 在上面建文件的时候就填好了 —— 它是【真正】建出来那个名字, 不是基名。
+        //  报给操作员的路径必须与盘上那个文件一致, 所以这里绝不能再写回基名。)
         return true;
 #else
         (void)tmpPath;

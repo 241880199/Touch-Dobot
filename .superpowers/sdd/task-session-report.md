@@ -635,3 +635,106 @@ $ Touch_Client\tests\test_payload_calibration.exe
    本次为做红-绿对比而 `git stash push -- Touch_Client/core/SessionReport.h` 留下的**同一份
    修改的副本**, 内容已经回到工作区 (用 `git show stash@{0}:… > 文件` 落的盘, 所以是 LF,
    没走 git 的 CRLF 转换)。**它是冗余的, 可以安全 `git stash drop`**;
+
+---
+
+# 附: 复审后的两处小修 (F1 / F2) — 2026-09-19
+
+出发点 `126cadc`。**只改两条, 只碰三个文件**: `Touch_Client/main.cpp`、
+`Touch_Client/core/SessionReport.h`、`Touch_Client/tests/test_session_report.cpp`。
+判决逻辑 / 阈值 / 模型 / `fitRaw` / `payloadDSection` 的算式与判据 / `logCalibAttempt` /
+`logPoseData` / 两份日志格式 / `#if 0` 块 / `"a+"` / 块与围栏结构: **一个字节没动**。
+
+## F1 — 块里那句话替 `c_s_z` 假定了符号 (`main.cpp:1024-1034`)
+
+原句: 「反向的约定把 cz_robot − c_s_z 变成 cz_robot + |c_s_z| —— 那是【另一个正数】, 不是变负
+(run-001: 68.700 + 55.556 = 124.256 mm)」。它**只在解出的 `c_s_z > 0` 时成立** —— 而 `126cadc`
+恰好把 `< 0` 那一支明写进测试 (`test_payload_d_section_negative_cs_prints_no_fabricated_signs`)。
+反例: `c_s_z = −100`, `cz_robot = 68.7` ⇒ 约定一 `68.7 − (−100) = 168.7`、
+约定二 `68.7 + (−100) = −31.3` —— **负数出现在另一支上**, 与那句话说的正好相反。
+
+改法 (只换这一句, **不加新判决、不加 `✓`/`✗`**): 不再说某一支是多少, 只说两支的**关系**
+「约定二 = 约定一 + 2·c_s_z (即 cz_robot − c_s_z 与 cz_robot + c_s_z): c_s_z 为正则约定二偏大,
+为负则约定一偏大 —— 谁更大、谁落到零以下, 都随本次解出的符号反过来」。末尾「所以下面 d 的两支
+都算、都打」原样保留 (它本来就是真的, 也没变)。
+
+**这一段只进块、不进控制台 —— 这是核实的, 不是假设**: 它拼进 `diagPayloadSection` 的返回值,
+该返回值只出现在三处 `diagFinish(diagPayloadSection(...))` (`main.cpp:1091 / 1147 / 1466`),
+而 `diagFinish` 把这个字符串**只**交给 `SessionReport::block(...)` 落盘; 屏幕那一半是 `diagEmit`
+(`fwrite` + `s_diagBody.append`), 正文里没有这一个字节。⇒ 硬要求 1 的"控制台与正文逐字节同源"
+不受影响 (改的只是尾节, 尾节从来不进 `s_diagBody`)。
+
+## F2 — "字节还在临时文件里"这个承诺, 撑不过下一次 `'s'`
+
+`calib_stderr.tmp` 是**固定名字** (`main.cpp:1227`), 而 `stderrCaptureBegin` 从前用
+`_O_CREAT | _O_TRUNC` 打开它。于是: 第 1 次 `'s'` 读失败 → 块尾写着"原始字节没有丢, 它们还在
+临时文件里: …calib_stderr.tmp", 而那些字节**没进控制台** (窗口里 fd 2 正指着这个文件)、块里也
+只落了一句"收不回来" —— 那个文件是**唯一副本**; 操作员最自然的反应 (再按一次 `'s'`) 把它截掉。
+**承诺里的那份字节, 被下一次按键销毁。**
+
+改法 (全在 `core/SessionReport.h`):
+
+* 新增纯函数 `captureTmpPathFor(基名, pid, 序号)` = 基名 + `.<pid>_<序号>` + 扩展名, 序号每次
+  `Begin` 递增 ⇒ **每次捕获一个专属名字**; 基名没有 `.`(或 `.` 只在目录名里)时后缀接在末尾。
+* `stderrCaptureBegin` 改用 **`_O_CREAT | _O_EXCL`** (不再 `_O_TRUNC`): 撞名 (`errno == EEXIST`)
+  就**换下一个序号重试**, 试满 64 个仍不行就**什么都不改地**返回 false (调用方照实报"窗口没搭
+  起来")。⇒ 已有的残留**在文件系统这一层**就不可能被碰到, 连"pid 被复用"也不怕, 永不截断。
+* `st.tmpPath` 从此存**真正建出来那个名字**, 而 `stderrCaptureLeftoverPath()` 报的就是它 ——
+  **报给操作员的路径与盘上那个文件必然一致** (main.cpp 那句警告一个字没改, 它取的就是这个值;
+  只加了一段说明"这个字符串是基名, 不是最终路径"的注释)。
+* 成功路径照旧在 `stderrCaptureEnd` 里 `_unlink` **自己那一个**文件, 不留残骸。
+
+## 验收 (逐条命令与输出)
+
+```
+$ cmd.exe /c "D:\Projects\Touch\Touch_Client\build.bat"
+  Build OK.                      (无 error, 无 LNK1168 ⇒ Touch_Client.exe 没在跑, 没结束任何进程)
+
+$ cmd.exe /c "D:\Projects\Touch\Touch_Client\tests\build_session_report_test.bat"
+  BUILD_EXIT=0
+$ Touch_Client\tests\test_session_report.exe
+  18 passed, 0 failed             (改前 16 passed, 0 failed; +2 = 本次新增的两条)
+    ├ test_stderr_capture_leftover_survives_a_second_begin   ← F2 的行为用例
+    └ capture_tmp_path_is_unique_and_recognizable            ← F2 的命名规则 (纯函数)
+  测试自己的临时目录收尾后为空 (残留 / 基名 / 派生名都清干净了 —— 见该用例末尾的 _unlink)
+
+$ cmd.exe /c "D:\Projects\Touch\Touch_Client\tests\build_payload_calibration_test.bat"
+  BUILD_EXIT=0
+$ Touch_Client\tests\test_payload_calibration.exe
+  45 passed, 0 failed             (与改前一致)
+```
+
+**F2 是怎么验的 —— 红-绿都做了**:
+
+* 绿: 上面那条 `test_stderr_capture_leftover_survives_a_second_begin` 走完整条真实路径 ——
+  第 1 次 `Begin`(基名) → 往 stderr 写一段 → 用"换工作目录"把 `End` 里那一句 `_open` 弄失效
+  (真的走读失败那条路, 不是旁边断言一句) → 残留留在盘上、内容逐字节比过 → **再用同一个基名**
+  `Begin` 第 2 次 → `End` 成功 → 断言残留**仍在、一个字节没少**, 且第 2 次收到的字节里没有第 1
+  次的 (没串台), 且成功的这一次不留东西。
+* 红 (证明这条用例真的挡得住旧行为): 把 `Begin` 临时改回"固定序号 + `_O_TRUNC`"重建再跑,
+  得到 `stderr_capture_leftover_survives_a_second_begin... FAIL: _access(leftover1.c_str(), 0) == 0`
+  / `17 passed, 1 failed`。旧行为比"截成 0 字节"还狠: 名字相同 ⇒ 第 2 次 `End` 成功时按自己的
+  名字 `_unlink`, 把第 1 次的**唯一副本整个删掉**。改回后重跑 = `18 passed, 0 failed`。
+  (红检用的是临时改写 + `cp` 备份还原, **没有用 `git stash`**, 所以没有给后续留下 stash 副本。)
+* 另有两条既有用例跟着改了两行断言 (`stderrCaptureEnd` 读失败的两条): 原来断言
+  `leftover == 基名`, 现在断言 `leftover` 以基名为前缀、**比基名长**、且**基名本身从来没被建过**
+  (`_access(基名) != 0`) —— 这两条同时也是 F2 的回归闸门 (固定名字一旦回来就会红)。
+
+## 没能验证的地方 (照实说)
+
+1. **端到端那条仍然没做**: 没有设备, 不能真跑一次 `'s'` 去比对"屏幕那一屏"与"`calib_report.md`
+   里那一块"逐字节相同 (与 §8-8 第 1 条、§9-7 第 2 条同一个缺口)。F1 的结论"这一段只进块"是
+   读代码 + 结构核实的: `diagPayloadSection` 的返回值只有 `diagFinish` 一个去处, 而 `diagFinish`
+   只把它交给 `appendToFile`。
+2. F1 那句新文字的**算术**只在纸上与代码上核过 (约定二 − 约定一 = 2·c_s_z, 代 `c_s_z = ±100`
+   两种符号各推一遍); 块里的这一句**没有单测**钉住 (它是 main.cpp 里的字面量, 而这个测试不能
+   把 main.cpp 编进来 —— 与既有的"正文格式"用例同一个性质: 那句正文本身靠 `diagEmit` 的结构
+   保证同源, 句子内容只有实机那次能看见)。
+3. F2 的 `_O_EXCL` 重试: 单测走到的是"名字不同 ⇒ 不撞名"这条主路, **64 次全撞满**那条路
+   (要盘上先摆 64 个同名文件) 没有单测, 也没有实测 —— 代码里它只是返回 false (什么都不改)。
+4. ⚠ **本次没改、但同类的一处还在** (留给后续判): `core/SessionReport.h:106-108` 的
+   `payloadDSection` 输出文本里也有一句「反向的约定给的是另一个数、**不是负数**」, 它同样只在
+   `c_s_z > 0` 时成立 (`c_s_z = −100`、`cz_robot = 68.7` 时反向那一支 = `−31.3`)。它**不在
+   F1 指的那两行里**, 而这一段是被 `126cadc` 连同它的两个用例一起定过的 (用例里断言了
+   `find("变负") == npos`、`find("✓") == npos` 等), 单独改它属于**扩大本次范围**, 所以没动 ——
+   但它会出现在同一个块的尾节里, 建议下一轮连它的用例一起收拾。
