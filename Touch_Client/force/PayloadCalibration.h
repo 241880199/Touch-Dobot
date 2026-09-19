@@ -86,6 +86,22 @@ namespace PayloadCalibration {
     // 全部线性 -> 一次求解, 不扫描。c_s × b_F 是常量, 被 b_M 吸收, 所以上式是完整的。
     // (spec: Docs/superpowers/specs/2026-09-19-raw-channel-calibration-design.md §2 §3)
 
+    // 逐姿态的【实测噪声】—— 模型形式检验的尺子, 与任何模型、任何重力约定无关。
+    //
+    // 每个姿态是 N 个样本的平均, 所以【均值】的 1σ 不确定度 = sqrt(var/N) (标准误)。方差取
+    // 样本方差 (无偏, 除以 N−1)。这批数是采集时顺手采下来的 (main.cpp 的 BiasCheck::sample:
+    // 与均值同一批样本、同一时间窗), 不是从拟合残差里反推的 —— 这正是它有价值的原因:
+    // 残差里混着"模型形式错"那一份, 拿它当噪声尺子会把判据放松成自指 (见 fitRaw 的说明)。
+    //
+    // 传 nullptr 给下面的函数 = 【没有噪声估计】-> 模型形式检验【不做】(不是"通过")。
+    // 任一方差 ≤ 0 (通道没采到 / 读数冻住 / 没填) 也算"没有噪声估计" —— 宁可说没做检验,
+    // 也不拿半批尺子判生死。
+    struct PoseNoise {
+        int    n;         // 该姿态参与平均的样本数 (1 = 没平均, 但方差已知)
+        double varF[3];   // 力三个分量的样本方差 (N²)
+        double varM[3];   // 力矩三个分量的样本方差 (N·m²)
+    };
+
     // 原始通道的线性拟合结果。
     struct RawFit {
         // 3×3 row-major: 分量 a 的力 = bF[a] + Σ_c A[a*3+c]·g[c]。9 个元素全自由:
@@ -101,27 +117,60 @@ namespace PayloadCalibration {
         // 布局与上面的字段同序: [0..8] = A (row-major, 与 A[9] 同序), [9..11] = bF,
         // [12..14] = cS, [15..17] = bM。力矩段是【给定 A 之后】的 6 参数系统。
         // 【为什么必须报它】残差是小量, 对"模型形式错"不敏感 —— 本批实机数据上形式错只值
-        // 0.018 N, 而质量符号已经翻过去了。参数不确定度才让人分得清"±0.05"和"±0.5",
-        // 自检的门限也由它导出 (见 fitRaw)。零自由度时 (方程数 = 参数数) 无法估, 报 0。
+        // 0.018 N, 而质量符号已经翻过去了。参数不确定度才让人分得清"±0.05"和"±0.5"。
+        // ⚠ 它【不再】参与任何接受/拒绝判据: 它来自拟合残差, 拿它当门限就是自指 (见 fitRaw)。
+        // 零自由度时 (方程数 = 参数数) 无法估, 报 0。
         double paramSigma[18];
+
+        // ===== 分解出来的物理量 —— 【报告量, 不参与接受/拒绝】 =====
+        double massScale;       // m = (σ1σ2σ3)^(1/3) (kg), 与 decompose() 的 m 同一个值
+        double parity;          // sign(det A): +1 / −1
+        // σ1/σ3 ≥ 1。力通道的 A 是【9 个元素全自由】的, 数据对它没有任何约束, 所以
+        // "非正交"是【传感器实际响应长这样】的测量结果, 不是"模型形式错"的证据
+        // (实机那批: 1.06546, 即 6.5% 非正交, 是物理属性)。因此这里只报数, 不判生死。
+        double isotropyRatio;
+
+        // ===== 模型形式检验 (χ² 式): 残差 vs 【实测】噪声 =====
+        // 力通道: chi2ForceRatio = Σ(e/σ)² / dofF, σ = sqrt(var/N) 是各姿态各通道的均值 1σ。
+        //         正确模型下它 ~ 1 (期望 1, 标准差 sqrt(2/dof))。
+        // 力矩通道: 它【是】受约束的 (c_s × (A·g), 3 参数 vs 自由的 9), 所以那里问的是
+        //         失拟问题 —— lackOfFitMomentRatio = (ssM_free − ssM)/σ̄_M² / 6。
+        // 没有噪声估计时 (noise == nullptr) 以上字段全 0 且 modelFormChecked = false。
+        double noiseForceN;          // 力通道实测噪声的合并尺度 (N) = sqrt(mean(σ²))
+        double noiseMomentNm;        // 力矩通道同上 (N·m)
+        double chi2ForceRatio;       // χ²_F / dofF
+        int    chi2DofForce;
+        double chi2MomentRatio;      // χ²_M / dofM —— 【只报告, 不做判据】(理由见 .cpp)
+        int    chi2DofMoment;
+        double lackOfFitMomentRatio; // 力矩失拟统计量 / 6 (自由 12 参数 vs 受约束 6 参数)
+        int    lackOfFitMomentDof;   // 6, 或 0 = 做不了 (方程数不足以养自由模型)
+        bool   modelFormChecked;     // true = 上面这些数【真的算过】并可作判据
     };
 
     // 纯函数: 线性拟合并做【物理自检】。返回 false = 拒绝给出参数 (原因打到 stderr),
     // 此时 out 里是【未经自检】的线性解, 只供诊断打印, 调用方不得采用。
-    // 拒绝的三种情形 (判据全部由数据/量程给出, 没有一个固定比例是猜的):
-    //   1) 各向同性: isotropyRatio 超出 paramSigma 能解释的范围 (见 .cpp 的推导)
+    // 拒绝的情形 (判据全部由数据/量程给出, 没有一个固定比例是猜的):
+    //   1) 模型形式: 拟合残差与【实测】噪声不一致 (χ² 式, 只在不传 noise 时无从判 -> 不做)
     //   2) 质量尺度: m ≤ 0 或超出 CR3 的负载量程 (EnableRobot 的量程)
     //   3) 条件数: cond 过大 -> 姿态激发不足, 12 个参数定不下来
     // 返回 false 也可能是线性层就失败: 姿态数 < 4 (12 个未知) 或姿态退化 (J 秩亏)。
+    //
+    // noise 给出逐姿态的实测噪声 -> 模型形式检验得以成立 (它需要一把与模型无关的尺子)。
+    // 【默认 nullptr 的那一版仍然可用】(测试与离线重放用): 它不做模型形式检验,
+    // out.modelFormChecked 会是 false —— 调用方读到 false 就该知道"形式没被验过",
+    // 而不是"形式验过了、通过了"。生产路径应当传 noise。
+    // 前置条件: out 的内存由调用方持有; noise 非空时其 n 个元素必须与 poses/forces/moments 同序。
     bool fitRaw(const double poses[][6], const double forces[][3], const double moments[][3],
-                int n, RawFit& out);
+                int n, RawFit& out, const PoseNoise* noise = nullptr);
 
     // 纯函数: 只做线性拟合, 【不做任何物理自检】。
     // 单独暴露的理由: 自检是【物理结论】的门, 而"任意 3×3 能否被复原"是【线性代数】的性质 ——
-    // 两者必须能分开测。一个明显非正交的 A 可以被精确复原, 同时又该被自检拒掉; 只有把两层
-    // 分开, 这两件事才各有各的断言。(生产路径请用 fitRaw。)
+    // 两者必须能分开测。一个明显非正交 (甚至带反射) 的 A 可以被精确复原, 而它该不该被采信
+    // 是另一个问题; 只有把两层分开, 这两件事才各有各的断言。(生产路径请用 fitRaw。)
+    // noise 只影响那些【检验用】的报告字段 (χ² 等), 不参与求解 —— 拟合本身永远是无权的普通
+    // 最小二乘 (加权的更换属于改线性代数, 不在本任务内)。
     bool fitRawLinear(const double poses[][6], const double forces[][3], const double moments[][3],
-                      int n, RawFit& out);
+                      int n, RawFit& out, const PoseNoise* noise = nullptr);
 
     // 从 A 读回物理量 —— 这一步才是"标定", 不是"猜"。
     //

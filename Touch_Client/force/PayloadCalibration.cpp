@@ -249,7 +249,9 @@ namespace PayloadCalibration {
     static const double RAW_MASS_MIN_KG = 0.05;   // 量程下限: 工具链不可能轻于此
     static const double RAW_MASS_MAX_KG = 3.0;    // 量程上限: CR3 额定负载 3 kg
                                                   // (Docs/机械臂资料/Dobot CR3机械臂参数文档.md)
-    static const double RAW_ISO_SIGMA_K = 3.0;    // 各向同性门限的 σ 倍数, 推导见 fitRaw
+    // χ² 式模型形式检验的置信倍数, 推导见 fitRaw 的自检 3。它【不是】阈值本身 ——
+    // 阈值 = 1 + K·sqrt(2/dof) 是【这个统计量自己的分布】给出的, 尺度完全来自实测噪声。
+    static const double RAW_CHI2_SIGMA_K = 3.0;
 
     // 重力在【传感器系】的表示, psi 恒为 0 —— 新模型里 A 吸收了一切, 不存在安装角。
     // 【这里必须走 AtYaw 而不是 gravitySensorFrame】: 后者读 TcpCalibration 的模块状态,
@@ -348,10 +350,97 @@ namespace PayloadCalibration {
         return lo > 0.0;
     }
 
+    // 该姿态该通道【均值】的 1σ² : σ² = var / N。方差来自采集时同一批样本的样本方差,
+    // 与模型、与重力约定都无关 —— 它就是"这个输入值本身有多准"。
+    static double meanVar(const PoseNoise& nz, int a, bool moment) {
+        return (moment ? nz.varM[a] : nz.varF[a]) / (double)nz.n;
+    }
+
+    // 整批噪声估计是否可用。任一姿态的方差 ≤ 0 (通道没采到 / 读数冻住 / 没填) 或样本数
+    // < 1 就判【整批不可用】—— 模型形式检验是拿这把尺子去量残差的, 半批坏尺子会让判据
+    // 忽紧忽松。宁可明确地说"没做检验"(modelFormChecked = false), 也不拿它判生死。
+    // 注意 N = 1 是【合法】的: 它表示"没有做平均, 但输入值的方差是已知的" (调用方从别处
+    // 知道), 此时 σ_mean = sqrt(var/1)。生产路径上 N 是采集窗口里的样本数 (通常 ~30)。
+    static bool poseNoiseUsable(const PoseNoise* noise, int n) {
+        if (!noise) return false;
+        for (int i = 0; i < n; i++) {
+            if (noise[i].n < 1) return false;
+            for (int a = 0; a < 3; a++)
+                if (!(noise[i].varF[a] > 0.0) || !(noise[i].varM[a] > 0.0)) return false;
+        }
+        return true;
+    }
+
+    // 自由力矩模型 M = b_M + N·w (N: 3×3 全自由, 12 参数) —— 【只用于失拟比较】, 不产出参数。
+    // 受约束的参数模型是它的【子模型】: c_s × w = [c_s]ₓ·w 是一个反对称阵, 所以
+    // "自由模型能解释而受约束模型解释不了"的那一份, 就是叉乘结构本身不成立的部分。
+    // 自由度 = 12 − 6 = 6。
+    // 回归量 w = A·g 用【已经解出的 A】算 —— 与受约束那一份用的是同一个 w, 这样两边的残差
+    // 才可比 (A 的误差同等地进两边, 在差值里大部分相消; 若用真值 w 反而不可比)。
+    // 返回 false = 方程数不足以养自由模型 (3n ≤ 12, 自由度 0), 或设计矩阵秩亏/数值奇异。
+    static bool fitMomentFree(const double posesIn[][6], const double A[9],
+                              const double moments[][3], int n, double& ssFree)
+    {
+        const int PMF = 12;
+        if (3 * n <= PMF) return false;
+
+        double AtA[144] = {0}, Atb[12] = {0};
+        for (int i = 0; i < n; i++) {
+            double g[3];
+            gravityNoYaw(posesIn[i], g);
+            double w[3];
+            for (int a = 0; a < 3; a++)
+                w[a] = A[a * 3 + 0] * g[0] + A[a * 3 + 1] * g[1] + A[a * 3 + 2] * g[2];
+            for (int a = 0; a < 3; a++) {
+                double row[12] = {0};
+                row[a] = 1.0;
+                for (int c = 0; c < 3; c++) row[3 + 3 * a + c] = w[c];
+                for (int c = 0; c < PMF; c++) {
+                    for (int e = 0; e < PMF; e++) AtA[c * PMF + e] += row[c] * row[e];
+                    Atb[c] += row[c] * moments[i][a];
+                }
+            }
+        }
+        double AtAcopy[144];
+        for (int i = 0; i < PMF * PMF; i++) AtAcopy[i] = AtA[i];
+        double lo = 0.0, hi = 0.0;
+        if (!symExtremes(AtAcopy, PMF, lo, hi)) return false;
+        if (!(sqrt(hi / lo) < RAW_SINGULAR_REL)) return false;
+
+        double x[12], C[144];
+        if (!solveNormal(AtA, Atb, PMF, x, C)) return false;
+
+        ssFree = 0.0;
+        for (int i = 0; i < n; i++) {
+            double g[3];
+            gravityNoYaw(posesIn[i], g);
+            double w[3];
+            for (int a = 0; a < 3; a++)
+                w[a] = A[a * 3 + 0] * g[0] + A[a * 3 + 1] * g[1] + A[a * 3 + 2] * g[2];
+            for (int a = 0; a < 3; a++) {
+                double pred = x[a];
+                for (int c = 0; c < 3; c++) pred += x[3 + 3 * a + c] * w[c];
+                const double e = pred - moments[i][a];
+                ssFree += e * e;
+            }
+        }
+        return true;
+    }
+
     bool fitRawLinear(const double posesIn[][6], const double forces[][3],
-                      const double moments[][3], int n, RawFit& out)
+                      const double moments[][3], int n, RawFit& out, const PoseNoise* noiseIn)
     {
         if (n < RAW_MIN_POSES) return false;
+
+        // 噪声估计可用才进入检验; 不可用一律当"没有" —— 字段留 0, modelFormChecked = false。
+        const PoseNoise* noise = poseNoiseUsable(noiseIn, n) ? noiseIn : nullptr;
+        for (int i = 0; i < 18; i++) out.paramSigma[i] = 0.0;
+        out.massScale = 0.0; out.parity = 0.0; out.isotropyRatio = 0.0;
+        out.noiseForceN = 0.0; out.noiseMomentNm = 0.0;
+        out.chi2ForceRatio = 0.0; out.chi2DofForce = 0;
+        out.chi2MomentRatio = 0.0; out.chi2DofMoment = 0;
+        out.lackOfFitMomentRatio = 0.0; out.lackOfFitMomentDof = 0;
+        out.modelFormChecked = false;
 
         // ===== 力通道: x = [b_F(3), A(9)] (A row-major) =====
         const int PF = 12;
@@ -384,8 +473,11 @@ namespace PayloadCalibration {
         double A[9];
         for (int i = 0; i < 9; i++) A[i] = xF[3 + i];
 
-        // 力通道残差与参数不确定度
-        double ssF = 0.0;
+        // 力通道残差与参数不确定度。
+        // 同一个循环里顺手累加 χ² = Σ(e/σ)² (σ = 该姿态该通道【均值】的实测 1σ) ——
+        // 这是模型形式检验的统计量, 判据在 fitRaw。ssF 的累加【顺序与式子和从前完全一样】,
+        // 所以 rmsForceN / paramSigma 一个比特都不会变。
+        double ssF = 0.0, chi2F = 0.0, sig2SumF = 0.0;
         for (int i = 0; i < n; i++) {
             double g[3];
             gravityNoYaw(posesIn[i], g);
@@ -394,6 +486,11 @@ namespace PayloadCalibration {
                 for (int c = 0; c < 3; c++) pred += A[a * 3 + c] * g[c];
                 const double e = pred - forces[i][a];
                 ssF += e * e;
+                if (noise) {
+                    const double s2 = meanVar(noise[i], a, false);
+                    chi2F += e * e / s2;
+                    sig2SumF += s2;
+                }
             }
         }
         const int dofF = 3 * n - PF;
@@ -435,7 +532,7 @@ namespace PayloadCalibration {
         double bM[3] = {xM[0], xM[1], xM[2]};
         double cS[3] = {xM[3], xM[4], xM[5]};
 
-        double ssM = 0.0;
+        double ssM = 0.0, chi2M = 0.0, sig2SumM = 0.0;
         for (int i = 0; i < n; i++) {
             double g[3];
             gravityNoYaw(posesIn[i], g);
@@ -448,10 +545,20 @@ namespace PayloadCalibration {
             for (int a = 0; a < 3; a++) {
                 const double e = pred[a] - moments[i][a];
                 ssM += e * e;
+                if (noise) {
+                    const double s2 = meanVar(noise[i], a, true);
+                    chi2M += e * e / s2;
+                    sig2SumM += s2;
+                }
             }
         }
         const int dofM = 3 * n - PM;
         const double s2M = (dofM > 0) ? ssM / (double)dofM : 0.0;
+
+        // 力矩通道的【失拟】: 自由 12 参数模型与受约束 6 参数模型的残差之差, 按实测噪声折算。
+        // 为什么力矩问的是失拟而不是"残差 vs 噪声": 见 fitRaw 的自检 3 与 RawFit 的说明。
+        double ssFreeM = 0.0;
+        const bool haveFreeM = noise && fitMomentFree(posesIn, A, moments, n, ssFreeM);
 
         // ===== 汇总 =====
         for (int i = 0; i < 9; i++) out.A[i] = A[i];
@@ -464,6 +571,30 @@ namespace PayloadCalibration {
         for (int i = 0; i < 3; i++) out.paramSigma[9 + i]  = sqrt(CF[i * PF + i] * s2F);
         for (int i = 0; i < 3; i++) out.paramSigma[12 + i] = sqrt(CM[(3 + i) * PM + (3 + i)] * s2M);
         for (int i = 0; i < 3; i++) out.paramSigma[15 + i] = sqrt(CM[i * PM + i] * s2M);
+
+        // ===== 检验用的报告字段 (只在不传 noise 时为 0) =====
+        if (noise) {
+            // 实测噪声的合并尺度: 各方程 σ² 的均值再开方 (与 rms 同量纲, 好直接对比)。
+            out.noiseForceN   = sqrt(sig2SumF / (3.0 * n));
+            out.noiseMomentNm = sqrt(sig2SumM / (3.0 * n));
+            out.chi2ForceRatio = (dofF > 0) ? chi2F / (double)dofF : 0.0;
+            out.chi2DofForce   = dofF;
+            out.chi2MomentRatio = (dofM > 0) ? chi2M / (double)dofM : 0.0;
+            out.chi2DofMoment   = dofM;
+            if (haveFreeM) {
+                // ⚠ 方向: 自由模型【包含】受约束模型 (c_s × w = [c_s]ₓ·w 是 N 的一个特例),
+                // 所以恒有 ssFree ≤ ssM。"多出来的 6 个参数少解释的那一份"是 ssM − ssFree:
+                // 受约束模型对得上时它只是噪声, 期望 6σ_M²; 叉乘结构不成立时它远大于此。
+                // 自由度 6 = 自由 12 参数 − 受约束 6 参数。按【合并的】噪声尺度折算
+                // (逐姿态 σ 略有差异时这是个近似: 差值统计量对权重的敏感度是二阶的)。
+                const double diff = (ssM > ssFreeM) ? (ssM - ssFreeM) : 0.0;   // 舍入可致微负
+                const double sig2Bar = sig2SumM / (3.0 * n);
+                out.lackOfFitMomentRatio = diff / sig2Bar / 6.0;
+                out.lackOfFitMomentDof   = 6;
+            }
+            // 3n > 12 (即 n ≥ 5) 才有残差自由度可言; n = 4 时自由度 0, 检验【做不了】。
+            out.modelFormChecked = (dofF > 0);
+        }
         return true;
     }
 
@@ -504,15 +635,19 @@ namespace PayloadCalibration {
     }
 
     bool fitRaw(const double posesIn[][6], const double forces[][3], const double moments[][3],
-                int n, RawFit& out)
+                int n, RawFit& out, const PoseNoise* noise)
     {
-        if (!fitRawLinear(posesIn, forces, moments, n, out)) return false;
+        if (!fitRawLinear(posesIn, forces, moments, n, out, noise)) return false;
+        const bool noiseUsable = poseNoiseUsable(noise, n);
 
         Decomp d;
         if (!decompose(out.A, d)) {
             fprintf(stderr, "[Payload] 自检拒绝: A 奇异 (σ3/σ1 过小), 定不出安装姿态与质量尺度。\n");
             return false;
         }
+        out.massScale = d.m;
+        out.parity = d.parity;
+        out.isotropyRatio = d.isotropyRatio;
 
         // ---- 自检 1: 条件数 (12 个参数定不定得下来) ----
         // 姿态激发不足 -> A 的每个分量都在大误差里, 后面两条判据也就没了意义, 所以先判它。
@@ -533,37 +668,89 @@ namespace PayloadCalibration {
             return false;
         }
 
-        // ---- 自检 3: 各向同性 —— 【判据由 paramSigma 导出, 不是固定的比例】 ----
+        // ---- 自检 3: 模型形式 —— 残差 vs 【实测】噪声, χ² 式 (取代从前的各向同性门限) ----
         //
-        // A 若真是"质量尺度 × 含手系的安装旋转", 它的三个奇异值必须相等 (都 = m)。实测到的
-        // 展布 isotropyRatio = σ1/σ3 > 1 有两个来源: 噪声, 与"模型形式不对"。要靠量级把两者
-        // 分开, 只能用【参数的不确定度】—— 一个固定的比例是猜的, 而用户明确不要猜。
+        // 【为什么各向同性比不再是判据】
+        // 力通道的模型是 F = b_F + A·g, A 的 9 个元素【全部自由】—— 数据对它没有任何约束。
+        // 于是 σ1/σ3 > 1 只能说明"传感器的实际响应不是各向同性的", 这是对传感器本身的
+        // 【测量结果】, 不是"模型形式与数据不符"的证据。实机那批数据里 A 本就 6.5% 非正交
+        // (isotropyRatio = 1.06546, 物理属性)。把它当门限有两个方向都错的后果:
+        //   · 反方向 (错杀): 用拟合残差估出来的 σ 去定门限, 而残差里混着"形式错"那一份 ——
+        //     无噪声重放真实数据时 σ → 0, 门限压到 1.0, 【正确的解被拒】;
+        //   · 正方向 (放行错解): 形式错 → 残差涨 → σ 涨 → 门限放松得比 iso 涨得更快。
+        //     评审实跑的反例: 真值完全各向同性 (A = 0.42·diag(1,1,−1)·Rz(30°)), 数据用
+        //     【历史上的转置回归量】生成 (就是那个让实机安静地解错两次的 bug) + 0.02 N 噪声 →
+        //     拟合 iso = 2.01, 门限 1+3σ/m = 2.59 → 【接受】, 返回 m = 0.4159 (真值 0.42)。
+        //     门对着自己放水, 正解错解一起放。
+        // 所以 isotropyRatio 现在【只报告】(out.isotropyRatio / 下面那行打印), 不进判决。
         //
-        //   尺子 sigmaScale = max_i paramSigma[i] (i = 0..8, A 的 9 个分量)
-        //     —— m 是从 A 的谱里读出来的, 它的不确定度不可能小于 A 本身定得最差的那个分量;
-        //        取 max 是保守侧 (宁可放过也不错杀: 错杀的代价是"标定不了", 放过的代价由
-        //        残差与闭环验证兜着)。
-        //   门限 1 + K·sigmaScale/m,  K = 3 (3σ)
+        // 【判据改用什么】拟合残差 vs 【与模型无关】的噪声估计: 每个姿态是 ~1 s (~30 个样本)
+        // 的平均, 样本方差量的是测量噪声本身 —— 它不经过模型、不经过 A、不经过重力约定。
+        // 该姿态均值的不确定度 σ = sqrt(var/N) (标准误), 于是
+        //     χ² = Σ_i Σ_a (pred_ia − F_ia)² / σ²_ia ,  dof = 方程数 − 参数数 (= 3n − 12)
+        // 模型形式对时 χ²/dof 的期望是 1、标准差 √(2/dof) (χ² 分布的一阶矩与二阶矩), 门限就取
+        // 它自己的分布:
+        //     拒绝 ⇔ χ²/dof > 1 + K·sqrt(2/dof) ,  K = 3 (3σ 置信水平)
+        // 【没有绝对 N 阈值】: 判据的尺度全部来自实测的 var/N —— 传感器吵, 门限按比例放宽;
+        // 传感器安静, 门限按比例收紧。K 只是"我愿意认几倍标准差", 量纲与量级都由数据给。
+        // 实机数据上 rmsForceN 与这把尺子的关系会照实打印出来 (含两者之比), 供人核对。
         //
-        // 实机对照 (2026-09-19, 7 个姿态): sigmaScale = 0.014129 kg, m = 0.422357 kg
-        //   -> sigmaScale/m = 3.345%
-        //   K = 3 -> 门限 1.10036 ; 实解 isotropyRatio = 1.06546 -> 通过 (富余 3.5%)
-        //   K = 2 -> 门限 1.06690 ; 同一个解【几乎贴在线上】—— 只勉强接受自己正确答案的门
-        //            不是门, 是把判决交给舍入误差。
-        // 控制器第一版用的固定 1.05 会【拒掉这个正确的解】, 这就是为什么要对着不确定度判。
-        // 反过来, 明确的形式错 (各向异性几倍这种) 在任何噪声水平下都远超 3σ, 照拒。
-        // 另外: 无噪声的精确数据 (sigmaScale -> 0) 会把门限压到 1.0 —— 这是对的, 那时候
-        // 模型形式就是被数据精确检验的, 任何非正交都说明形式不成立。
-        double sigmaScale = 0.0;
-        for (int i = 0; i < 9; i++)
-            if (out.paramSigma[i] > sigmaScale) sigmaScale = out.paramSigma[i];
-        const double isoLimit = 1.0 + RAW_ISO_SIGMA_K * sigmaScale / d.m;
-        if (!(d.isotropyRatio < isoLimit)) {
-            fprintf(stderr, "[Payload] 自检拒绝: 各向同性比 σ1/σ3=%.5g 超出噪声能解释的范围"
-                            " (门限 %.5g = 1 + %.0fσ, σ=%.4g kg)。模型形式与数据不符,"
-                            " 拒绝给出参数。\n",
-                    d.isotropyRatio, isoLimit, RAW_ISO_SIGMA_K, sigmaScale);
-            return false;
+        // 力矩通道【另论】: 它确实是受约束的 (c_s × (A·g), 3 参数 vs 自由的 9), 但它的回归量
+        // w = A·g 里带着 A 的估计误差, 所以"力矩残差 vs 噪声"不是纯噪声统计量 (会系统性偏大),
+        // 拿它当判据会错杀。力矩问的是【失拟】: 自由模型 (b_M + N·w, 12 参数) 与受约束模型
+        // (b_M + c_s × w, 6 参数) 的残差之差, 按同一个实测噪声折算, 自由度 6。
+        // 两边都用同一个 w, A 的误差在差值里大部分相消。
+        if (!noiseUsable) {
+            // 【说清楚"没做"与"通过"的区别】: 没有逐姿态噪声估计时, 残差是唯一能看的量,
+            // 而它自己的尺度里就有模型形式错那一份 —— 拿它判等于自指, 所以这里【不判】。
+            fprintf(stderr, "[Payload] 注意: 未提供(或不可用)逐姿态噪声估计 -> 【不做】模型形式"
+                            "检验 (modelFormChecked=false)。各向同性比 σ1/σ3=%.5g 仅作报告。\n",
+                    d.isotropyRatio);
+        } else if (!out.modelFormChecked) {
+            // 有噪声但没残差自由度 (n = 4: 3n = 12 = 参数数) —— 检验同样做不了, 照实说。
+            fprintf(stderr, "[Payload] 注意: %d 个姿态下力通道自由度 = 0 (3n − 12), 模型形式"
+                            "检验【做不了】(不是通过)。\n", n);
+        } else {
+            if (out.chi2DofForce > 0) {
+                const double limF = 1.0 + RAW_CHI2_SIGMA_K * sqrt(2.0 / (double)out.chi2DofForce);
+                if (!(out.chi2ForceRatio < limF)) {
+                    fprintf(stderr, "[Payload] 自检拒绝(模型形式): 力通道 χ²/dof=%.4g 超过门限"
+                                    " %.4g (= 1 + %.0f·sqrt(2/%d), 3σ 置信) —— 残差 %.4g N 与实测"
+                                    " 噪声 %.4g N (sd/sqrt(N)) 不一致, 模型形式解释不了这批数据。\n",
+                            out.chi2ForceRatio, limF, RAW_CHI2_SIGMA_K, out.chi2DofForce,
+                            out.rmsForceN, out.noiseForceN);
+                    return false;
+                }
+            }
+            if (out.lackOfFitMomentDof > 0) {
+                const double limM = 1.0 + RAW_CHI2_SIGMA_K
+                                        * sqrt(2.0 / (double)out.lackOfFitMomentDof);
+                if (!(out.lackOfFitMomentRatio < limM)) {
+                    fprintf(stderr, "[Payload] 自检拒绝(模型形式): 力矩通道失拟 %.4g 超过门限 %.4g"
+                                    " (= 1 + %.0f·sqrt(2/%d)) —— 自由模型比 c_s × (A·g) 显著地"
+                                    " 解释得更好, 叉乘结构不成立。\n",
+                            out.lackOfFitMomentRatio, limM, RAW_CHI2_SIGMA_K,
+                            out.lackOfFitMomentDof);
+                    return false;
+                }
+            }
+        }
+        // 报告量: 各向同性比与它的构成 (奇异值)。【不是判决】, 理由见上。
+        // 换工具/重装传感器/换一支笔, 这个数会变 —— 它是"此刻这只传感器响应有多正"的读数。
+        fprintf(stderr, "[Payload] 各向同性比 σ1/σ3 = %.5f (报告量, 不作判据): σ=[%.5f %.5f %.5f]"
+                        " kg, m = %.5f kg, parity = %+.0f\n",
+                d.isotropyRatio, d.sv[0], d.sv[1], d.sv[2], d.m, d.parity);
+        // 通过时也要把"离门限多远"照实报出来 —— 拒绝时的那些数只有被拒才看得到, 而
+        // "贴着线过"与"富余着过"是两回事 (从前 `K=2` 那条门限就是被这个数救回来的)。
+        if (out.modelFormChecked) {
+            fprintf(stderr, "[Payload] 模型形式: rmsF=%.4g N / 实测噪声 %.4g N -> χ²/dof=%.4g"
+                            " (门限 %.4g, dof=%d); 力矩失拟=%.4g (门限 %.4g, dof=%d)\n",
+                    out.rmsForceN, out.noiseForceN, out.chi2ForceRatio,
+                    1.0 + RAW_CHI2_SIGMA_K * sqrt(2.0 / (double)out.chi2DofForce), out.chi2DofForce,
+                    out.lackOfFitMomentRatio,
+                    out.lackOfFitMomentDof > 0
+                        ? 1.0 + RAW_CHI2_SIGMA_K * sqrt(2.0 / (double)out.lackOfFitMomentDof) : 0.0,
+                    out.lackOfFitMomentDof);
         }
         return true;
     }

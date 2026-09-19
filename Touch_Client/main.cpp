@@ -59,6 +59,13 @@ namespace BiasCheck {
     static double accum[6];
     static double accumTcp[6];           // 同上, 但累加 @720 TCPForce
     static double accumSix[6];           // 同上, 但累加 @1304 SixForceValue (原始值)
+    // 与上面三组均值【配对】的平方累加 —— 单靠均值分不出"读数很稳"与"读数在跳"。
+    // 每姿态采 ~30 个样本再平均, 所以样本方差量的是【测量噪声本身】: 它与任何模型、
+    // 任何重力约定都无关, 这正是模型形式检验需要的、独立于拟合残差的噪声尺子
+    // (从前那条判据用的是 paramSigma ← 拟合残差, 于是模型形式错时门限跟着残差一起放松)。
+    static double accumSq[6];
+    static double accumTcpSq[6];
+    static double accumSixSq[6];
     static double pose[MAX_POSES][6];    // Rx,Ry,Rz (deg) + X,Y,Z (mm)
     static double bias[MAX_POSES][6];    // 该姿态平均 raw 力/力矩 (@576 ActualTCPForce)
     // 该姿态平均 @720 TCPForce。两路一起采、一起报, 好对比哪一路才反映负载参数。
@@ -67,6 +74,24 @@ namespace BiasCheck {
     // 该姿态平均 @1304 SixForceValue (原始值)。三路一起采、一起报 —— 每次求解落盘的
     // calib_poses.txt 就是给这三路做裁决用的: 传感器离线 / 读错字段 / z 通道真的死了。
     static double biasSix[MAX_POSES][6];
+    // 三路各自的【样本方差】(该姿态内, 逐通道)。@1304 那一份是新的线性拟合消费的通道
+    // (见 solveAndApply 的 @1304 对齐说明), 所以它随姿态一起存下来, 供 fitRaw 的
+    // 模型形式检验换算成"该姿态均值的不确定度" σ = sqrt(var/N)。
+    static double var[MAX_POSES][6];
+    static double varTcp[MAX_POSES][6];
+    static double varSix[MAX_POSES][6];
+    // 每个姿态参与平均的样本数 (方差的分母就是它) —— 缺了它, sqrt(var/N) 只是半截信息。
+    static int    samples[MAX_POSES];
+
+    // 样本方差 (无偏, 除以 N−1)。用 Σx² − N·mean² 的差式: 这里的量级 (|F| ~ 10 N,
+    // N ~ 30, 噪声方差 ~1e-3) 下消去误差 ~1e-13, 比噪声本身小十几个数量级; 为负
+    // (纯舍入) 时夹到 0, 免得 sqrt 出 NaN。N < 2 时无方差可言, 返回 0 (= 没有噪声估计)。
+    static double sampleVar(double sum, double sumsq, int n) {
+        if (n < 2) return 0.0;
+        const double mean = sum / (double)n;
+        const double v = (sumsq - (double)n * mean * mean) / (double)(n - 1);
+        return (v > 0.0) ? v : 0.0;
+    }
 
     // 数据只有在「机械臂配置 == 采集时的配置」时才可用于复验。
     // 求解改了负载/本地补偿 -> 已采数据作废 (拒绝 report 判定)。
@@ -83,7 +108,10 @@ namespace BiasCheck {
         count = 0;
         sampling = false;
         avgCount = 0;
-        for (int i = 0; i < 6; i++) { accum[i] = 0.0; accumTcp[i] = 0.0; accumSix[i] = 0.0; }
+        for (int i = 0; i < 6; i++) {
+            accum[i] = 0.0; accumTcp[i] = 0.0; accumSix[i] = 0.0;
+            accumSq[i] = 0.0; accumTcpSq[i] = 0.0; accumSixSq[i] = 0.0;
+        }
     }
 
     // 静默退出 (被其他采集模式抢占时调用, 丢弃已采姿态)
@@ -113,7 +141,10 @@ namespace BiasCheck {
             std::cout << "[BIAS] 已达 " << MAX_POSES << " 个姿态, 按 'm' 输出报告" << std::endl;
             return;
         }
-        for (int i = 0; i < 6; i++) { accum[i] = 0.0; accumTcp[i] = 0.0; accumSix[i] = 0.0; }
+        for (int i = 0; i < 6; i++) {
+            accum[i] = 0.0; accumTcp[i] = 0.0; accumSix[i] = 0.0;
+            accumSq[i] = 0.0; accumTcpSq[i] = 0.0; accumSixSq[i] = 0.0;
+        }
         avgCount = 0;
         lastSampleMs = 0;
         sampleStartMs = GetTickCount();
@@ -142,6 +173,10 @@ namespace BiasCheck {
             accum[i] += fd.raw[i];
             accumTcp[i] += fd.tcpForce[i];   // 同时采 @720, 见 biasTcp 的说明
             accumSix[i] += fd.sixForceRaw[i]; // 同时采 @1304, 见 biasSix 的说明
+            // 平方累加: 均值不变, 但多出"这批样本跳得有多厉害"这一维 (见 accumSq 的说明)。
+            accumSq[i]    += fd.raw[i] * fd.raw[i];
+            accumTcpSq[i] += fd.tcpForce[i] * fd.tcpForce[i];
+            accumSixSq[i] += fd.sixForceRaw[i] * fd.sixForceRaw[i];
         }
         avgCount++;
 
@@ -158,7 +193,13 @@ namespace BiasCheck {
             bias[count][i]    = accum[i] / avgCount;
             biasTcp[count][i] = accumTcp[i] / avgCount;
             biasSix[count][i] = accumSix[i] / avgCount;
+            // 方差与均值【同一批样本】算出来, 一一对应 —— 后面 fitRaw 要的正是
+            // "这个均值有多准", 即 σ = sqrt(var/N)。
+            var[count][i]    = sampleVar(accum[i],    accumSq[i],    avgCount);
+            varTcp[count][i] = sampleVar(accumTcp[i], accumTcpSq[i], avgCount);
+            varSix[count][i] = sampleVar(accumSix[i], accumSixSq[i], avgCount);
         }
+        samples[count] = avgCount;
 
         EnterCriticalSection(&appState.robotPoseMutex);
         pose[count][0] = appState.robotActualPose.rx;
@@ -186,6 +227,16 @@ namespace BiasCheck {
                biasSix[count][0], biasSix[count][1], biasSix[count][2],
                biasSix[count][3], biasSix[count][4], biasSix[count][5],
                fd.sixForceOnline);
+        // 均值旁边报出【实测噪声】(样本标准差, N 个样本), 以及均值本身的不确定度 sd/sqrt(N)。
+        // 求解的模型形式检验只用后者 (它才是"输入值准不准"), 报前者是因为它才是
+        // "传感器有多吵"的直观量。数据流有问题时 (抖动远大于典型值) 这两行会先露馅。
+        printf("       noise(@1304): sd=(%.4f,%.4f,%.4f)  sd=(%.4f,%.4f,%.4f)"
+               "   N=%d  -> sd/sqrt(N)=(%.4f,%.4f,%.4f)\n",
+               sqrt(varSix[count][0]), sqrt(varSix[count][1]), sqrt(varSix[count][2]),
+               sqrt(varSix[count][3]), sqrt(varSix[count][4]), sqrt(varSix[count][5]),
+               avgCount,
+               sqrt(varSix[count][0] / avgCount), sqrt(varSix[count][1] / avgCount),
+               sqrt(varSix[count][2] / avgCount));
         count++;
     }
 
@@ -417,17 +468,26 @@ namespace BiasCheck {
 
         fprintf(f, "# attempt %s  poses=%d  sixForceOnline=%d\n", ts, count, online);
         fprintf(f, "# rx,ry,rz,x,y,z,F576x,F576y,F576z,M576x,M576y,M576z,"
-                   "F1304x,F1304y,F1304z,M1304x,M1304y,M1304z\n");
+                   "F1304x,F1304y,F1304z,M1304x,M1304y,M1304z,"
+                   "N1304,sdF1304x,sdF1304y,sdF1304z,sdM1304x,sdM1304y,sdM1304z\n");
+        // 末尾 7 列是 2026-09-19 加的 (模型形式检验要实测噪声, 而噪声是【逐姿态】采出来的):
+        // N1304 = 该姿态的样本数, sd* = 该姿态内 @1304 各通道的样本标准差。
+        // 均值那 18 列的形状【没有】动 —— 离线分析/历史脚本读它们仍然照旧。
+        // 有了 (N, sd) 就能还原"均值的不确定度" sd/sqrt(N), 也就是 fitRaw 要的那把尺子。
         for (int i = 0; i < count; i++) {
             fprintf(f, "%.1f,%.1f,%.1f,%.3f,%.3f,%.3f,"
                        "%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,"
-                       "%.3f,%.3f,%.3f,%.3f,%.3f,%.3f\n",
+                       "%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,"
+                       "%d,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f\n",
                     pose[i][0], pose[i][1], pose[i][2],
                     pose[i][3], pose[i][4], pose[i][5],
                     bias[i][0], bias[i][1], bias[i][2],
                     bias[i][3], bias[i][4], bias[i][5],
                     biasSix[i][0], biasSix[i][1], biasSix[i][2],
-                    biasSix[i][3], biasSix[i][4], biasSix[i][5]);
+                    biasSix[i][3], biasSix[i][4], biasSix[i][5],
+                    samples[i],
+                    sqrt(varSix[i][0]), sqrt(varSix[i][1]), sqrt(varSix[i][2]),
+                    sqrt(varSix[i][3]), sqrt(varSix[i][4]), sqrt(varSix[i][5]));
         }
         fclose(f);
     }

@@ -557,13 +557,16 @@ static double maxSigmaA(const PayloadCalibration::RawFit& f) {
 // 【刻意不复用上面的 synthesize()】: 那一份是按"psi 纯偏航"模型造的 (solve() 用), 它的入参里
 // 根本没有 A 这个概念。这一份拿任意 A 造数, 重力只用 psi = 0 —— 数据里不存在任何安装角,
 // 这正是新模型要能拟合的东西。(生成器与估计器不共用代码, 见 gravitySensorRefAt 的说明。)
-static void synthRaw(const double A[9], const double bF[3], const double cs[3],
-                     const double bM[3], const double poses[][6], int n,
-                     double forces[][3], double moments[][3])
+//
+// grav 决定【造数据时】用哪个重力约定 —— 正向对照传 gravitySensorRefAt (psi 给 0), 反向对照
+// 传 gravityTransposedAt (历史上那个转置 bug)。生成器永远不调用被测函数。
+static void synthRawWith(GravityFnAt grav, double psiDeg, const double A[9], const double bF[3],
+                         const double cs[3], const double bM[3], const double poses[][6], int n,
+                         double forces[][3], double moments[][3])
 {
     for (int i = 0; i < n; i++) {
         double g[3];
-        gravitySensorRefAt(poses[i], 0.0, g);
+        grav(poses[i], psiDeg, g);
         double w[3];
         for (int a = 0; a < 3; a++)
             w[a] = A[a * 3 + 0] * g[0] + A[a * 3 + 1] * g[1] + A[a * 3 + 2] * g[2];
@@ -572,6 +575,29 @@ static void synthRaw(const double A[9], const double bF[3], const double cs[3],
         moments[i][0] = bM[0] + cs[1] * w[2] - cs[2] * w[1];
         moments[i][1] = bM[1] + cs[2] * w[0] - cs[0] * w[2];
         moments[i][2] = bM[2] + cs[0] * w[1] - cs[1] * w[0];
+    }
+}
+
+static void synthRaw(const double A[9], const double bF[3], const double cs[3],
+                     const double bM[3], const double poses[][6], int n,
+                     double forces[][3], double moments[][3])
+{
+    synthRawWith(gravitySensorRefAt, 0.0, A, bF, cs, bM, poses, n, forces, moments);
+}
+
+// 逐姿态的噪声申报 —— 测试【自己知道】它往均值里加了多少噪声 (addRawNoise 的 sigF/sigM),
+// 所以它把加进去的量如实申报成"这个输入值的 1σ"。N = 1 = 没有做平均 (噪声是直接加在均值上
+// 的), var = σ² -> σ_mean = σ。
+// 【这不是"把答案喂给判据"】: 判据要的是"输入有多准"这个事实, 而这件事在生产路径上来自
+// 采集时的样本方差 (BiasCheck), 在测试里只能来自"我知道我加了什么"。申报值与被测代码
+// 如何拟合无关 —— 生成器与估计器仍然不共用代码。
+static void declareNoise(int n, double sigF, double sigM, PayloadCalibration::PoseNoise* nz) {
+    for (int i = 0; i < n; i++) {
+        nz[i].n = 1;
+        for (int a = 0; a < 3; a++) {
+            nz[i].varF[a] = sigF * sigF;
+            nz[i].varM[a] = sigM * sigM;
+        }
     }
 }
 
@@ -739,9 +765,12 @@ static void test_decompose_matches_reference_numbers() {
     PASS();
 }
 
-// 各向同性自检: 明显各向异性的 A (奇异值比 = 4) 必须被【拒】, 且拒在门限上, 不是拒在拟合上。
-static void test_isotropy_gate_rejects_nonorthogonal() {
-    TEST(isotropy_gate_rejects_nonorthogonal);
+// 各向同性比是【报告量, 不是门限】: 明显各向异性的 A (奇异值比 = 4) 照样被接受,
+// 但因为数据里本来就是这个响应 —— A 的 9 个元素全自由, "非正交"是被测量出来的事实。
+// (取代 isotropy_gate_rejects_nonorthogonal: 它当年断言"4:1 必须被拒"。那个断言的
+//  根据是自指的 (σ ← 残差), 且方向本身是错的 —— 力的 A 没有任何约束, 非正交不是罪证。)
+static void test_isotropy_ratio_is_reported_not_gated() {
+    TEST(isotropy_ratio_is_reported_not_gated);
     const double D[9] = {1.0, 0.0, 0.0,  0.0, 1.0, 0.0,  0.0, 0.0, 0.25};
     double A[9];
     buildAWithP(0.45, -1.0, 10.0, D, A);          // 奇异值 (0.45, 0.45, 0.1125), 比 = 4
@@ -753,60 +782,191 @@ static void test_isotropy_gate_rejects_nonorthogonal() {
     unsigned seed = 7u;
     addRawNoise(F, M, NP, 0.01, 0.0005, seed);
 
-    // 线性层照样解得出来 (数据本身完全符合模型) —— 被拒的是【物理自检】, 不是拟合。
+    PayloadCalibration::PoseNoise nz[NP];
+    declareNoise(NP, 0.01, 0.0005, nz);
+
+    // 接受 —— 且是【过了模型形式检验】才接受的 (不是"没做检验")。
     PayloadCalibration::RawFit fit;
-    CHECK(PayloadCalibration::fitRawLinear(g_poses, F, M, NP, fit));
+    CHECK(PayloadCalibration::fitRaw(g_poses, F, M, NP, fit, nz));
+    CHECK(fit.modelFormChecked);
+    printf("[iso=%.4f 报告 (m=%.4f kg), 残差 %.4f N vs 噪声 %.4f N -> 过] ",
+           fit.isotropyRatio, fit.massScale, fit.rmsForceN, fit.noiseForceN);
+    CHECK(fit.isotropyRatio > 3.5);              // 展布照实报出来 (4:1)
+    CHECK(fit.chi2ForceRatio < 1.0 + 3.0 * sqrt(2.0 / fit.chi2DofForce));
+    // 报告量与 decompose 是同一个数 (不是另算一份口径)
     PayloadCalibration::Decomp d;
     CHECK(PayloadCalibration::decompose(fit.A, d));
-    printf("[iso=%.4f 被拒, 线性层 rmsF=%.4f] ", d.isotropyRatio, fit.rmsForceN);
-    CHECK(d.isotropyRatio > 3.5);                 // 确实是那个明显各向异性的 A
-    CHECK(fit.rmsForceN < 0.05);                  // 而且拟合得很"好" ——
-
-    // —— 这正是本任务的重点: 残差小【不能】证明模型形式对。门必须自己拒。
-    CHECK(!PayloadCalibration::fitRaw(g_poses, F, M, NP, fit));
+    CHECK(fabs(d.isotropyRatio - fit.isotropyRatio) < 1e-12);
+    CHECK(fabs(d.m - fit.massScale) < 1e-12);
     PASS();
 }
 
-// 门限【随不确定度走】: 同一个 A, 同一个几何, 只有噪声水平变了 —— 判据要跟着翻。
-// 这条是"门限不是固定的 1.05"的直接证明。
-static void test_isotropy_gate_tracks_param_sigma() {
-    TEST(isotropy_gate_tracks_param_sigma);
-    const double D[9] = {1.0, 0.0, 0.0,  0.0, 1.0, 0.0,  0.0, 0.0, 0.95};   // 奇异值比 = 1.0526
+// ★ 评审的反例 (本次修复要拦住的正是它): 真值【完全各向同性】, 数据用历史上的【转置回归量】
+//   生成 (就是那个让实机安静地解错两次的 bug), 0.02 N 噪声。
+//   旧的各向同性门限拿它没办法: 拟合 iso≈2.01, 而门限 1+3σ/m 随残差一起涨到 ≈2.59
+//   → 【接受】, 返回 m≈0.4159 (真值 0.42)。这正是"安静地给出错答案"。
+//   新判据必须拒: 残差 ~0.47 N 对上实测噪声 0.02 N, χ²/dof 差着几个数量级。
+static void test_modelform_rejects_transposed_convention() {
+    TEST(modelform_rejects_transposed_convention);
     double A[9];
-    buildAWithP(0.50, -1.0, 32.0, D, A);
-    const double bF[3] = {0.4, 0.3, -0.2};
-    const double cs[3] = {0.01, 0.02, 0.09};
+    buildA(0.42, -1.0, 30.0, 0.0, ARB_U, ARB_V, A);   // 真值 = 恰好 0.42·diag(1,1,-1)·Rz(30°)
+    const double bF[3] = {0.0, 0.0, 0.0};
+    const double cs[3] = {0.0, 0.0, 0.08};
+    const double bM[3] = {0.0, 0.0, 0.0};
+    double F[NP][3], M[NP][3];
+    synthRawWith(gravityTransposedAt, 0.0, A, bF, cs, bM, g_poses, NP, F, M);
+    unsigned seed = 20260919u;
+    addRawNoise(F, M, NP, 0.02, 0.001, seed);
+
+    PayloadCalibration::PoseNoise nz[NP];
+    declareNoise(NP, 0.02, 0.001, nz);
+
+    // 线性层照样解得出来 —— 被拒的是模型形式, 不是拟合。
+    PayloadCalibration::RawFit fit;
+    CHECK(PayloadCalibration::fitRawLinear(g_poses, F, M, NP, fit, nz));
+    PayloadCalibration::Decomp d;
+    CHECK(PayloadCalibration::decompose(fit.A, d));
+    // 旧门限的自指关系照实算出来 (供对照, 不作断言依据): 残差涨 -> σ 涨 -> 门限涨得比 iso 快。
+    const double oldLimit = 1.0 + 3.0 * maxSigmaA(fit) / d.m;
+    printf("[转置数据: rmsF=%.4f N, 噪声=%.4f N, iso=%.3f, 旧门限 1+3s/m=%.3f -> 旧行为接受] ",
+           fit.rmsForceN, fit.noiseForceN, d.isotropyRatio, oldLimit);
+    CHECK(d.isotropyRatio < oldLimit);            // 旧门限确实放它过去 (这就是那个漏洞)
+    CHECK(fit.rmsForceN > 0.1);                   // 残差远大于噪声 —— 数据与模型形式不符
+
+    // 新判据: 拒。
+    CHECK(!PayloadCalibration::fitRaw(g_poses, F, M, NP, fit, nz));
+    printf("[χ²/dof=%.1f (dof=%d, 限=%.2f) -> 拒] ",
+           fit.chi2ForceRatio, fit.chi2DofForce,
+           1.0 + 3.0 * sqrt(2.0 / fit.chi2DofForce));
+    CHECK(fit.chi2ForceRatio > 1.0 + 3.0 * sqrt(2.0 / fit.chi2DofForce));
+    PASS();
+}
+
+// 正确模型 + 与实机同量级的噪声 -> 必须接受, 且是【过了检验】才接受的。
+// 与上一条配对: 一个拒、一个过, 而两条的差别只在"数据是不是真按模型生成的"。
+static void test_modelform_accepts_correct_fit_with_noise() {
+    TEST(modelform_accepts_correct_fit_with_noise);
+    double A[9];
+    buildA(0.42, -1.0, 30.0, 0.0, ARB_U, ARB_V, A);   // 与反例【同一个 A】, 但约定是对的
+    const double bF[3] = {1.2, -0.4, 0.3};
+    const double cs[3] = {0.005, -0.008, 0.061};
     const double bM[3] = {0.01, -0.01, 0.005};
     double F[NP][3], M[NP][3];
+    synthRaw(A, bF, cs, bM, g_poses, NP, F, M);
+    unsigned seed = 20260919u;
+    addRawNoise(F, M, NP, 0.02, 0.001, seed);
+
+    PayloadCalibration::PoseNoise nz[NP];
+    declareNoise(NP, 0.02, 0.001, nz);
+
     PayloadCalibration::RawFit fit;
-    PayloadCalibration::Decomp d;
-
-    // (a) 噪声极小 (0.0005 N): 参数不确定度 ~0.03%, 5% 的展布解释不了 -> 拒绝
-    synthRaw(A, bF, cs, bM, g_poses, NP, F, M);
-    unsigned seed = 99u;
-    addRawNoise(F, M, NP, 0.0005, 0.00002, seed);
-    CHECK(PayloadCalibration::fitRawLinear(g_poses, F, M, NP, fit));
-    CHECK(PayloadCalibration::decompose(fit.A, d));
-    printf("[0.0005N: iso=%.3f, 判据=1+3s/m=%.3f -> 拒] ",
-           d.isotropyRatio, 1.0 + 3.0 * maxSigmaA(fit) / d.m);
-    CHECK(!PayloadCalibration::fitRaw(g_poses, F, M, NP, fit));
-
-    // (b) 同一个 A、同一个几何, 只把噪声放大 (0.30 N): 判据随不确定度抬上去 -> 通过
-    synthRaw(A, bF, cs, bM, g_poses, NP, F, M);
-    seed = 99u;
-    addRawNoise(F, M, NP, 0.30, 0.015, seed);
-    CHECK(PayloadCalibration::fitRawLinear(g_poses, F, M, NP, fit));
-    CHECK(PayloadCalibration::decompose(fit.A, d));
-    printf("[0.30N: iso=%.3f, 判据=1+3s/m=%.3f -> 过] ",
-           d.isotropyRatio, 1.0 + 3.0 * maxSigmaA(fit) / d.m);
-    CHECK(PayloadCalibration::fitRaw(g_poses, F, M, NP, fit));
+    CHECK(PayloadCalibration::fitRawLinear(g_poses, F, M, NP, fit, nz));
+    printf("[正确约定: rmsF=%.4f N, 噪声=%.4f N, χ²/dof=%.2f (dof=%d), 力矩失拟=%.2f (dof=%d)] ",
+           fit.rmsForceN, fit.noiseForceN, fit.chi2ForceRatio, fit.chi2DofForce,
+           fit.lackOfFitMomentRatio, fit.lackOfFitMomentDof);
+    CHECK(PayloadCalibration::fitRaw(g_poses, F, M, NP, fit, nz));
+    CHECK(fit.modelFormChecked);
+    // 正确模型下 χ²/dof 应落在 1 附近 —— 门限 1+3·sqrt(2/dof) 之内, 且不该小得离谱
+    // (太小说明噪声被报大了, 那会让判据失去分辨力)。
+    CHECK(fit.chi2ForceRatio < 1.0 + 3.0 * sqrt(2.0 / fit.chi2DofForce));
+    CHECK(fit.chi2ForceRatio > 0.2);
+    printf("[A[0] err=%.1e] ", fabs(fit.A[0] - A[0]));
+    CHECK(fabs(fit.A[0] - A[0]) < 4.0 * fit.paramSigma[0]);
     PASS();
 }
 
-// 各向同性自检不能太紧: 实机那条正确的解 iso = 1.0655 (6.5% 展布) 必须过。
-// 这里用参考 A 的形状 + 与实机同量级的噪声造数据 —— 门限若做成固定的 1.05, 这里就红。
-static void test_isotropy_gate_accepts_realistic_spread() {
-    TEST(isotropy_gate_accepts_realistic_spread);
+// 门限【随实测噪声走】: 同一批数据 (同一个模型形式错), 只把【申报的】噪声改掉 —— 判决跟着翻。
+// 这条是"阈值来自实测噪声, 不是固定的 N 数"的直接证明:
+//   (a) 申报 0.02 N: 残差 0.47 N 解释不了 -> 拒;
+//   (b) 申报 0.60 N: 0.47 N 的残差与这么吵的测量并不矛盾 -> 接受。
+// (取代 isotropy_gate_tracks_param_sigma: 它当年用【同一批数据 + 两个噪声水平】证明"门限随
+//  paramSigma 走", 而 paramSigma 来自残差 —— 噪声大残差也大, 那个"随"是自指的。)
+static void test_modelform_gate_tracks_measured_noise() {
+    TEST(modelform_gate_tracks_measured_noise);
+    double A[9];
+    buildA(0.42, -1.0, 30.0, 0.0, ARB_U, ARB_V, A);
+    const double bF[3] = {0.0, 0.0, 0.0};
+    const double cs[3] = {0.0, 0.0, 0.08};
+    const double bM[3] = {0.0, 0.0, 0.0};
+    double F[NP][3], M[NP][3];
+    synthRawWith(gravityTransposedAt, 0.0, A, bF, cs, bM, g_poses, NP, F, M);
+    unsigned seed = 20260919u;
+    addRawNoise(F, M, NP, 0.02, 0.001, seed);      // 真实噪声: 0.02 N
+
+    PayloadCalibration::RawFit fit;
+    PayloadCalibration::PoseNoise nz[NP];
+
+    // (a) 如实申报 0.02 N -> 残差与之不符 -> 拒
+    declareNoise(NP, 0.02, 0.001, nz);
+    CHECK(PayloadCalibration::fitRawLinear(g_poses, F, M, NP, fit, nz));
+    printf("[申报 0.02N: χ²/dof=%.1f -> 拒] ", fit.chi2ForceRatio);
+    CHECK(!PayloadCalibration::fitRaw(g_poses, F, M, NP, fit, nz));
+
+    // (b) 同一个拟合, 只把噪声申报成 0.60 N -> 同一个残差落进门限 -> 接受
+    declareNoise(NP, 0.60, 0.03, nz);
+    CHECK(PayloadCalibration::fitRawLinear(g_poses, F, M, NP, fit, nz));
+    printf("[申报 0.60N: χ²/dof=%.2f (限 %.2f), 力矩失拟=%.2f -> 过] ",
+           fit.chi2ForceRatio, 1.0 + 3.0 * sqrt(2.0 / fit.chi2DofForce),
+           fit.lackOfFitMomentRatio);
+    CHECK(PayloadCalibration::fitRaw(g_poses, F, M, NP, fit, nz));
+    CHECK(fit.chi2ForceRatio < 1.0 + 3.0 * sqrt(2.0 / fit.chi2DofForce));
+    PASS();
+}
+
+// 力矩通道的【失拟】门: 它是受约束的 (c_s × (A·g), 3 参数 vs 自由的 9), 所以那里问的是
+// "叉乘结构成不成立"。这里造一批力通道完全正确、而力矩【不是】叉乘结构的数据
+// (M = N·w, N 含对称分量) —— 力通道的 χ² 照样合格, 只有力矩失拟能把这种错挑出来。
+// 【这条用例存在的理由】: 力矩判据是新增的代码路径, 没有它的话"门能不能开"无从验证
+// (本实现第一次就把它写反了方向 (ssFree − ssM ≤ 0 恒成立), 全靠这里的对照才发现)。
+static void test_moment_lack_of_fit_rejects_non_cross_product() {
+    TEST(moment_lack_of_fit_rejects_non_cross_product);
+    double A[9];
+    buildA(0.42, -1.0, 30.0, 0.0, ARB_U, ARB_V, A);
+    const double bF[3] = {1.0, -0.5, 0.2};
+    const double cs[3] = {0.005, -0.008, 0.061};
+    const double bM[3] = {0.01, -0.01, 0.005};
+    // 力矩的"响应矩阵": 反对称部分 (≈ c_s×) 之外再加一个对称部分, 量级 ~4 mm (远超噪声)
+    const double N[9] = { 0.001, 0.004, 0.000,
+                          0.004, 0.002, 0.000,
+                          0.000, 0.000, 0.003 };
+    double F[NP][3], M[NP][3];
+    synthRaw(A, bF, cs, bM, g_poses, NP, F, M);
+    for (int i = 0; i < NP; i++) {
+        double g[3], w[3];
+        gravitySensorRefAt(g_poses[i], 0.0, g);          // 测试侧自己算, 不调被测函数
+        for (int a = 0; a < 3; a++)
+            w[a] = A[a * 3 + 0] * g[0] + A[a * 3 + 1] * g[1] + A[a * 3 + 2] * g[2];
+        for (int a = 0; a < 3; a++) {
+            // 保留原来的 c_s × w, 再叠加非反对称的那一份
+            const double cross = (a == 0) ? (cs[1] * w[2] - cs[2] * w[1])
+                               : (a == 1) ? (cs[2] * w[0] - cs[0] * w[2])
+                                          : (cs[0] * w[1] - cs[1] * w[0]);
+            M[i][a] = bM[a] + cross + N[a * 3 + 0] * w[0] + N[a * 3 + 1] * w[1]
+                                                                + N[a * 3 + 2] * w[2];
+        }
+    }
+    unsigned seed = 4242u;
+    addRawNoise(F, M, NP, 0.02, 0.001, seed);
+    PayloadCalibration::PoseNoise nz[NP];
+    declareNoise(NP, 0.02, 0.001, nz);
+
+    PayloadCalibration::RawFit fit;
+    CHECK(PayloadCalibration::fitRawLinear(g_poses, F, M, NP, fit, nz));
+    printf("[力通道 χ²/dof=%.2f (合格), 力矩失拟=%.2f (dof=%d, 限=%.2f) -> 拒] ",
+           fit.chi2ForceRatio, fit.lackOfFitMomentRatio, fit.lackOfFitMomentDof,
+           1.0 + 3.0 * sqrt(2.0 / fit.lackOfFitMomentDof));
+    // 力通道没问题 (它是自由拟合, 数据也确实符合) —— 拒的理由必须来自力矩那一条
+    CHECK(fit.chi2ForceRatio < 1.0 + 3.0 * sqrt(2.0 / fit.chi2DofForce));
+    CHECK(fit.lackOfFitMomentRatio > 1.0 + 3.0 * sqrt(2.0 / fit.lackOfFitMomentDof));
+    CHECK(!PayloadCalibration::fitRaw(g_poses, F, M, NP, fit, nz));
+    PASS();
+}
+
+// 实机那条正确的解 (参考 A, iso = 1.0655, 6.5% 的物理非正交) 必须过 —— 而且现在是靠
+// "残差 vs 实测噪声"过的, 不再靠"iso 撞上一条随残差放松的门限"。
+// 用参考 A 的形状 + 与实机同量级的噪声造数据。
+static void test_realistic_spread_accepted_with_measured_noise() {
+    TEST(realistic_spread_accepted_with_measured_noise);
     const double ref[9] = { 0.36456, 0.21055, -0.00003,
                            -0.21828, 0.37331,  0.00298,
                            -0.01155, -0.01493, -0.41390 };
@@ -816,20 +976,54 @@ static void test_isotropy_gate_accepts_realistic_spread() {
     double F[NP][3], M[NP][3];
     synthRaw(ref, bF, cs, bM, g_poses, NP, F, M);
     unsigned seed = 1304u;
-    // 噪声取 0.15 N: 与实机那批同量级的不确定度 (实机 σ = 0.034 N, 但姿态只有 7 个、
-    // 自由度 9; 这里的 6 个姿态自由度更少, 要让 sigmaScale/m 落在同一个 ~3% 附近)。
     addRawNoise(F, M, NP, 0.15, 0.008, seed);
 
+    PayloadCalibration::PoseNoise nz[NP];
+    declareNoise(NP, 0.15, 0.008, nz);
+
     PayloadCalibration::RawFit fit;
-    CHECK(PayloadCalibration::fitRawLinear(g_poses, F, M, NP, fit));
-    PayloadCalibration::Decomp d;
-    CHECK(PayloadCalibration::decompose(fit.A, d));
-    printf("[iso=%.4f, 限=1+3s/m=%.4f -> 过, m=%.4f kg, parity=%+.0f] ",
-           d.isotropyRatio, 1.0 + 3.0 * maxSigmaA(fit) / d.m, d.m, d.parity);
-    CHECK(d.isotropyRatio > 1.02);                // 确实带着实机那种量级的展布 (不是碰巧正交)
-    CHECK(PayloadCalibration::fitRaw(g_poses, F, M, NP, fit));   // 门必须放行
-    CHECK(fabs(d.parity - (-1.0)) < 1e-12);       // 参考 A 的手系是负的
-    CHECK(fabs(d.m - 0.4224) < 0.06);
+    CHECK(PayloadCalibration::fitRaw(g_poses, F, M, NP, fit, nz));   // 必须放行
+    CHECK(fit.modelFormChecked);
+    printf("[iso=%.4f (报告), rmsF=%.4f N, 噪声=%.4f N, χ²/dof=%.2f, 力矩失拟=%.2f,"
+           " m=%.4f kg, parity=%+.0f] ",
+           fit.isotropyRatio, fit.rmsForceN, fit.noiseForceN, fit.chi2ForceRatio,
+           fit.lackOfFitMomentRatio, fit.massScale, fit.parity);
+    CHECK(fit.isotropyRatio > 1.02);               // 确实带着实机那种量级的展布 (不是碰巧正交)
+    CHECK(fabs(fit.parity - (-1.0)) < 1e-12);      // 参考 A 的手系是负的
+    CHECK(fabs(fit.massScale - 0.4224) < 0.06);
+    PASS();
+}
+
+// 没有噪声估计 = 【不做】模型形式检验, 而不是"通过": 同一个反例数据, 不传 noise 时
+// 线性层与自检都放行 —— 这个"洞"必须【看得见】 (modelFormChecked = false), 而不是被当成绿灯。
+// 同时钉住: 生产路径不传 noise 就等于关掉了模型形式检验 —— 所以生产路径必须传。
+static void test_modelform_not_checked_without_noise() {
+    TEST(modelform_not_checked_without_noise);
+    double A[9];
+    buildA(0.42, -1.0, 30.0, 0.0, ARB_U, ARB_V, A);
+    const double bF[3] = {0.0, 0.0, 0.0};
+    const double cs[3] = {0.0, 0.0, 0.08};
+    const double bM[3] = {0.0, 0.0, 0.0};
+    double F[NP][3], M[NP][3];
+    synthRawWith(gravityTransposedAt, 0.0, A, bF, cs, bM, g_poses, NP, F, M);
+    unsigned seed = 20260919u;
+    addRawNoise(F, M, NP, 0.02, 0.001, seed);
+
+    PayloadCalibration::RawFit fit;
+    CHECK(PayloadCalibration::fitRaw(g_poses, F, M, NP, fit));    // 5 参数旧形式
+    CHECK(!fit.modelFormChecked);                                // 明说"没验过"
+    CHECK(fit.chi2ForceRatio == 0.0 && fit.chi2DofForce == 0);   // 检验用的字段全空
+
+    // 不可用的噪声估计 (方差为 0 = 通道冻住 / 没采到) 同样【不做】检验, 而不是"通过"。
+    PayloadCalibration::PoseNoise nz[NP];
+    declareNoise(NP, 0.02, 0.001, nz);
+    nz[2].varF[1] = 0.0;
+    CHECK(PayloadCalibration::fitRawLinear(g_poses, F, M, NP, fit, nz));
+    CHECK(!fit.modelFormChecked);
+    // 与"没给"完全同路: 不做检验, 也【不】因此拒绝 (拒绝必须由某条判据给出理由, 不是"缺数据
+    // 就毙掉")。调用方要区分这两种情形, 读的就是 modelFormChecked。
+    CHECK(PayloadCalibration::fitRaw(g_poses, F, M, NP, fit, nz));
+    CHECK(!fit.modelFormChecked);
     PASS();
 }
 
@@ -961,9 +1155,15 @@ int main() {
     test_decompose_rejects_singular_A();
     test_rawfit_recovers_arbitrary_A();
     test_rawfit_uses_no_psi();
-    test_isotropy_gate_rejects_nonorthogonal();
-    test_isotropy_gate_tracks_param_sigma();
-    test_isotropy_gate_accepts_realistic_spread();
+    // 各向同性比: 【报告量】, 不进判决 (它由力通道的 A 自由性决定, 非正交是物理属性)
+    test_isotropy_ratio_is_reported_not_gated();
+    // 模型形式检验: 残差 vs 【实测】噪声 (χ² 式)。判据的尺度全来自数据。
+    test_modelform_rejects_transposed_convention();   // ★ 评审的反例 (旧门限放它过去)
+    test_modelform_accepts_correct_fit_with_noise();
+    test_modelform_gate_tracks_measured_noise();
+    test_moment_lack_of_fit_rejects_non_cross_product();
+    test_modelform_not_checked_without_noise();
+    test_realistic_spread_accepted_with_measured_noise();
     test_rawfit_rejects_too_few_poses();
     test_rawfit_rejects_degenerate_poses();
     test_rawfit_rejects_bad_mass_scale();
