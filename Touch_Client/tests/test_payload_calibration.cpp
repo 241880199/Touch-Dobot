@@ -1066,12 +1066,19 @@ static void test_moment_lack_of_fit_rejects_non_cross_product() {
 
     PayloadCalibration::RawFit fit;
     CHECK(PayloadCalibration::fitRawLinear(poses, F, M, NQ, fit, nz, &REP_PAIR, 1));
-    printf("[力通道 χ²rep/dof=%.2f (合格), 力矩失拟=%.2f (dof=%d, 限=%.2f) -> 拒] ",
+    // ★ 2026-09-19 门限重标定【放宽了】力矩那一刀: 这条错模型的余量从 26.27x 掉到 9.09x
+    //   (改动前的实测: 155.53 / 5.922; 改动后: 155.53 / 17.11)。⚠ 9.09x 已经【低于】模块
+    //   头文件里那条 ~10x 的底线 —— 这是本次改动真实的代价, 记在这里与本轮的验收报告里,
+    //   不藏。断言只钉到 5x: 它拦的是"下一轮再把门放宽一倍多", 而不是把观察值当门限
+    //   (把断言的数贴着观察值定, 等于把它变成第二次冻结金标)。
+    const double margin = fit.lackOfFitMomentRatio / fit.lackOfFitMomentLimit;
+    printf("[力通道 χ²rep/dof=%.2f (合格), 力矩失拟=%.2f (dof=%d, 限=%.2f, 余量 %.2fx) -> 拒] ",
            fit.chi2RepForceRatio, fit.lackOfFitMomentRatio, fit.lackOfFitMomentDof,
-           fit.lackOfFitMomentLimit);
+           fit.lackOfFitMomentLimit, margin);
     // 力通道没问题 (它是自由拟合, 数据也确实符合) —— 拒的理由必须来自力矩那一条
     CHECK(fit.chi2RepForceRatio < fit.chi2RepForceLimit);
     CHECK(fit.lackOfFitMomentRatio > fit.lackOfFitMomentLimit);
+    CHECK(margin > 5.0);          // 放宽不等于放过去 (见上: 观察值 9.09x, 底线 ~10x 在报告里记着)
     CHECK(!PayloadCalibration::fitRaw(poses, F, M, NQ, fit, nz, &REP_PAIR, 1));
     PASS();
 }
@@ -1824,16 +1831,59 @@ struct MomentCapture {
     double      conRatio;      // 控制台当时打印的失拟 (记录, 不断言)
     double      conLimit;      // 控制台当时打印的门限 (记录, 不断言)
     double      conCond;       // 控制台当时打印的 cond  (记录, 不断言)
+    // ★ 2026-09-19 (b) 重标定的力矩门限需要两个【不是从本实现读出来的】锚:
+    //   refProdLimit = 重标定之前的门限 (= modelFormLimit(6,R,σ_sysM²,floor_M²) 自己) ——
+    //                  §6.1 之前那一版的 refLimit, 现在【只用来独立复算新门限】, 不再断言相等。
+    //                  ⚠ 它没变: 变的是门外面的那个乘数, 不是这个函数。
+    //   refExcess    = e = δA 引起的期望多余量。【这个数不是本实现算出来的】—— 它是离线报告
+    //                  (Docs/superpowers/evidence/limit-recalibration-report.md §1.3 的 e(A) 列,
+    //                  独立实现、独立 harness) 印出来的五位小数。断言它是【口径自校】:
+    //                  口径一旦漂移 (Σ_A 用 paramSigma、漏掉 p* 重优化项、少除那个 6),
+    //                  这里立刻变红。容差见 REF_EXCESS_TOL。
+    double      refProdLimit;
+    double      refExcess;
 };
 
+// ★★ 这张表在 2026-09-19 被【显式重导】过一次(refLimit 一列)。规矩与来由:
+//
+// 【为什么必须动】力矩门的门限从 modelFormLimit(6,R,σ_sysM²,floor_M²) 换成了
+//     c0(α,R)·modelFormLimit(6,R,σ_sysM²,floor_M²) + κ(α,R)·e
+// (把那一刀从零分布的 99% 附近挪到它本来就该在的 99.99% 分位; 推导见 PayloadCalibration.cpp
+// 的 momentFormLimit 上面)。门限换了, refLimit 必然变 —— 这是本表自己的规矩要求的"变红",
+// 不是"顺手把数改成新的"。
+//
+// 【怎么重导的 —— 三块, 每一块都有独立出处, 没有一块是"读实现自己的输出"】
+//   (1) refProdLimit: 未变, 仍是 7.402061054 / 6.050025293 / 6.440865571 (本实现之前就钉住的
+//       金标, 复现过 5.1e-11 相对)。
+//   (2) e: 离线报告的 e(A) 列 (0.55771 / 0.48289 / 0.48102), 独立实现独立 harness 印出来的
+//       五位小数。本实现给出 0.557713 / 0.482887 / 0.481020, 五位小数逐位相同。
+//   (3) c0 / κ: 离线报告的标定表 (α=0.9999 档, 路线 2, R=1/3/5):
+//       c0 = (2.160, 1.590, 1.350),  κ = (4.589, 5.225, 4.841)。
+//   三个数代进去就是新的 refLimit (下面测试里【当场重算一遍】并与冻结值比 — 同一件事写两遍,
+//   一遍是冻结的字面量, 一遍由 (1)(2)(3) 现算, 两者必须一致)。
+//
+// 【没变的】refRatio 三列、refPass 三列、以及控制台那三列(记录)。refPass 保住 (过/拒/拒) 是
+// 本表的硬要求: 18.36 与 33.74 对新门限 10.51 / 11.02 仍然超 (余量 1.75× / 3.06×)。
 static const MomentCapture MG_CAPS[3] = {
     { "15:25", "calib_poses_2026-09-19_1525.txt",  9, 3,
-      6.973380689, 7.402061054, true,   5.359, 7.998, 206.606  },
+      6.973380689, 14.68333151, true,   5.359, 7.998, 206.606,
+      7.402061054, 0.55771 },
     { "15:30", "calib_poses_2026-09-19_1530.txt", 10, 5,
-      18.36001184, 6.050025293, false,  20.51,  6.321,  43.9034 },
+      18.36001184, 10.50518393, false,  20.51,  6.321,  43.9034,
+      6.050025293, 0.48289 },
     { "15:33", "calib_poses_2026-09-19_1533.txt", 10, 5,
-      33.74121269, 6.440865571, false,  61.22,  5.239,  18.2353 }
+      33.74121269, 11.02378921, false,  61.22,  5.239,  18.2353,
+      6.440865571, 0.48102 }
 };
+
+// refExcess 的容差: 离线报告印的是【五位小数】, 所以真值落在 ±5e-6 之内; 本实现在 FP 累加
+// 顺序上与离线探针有别 (~1e-12 相对), 两头加起来留 1e-4 足够宽。口径错一点 (比如 Σ_A 换成
+// paramSigma) 动的是 40% 以上 —— 这个容差拦得住。
+static const double REF_EXCESS_TOL = 1e-4;
+
+// ★ 力通道门限 —— 2026-09-19 重标定【之前】夹具重放出来的逐位值 (改动前那次运行的实测记录)。
+// 本任务只动力矩分支, 这三个数必须【逐位不变】; 下面的测试把这句话写成两条断言。
+static const double REF_FORCE_LIMIT[3] = { 4.164824768, 4.372012792, 2.924170995 };
 
 // 【容差】= 该量自身的 1e-6 (先按 1e-3 跑一遍读出全精度值, 再收紧到这里)。
 //   · 数值可复现性: 同一份夹具、同一个二进制走同一条确定性算术, 逐位一致; 换编译器/libm 的
@@ -2056,6 +2106,12 @@ static void test_moment_gate_real_captures_golden() {
         printf("         力矩失拟 ratio   = %.10g  门限 = %.10g  dof=%d  -> %s\n",
                fit.lackOfFitMomentRatio, fit.lackOfFitMomentLimit, fit.lackOfFitMomentDof,
                (fit.lackOfFitMomentRatio < fit.lackOfFitMomentLimit) ? "过" : "拒");
+        // 门限的两块: LIMIT_prod (未变) 与 e (新加的修正项)。两个都印全精度 —— 门限是这两个
+        // 数的函数, 判决是门限的函数, 所以"离门限多远"要能一路追到这里。
+        printf("         门限分解 c0·LIMIT_prod + κ·e:  LIMIT_prod = %.10g (未变),  e = %.10g\n",
+               PayloadCalibration::modelFormLimit(6.0, fit.repeatPairCount, fit.repeatSysM,
+                                                  fit.repeatFloorM),
+               fit.lackOfFitMomentExcess);
         printf("         尺子 σ_rep,M = (%.6g, %.6g, %.6g) N·m;  σ_rep,F = (%.6g, %.6g, %.6g) N\n",
                fit.repeatSigmaM[0], fit.repeatSigmaM[1], fit.repeatSigmaM[2],
                fit.repeatSigmaF[0], fit.repeatSigmaF[1], fit.repeatSigmaF[2]);
@@ -2081,6 +2137,211 @@ static void test_moment_gate_real_captures_golden() {
     }
     if (bad != 0) {
         std::cout << "FAIL (" << bad << " 项对不上金标 —— 这些数是实机的记录, 要查的是实现)" << std::endl;
+        g_failed++;
+        return;
+    }
+    PASS();
+}
+
+// -------------------------------------------------------------------------------------
+// 1b) ★ 2026-09-19 重标定的两条断言 (改动本身的两条, 与上面那张金标表互补)。
+//
+// 为什么单独写两条, 而不是塞进金标表: 它们断言的是【结构】而不是数值 ——
+//   · 力通道门限必须【逐位】等于未改动的那个函数算出来的东西 (改的是力矩那一支,
+//     如果谁顺手把力那一支也改了, 金标表动的是第三位小数, 而这里动的是"是不是同一个式子");
+//   · 力矩门限必须【等于 c0·LIMIT_prod + κ·e】, 而 e 必须等于【离线报告】的数 (外部锚)。
+// 两者一起才把"这次改动是什么"钉住: 一个是"没动什么", 一个是"动了什么、按哪个口径动的"。
+// -------------------------------------------------------------------------------------
+
+// 力通道门限的逐位不变: 三份夹具上,
+//   (1) 它 == modelFormLimit(chi2DofForce, R, repeatSysF, repeatFloorF) —— 同一个函数、同一组
+//       输入 ⇒ 必须【逐位】(==) 相同; 这一条与数值无关, 是"力那一条支路没被碰过"的证明;
+//   (2) 它 == 改动【之前】那一次运行的实测记录 (REF_FORCE_LIMIT), 容差 RTOL_MG。
+static void moment_gate_force_limit_is_bit_identical_to_the_old_formula() {
+    TEST(moment_gate_force_limit_is_bit_identical_to_the_old_formula);
+    int bad = 0;
+    mgMuteStderr();
+    for (int k = 0; k < 3; k++) {
+        MomentCaptureData d;
+        const char* used = nullptr;
+        if (!mgLoad(MG_CAPS[k].fixture, d, used)) {
+            mgUnmuteStderr();
+            std::cout << "    FAIL: 读不到夹具 " << MG_CAPS[k].fixture << std::endl;
+            g_failed++;
+            return;
+        }
+        PayloadCalibration::PoseNoise nz[MG_MAXN];
+        mgDeclareNoise(d, nz);
+        PayloadCalibration::RawFit fit;
+        PayloadCalibration::fitRaw(d.poses, d.F, d.M, d.n, fit, nz, d.reps, d.repCount,
+                                   PayloadCalibration::MODEL_FORM_REQUIRED);
+        // (1) 逐位 == 旧的式子
+        const double recomputed = PayloadCalibration::modelFormLimit(
+            (double)fit.chi2DofForce, fit.repeatPairCount, fit.repeatSysF, fit.repeatFloorF);
+        if (!(fit.chi2RepForceLimit == recomputed)) {
+            std::cout << "    !! [" << MG_CAPS[k].tag << "] 力门限不再逐位等于"
+                      << " modelFormLimit(dofF,R,sysF,floorF): " << fit.chi2RepForceLimit
+                      << " vs " << recomputed << " (差 "
+                      << (fit.chi2RepForceLimit - recomputed) << ")" << std::endl;
+            bad++;
+        }
+        // (2) == 改动【之前】那一次运行的实测记录 (这一列是记录下来的十进制值, 不是 double 的
+        //     精确二进制展开, 所以这里比的是"没有可观察的位变", 容差 = 记录值本身的 1e-6;
+        //     真正的逐位证明是上面那条 (1))。
+        nearRef(bad, "chi2RepForceLimit", fit.chi2RepForceLimit,
+                REF_FORCE_LIMIT[k], RTOL_MG * fabs(REF_FORCE_LIMIT[k]));
+        printf("[%s 力门限 %.10g (改动前 %.10g, 差 %.2e)] ", MG_CAPS[k].tag,
+               fit.chi2RepForceLimit, REF_FORCE_LIMIT[k],
+               fit.chi2RepForceLimit - REF_FORCE_LIMIT[k]);
+    }
+    mgUnmuteStderr();
+    if (bad != 0) {
+        std::cout << "FAIL (" << bad << " 项 —— 力通道的门限必须逐位不变, 本任务只动力矩分支)"
+                  << std::endl;
+        g_failed++;
+        return;
+    }
+    printf("[力门限逐位不变: 4.164824768 / 4.372012792 / 2.924170995, == 未改动的式子] ");
+    PASS();
+}
+
+// ★ 力矩门限的结构 × 口径:
+//   (a) 门限 == c0(R)·LIMIT_prod + κ(R)·e, 其中 LIMIT_prod 与 e 都是 fit 自己的字段
+//       —— 三个数一起重算一遍, 与冻结的 refLimit 是同一件事写两遍;
+//   (b) e == 离线报告印的五位小数 (外部锚, 见 MG_CAPS 的 refExcess);
+//   (c) R ∉ {1,3,5} 的处理: 区间内线性插值、区间外平夹 —— 三个标定点逐位落在表上。
+static const double MG_C0[3]  = { 2.160, 1.590, 1.350 };   // 离线报告 α=0.9999 / 路线 2
+static const double MG_KAP[3] = { 4.589, 5.225, 4.841 };
+
+static void mgExpectCoeffs(int R, double& c0, double& kap) {
+    if (R <= 1)      { c0 = MG_C0[0];  kap = MG_KAP[0]; }
+    else if (R >= 5) { c0 = MG_C0[2];  kap = MG_KAP[2]; }
+    else if (R < 3)  { const double t = (R - 1.0) / 2.0;
+                       c0 = MG_C0[0] + t * (MG_C0[1] - MG_C0[0]);
+                       kap = MG_KAP[0] + t * (MG_KAP[1] - MG_KAP[0]); }
+    else if (R > 3)  { const double t = (R - 3.0) / 2.0;
+                       c0 = MG_C0[1] + t * (MG_C0[2] - MG_C0[1]);
+                       kap = MG_KAP[1] + t * (MG_KAP[2] - MG_KAP[1]); }
+    else             { c0 = MG_C0[1];  kap = MG_KAP[1]; }
+}
+
+static void moment_gate_limit_is_c0_times_prod_plus_kappa_times_e() {
+    TEST(moment_gate_limit_is_c0_times_prod_plus_kappa_times_e);
+    int bad = 0;
+    mgMuteStderr();
+    for (int k = 0; k < 3; k++) {
+        MomentCaptureData d;
+        const char* used = nullptr;
+        if (!mgLoad(MG_CAPS[k].fixture, d, used)) {
+            mgUnmuteStderr();
+            std::cout << "    FAIL: 读不到夹具 " << MG_CAPS[k].fixture << std::endl;
+            g_failed++;
+            return;
+        }
+        PayloadCalibration::PoseNoise nz[MG_MAXN];
+        mgDeclareNoise(d, nz);
+        PayloadCalibration::RawFit fit;
+        PayloadCalibration::fitRaw(d.poses, d.F, d.M, d.n, fit, nz, d.reps, d.repCount,
+                                   PayloadCalibration::MODEL_FORM_REQUIRED);
+        const int R = fit.repeatPairCount;
+        double c0 = 1.0, kap = 0.0;
+        mgExpectCoeffs(R, c0, kap);
+        // (a) 门限 = c0·LIMIT_prod + κ·e
+        const double prod = PayloadCalibration::modelFormLimit(6.0, R, fit.repeatSysM,
+                                                              fit.repeatFloorM);
+        const double expect = c0 * prod + kap * fit.lackOfFitMomentExcess;
+        const double tol = 1e-12 * (fabs(expect) + 1e-300);
+        if (!(fabs(fit.lackOfFitMomentLimit - expect) <= tol)) {
+            std::cout << "    !! [" << MG_CAPS[k].tag << "] 门限 != c0·LIMIT_prod + κ·e: "
+                      << fit.lackOfFitMomentLimit << " vs " << expect << std::endl;
+            bad++;
+        }
+        // 冻结的 refLimit 与上面现算的必须是同一个数 (近似到 RTOL_MG)
+        nearRef(bad, "refLimit(重算)", expect, MG_CAPS[k].refLimit,
+                RTOL_MG * fabs(MG_CAPS[k].refLimit));
+        // (b) e == 离线报告 (外部锚)
+        if (!(fabs(fit.lackOfFitMomentExcess - MG_CAPS[k].refExcess) <= REF_EXCESS_TOL)) {
+            std::cout << "    !! [" << MG_CAPS[k].tag << "] e 与离线报告的 e(A) 对不上: 本实现 "
+                      << fit.lackOfFitMomentExcess << ", 离线报告 " << MG_CAPS[k].refExcess
+                      << " (容差 " << REF_EXCESS_TOL << ") —— 口径漂了 (Σ_A? p* 重优化? 那个 6?)"
+                      << std::endl;
+            bad++;
+        }
+        printf("[%s R=%d: e=%.6f (离线 %.5f), LIMIT_prod=%.6f, 门限=%.6f] ",
+               MG_CAPS[k].tag, R, fit.lackOfFitMomentExcess, MG_CAPS[k].refExcess,
+               prod, fit.lackOfFitMomentLimit);
+    }
+    mgUnmuteStderr();
+
+    // (c) R ∉ {1,3,5} 的规则: 黑箱把系数抠出来再断。
+    //     门限 = c0(R)·P(R) + κ(R)·e 对 e 是【线性】的 (斜率 κ, 截距 c0·P), 所以取 e=0 与
+    //     e=1 两点的值就能把 (c0, κ) 解出来 —— 不需要把内部函数暴露出来, 也不是"读实现自己的
+    //     输出": 断的是抠出来的数与【离线报告那张表 + 声明过的插值规则】的关系。
+    {
+        const double sys2[3]   = { 4.0e-8, 9.0e-8, 2.5e-7 };
+        const double floor2[3] = { 1.0e-8, 2.0e-8, 5.0e-8 };
+        double c0v[8], kav[8];
+        for (int R = 1; R <= 8; R++) {
+            const double at0 = PayloadCalibration::momentFormLimit(0.0, R, sys2, floor2);
+            const double at1 = PayloadCalibration::momentFormLimit(1.0, R, sys2, floor2);
+            const double P   = PayloadCalibration::modelFormLimit(6.0, R, sys2, floor2);
+            if (!(P > 0.0)) { std::cout << "    !! modelFormLimit 在 R=" << R << " 退化" << std::endl;
+                              bad++; continue; }
+            c0v[R - 1] = at0 / P;          // 截距 / P(R)
+            kav[R - 1] = at1 - at0;        // 斜率
+        }
+        const double rel = 1e-12;
+        // 三个标定点: 系数必须【恰是】离线报告表上的值
+        const int RTAB[3] = { 1, 3, 5 };
+        for (int t = 0; t < 3; t++) {
+            const int R = RTAB[t];
+            if (!(fabs(c0v[R - 1] - MG_C0[t]) <= rel * MG_C0[t])) {
+                std::cout << "    !! c0(R=" << R << ") = " << c0v[R - 1] << " != 表上的 "
+                          << MG_C0[t] << std::endl; bad++;
+            }
+            if (!(fabs(kav[R - 1] - MG_KAP[t]) <= rel * MG_KAP[t])) {
+                std::cout << "    !! kappa(R=" << R << ") = " << kav[R - 1] << " != 表上的 "
+                          << MG_KAP[t] << std::endl; bad++;
+            }
+        }
+        // R=2 (夹在 1..3) 与 R=4 (夹在 3..5): 线性插值 = 两端中点
+        if (!(fabs(c0v[1] - 0.5 * (MG_C0[0] + MG_C0[1])) <= rel * MG_C0[1])) {
+            std::cout << "    !! R=2 的 c0 不是 R=1..3 的中点" << std::endl; bad++;
+        }
+        if (!(fabs(kav[1] - 0.5 * (MG_KAP[0] + MG_KAP[1])) <= rel * MG_KAP[1])) {
+            std::cout << "    !! R=2 的 kappa 不是 R=1..3 的中点" << std::endl; bad++;
+        }
+        if (!(fabs(c0v[3] - 0.5 * (MG_C0[1] + MG_C0[2])) <= rel * MG_C0[1])) {
+            std::cout << "    !! R=4 的 c0 不是 R=3..5 的中点" << std::endl; bad++;
+        }
+        if (!(fabs(kav[3] - 0.5 * (MG_KAP[1] + MG_KAP[2])) <= rel * MG_KAP[1])) {
+            std::cout << "    !! R=4 的 kappa 不是 R=3..5 的中点" << std::endl; bad++;
+        }
+        // R = 6/7/8: 系数【平夹到 R=5】(不外推; 门限自己还是会随 P(R) 变, 变的是系数)。
+        // 比的是"同一个 double"到 1e-12 相对 —— 抠系数这一步本身有 1~2 ulp 的除法/减法噪声
+        // ((c0·P)/P 不保证逐位回到 c0), 所以这里不能用 ==。
+        for (int R = 6; R <= 8; R++) {
+            if (!(fabs(c0v[R - 1] - c0v[4]) <= rel * MG_C0[2])
+             || !(fabs(kav[R - 1] - kav[4]) <= rel * MG_KAP[2])) {
+                std::cout << "    !! R=" << R << " 的系数没有被平夹到 R=5 的系数 (c0 "
+                          << c0v[R - 1] << " vs " << c0v[4] << ", kappa "
+                          << kav[R - 1] << " vs " << kav[4] << ")" << std::endl;
+                bad++;
+            }
+        }
+        // 方位检查: 插值只能落在两端之间; c0 随 R 单调不增 (表上如此, 插值不会把它翻过来)
+        for (int R = 2; R <= 4; R++) {
+            const double lo = fmin(c0v[R - 2], c0v[R]), hi = fmax(c0v[R - 2], c0v[R]);
+            if (!(c0v[R - 1] >= lo - rel && c0v[R - 1] <= hi + rel)) {
+                std::cout << "    !! R=" << R << " 的 c0 插到区间外" << std::endl; bad++;
+            }
+        }
+        printf("[R 规则: 表点 (2.160/1.590/1.350, 4.589/5.225/4.841) 命中, R=2/4 取中点,"
+               " R>5 平夹] ");
+    }
+
+    if (bad != 0) {
+        std::cout << "FAIL (" << bad << " 项)" << std::endl;
         g_failed++;
         return;
     }
@@ -2295,9 +2556,24 @@ static void test_moment_gate_null_false_reject_rate() {
     // ---- 冻结的实测值 (确定性种子 -> 逐次可复现; 容差见下) ----
     // 力矩分支的冤枉率 (分子是【走到力矩门】的次数, 分母是走到的次数)。力分支一次都没拒
     // (唯一的例外: 15:25 的 B 里 2 次, 记在下面), 所以两条门的分母几乎相同。
-    // 容差 ±5 次 (占 2000 的 0.25 个百分点): 只容"边界上几次抽样翻转", 容不下任何真实改动
-    // —— 统计量/门限动一下, 这些计数动的是成百上千。
-    static const int REF_MOMENT_REJECT[3][2] = { { 127, 438 }, { 33, 90 }, { 20, 18 } };
+    //
+    // ★ 2026-09-19 【力矩那一列被显式重导过】(127/438/33/90/20/18 -> 1/68/0/9/0/1) —— 门限从
+    //   modelFormLimit 换成了 c0·LIMIT_prod + κ·e, 零假设的统计量【一个比特都没动】(它只由
+    //   数据与尺子决定), 只有切的那一刀挪了位。这就是"统计量/门限被改过就会是这样"那句注解
+    //   要求的变红方式; 重导的合法性由两件事保证:
+    //     · 门限本身有两个独立的锚 (新加的 moment_gate_limit_is_c0_times_prod_plus_kappa_times_e
+    //       把 e 钉在离线报告的五位小数上, 把门限钉在 c0·LIMIT_prod + κ·e 上; 金标表把门限的
+    //       数值钉在 1e-6);
+    //     · 零分布那一边一动不动: REF_REACHED 与上面印出来的零分布分位数 (均值/中位/99%/max)
+    //       全部逐位未变 —— 只有"被拒的次数"这一列动了。
+    //   力通道那一列 (0/2/0/0/0/0) 与 REF_REACHED 一样【逐位未变】: 本任务没碰力那一条支路。
+    //
+    // 【容差 ±5 次】: 只容"边界上几次抽样翻转"(换编译器/libm 时 FP 抖动会翻掉几个边缘抽样),
+    // 不是给实现改动留的余地。⚠ 重导之后力矩那一列变成了个位数, 所以这个 ±5 对【小格】而言
+    // 比从前松 (0 与 5 都在容差里)。紧的那道闸在别处: 门限的数值由 refLimit 与上面那条
+    // c0·LIMIT_prod + κ·e 的断言钉到 1e-6 / 1e-12, 统计量的分布由 (i)/(ii) 那条分界
+    // (零分布 max vs 实测, 两套噪声模型都判) 钉住。这里这一列因此是【粗验】。
+    static const int REF_MOMENT_REJECT[3][2] = { { 1, 68 }, { 0, 9 }, { 0, 1 } };
     static const int REF_FORCE_REJECT[3][2]  = { {   0,   2 }, {  0,  0 }, {  0,  0 } };
     static const int REF_REACHED[3][2]       = { {2000,1998 }, {2000,2000 }, {2000,2000 } };
     static const int MC_TOL = 5;
@@ -2417,6 +2693,11 @@ int main() {
     test_rawfit_rejects_too_few_poses();
     test_rawfit_rejects_degenerate_poses();
     test_rawfit_rejects_bad_mass_scale();
+    // ★ 2026-09-19 (b): 力矩门限重标定 —— 一条钉"没动什么"(力门限逐位不变), 一条钉
+    //   "动了什么"(门限 = c0·LIMIT_prod + κ·e, 且 e 与离线报告的五位小数相同)。
+    moment_gate_force_limit_is_bit_identical_to_the_old_formula();   // ★ 力那一条支路没被碰过
+    moment_gate_limit_is_c0_times_prod_plus_kappa_times_e();         // ★ 力矩门限的结构与口径
+
     // ★ 实机回归: 7 个真实姿态的【冻结夹具】重放, 逐项对金标 (夹具已入库, 本该必然跑;
     //   真 SKIP 了 = 检出缺文件)。
     // 【放在最后】: 它会把 [Payload] 的逐姿态残差表与"接受未检验模型形式"的告警打到

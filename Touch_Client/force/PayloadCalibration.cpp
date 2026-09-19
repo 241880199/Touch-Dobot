@@ -664,6 +664,7 @@ namespace PayloadCalibration {
         }
         out.chi2RepForceRatio = 0.0; out.chi2RepForceLimit = 0.0;
         out.lackOfFitMomentRatio = 0.0; out.lackOfFitMomentLimit = 0.0;
+        out.lackOfFitMomentExcess = 0.0;
         out.lackOfFitMomentDof = 0;
         for (int i = 0; i < RAW_POSE_REPORT_MAX; i++) {
             out.poseResidualF[i] = 0.0; out.poseResidualM[i] = 0.0;
@@ -731,6 +732,387 @@ namespace PayloadCalibration {
             }
         }
         return true;
+    }
+
+    // =================================================================================
+    // 力矩门的【重标定门限】(2026-09-19, 依据 Docs/superpowers/evidence/
+    // limit-recalibration-report.md 的离线标定 + 验证) —— 【只改力矩这一条支路】
+    //
+    // 病 (moment-gate-diagnosis-report.md): 上面的 modelFormLimit 假设零假设下统计量的
+    //   中心是 1。力矩通道【不是】这样 —— 它的模型复用的是【力通道估出来的】A, Â ≠ A 时
+    //   叉乘结构吃不掉那一份 (δA), 统计量因此系统性抬高: 实测中心 1.5~5.3, 而门限按中心 1
+    //   切, 于是门限落在零分布【身体上】(δA=0 那一半的 99% 分位附近, 不是 99.99%)。后果:
+    //   判决由建模细节的第一位小数决定 (联合估计 A 的四种合理权重口径给出 4.20/3.87/4.81/4.98
+    //   对门限 4.909)。实测冤枉率: R=3 约 7~23%, R=5 约 1~5%。
+    //
+    // 药: 把门限按【实测零分布的分位数】重新切, 并显式承认那一份系统性抬高:
+    //
+    //     limit(e, R; α) = c0(α,R) · LIMIT_prod(R)  +  κ(α,R) · e
+    //
+    //   LIMIT_prod(R) = modelFormLimit(6, R, σ_sysM², floor_M²)  —— 【上式原样保留】,
+    //                   一个字没改: 它仍然是"χ²(6,α)/6 × 尺子的自由度折扣", 只是现在当
+    //                   【基线项】用。力分支 (:1008) 也仍然只用它 —— 那条支路本任务没动。
+    //   e             = δA 引起的【期望】多余量, 以统计量自己的单位计 (无量纲) —— 见
+    //                   momentFormExcess。
+    //   R             = 池化进来的重复对数 (尺子的自由度)。
+    //
+    // c0 / κ 的出处 (离线标定, 只用【构造的零假设】, 没有用任何真实采集的通过/拒绝结果):
+    //   168 个 k 单元 × 20000 次 + 24 个锚点单元 × 40000 次 + 8 个验证格 × 200000 次
+    //   (约 7×10⁶ 次生产 fitRaw)。α = 0.9999 (= RAW_MODEL_FORM_ALPHA, 即目标假拒率 1e-4):
+    //       R = 1 : c0 = 2.160   κ = 4.589
+    //       R = 3 : c0 = 1.590   κ = 5.225
+    //       R = 5 : c0 = 1.350   κ = 4.841
+    //
+    // 【为什么 c0 > 1 —— 这不是"放宽", 是把那一刀挪到它本来就该在的分位上】: 锚点 (δA 精确
+    //   为 0, 每档约 32 万抽样) 实测 S/LIMIT_prod 的 99.99% 分位就是上面这三个数; 也就是说
+    //   现行门限本来就切在 δA=0 零分布的【99% 附近】(R=1 时 0.52~1.19 覆盖了 r99 到 r999),
+    //   而不是 99.99%。这与既有基线 (δA=0 假拒率 0.03%~1.08%, 而名义 α=0.01%) 是同一个事实。
+    //
+    // 离线验证 (本实现要复现的数, 口径必须逐字一致, 否则门限不可比):
+    //   · e 的验证: 168 个人造格上, 实测多余量 / e 的比值【中位 0.995】(范围 0.822~1.130),
+    //     设计点 (k=1) 那 24 格 0.977~1.023 ⇒ e 把 δA 引起的平均多余量复现到设计点 ~2%。
+    //   · 假拒率 (α=1e-4, 目标 0.01%, 分母 2e5): 四份未参与标定的真实采集 × 两套噪声模型
+    //     逐格 0.0040%~0.1602% (基线 1.19%~22.70%)。
+    //   · 三个已知错误模型【全部仍被拒】: 力矩非叉乘结构余量 37.18× → 11.25×
+    //     (11.25× 仍在模块头文件那条 ~10× 底线之上, 但已是三条里最薄的一条);
+    //     另两条走【力门】(本任务未改), 余量逐位不变 (295.53× / 33.17×)。
+    //
+    // ===== 五条限制 (要求写进代码, 不是可选) =====
+    //   (1) 【最大残余敏感项: c0 其实还随 r = σ_sysM²/floor_M² 变 ~2 倍, 这里并成了一个
+    //       保守值】。锚点每单元的 r9999 在噪声模型 A (r≈0.45) 与 B (r≈1.9) 之间差 1.9~2.6 倍,
+    //       而现行的 (1+r)/(1+shrink·r) 只解释了其中 1.6 倍。标定时把两个噪声模型【池化并取
+    //       上界】⇒ c0 偏向高 r 一侧, 对低 r 的格【偏保守】(四次真实采集的 r 落在 0.072~0.769,
+    //       都在低档, 所以实测假拒率系统性【低于】名义 α 也有这一份在里头)。收它需要更多 r 档
+    //       的锚点 (本轮只有 2 档) 与 c0(α,R,r) 的函数形式 —— 本轮只做到"量化它有多大 +
+    //       取保守上界"。方向是"更保守"(不会让错模型溜过去), 代价是门偏钝。
+    //   (2) 【α=1e-4 的 c0 只有 ~32 个次序统计量 ⇒ 标定噪声 ~18%】(32 万抽样的第 ~32 个)。
+    //       c0 直接进 c0·LIMIT_prod (≈ 门限的 40~60%), 所以门限带 ±10% 的标定噪声。这是
+    //       抽样次数的限制, 不是模型选择: 再跑 3 倍抽样可减半。α=0.99/0.999 两档的抽样厚得多
+    //       (~3200 / ~320 个), 那两列更可靠。
+    //   (3) 【整套标定是"夹具口径"】: calib_poses.txt / 夹具把力矩量化到 0.001 N·m、姿态到
+    //       0.1°, 于是 σ_rep,M 被量化抬粗 (15:25 夹具 0.000707 对控制台 0.0005) ⇒ 统计量被
+    //       压低。既有报告的结论是"完整精度下只会更强", 但【本轮没有重新验证那一条】——
+    //       换到更高精度的采集上, 这些 c0/κ 可能会动。
+    //   (4) 【力门未改也未验】: 力分支仍然只用 LIMIT_prod, 并且本任务只确认了三条错模型里
+    //       走力门那两条的余量与从前【逐位相同】。力矩这半边改了门限, 不等于力那半边被审过。
+    //   (5) 【R ∉ {1,3,5} 没有标定数据】: 表只有三个点, 见 momentFormLimit 的插值说明。
+    //       接口上支持 MAX_REPEATS = 8 对, 但 R = 2/4 是插值、R = 6/7/8 是平夹 ——
+    //       这两段【没有经过任何蒙特卡洛验证】。
+    //   (6) 另有一条必须与门限一起读的边界 (limit-recalibration-report.md §7.2): 这条门限
+    //       【不能单独用来判"叉乘模型形式对不对"】。18:49:55 被判 REJECT 是在【生产的 A_F】
+    //       上算的, 它拒的是"生产那个 Â 与叉乘结构不自洽 (超出申报噪声能解释的程度)",
+    //       而"Â 估得不好"与"模型缺结构"这条门【分不开】。
+    //
+    // 【口径上的两个刻意选择 —— 与离线报告逐字对齐】
+    //   · Σ_A 用【三明治】(JᵀJ)⁻¹JᵀΣJ(JᵀJ)⁻¹, Σ 取【逐姿态均值的噪声】(PoseNoise 的
+    //     varF/N)。【不用 paramSigma】—— 它把三通道池化 (s2F), 而实机力噪声三通道差 4~5 倍
+    //     (夹具 sdF1304 = 0.053/0.034/0.131 N), 逐通道偏差 ×2.47 / ×0.76, 拿它算 e 会放大 ~6 倍。
+    //   · Σ 里【不加 σ_sys,F²】(即离线报告的"噪声模型 A"口径)。离线报告把"加不加 σ_sys,F²"
+    //     列为头号敏感项 (它让 e 变 1.4~4 倍、门限动 ±40%), 真实介于两者之间; 这里取【不加】
+    //     的那一端, 因为 (i) 它只依赖【申报的逐姿态噪声】(与模型、与重力约定无关的量),
+    //     (ii) 它给出【更小】的 e ⇒ 门限更紧 ⇒ 是安全的那一侧,
+    //     (iii) 它同时是离线报告 §7.1/§7.2 用来读"生产会打印哪个数"的那一列
+    //     (18:49:55 的新门限 11.1571、错模型余量 11.25× 都是这一列)。
+    //     离线报告 §4 的 "B 行" (Σ 再加 σ_sys,F²) 是另一套口径, 验收时另列, 不作为生产行为。
+    // =================================================================================
+
+    // ---- 3×3 小工具 (只服务 e 的构造; 与拟合路径的线性代数无关, 不共用 solveNormal) ----
+    // 逐字对齐离线报告的构造, 这样 e 才与它可比 (口径不一致的门限不可比)。
+    static void excessMul3(const double* X, const double* Y, double* Z) {
+        for (int i = 0; i < 3; i++)
+            for (int j = 0; j < 3; j++) {
+                double s = 0.0;
+                for (int k = 0; k < 3; k++) s += X[i * 3 + k] * Y[k * 3 + j];
+                Z[i * 3 + j] = s;
+            }
+    }
+    static void excessCrossM(const double v[3], double M[9]) {   // [v]ₓ
+        M[0] = 0.0;    M[1] = -v[2];  M[2] = v[1];
+        M[3] = v[2];   M[4] = 0.0;    M[5] = -v[0];
+        M[6] = -v[1];  M[7] = v[0];   M[8] = 0.0;
+    }
+    // Gauss-Jordan 求逆 (n ≤ 12), 主元阈值取【相对的】(1e-13 × 最大对角元)。
+    static bool excessInvN(double* m, int n, double* out) {
+        double a[144], inv[144];
+        for (int i = 0; i < n * n; i++) { a[i] = m[i]; inv[i] = 0.0; }
+        for (int i = 0; i < n; i++) inv[i * n + i] = 1.0;
+        double scale = 0.0;
+        for (int i = 0; i < n; i++) if (fabs(a[i * n + i]) > scale) scale = fabs(a[i * n + i]);
+        if (!(scale > 0.0)) return false;
+        for (int col = 0; col < n; col++) {
+            int piv = col;
+            for (int r = col + 1; r < n; r++)
+                if (fabs(a[r * n + col]) > fabs(a[piv * n + col])) piv = r;
+            if (!(fabs(a[piv * n + col]) > 1e-13 * scale)) return false;
+            if (piv != col)
+                for (int c = 0; c < n; c++) {
+                    double t = a[col * n + c]; a[col * n + c] = a[piv * n + c]; a[piv * n + c] = t;
+                    t = inv[col * n + c]; inv[col * n + c] = inv[piv * n + c]; inv[piv * n + c] = t;
+                }
+            const double d = a[col * n + col];
+            for (int c = 0; c < n; c++) { a[col * n + c] /= d; inv[col * n + c] /= d; }
+            for (int r = 0; r < n; r++) {
+                if (r == col) continue;
+                const double f = a[r * n + col];
+                if (f == 0.0) continue;
+                for (int c = 0; c < n; c++) {
+                    a[r * n + c] -= f * a[col * n + c];
+                    inv[r * n + c] -= f * inv[col * n + c];
+                }
+            }
+        }
+        for (int i = 0; i < n * n; i++) out[i] = inv[i];
+        return true;
+    }
+    static bool excessInv3(const double* m, double* out) {
+        double tmp[9];
+        for (int i = 0; i < 9; i++) tmp[i] = m[i];
+        return excessInvN(tmp, 3, out);
+    }
+
+    // Σ_A = Cov(Â): 三明治 (JᵀJ)⁻¹ JᵀΣJ (JᵀJ)⁻¹, Σ = diag(逐姿态逐通道的【均值】噪声方差)。
+    // 布局: 参数 x = [b_F(3), A(9)] (A row-major); 输出是 A 那 9 个参数的 9×9 协方差块,
+    // 下标约定与 momentFormExcess 的基方向一致: 参数 (a,c) ↔ 下标 a*3+c。
+    // 返回 false = JᵀJ 数值上不可逆 (正常路径上不会: 力通道在调用前已经过了 cond 自检)。
+    static bool excessSigmaA(const double poses[][6], int n, const PoseNoise* noiseIn,
+                             double Sig[81]) {
+        const int P = 12;
+        double AtA[144] = {0}, JtSJ[144] = {0};
+        for (int i = 0; i < n; i++) {
+            double g[3];
+            gravityNoYaw(poses[i], g);
+            for (int a = 0; a < 3; a++) {
+                double row[12] = {0};
+                row[a] = 1.0;
+                for (int c = 0; c < 3; c++) row[3 + 3 * a + c] = g[c];
+                const double s2 = meanVar(noiseIn[i], a, false);
+                for (int c = 0; c < P; c++)
+                    for (int e = 0; e < P; e++) {
+                        AtA[c * P + e]  += row[c] * row[e];
+                        JtSJ[c * P + e] += s2 * row[c] * row[e];
+                    }
+            }
+        }
+        double Cinv[144], tmp[144];
+        if (!excessInvN(AtA, P, Cinv)) return false;
+        for (int i = 0; i < P; i++)
+            for (int j = 0; j < P; j++) {
+                double s = 0.0;
+                for (int k = 0; k < P; k++) s += Cinv[i * P + k] * JtSJ[k * P + j];
+                tmp[i * P + j] = s;
+            }
+        for (int i = 0; i < P; i++)
+            for (int j = 0; j < P; j++) {
+                double s = 0.0;
+                for (int k = 0; k < P; k++) s += tmp[i * P + k] * Cinv[k * P + j];
+                AtA[i * P + j] = s;
+            }
+        for (int i = 0; i < 81; i++) Sig[i] = 0.0;
+        for (int a = 0; a < 3; a++)
+            for (int c = 0; c < 3; c++)
+                for (int a2 = 0; a2 < 3; a2++)
+                    for (int c2 = 0; c2 < 3; c2++)
+                        Sig[(a * 3 + c) * 9 + (a2 * 3 + c2)] =
+                            AtA[(3 + a * 3 + c) * P + (3 + a2 * 3 + c2)];
+        return true;
+    }
+
+    // e = δA 引起的【期望】多余量, 以统计量自己的单位计 (无量纲)。
+    //
+    //   e = E_{Δ ~ N(0,Σ_A)} [ Σ_a Σ_i ((T − [p*]ₓ) z_i)_a² / σ_rep,M,a² ] / 6
+    //       T   = [c_s]ₓ · Δ · Â⁻¹                     (Δ = A_true − Â)
+    //       z_i = w_i − w̄ ,  w = Â·g_i
+    //       p*  = 受约束模型【重新优化】出来的 c' 修正量 (法方程 M p* = Σ_i [z_i]ₓ sym(T) z_i)
+    //            —— 【这一步是真做了的】: 提案原式只算 sym(T) 那一项, 实测偏大 1.49~2.97 倍
+    //            (倍率随 cond 单调: cond 207→2.97, cond 18→1.50), 不是"取哪一项"的问题
+    //            (moment-gate-dA-correction-report.md §2)。
+    //   物理意义: 力矩模型 M = b_M + c_s × (A·g) 复用的是【力通道估出来的】A; Â ≠ A 时叉乘
+    //   结构吃不掉那一份, 统计量因此系统性抬高 —— e 就是这一份抬高的期望值。
+    //
+    // 二次型核: Δ 对下面两个量都是线性的, 所以两者都是 Δ 的二次型, 可用 Σ_A 精确写成
+    //   9×9 的核 G_a / H_a (Δ 取 9 个基方向 e_pm e_pnᵀ 各算一遍, 9 次 3×3 求值):
+    //       G_a[p][q] = Σ_i (S_p z_i)_a (S_q z_i)_a       S_p = sym([c_s]ₓ e_pm e_pnᵀ Â⁻¹)
+    //       H_a[p][q] = Σ_i (q_p×z_i)_a (q_q×z_i)_a       q_p = 该基方向下的 p*(Δ)
+    //       predExactLoF = Σ_a [ quadr(G_a,Σ_A) − quadr(H_a,Σ_A) ] / σ_rep,M,a²
+    //   ⇒ e = predExactLoF / 6。这套机制在 moment-gate-dA-correction-report.md §2③ 里
+    //   与独立解析核交叉验证到 1.5e-16, 在真 Δ 上与实测 δA 多余量吻合到 0.997~1.004。
+    //
+    // 【自校 (口径自检的方式, 不是"看看像不像")】: 在冻结夹具 15:25 / 15:30 / 15:33 上,
+    //   本函数给出 0.55771 / 0.48289 / 0.48102 —— 与离线报告 (limit-recalibration-report.md
+    //   §1.3, 独立实现) 的 e(A) 列【五位小数逐位相同】。测试
+    //   moment_gate_excess_matches_offline_reference 把这三个数钉住了; 口径一旦漂移
+    //   (Σ_A 换成 paramSigma、漏掉 p* 重优化项、少除那个 6), 这里会立刻变红。
+    //
+    // 返回 0 = 算不出来 (A 或 M 不可逆 / 没有噪声估计 / 某通道尺子为 0) —— 那是"没有修正项",
+    //   门限退回 c0·LIMIT_prod (方向是【更紧】, 安全的那一侧)。
+    static double momentFormExcess(const double A[9], const double cS[3],
+                                   const double poses[][6], int n,
+                                   const PoseNoise* noiseIn, const double sigRepM[3]) {
+        if (!A || !cS || !poses || !sigRepM || !noiseIn || n <= 0) return 0.0;
+        bool anySigmaM = false;
+        for (int a = 0; a < 3; a++) if (sigRepM[a] > 0.0) anySigmaM = true;
+        if (!anySigmaM) return 0.0;
+
+        double Sig[81];
+        if (!excessSigmaA(poses, n, noiseIn, Sig)) return 0.0;
+
+        double B[9];
+        if (!excessInv3(A, B)) return 0.0;              // Â⁻¹
+        double Cx[9];
+        excessCrossM(cS, Cx);                           // [c_s]ₓ
+
+        // w̄: 先把三通道的均值攒出来 (z_i = w_i − w̄ 要用它)。
+        double wbar[3] = {0.0, 0.0, 0.0};
+        for (int i = 0; i < n; i++) {
+            double g[3];
+            gravityNoYaw(poses[i], g);
+            for (int a = 0; a < 3; a++)
+                wbar[a] += A[a * 3 + 0] * g[0] + A[a * 3 + 1] * g[1] + A[a * 3 + 2] * g[2];
+        }
+        for (int a = 0; a < 3; a++) wbar[a] /= (double)n;
+
+        // M = Σ_i (‖z_i‖²·I − z_i z_iᵀ)  (受约束模型重优化 c' 的那个法方程的左端)
+        double M[9] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+        for (int i = 0; i < n; i++) {
+            double g[3], z[3];
+            gravityNoYaw(poses[i], g);
+            for (int a = 0; a < 3; a++) {
+                const double w = A[a * 3 + 0] * g[0] + A[a * 3 + 1] * g[1] + A[a * 3 + 2] * g[2];
+                z[a] = w - wbar[a];
+            }
+            const double nz2 = z[0] * z[0] + z[1] * z[1] + z[2] * z[2];
+            for (int r = 0; r < 3; r++)
+                for (int c = 0; c < 3; c++) M[r * 3 + c] += ((r == c) ? nz2 : 0.0) - z[r] * z[c];
+        }
+        double Minv[9];
+        if (!excessInv3(M, Minv)) return 0.0;
+
+        // 9 个基方向的 p* (Δ = e_pm e_pnᵀ): rhs 逐方向先攒出来, 再一次性解 q = M⁻¹·rhs。
+        double qDir[9][3];
+        for (int p = 0; p < 9; p++) {
+            const int pm = p / 3, pn = p % 3;
+            double epB[9];
+            for (int c = 0; c < 3; c++)
+                for (int cc = 0; cc < 3; cc++) epB[c * 3 + cc] = (c == pm) ? B[pn * 3 + cc] : 0.0;
+            double T[9];
+            excessMul3(Cx, epB, T);
+            double S[9];
+            for (int r = 0; r < 3; r++)
+                for (int c = 0; c < 3; c++) S[r * 3 + c] = 0.5 * (T[r * 3 + c] + T[c * 3 + r]);
+            double rhs[3] = {0.0, 0.0, 0.0};
+            for (int i = 0; i < n; i++) {
+                double g[3], z[3];
+                gravityNoYaw(poses[i], g);
+                for (int a = 0; a < 3; a++) {
+                    const double w = A[a * 3 + 0] * g[0] + A[a * 3 + 1] * g[1] + A[a * 3 + 2] * g[2];
+                    z[a] = w - wbar[a];
+                }
+                double sz[3];
+                for (int a = 0; a < 3; a++)
+                    sz[a] = S[a * 3 + 0] * z[0] + S[a * 3 + 1] * z[1] + S[a * 3 + 2] * z[2];
+                rhs[0] += -z[2] * sz[1] + z[1] * sz[2];
+                rhs[1] +=  z[2] * sz[0] - z[0] * sz[2];
+                rhs[2] += -z[1] * sz[0] + z[0] * sz[1];
+            }
+            for (int a = 0; a < 3; a++)
+                qDir[p][a] = Minv[a * 3 + 0] * rhs[0] + Minv[a * 3 + 1] * rhs[1]
+                           + Minv[a * 3 + 2] * rhs[2];
+        }
+
+        // G / H: 逐姿态把 9 个方向的内积摊进 9×9 核。
+        double G[3][81], H[3][81];
+        for (int a = 0; a < 3; a++)
+            for (int i = 0; i < 81; i++) { G[a][i] = 0.0; H[a][i] = 0.0; }
+        for (int i = 0; i < n; i++) {
+            double g[3], z[3];
+            gravityNoYaw(poses[i], g);
+            for (int a = 0; a < 3; a++) {
+                const double w = A[a * 3 + 0] * g[0] + A[a * 3 + 1] * g[1] + A[a * 3 + 2] * g[2];
+                z[a] = w - wbar[a];
+            }
+            double sv[9][3], qv[9][3];
+            for (int p = 0; p < 9; p++) {
+                const int pm = p / 3, pn = p % 3;
+                double epB[9];
+                for (int c = 0; c < 3; c++)
+                    for (int cc = 0; cc < 3; cc++)
+                        epB[c * 3 + cc] = (c == pm) ? B[pn * 3 + cc] : 0.0;
+                double T[9];
+                excessMul3(Cx, epB, T);
+                double S[9];
+                for (int r = 0; r < 3; r++)
+                    for (int c = 0; c < 3; c++) S[r * 3 + c] = 0.5 * (T[r * 3 + c] + T[c * 3 + r]);
+                for (int a = 0; a < 3; a++)
+                    sv[p][a] = S[a * 3 + 0] * z[0] + S[a * 3 + 1] * z[1] + S[a * 3 + 2] * z[2];
+                qv[p][0] = qDir[p][1] * z[2] - qDir[p][2] * z[1];
+                qv[p][1] = qDir[p][2] * z[0] - qDir[p][0] * z[2];
+                qv[p][2] = qDir[p][0] * z[1] - qDir[p][1] * z[0];
+            }
+            for (int a = 0; a < 3; a++)
+                for (int p = 0; p < 9; p++)
+                    for (int q = 0; q < 9; q++) {
+                        G[a][p * 9 + q] += sv[p][a] * sv[q][a];
+                        H[a][p * 9 + q] += qv[p][a] * qv[q][a];
+                    }
+        }
+
+        double tot = 0.0;
+        for (int a = 0; a < 3; a++) {
+            if (!(sigRepM[a] > 0.0)) continue;
+            double qG = 0.0, qH = 0.0;
+            for (int p = 0; p < 9; p++)
+                for (int q = 0; q < 9; q++) {
+                    qG += G[a][p * 9 + q] * Sig[p * 9 + q];
+                    qH += H[a][p * 9 + q] * Sig[p * 9 + q];
+                }
+            tot += (qG - qH) / (sigRepM[a] * sigRepM[a]);
+        }
+        return tot / 6.0;
+    }
+
+    // ---- 重标定门限的系数 (见上面那一段说明): c0(α,R) / κ(α,R), α = 0.9999 ----
+    //   R = 1 : c0 = 2.160, κ = 4.589
+    //   R = 3 : c0 = 1.590, κ = 5.225
+    //   R = 5 : c0 = 1.350, κ = 4.841
+    //
+    // 【R ∉ {1,3,5} 怎么办】: 标定表只有这三个点, 而接口允许 MAX_REPEATS = 8 对。取
+    // 【区间内线性插值, 区间外平夹】:
+    //   · 三个标定过的点【逐位精确】——离线报告 §4/§5 的数全在 R∈{1,3,5} 上, 这条路
+    //     保证它们可复现 (插值若在整数点上取到别的值, 那些数就不再可比)。
+    //   · 区间内线性插值而不是阶梯: 操作员"补一对"让 R 加 1, 阶梯会让门限【跳变】——
+    //     一个由采集者动作而非数据决定的不连续。插值让门限随 R 连续。
+    //   · 区间外【平夹到最近的一个标定点】, 不外推: 表外没有数据。外推一个随 R 单调下降的
+    //     c0 只会把门放到【证据之外】(安全方向是错的那一侧), 所以宁可停在 R=5 那一档。
+    //   · ⚠ 诚实的一条: c0(R) 序列 (2.160, 1.590, 1.350) 是【凸】的, 其弦在区间内部【高于】
+    //     未知的真值 ⇒ R=2/4 的插值方向偏【松】; κ(R) 本身非单调 (R=3 有个包), 插值在
+    //     那里只是内插而没有机理支撑。两处都是【没有验证过的外推】, 记在上面限制 (5) 里;
+    //     标定值自己就带 ~18% 噪声, 这个误差在同一个量级。
+    static void momentFormCoeffs(int repPairs, double& c0, double& kappa) {
+        static const double C0[3]  = { 2.160, 1.590, 1.350 };
+        static const double KAP[3] = { 4.589, 5.225, 4.841 };
+        const double x = (double)repPairs;
+        // 【三个标定点走单独一支】: 插值式 (C0[0] + t·(C0[1]−C0[0])) 在 t=1 时只是【数学上】
+        // 等于 C0[1], 浮点上会差 1~2 ulp —— 而 R=3 是离线报告里四份真实采集中的一份 (15:25)
+        // 用的档, 那个数必须逐位对得上, 所以把标定点从插值里摘出来。
+        if (x <= 1.0)      { c0 = C0[0];  kappa = KAP[0]; }
+        else if (x >= 5.0) { c0 = C0[2];  kappa = KAP[2]; }
+        else if (x < 3.0) {
+            const double t = (x - 1.0) / 2.0;
+            c0 = C0[0] + t * (C0[1] - C0[0]);
+            kappa = KAP[0] + t * (KAP[1] - KAP[0]);
+        } else if (x > 3.0) {
+            const double t = (x - 3.0) / 2.0;
+            c0 = C0[1] + t * (C0[2] - C0[1]);
+            kappa = KAP[1] + t * (KAP[2] - KAP[1]);
+        } else { c0 = C0[1]; kappa = KAP[1]; }
+    }
+
+    double momentFormLimit(double excess, int repPairs,
+                           const double sys2[3], const double floor2[3]) {
+        double c0 = 1.0, kappa = 0.0;
+        momentFormCoeffs(repPairs, c0, kappa);
+        if (!(excess > 0.0)) excess = 0.0;             // 算不出来 = 没有修正项, 退回基线 (更紧)
+        return c0 * modelFormLimit(6.0, repPairs, sys2, floor2) + kappa * excess;
     }
 
     bool fitRawLinear(const double posesIn[][6], const double forces[][3],
@@ -1000,8 +1382,14 @@ namespace PayloadCalibration {
                 }
                 out.lackOfFitMomentRatio = loF / 6.0;
                 out.lackOfFitMomentDof   = 6;
-                out.lackOfFitMomentLimit = modelFormLimit(6.0, out.repeatPairCount,
-                                                          out.repeatSysM, out.repeatFloorM);
+                // 门限 = c0·LIMIT_prod + κ·e —— 【只有这一处支路改了】。力分支 (:下面那个
+                // chi2RepForceLimit) 仍然只用 modelFormLimit, 一个字没动 (见 momentFormLimit
+                // 上面那一段的说明与限制 (4))。
+                out.lackOfFitMomentExcess = momentFormExcess(A, cS, posesIn, n,
+                                                             noiseIn, out.repeatSigmaM);
+                out.lackOfFitMomentLimit = momentFormLimit(out.lackOfFitMomentExcess,
+                                                           out.repeatPairCount,
+                                                           out.repeatSysM, out.repeatFloorM);
             }
         }
         out.chi2RepForceLimit = (out.chi2DofForce > 0)

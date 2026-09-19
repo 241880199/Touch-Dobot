@@ -229,7 +229,18 @@ namespace PayloadCalibration {
         double chi2RepForceRatio;    // Σ(e/σ_rep)² / dofF —— 【判据】; 正确模型下期望 ≈ 1
         double chi2RepForceLimit;    // 上面那个判据的门限 (推导见 .cpp 的 modelFormLimit)
         double lackOfFitMomentRatio; // Σ_a(ssM_a − ssFree_a)/σ_rep,M,a² / 6 —— 【判据】
-        double lackOfFitMomentLimit; // 同上, 门限
+        // 上面的统计量【在零假设下不是以 1 为中心】: 力矩模型复用力通道估出来的 A, Â ≠ A
+        // 时叉乘结构吃不掉那一份, 统计量系统性抬高 (实测中心 1.5~5.3)。所以门限是
+        //     lackOfFitMomentLimit = c0(α,R)·modelFormLimit(6,R,σ_sysM²,floor_M²) + κ(α,R)·e
+        // 而不是 modelFormLimit 自己 (力那一条仍然只用 modelFormLimit, 未改)。
+        // 推导、c0/κ 的出处、五条限制、以及离线验证都在 .cpp 的 momentFormLimit 上面。
+        double lackOfFitMomentLimit; // 同上, 门限 (重标定过的, 见上)
+        // e = δA 引起的【期望】多余量, 以统计量自己的单位计 (无量纲) —— 就是上式里那一项。
+        // 由 fit 自己的 A / cS / repeatSigmaM 与三明治 Σ_A (从 PoseNoise 建, 【不是】paramSigma)
+        // 经 G/H 二次型算出; 算不出来 (矩阵不可逆等) 时报 0, 门限随之退回 c0·modelFormLimit。
+        // 【口径自校】三份冻结夹具上它给出 0.55771 / 0.48289 / 0.48102, 与离线报告
+        // (Docs/superpowers/evidence/limit-recalibration-report.md §1.3) 五位小数逐位相同。
+        double lackOfFitMomentExcess;
         int    lackOfFitMomentDof;   // 6, 或 0 = 做不了 (方程数不足以养自由模型)
 
         // ===== 逐姿态残差 (spec §3 表格第 4 行) —— 分得清"一个坏姿态"与"整体形式错" =====
@@ -299,6 +310,19 @@ namespace PayloadCalibration {
     //     【为什么不做】: 改成逐通道打折属于重构统计量, 本任务明令不动。
     double modelFormLimit(double dofFit, int repPairs,
                           const double sys2[3], const double floor2[3]);
+
+    // 【力矩分支的门限】(2026-09-19 重标定) —— 拒绝 ⇔ lackOfFitMomentRatio > momentFormLimit(...)。
+    //   excess   = e = δA 引起的期望多余量, 以统计量自己的单位计 (见 RawFit::lackOfFitMomentExcess;
+    //              <= 0 当作 0 处理 = 没有修正项, 门限退回 c0·modelFormLimit)
+    //   repPairs = 重复对数 R (尺子的自由度)。标定表只有 R = 1/3/5 三个点, 其余
+    //              【区间内线性插值, 区间外平夹】—— 理由与它没被验证的那两段都写在
+    //              .cpp 的 momentFormCoeffs 上面。
+    // 门限 = c0(α,R)·modelFormLimit(6,R,σ_sysM²,floor_M²) + κ(α,R)·e, α = RAW_MODEL_FORM_ALPHA。
+    // 【只有力矩这一条支路用它】: 力分支仍然只用 modelFormLimit, 一个字没改。
+    // 公开它, 与 modelFormLimit 同一个理由: 让测试与诊断能【独立复算】门限
+    // (测试里 moment_gate_limit_is_c0_times_prod_plus_kappa_times_e 就是这么钉的)。
+    double momentFormLimit(double excess, int repPairs,
+                           const double sys2[3], const double floor2[3]);
 
     // 纯函数: 线性拟合并做【物理自检】。返回 false = 拒绝给出参数 (原因打到 stderr),
     // 此时 out 里是【未经自检】的线性解, 只供诊断打印, 调用方不得采用。
