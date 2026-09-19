@@ -321,23 +321,24 @@ namespace BiasCheck {
     // 一行一次尝试, 便于 grep 与表格工具直接读。
     //
     // 表头只在【文件不存在或为空】时写。不要用进程内 static 标志位: 那个标志每次启动都是
-    // false, 会让 fopen 用 "w" 把历次记录整个截断 —— 与"可追溯"的立意在字面上相反。
+    // false, 会截断历次记录 —— 与"可追溯"的立意在字面上相反。打开方式也必须是 "a+",
+    // 见下面的说明。
     //
     // r 可为 nullptr: 求解【之前】就返回的出口 (已上锁 / 姿态数不足 / 正在采样) 没有 Result,
     // 此时各数值列记 "-"。
     static void logCalibAttempt(const char* outcome, const PayloadCalibration::Result* r)
     {
-        // fileFor 返回 static 缓冲, 调用方必须立即拷贝 (头文件已注明) —— 下面要 fopen 两次。
+        // fileFor 返回 static 缓冲, 调用方必须立即拷贝 (头文件已注明)。
         char path[512];
         snprintf(path, sizeof(path), "%s", CalibStore::fileFor("calib_log.txt"));
 
-        bool needHeader = true;
-        if (FILE* existing = fopen(path, "r")) {
-            needHeader = (fgetc(existing) == EOF);   // 存在但为空 → 仍然写表头
-            fclose(existing);
-        }
-        FILE* f = fopen(path, needHeader ? "w" : "a");
+        // 【只用 "a+" 打开, 永不截断。】不要先试 "r" 再决定 "w"/"a": "读不了"(被占用/权限)
+        // 与"不存在"会被混为一谈, 而前者会走 "w" 把历次记录整个删掉 —— 毁的正是这个文件
+        // 存在的理由。(Task 11 复审 Minor #50)
+        FILE* f = fopen(path, "a+");
         if (!f) return;
+        bool needHeader = true;
+        if (fseek(f, 0, SEEK_END) == 0) needHeader = (ftell(f) == 0);
         if (needHeader) {
             fprintf(f, "# 负载标定尝试记录 (每次按 's' 一行)\n");
             fprintf(f, "# time | poses | rmsF_N | rmsM_Nm | psi_deg | dm_kg | mass_kg"
@@ -358,9 +359,9 @@ namespace BiasCheck {
         }
         char ts[24];
         const std::time_t now = std::time(nullptr);
-        const std::tm* lt = std::localtime(&now);
-        if (lt) strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", lt);
-        else    strcpy(ts, "?");
+        std::tm tmInfo;
+        localtime_s(&tmInfo, &now);
+        strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", &tmInfo);
 
         fprintf(f, "%s | %s | %s | %s | %s | %s | %s | %s | %s\n",
                 ts, sPoses, sRmsF, sRmsM, sPsi, sDm, sMass, sComZ, outcome);
