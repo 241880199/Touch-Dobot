@@ -157,6 +157,75 @@ static void test_block_wraps_a_real_console_screen_verbatim() {
     PASS();
 }
 
+// ===== 块尾 d 判据: 【两种符号约定都算】, 且不给单一的 ✓/✗ =====
+//
+// c_s 的 z 向【符号】不由数据决定 (模型在 g → −g, A → −A, c_s → −c_s 下逐字不变), 所以同一个
+// cz_robot 与 |c_s_z| 给出两个 d, 而 (0, 31.5) mm 对它们的结论可以【相反】。用 run-001 的实数:
+//   同向  68.700 − 55.556 =  13.144 mm  -> 在范围内
+//   反向  68.700 + 55.556 = 124.256 mm  -> 在范围外
+// 从前这里只打一支, 而且块里的句子说"若实际反向, d 会整体变负" —— 那是算错的 (反向给的是另一个
+// 正数), 会把操作员引到错的地方。这个用例把"两支都打 + 不给单一结论"钉住。
+static void test_payload_d_section_prints_both_sign_conventions() {
+    TEST(payload_d_section_prints_both_sign_conventions);
+    // run-001 的自报值, 全精度 (取自那次上机的 30004 帧读数)
+    const double czRobot = 68.699999999999989;   // @1176 CenterZ (mm)
+    const double csZ     = 55.556000000000004;   // c_s 沿工具轴的分量 (mm)
+    const std::string s = SessionReport::payloadDSection(czRobot, csZ, true);
+
+    // 【两支的数值都在】—— 用 %.17g 逐字比 (文档是给人复算的, 精度不许缩水)
+    char buf[128];
+    snprintf(buf, sizeof(buf), "%.17g", czRobot - csZ); CHECK(s.find(buf) != std::string::npos);
+    snprintf(buf, sizeof(buf), "%.17g", czRobot + csZ); CHECK(s.find(buf) != std::string::npos);
+
+    // 两个结论【都】照实写出来 (这一对数是相反的), 并明说两种约定未必一致
+    CHECK(s.find("【在范围内】") != std::string::npos);
+    CHECK(s.find("【在范围外】") != std::string::npos);
+    CHECK(s.find("【相反】") != std::string::npos);
+
+    // 【不许有一个能被单独引用的 ✓】: 一个勾都不给, 而且明写要【成对读】、不给单一的勾
+    CHECK(s.find("✓") == std::string::npos);
+    CHECK(s.find("✗") == std::string::npos);
+    CHECK(s.find("本块【不给单一的勾】") != std::string::npos);
+    CHECK(s.find("成对读") != std::string::npos);
+
+    // 【那句算错的话不许再出现】: 反向约定给的是另一个正数, 不是负数
+    CHECK(s.find("变负") == std::string::npos);
+    snprintf(buf, sizeof(buf), "%.17g", czRobot + csZ);
+    CHECK(czRobot + csZ > 0.0);            // 事实层面: 反向那一支是正的 (run-001: 124.256 mm)
+    CHECK(s.find(buf) != std::string::npos);
+
+    // 缺 cz_robot 的那一支由 main.cpp 自己写 (【不可用】), 不在这里 —— 这里只管有数的时候。
+    PASS();
+}
+
+// ===== 尾节对【被拒的那一次】要限定措辞 (I2) =====
+// 被 chi2RepForceRatio 拒掉的那一次, 块里几行之前印着"模型形式检验: 【拒绝】"。尾节若无条件地
+// 说一句"测量原点落在传感器体内", 同一个自描述块里就有了两个互相打架的结论 —— 正是本项目
+// 最忌讳的"安静地错"。修法: 【限定】, 而不是删掉 (判据本身是信息, 该给的还得给)。
+static void test_payload_d_section_qualifies_a_rejected_fit() {
+    TEST(payload_d_section_qualifies_a_rejected_fit);
+    const double czRobot = 68.699999999999989;
+    const double csZ     = 55.556000000000004;
+
+    const std::string rejected = SessionReport::payloadDSection(czRobot, csZ, false);
+    CHECK(rejected.find("本次 fitRaw 为【拒绝】") != std::string::npos);
+    CHECK(rejected.find("该结论不成立") != std::string::npos);
+    CHECK(rejected.find("仅描述 d 的算术位置") != std::string::npos);
+    // 【限定, 不是删掉】: 两支的数与两个结论一个都不能少
+    CHECK(rejected.find("【在范围内】") != std::string::npos);
+    CHECK(rejected.find("【在范围外】") != std::string::npos);
+    CHECK(rejected.find("本块【不给单一的勾】") != std::string::npos);
+
+    // fitOk = true 的那一次【不许】拖这条尾巴 (它会在块里自己打自己的脸)
+    const std::string accepted = SessionReport::payloadDSection(czRobot, csZ, true);
+    CHECK(accepted.find("该结论不成立") == std::string::npos);
+    CHECK(accepted.find("【拒绝】") == std::string::npos);
+    // 除了那一句限定, 两者逐字相同 —— 说明限定是【加上去的】, 没有动任何数
+    CHECK(accepted.size() < rejected.size());
+    CHECK(rejected.compare(0, accepted.size(), accepted) == 0);
+    PASS();
+}
+
 // ===== 追加写: 已有内容一个字节不动, 永不截断 =====
 
 static void test_append_preserves_existing_bytes() {
@@ -331,6 +400,53 @@ static void test_stderr_capture_begin_failure_leaves_stderr_alone() {
     PASS();
 }
 
+// 【收不回来时【不删】那个临时文件】—— 字节不能被销毁, 只能被"没记上"
+// 危险的那一条路: Begin 成功 (fd 2 已指向临时文件) 之后, End 里那一句 fflush(stderr) 会把
+// stderr 缓冲里的字节【推进文件】, 然后 _open 读那一步失败。此刻盘上那份是这些字节【唯一的
+// 副本】(它们已经没进控制台了, 因为窗口里 fd 2 不指向控制台)。从前这里照样 _unlink —— 于是
+// 控制台与文档块两头都没有, 只留一句"收回来了但读不出来"。
+// 这里把读那一步弄失败: 给一个【相对】路径, Begin 之后换掉工作目录, 那一句 _open 就找不到它了。
+// (这是真的在跑那条失败路径, 不是在旁边断言一句"理论上会留": 断言里连文件内容都比了。)
+static void test_stderr_capture_end_read_failure_keeps_the_bytes() {
+    TEST(stderr_capture_end_read_failure_keeps_the_bytes);
+    const std::string rel = tmpPath("cap_fail.tmp");    // 相对路径: 靠改工作目录把它弄失效
+    _unlink(rel.c_str());
+
+    CHECK(SessionReport::stderrCaptureBegin(rel.c_str()));
+    std::fprintf(stderr, "END-READ-FAIL 这一段收不回来, 但必须留在盘上\n");
+    std::fflush(stderr);
+
+    char cwd[1024];
+    CHECK(_getcwd(cwd, sizeof(cwd)) != nullptr);
+    CHECK(_chdir(TMPDIR) == 0);                         // 于是 rel 这个相对路径解析到别处去了
+
+    std::string out;
+    const bool ok = SessionReport::stderrCaptureEnd(&out);
+    CHECK(_chdir(cwd) == 0);                            // 先换回来 (后面哪个断言红了也不留在里面)
+
+    CHECK(!ok);                                         // 读不出来 -> 照实返回 false
+    CHECK(out.empty());
+    CHECK(!SessionReport::stderrCaptureActive());       // 还原是无条件的
+
+    const std::string leftover = SessionReport::stderrCaptureLeftoverPath();
+    CHECK(leftover == rel);                             // 路径报得出来 (调用方要写进块尾)
+    CHECK(_access(leftover.c_str(), 0) == 0);           // 【文件还在】—— 没被删掉
+    // 【字节一个不少】: 这一段此刻只有这一个副本, 读回来就是"可捡回"的证明
+    CHECK(readWholeFile(leftover) == "END-READ-FAIL 这一段收不回来, 但必须留在盘上\n");
+
+    // 【还原了没有】: 再开一个窗口, 收到的只能是新字节 (串台 = 上一次的字节又收一遍)
+    std::string out2;
+    CHECK(SessionReport::stderrCaptureBegin(tmpPath("cap7.tmp").c_str()));
+    std::fprintf(stderr, "新的窗口\n");
+    std::fflush(stderr);
+    CHECK(SessionReport::stderrCaptureEnd(&out2));
+    CHECK(out2 == "新的窗口\n");
+    CHECK(SessionReport::stderrCaptureLeftoverPath()[0] == '\0');  // 成功的那次不留东西
+
+    _unlink(leftover.c_str());                          // 收尾 (它本该留在盘上; 测试自己清)
+    PASS();
+}
+
 int main() {
     std::printf("=== SessionReport Tests ===\n");
     _mkdir(TMPDIR);
@@ -340,12 +456,15 @@ int main() {
     test_block_closes_fence_when_body_has_no_trailing_newline();
     test_block_trailer_goes_after_the_fence();
     test_block_wraps_a_real_console_screen_verbatim();
+    test_payload_d_section_prints_both_sign_conventions();
+    test_payload_d_section_qualifies_a_rejected_fit();
     test_append_preserves_existing_bytes();
     test_append_creates_missing_file();
     test_append_on_unreadable_file_reports_failure_without_truncating();
     test_solve_path_prints_only_through_the_sink();
     test_stderr_capture_roundtrip_and_restore();
     test_stderr_capture_begin_failure_leaves_stderr_alone();
+    test_stderr_capture_end_read_failure_keeps_the_bytes();
 
     // 清理 (文件先删, 目录才删得掉)
     _unlink(tmpPath("append.md").c_str());

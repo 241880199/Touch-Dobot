@@ -904,6 +904,15 @@ namespace BiasCheck {
             diagEmit(s, (size_t)n);
             return n;
         }
+        // 【std::endl 的冲刷要在, 别以为它自己就有】: std::ostream::flush() 走到这里 ——
+        // 不覆盖 sync() 的话它是个空操作 (这个 streambuf 没有别的缓冲, 编译器不会报错),
+        // 而 C 的 stdout 在全缓冲时 (被重定向/接进管道时就是这样) 会一直憋到进程退出:
+        // 一次跑到一半被结束的求解, 尾巴就没了。从前这里是 std::cout << ... << std::endl,
+        // 那时 sync_with_stdio 默认 true, endl 确实会冲刷 —— 换成 diagOut() 之后这行为得自己接回来。
+        // 只是把字节推出去, 【不改任何字节】。
+        int sync() override {
+            return fflush(stdout) == 0 ? 0 : -1;
+        }
     };
     static std::ostream& diagOut() {
         static DiagBuf buf;
@@ -953,7 +962,12 @@ namespace BiasCheck {
     //
     // haveCs = 本次有没有解出 c_s (线性层就没解出来时它是全 0, 不携带信息);
     // parity = sign(det A) (0 = 没解出来), 只用于把"手系"这件事一起记下来。
-    static std::string diagPayloadSection(bool haveCs, const double cS[3], double parity) {
+    // fitOk  = 本次 fitRaw 的判决。它【只用来限定 d 那一节的措辞】: 被拒的那一次块里几行之前
+    //          才印着"【拒绝】", 尾节再说一句无条件的"测量原点落在传感器体内"就是同一个块里
+    //          两个互相打架的结论。传进来的是判决的【结果】, 这里改不了它, 也不参与任何判决
+    //          (brief 硬要求 6) —— 它只决定那一行后面【要不要跟一句"该结论不成立"】。
+    static std::string diagPayloadSection(bool haveCs, const double cS[3], double parity,
+                                          bool fitOk) {
         std::string s = "\n### 机械臂自报负载 (30004 帧)\n";
 
         bool echoOk = false;
@@ -997,21 +1011,17 @@ namespace BiasCheck {
                  "  横向分量 c_s_x / c_s_y = %.17g / %.17g mm。parity = sign(det A) = %.17g\n",
                  cz, cx, cy, parity);
         s += buf;
-        s += "  ⚠ 该系 z 轴与工具轴的【指向】是否同向, 数据定不了 (A 是自由 3×3, 反射由 parity\n"
-             "    报出; 实机上解出 parity = −1)。上面按【同向】取分量 —— 若实际反向, d 会整体\n"
-             "    变负, 那正是下面这条判据要暴露的。\n";
+        s += "  ⚠ 该系 z 轴与工具轴的【指向】是否同向, 数据定不了: 模型在 g → −g, A → −A,\n"
+             "    c_s → −c_s 下逐字不变 (A 是自由 3×3, 反射由 parity 报出; 实机上解出\n"
+             "    parity = −1), 所以【只有 |c_s_z| 是数据定的, 符号不是】。反向的约定把\n"
+             "    cz_robot − c_s_z 变成 cz_robot + |c_s_z| —— 那是【另一个正数】, 不是变负\n"
+             "    (run-001: 68.700 + 55.556 = 124.256 mm)。所以下面 d 的两支都算、都打。\n";
 
         if (echoOk) {
-            const double d = ctr[2] - cz;
-            snprintf(buf, sizeof(buf),
-                     "- d = cz_robot − c_s_z = %.17g − %.17g = %.17g mm\n", ctr[2], cz, d);
-            s += buf;
-            if (d > 0.0 && d < 31.5) {
-                s += "  → 判据 0 < d < 31.5 mm: 【在范围内】✓ 测量原点落在传感器体内\n";
-            } else {
-                s += "  → 判据 0 < d < 31.5 mm: 【在范围外】✗ —— 哪里错了, 不得下发"
-                     " (设计 §6b)\n";
-            }
+            // 【两个约定都算】—— 见 SessionReport::payloadDSection 顶上那段说明:
+            // c_s_z 的符号不由数据决定, 而它决定 d 落在判据哪一边。这里【不给单一的 ✓/✗】。
+            // fitOk 只决定要不要在结论后面跟一句"该结论不成立" (被拒的那一次), 不参与判决。
+            s += SessionReport::payloadDSection(ctr[2], cz, fitOk);
         } else {
             s += "- d = cz_robot − c_s_z = 【不可用】: 缺 cz_robot (@1176 CenterZ)\n"
                  "  ⇒ 判据 0 < d < 31.5 mm 【无法判定】\n";
@@ -1066,7 +1076,9 @@ namespace BiasCheck {
             snprintf(outcome, sizeof(outcome), "REJECTED too_few_poses (count=%d)", count);
             logCalibAttempt(outcome, nullptr, count);
             // 被拒的这一次也要留下块 (正文就是上面那一行) —— 没有 c_s, 尾节照实报"不可用"。
-            diagFinish(diagPayloadSection(false, nullptr, 0.0));
+            // 末一个实参是 fitRaw 的判决: 这里【fitRaw 根本没跑】, 传 false 是照实说
+            // (而且 haveCs = false 时 d 那一节整段不打印, 它在这里不产生任何字)。
+            diagFinish(diagPayloadSection(false, nullptr, 0.0, false));
             return;
         }
         // 姿态数够了就落盘 —— 【在任何拒绝判据之前】: 被拒绝的那几次同样要留下数据,
@@ -1121,7 +1133,8 @@ namespace BiasCheck {
             diagOut() << "[BIAS] 正在采样, 稍后再求解" << std::endl;
             logCalibAttempt("REJECTED sampling_in_progress", nullptr, count);
             // 同上: 被拒的这一次也留下块 (正文 = 尺子那几行 + 这一行), 尾节照实报"不可用"。
-            diagFinish(diagPayloadSection(false, nullptr, 0.0));
+            // 同上, fitRaw 没跑 -> 末一个实参 false (haveCs = false, d 那一节不打印)。
+            diagFinish(diagPayloadSection(false, nullptr, 0.0, false));
             return;
         }
 
@@ -1200,9 +1213,18 @@ namespace BiasCheck {
                                                       repeatCount,
                                                       PayloadCalibration::MODEL_FORM_REQUIRED);
         if (errCapOk) {
-            if (!SessionReport::stderrCaptureEnd(&errText))
+            if (!SessionReport::stderrCaptureEnd(&errText)) {
+                // 【照实说, 而且要说出字节在哪儿】: 收不回来时临时文件【故意不删】(见
+                // SessionReport.h 的 stderrCaptureEnd) —— 上面那几行字节此刻【只有这一个副本】,
+                // 它们既没进控制台 (fd 2 在窗口里就指着这个文件) 也没进本块。所以路径必须报出来,
+                // 否则这一段就是被安静地销毁了 —— 本项目最不能接受的一类失败。
                 s_diagWarn = "      ⚠ 库打到 stderr 的那一段 (逐姿态残差表 / [Payload] 自检行)"
-                             "收回来了但读不出来 —— 这一段没能并入本块。\n";
+                             "收回来了但读不出来 —— 这一段没能并入本块。\n"
+                             "        原始字节没有丢, 它们还在临时文件里: ";
+                s_diagWarn += SessionReport::stderrCaptureLeftoverPath();
+                s_diagWarn += "\n        (读不出来时【不删】临时文件 —— 删了就连副本都没了;"
+                              " 这一段没进控制台, 也没进本块。)\n";
+            }
             diagEmit(errText.data(), errText.size());
         } else {
             s_diagWarn = "      ⚠ 库打到 stderr 的那一段 (逐姿态残差表 / [Payload] 自检行)"
@@ -1426,9 +1448,12 @@ namespace BiasCheck {
         // ===== 落文档块 (本次按 's' 的出口) =====
         // 【在这里, 不在判决之前】: 正文攒的是上面整屏的字节, 判决 (fitOk) 与它的逐条说明都在
         // 正文里; 块尾那一节 (机械臂自报负载 / d = cz_robot − c_s / (0, 31.5) mm 判据) 只是
-        // 【信息】, 它读不到 fitOk, 也改不了任何判决 (brief 硬要求 6)。
+        // 【信息】, 它改不了任何判决 (brief 硬要求 6)。
         // 被拒的那几次同样走到这里 —— 那正是"为什么被拒"最需要留在文档里的场合。
-        diagFinish(diagPayloadSection(decompOk, fit.cS, d.parity));
+        // fitOk 一并传下去【只用来限定尾节 d 那一行的措辞】: 被拒的那一次块里几行之前才印着
+        // "模型形式检验: 【拒绝】", 尾节不能再无条件地说"测量原点落在传感器体内" —— 那是一个
+        // 自描述块里两个互相打架的结论。判决、阈值、模型一个字节没动。
+        diagFinish(diagPayloadSection(decompOk, fit.cS, d.parity, fitOk));
 
 #if 0  // ================= 旧模型 (psi 扫描 + 残余量 dm/dp) —— 已停用 =================
        // 【保留不删, 待 Task 11 统一移除】。停用理由 (两行版的 spec §1): 这个模型预设了

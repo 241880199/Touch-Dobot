@@ -64,6 +64,66 @@ namespace SessionReport {
         return s;
     }
 
+    // ===== 块尾的 d 判据那一节 (纯函数) =====
+    //
+    // d = cz_robot − c_s_z 与判据 (0, 31.5) mm (设计 §6b: 测量原点必须落在传感器体内)。
+    //
+    // 【为什么两个值都要打】: c_s 的 z 向【符号】不是数据定得下来的。模型
+    //     F = b_F + A·g,   M = b_M + c_s × (A·g)
+    // 在 g → −g, A → −A, c_s → −c_s 下【逐字不变】, 而 A 是自由 3×3 (含反射): parity =
+    // sign(det A) 只把"含不含反射"报出来, 说不了哪一支是物理的。同一份 cz_robot 与 |c_s_z|
+    // 于是给出两个 d, 而 (0, 31.5) mm 对这两个数的结论可以【相反】—— run-001 的实数就是
+    // 13.144 mm (在范围内) 与 124.256 mm (在范围外)。
+    // ⚠ 反向的约定【不是】"把 d 整体变负": cz_robot = +68.7 时它是 68.700 + 55.556 =
+    //   124.256 mm (另一个正数)。说成变负会让操作员去错的地方找问题。
+    //
+    // 【所以这一节【不】给单一的 ✓/✗】: 上面两行谁也不是"通过", 读者拿不到一个能被单独引用的
+    // 结论 —— 符号约定未定之前, 这里给不出"通过"。
+    //
+    // fitOk = 本次 fitRaw 的判决。为 false 时【照样打, 但把结论限定住】: 被拒的那一次, 块里
+    // 几行之前才印着"模型形式检验 (fitRaw 的判决): 【拒绝】", 尾节再无条件地说一句"测量原点
+    // 落在传感器体内", 就是同一个自描述块里两个互相打架的结论 (本项目最忌讳的"安静地错")。
+    // 判据、阈值、任何判决路径一个字节没改 —— 加上的只是"这一行读不读得成立"的前提。
+    //
+    // ⚠ 这一节【只是信息】: 不参与任何接受/拒绝, 也不改变 fitRaw 的判决 (brief 硬要求 6)。
+    //   两个约定的【成对读法】属于上机操作单 §6 闸1 (它管的是"要不要下发 cz", 不是本次
+    //   拟合成不成) —— 这里只把两个数摆出来, 不替读者裁定。
+    inline std::string payloadDSection(double czRobotMm, double csZmm, bool fitOk) {
+        // 约定一 = c_s_z 与工具轴【同向】 (改动前的实现取的就是这一支); 约定二 = 反向。
+        const double dSameDir = czRobotMm - csZmm;
+        const double dFlipDir = czRobotMm + csZmm;
+        const bool sameIn  = (dSameDir > 0.0 && dSameDir < 31.5);
+        const bool flipIn  = (dFlipDir > 0.0 && dFlipDir < 31.5);
+
+        std::string s;
+        char buf[512];
+        snprintf(buf, sizeof(buf),
+                 "- d = cz_robot − c_s_z, 【两种符号约定都算】= %.17g / %.17g mm\n",
+                 dSameDir, dFlipDir);
+        s += buf;
+        s += "  (c_s 的 z 向【符号】不由数据决定: 模型在 g → −g, A → −A, c_s → −c_s 下逐字不变,\n"
+             "   反向的约定给的是另一个数、不是负数。所以这里【不】给单一的勾/叉 —— 整节一个\n"
+             "   勾都不出现, 谁也别想从块里摘出一个【通过】去。)\n";
+        snprintf(buf, sizeof(buf),
+                 "    约定一【同向, c_s_z = +%.17g mm】: d = %.17g − %.17g = %.17g mm  %s\n",
+                 csZmm, czRobotMm, csZmm, dSameDir, sameIn ? "【在范围内】" : "【在范围外】");
+        s += buf;
+        snprintf(buf, sizeof(buf),
+                 "    约定二【反向, c_s_z = −%.17g mm】: d = %.17g + %.17g = %.17g mm  %s\n",
+                 csZmm, czRobotMm, csZmm, dFlipDir, flipIn ? "【在范围内】" : "【在范围外】");
+        s += buf;
+        s += "  → 判据 0 < d < 31.5 mm: 两种约定下结论";
+        s += (sameIn == flipIn) ? "相同" : "【相反】";
+        // 【不给单一的勾, 也不替读者裁定】: 这一条是【成对】读的 (上机操作单 §6 闸1:
+        // 恰好一支落在内 = 那就是正确的符号约定 / 两支都在内 = 符号定不了, 不许猜 /
+        // 两支都在外 = 哪里错了)。本块只把两个数摆出来, 谁也别想从块里摘走一支当"通过"。
+        s += " —— 这一条要【成对读】(用法见上机操作单 §6 闸1): 本块【不给单一的勾】,\n"
+             "    别只认其中一支。\n";
+        if (!fitOk)
+            s += "    （本行仅描述 d 的算术位置; 本次 fitRaw 为【拒绝】, 该结论不成立）\n";
+        return s;
+    }
+
     // ===== 追加写 =====
 
     // 把一段字节【追加】到文件末尾。返回 false = 没写成 (打不开 / 写不全), 调用方据此照实报。
@@ -107,12 +167,20 @@ namespace SessionReport {
     struct StderrCaptureState {
         int  savedFd = -1;
         char tmpPath[512] = {0};
+        // 上一次 End 【读不出来】因而【故意没删】的那个临时文件 (空 = 没有)。
+        // 它不是"没搭起窗口"(那时根本没有文件), 而是"字节已经写进去了、只是收不回来" ——
+        // 那些字节的【唯一副本】就在这个文件里, 所以调用方必须把路径报出去 (见 stderrCaptureEnd)。
+        char leftoverPath[512] = {0};
     };
     inline StderrCaptureState& stderrCaptureState() {
         static StderrCaptureState s;
         return s;
     }
     inline bool stderrCaptureActive() { return stderrCaptureState().savedFd >= 0; }
+
+    // 上一次 stderrCaptureEnd 读失败时留下来的临时文件路径 (空串 = 没有)。
+    // 只在那个失败的场合非空; 报给操作员, 那一段诊断还能被人从盘上捡回来。
+    inline const char* stderrCaptureLeftoverPath() { return stderrCaptureState().leftoverPath; }
 
     // 开始捕获。tmpPath = 临时文件路径 (调用方给; 捕获结束后会被删掉)。
     inline bool stderrCaptureBegin(const char* tmpPath) {
@@ -142,6 +210,12 @@ namespace SessionReport {
 
     // 结束捕获: 【无条件还原 fd 2】, 并把窗口内收到的字节追加到 out (out 可为 nullptr = 只要还原)。
     // 返回 false = 窗口里收到了内容但读不出来 (调用方据此照实报)。
+    //
+    // 【读不出来时【不删】那个临时文件】: 上面那一句 fflush(stderr) 已经把 stderr 缓冲里的字节
+    // 推进临时文件了 (fd 2 在窗口里就指着它), 所以此刻盘上那份【是这些字节唯一的副本】——
+    // 删掉它 = 控制台与文档块两头都没有了, 只留下一句"收回来了但读不出来", 正是本文件开头说的
+    // "本项目最不能接受的一类失败"。留着, 把路径交给 stderrCaptureLeftoverPath(), 至少还能捡回来。
+    // (读成功时照旧删掉: 字节已经在 out 里了。)
     inline bool stderrCaptureEnd(std::string* out) {
         StderrCaptureState& st = stderrCaptureState();
         if (st.savedFd < 0) return false;
@@ -152,10 +226,13 @@ namespace SessionReport {
         _dup2(saved, 2);                                   // ← 先还原, 后面无论如何都在窗口外了
         _close(saved);
 
+        st.leftoverPath[0] = '\0';
         bool ok = true;
         const int fd = _open(st.tmpPath, _O_RDONLY | _O_BINARY);
         if (fd < 0) {
             ok = false;
+            // 【不删】, 只把路径记下来 —— 见上面那段注释。
+            snprintf(st.leftoverPath, sizeof(st.leftoverPath), "%s", st.tmpPath);
         } else {
             char buf[4096];
             int n;
@@ -163,8 +240,8 @@ namespace SessionReport {
                 if (out) out->append(buf, (size_t)n);
             }
             _close(fd);
+            _unlink(st.tmpPath);
         }
-        _unlink(st.tmpPath);
         st.tmpPath[0] = '\0';
         return ok;
 #else

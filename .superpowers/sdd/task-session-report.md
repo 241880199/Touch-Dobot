@@ -279,3 +279,167 @@ IDENTICAL: transformation is exactly the two substitutions
 "只追加、永不截断"只由打开方式决定, 与二进制与否无关 —— 所以 `"a+"` 一个字没动,
 只把流翻译关掉。`append_creates_missing_file` 里有一条
 `CHECK(readWholeFile(path).find('\r') == std::string::npos)` 把这件事钉住。
+
+---
+
+# 8. 复审修复 (I1 / I2 / I3 + M3) — 2026-09-19
+
+复审对 `beb5bcc` 提了三条 Important 与一条便宜的。三条都改在本报告所述的同一个特性里,
+**没有动** `logCalibAttempt` / `logPoseData` / 两份日志格式 / `#if 0` 块 / 任何阈值 / 模型 /
+任何判决路径, **也没有改控制台输出的任何一个字节**(下面 §8-5 核过)。
+
+## 8-1 I1 — 尾节的判决不是数据定的, 而块里那句"反向会变负"算错了
+
+**改成: 两种符号约定都打, 且整节一个勾都不出现。**
+
+- 新增纯函数 `SessionReport::payloadDSection(cz_robot, c_s_z, fitOk)` (`core/SessionReport.h:67-124`,
+  定义在 `89`): 约定一 (同向) `d = cz − c_s_z`, 约定二 (反向) `d = cz + c_s_z`, 两个数都用
+  `%.17g` 打全精度, 各自照实跟一句 `【在范围内】` / `【在范围外】`, 再给一行
+  `→ 判据 0 < d < 31.5 mm: 两种约定下结论【相同】/【相反】 —— 这一条要【成对读】… 本块【不给单一的勾】`。
+- **一个 ✓/✗ 都不再出现**(连解释那句话里也不用这个字符), 所以 `grep ✓` 在这一节里必然为空 ——
+  读者无法从块里摘出一个能被单独引用的"通过"。
+- 算错的那句删了。`main.cpp:1014-1018` 现在是: 模型在 `g → −g, A → −A, c_s → −c_s` 下逐字不变,
+  所以**只有 `|c_s_z|` 是数据定的、符号不是**; 反向的约定把 `cz − c_s_z` 变成 `cz + |c_s_z|` ——
+  **那是另一个正数, 不是变负**(run-001: `68.700 + 55.556 = 124.256 mm`)。
+- ⚠ **与 `aad9733` 的对齐**(评审在本修复进行中落的文档提交): 它把这条判据明确定义成
+  **符号判别器**(上机操作单 §6 闸1: 恰好一支落在内 = 那就是正确的符号约定 / 两支都在内 =
+  符号定不了, 不许猜 / 两支都在外 = 哪里错了, 不得下发), 并写明"实现侧由修复提交一并改为
+  打印两种约定"。所以这一节的收尾句写成 **"要成对读 (用法见上机操作单 §6 闸1); 本块不给单一的
+  勾, 别只认其中一支"** —— 而不是我自己先写过的"不得据它下发": 后者在"恰好一支落在内"那一格
+  与刚改过的操作单**直接打架**, 而那条规矩管的是"要不要下发 cz"(Task 9 的事), 不属于本节
+  "信息"的范畴。这里只把两个数摆出来, 不替读者裁定。
+- run-001 的实数在这个实现下的实际输出(`fitOk = true`, 见 §8-7 的核验方式):
+
+  ```
+  - d = cz_robot − c_s_z, 【两种符号约定都算】= 13.143999999999984 / 124.256 mm
+    (c_s 的 z 向【符号】不由数据决定: 模型在 g → −g, A → −A, c_s → −c_s 下逐字不变,
+     反向的约定给的是另一个数、不是负数。所以这里【不】给单一的勾/叉 —— 整节一个
+     勾都不出现, 谁也别想从块里摘出一个【通过】去。)
+      约定一【同向, c_s_z = +55.556000000000004 mm】: d = 68.699999999999989 − 55.556000000000004 = 13.143999999999984 mm  【在范围内】
+      约定二【反向, c_s_z = −55.556000000000004 mm】: d = 68.699999999999989 + 55.556000000000004 = 124.256 mm  【在范围外】
+    → 判据 0 < d < 31.5 mm: 两种约定下结论【相反】 —— 这一条要【成对读】(用法见上机操作单 §6 闸1): 本块【不给单一的勾】,
+      别只认其中一支。
+  ```
+
+  (这一段是用一个临时程序真的调 `payloadDSection` 打出来的, 编译产物落在系统 temp 里、已删,
+  没有落进仓库; `13.143999999999984` 与评审文字里的 `13.143999999999996` 差在浮点字面量的
+  取值上, 不是算法差异。)
+
+## 8-2 I2 — 尾节不再对被拒的那一次下无条件结论
+
+`diagPayloadSection` 增加第四个形参 `fitOk` (`main.cpp:969`), 三个出口都传 (`1081` / `1137` /
+`1456`)。它**只被读来决定尾节那一行后面要不要跟一句限定**, `fitRaw` 的入参、阈值、判决与
+`logCalibAttempt` 的 outcome 一个字节没动。
+
+- `fitOk == false` 时, 两种约定的两行照旧全打(限定, 不是删掉), 末尾多一行:
+  `（本行仅描述 d 的算术位置; 本次 fitRaw 为【拒绝】, 该结论不成立）`
+- `fitOk == true` 时这一行不出现 —— 两个输出**逐字前缀相同**(测试把这条钉住了), 说明加的是尾巴,
+  不是改了数。
+- 两个提前 return(姿态数不足 / 正在采样)传 `false`: 那里 `fitRaw` 根本没跑, 且 `haveCs = false`
+  时 d 那一节整段不打印, 所以它在那里不产生任何字(`main.cpp:1081` / `1137` 的注释里写明了)。
+
+## 8-3 I3 — 收不回来的 stderr **不再被删掉**, 而且报告里那句错误陈述已纠正
+
+`SessionReport::stderrCaptureEnd` (`core/SessionReport.h:213`): `_open` 读失败时**不再 `_unlink`**,
+改成把路径记进 `st.leftoverPath` (`167`), 由 `stderrCaptureLeftoverPath()` (`177`) 交给调用方。
+理由写在函数顶上: 那一句 `fflush(stderr)` 已经把字节推进文件了, 此刻盘上那份是**唯一的副本**
+(它们没进控制台, 因为窗口里 fd 2 指着这个文件), 删掉就是"安静地销毁诊断"。
+读成功时照旧删(字节已经在 `out` 里)。
+
+调用方 (`main.cpp:1216-1226`) 的警告因此**带上了路径**: `原始字节没有丢, 它们还在临时文件里: <路径>`。
+
+§2-3 那句 **"失败时 (临时文件开不了 / 读不出来) stderr 一个字节都不动" 是错的**, 本次纠正:
+它对 `Begin` 失败成立, 对 `End` 读失败**不成立**(那时字节已经不在 stderr 上了)。正确说法是:
+**窗口没搭起来时 stderr 一个字节都不动; 窗口搭起来之后字节就已经离开 stderr 了, 所以收不回来时
+保证的是"副本还在盘上、路径报得出来", 不是"原地没动"。** (§2-3 那一段正文本次未改 ——
+以本节为准。)
+
+## 8-4 M3 — `DiagBuf::sync()`
+
+`main.cpp:913-915` 覆盖 `sync()` 为 `fflush(stdout)`, 把 `std::endl` 的冲刷原样接回来
+(从前是 `std::cout`, `sync_with_stdio` 默认 true 所以 endl 确实冲刷)。**只把字节推出去, 不改字节。**
+
+## 8-5 验收命令与输出
+
+```
+$ cmd.exe //c "D:\Projects\Touch\Touch_Client\build.bat"
+  Touch_Client.vcxproj -> D:\Projects\Touch\Touch_Client\x64\Release\Touch_Client.exe
+  Build OK.
+  DLLs copied.
+  Models copied.
+```
+(与上次一样只有原有两条告警: `MSB8004` 与 `glut.h`/`minwindef.h` 的 `CALLBACK` 重定义;
+没有出现 LNK1168 = 构建期间 `Touch_Client.exe` 没有在跑; 全程没有启动也没有结束任何进程。)
+
+```
+$ cmd.exe //c "D:\Projects\Touch\Touch_Client\tests\build_session_report_test.bat"   -> BUILD_EXIT=0
+$ tests\test_session_report.exe
+  block_header_format... PASS
+  block_wraps_body_verbatim... PASS
+  block_closes_fence_when_body_has_no_trailing_newline... PASS
+  block_trailer_goes_after_the_fence... PASS
+  block_wraps_a_real_console_screen_verbatim... PASS
+  payload_d_section_prints_both_sign_conventions... PASS      ← 新增 (I1)
+  payload_d_section_qualifies_a_rejected_fit... PASS          ← 新增 (I2)
+  append_preserves_existing_bytes... PASS
+  append_creates_missing_file... PASS
+  append_on_unreadable_file_reports_failure_without_truncating... PASS
+  solve_path_prints_only_through_the_sink... PASS
+  stderr_capture_roundtrip_and_restore... PASS
+  stderr_capture_begin_failure_leaves_stderr_alone... PASS
+  stderr_capture_end_read_failure_keeps_the_bytes... PASS     ← 新增 (I3)
+14 passed, 0 failed
+```
+
+```
+$ cmd.exe //c "D:\Projects\Touch\Touch_Client\tests\build_payload_calibration_test.bat"  -> BUILD_EXIT=0
+$ tests\test_payload_calibration.exe | tail -2
+45 passed, 0 failed
+```
+
+新增的三个用例 (`tests/test_session_report.cpp`):
+
+| 用例 | 钉住什么 |
+|---|---|
+| `payload_d_section_prints_both_sign_conventions` | 两支的 `%.17g` 数都在; 两个结论都打; 出现 `【相反】`; **`✓`/`✗` 一个都没有**; 有 `本块【不给单一的勾】` 与 `成对读`; **`变负` 字样不许再出现**(而 `cz + c_s > 0` 这一事实层面也断言了) |
+| `payload_d_section_qualifies_a_rejected_fit` | `fitOk=false` 有 `本次 fitRaw 为【拒绝】`/`该结论不成立`; `fitOk=true` 没有; 且**前者逐字是后者的前缀**(限定是加上去的, 数一个没改) |
+| `stderr_capture_end_read_failure_keeps_the_bytes` | 真跑那条失败路径(见下) |
+
+## 8-6 I3 的"不删"是怎么验的 (不是只读代码)
+
+`stderrCaptureEnd` 里那个 `_open` 失败不好造: 文件刚由我们自己创建, 而且 Windows 没有
+"只写不可读"的属性。做法是**让它解析不到** —— 给 `Begin` 一个**相对路径**, 窗口开着的时候
+`_chdir` 进临时目录, 那一句 `_open(相对路径)` 就落到别处去了:
+
+1. `stderrCaptureBegin("test_session_report_tmp/cap_fail.tmp")` 成功 (fd 2 已指向它);
+2. 往里写一行 `END-READ-FAIL 这一段收不回来, 但必须留在盘上` 并 `fflush(stderr)`
+   —— **这一句就是把字节从 stderr 推到文件里的那一步**;
+3. `_chdir(TMPDIR)`, 于是那个相对路径解析成 `…/test_session_report_tmp/test_session_report_tmp/…`
+   → `_open` 返回 −1;
+4. `stderrCaptureEnd` 返回 **false**(照实);
+5. 断言: `stderrCaptureLeftoverPath() == 那个相对路径`; **`_access(path) == 0` (文件还在)**;
+   **读回来的内容逐字等于第 2 步写进去的那一行**(⇒ 字节真的可捡回, 不是"也许还在");
+   fd 2 已还原(再开一个窗口只收到新字节, 且那次成功后 leftover 为空串);
+6. 测试自己把那个文件删掉(它本该留在盘上, 只有测试知道它是测试的产物)。
+
+这条用例在**改之前会是红的**(旧代码 `_unlink` 掉了文件, `_access` 与内容断言都会失败)。
+
+## 8-7 同源 (硬要求 1) 有没有被这次修改碰到
+
+没有。`diagEmit` / `diagEmitf` 一个字节没动 (`main.cpp:875` / `883`), 求解路径上的打印调用一处未改;
+本次改的三处(**尾节字符串**、`DiagBuf::sync()`、**stderr 捕获收尾**)里, 尾节本来就不上屏
+(`diagFinish` 只写文件), `sync()` 只影响冲刷时机、不产生字节, 而 stderr 那一半只改了
+"读失败之后删不删临时文件"与警告措辞。**控制台的字节输出与改动前逐字相同**,
+所以"文档块正文 = 屏幕那一屏"这条仍然成立。
+
+## 8-8 仍然没能验证的 (照实说)
+
+1. 与 §6-1 相同: **端到端那条验收(真机跑一次 `'s'`)仍然没做** —— 没有设备, 也不许动
+   正在运行的 `Touch_Client.exe`。I1/I2 这次是**纯函数单测**覆盖的(尾节是纯函数, 这一步现在
+   真的能测了); 但 `fitOk` 从 `fitRaw` **接到** `diagPayloadSection` 的那一根线, 仍然只有读代码。
+2. I1 的"两个约定到底哪一个对"**本次仍然没有解决**, 只是把这件事摆到台面上(这正是 I1 要的):
+   块里现在给不出"通过", 判据本身也仍然不参与任何判决。
+3. `payloadDSection` 里 `cz + c_s` 的那一支, **没有任何真实数据**证明机械臂报的 c_s 会落在哪一支;
+   run-001 的数只是"两种约定下结论相反"的一个实例。
+4. M3 的效果(`stdout` 被重定向时不憋到进程退出)**没有实测** —— 手上没有一个把 stdout 接进
+   文件的运行实例; 断言只到"覆盖了 `sync()`, 且它调 `fflush(stdout)`"。
