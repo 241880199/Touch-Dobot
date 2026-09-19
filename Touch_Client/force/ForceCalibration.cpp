@@ -478,6 +478,40 @@ bool loadFromFile(const char* path, double A[9], double biasForce[3],
                         "文件被截断或改坏了。本地补偿【未启用】。\n");
         return false;
     }
+
+    // ===== 数值可用性 (2026-09-19): 四个字段都校验, A 另判退化 =====
+    // 为什么【必须】在这里拒: 上面那条 version 判据只看版本号, 于是 "version 3 但 A 全 0"
+    // 的文件会被【安静地接受】—— 补偿后的读数依旧是个 N, 不报错, 只是整个重力项没有,
+    // 读数随姿态漂。这正是本项目栽过多次的"安静地错"。
+    // 判据与 setCalibration 共用 ForceCompensation::modelUsable (同一条判据只许有一份)。
+    char why[192];
+    if (!ForceCompensation::modelUsable(A, why, sizeof(why))) {
+        fprintf(stderr,
+                "[Force] !! force_calib.json 【模型不可用, 已拒绝装载】: %s\n"
+                "[Force] !!   文件: %s\n"
+                "[Force] !!   本地补偿【未启用】(不是\"静默地当作没标定\": 运行时闸门会以\n"
+                "[Force] !!   ERR_FORCE_UNCALIBRATED 每帧拒绝传数据, 并在 stderr 上说出这一段原因)。\n"
+                "[Force] !!   处理: 按 'm' 采多姿态 (至少 4 个朝向不同的姿态) -> 's' 解出 A, 再 'z' 调零存盘。\n",
+                why, (path && *path) ? path : "(null)");
+        return false;
+    }
+    for (int i = 0; i < 3; i++) {
+        if (!std::isfinite(biasForce[i])) {
+            fprintf(stderr, "[Force] !! force_calib.json 的 bias_force_n[%d] 不是有限数 —— "
+                            "本地补偿【未启用】。\n", i);
+            return false;
+        }
+        if (!std::isfinite(biasTorque[i])) {
+            fprintf(stderr, "[Force] !! force_calib.json 的 bias_torque_nm[%d] 不是有限数 —— "
+                            "本地补偿【未启用】。\n", i);
+            return false;
+        }
+        if (!std::isfinite(comSensor[i])) {
+            fprintf(stderr, "[Force] !! force_calib.json 的 com_sensor_m[%d] 不是有限数 —— "
+                            "本地补偿【未启用】。\n", i);
+            return false;
+        }
+    }
     return true;
 }
 

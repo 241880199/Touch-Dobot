@@ -31,6 +31,10 @@ namespace ForceCompensation {
     // fd.sixForceRaw[] (@1304, 原始读数) must be fresh; poseRxyz = {X,Y,Z,Rx,Ry,Rz} in mm & deg
     // from GetPose(). Writes fd.compensated[] (6-axis compensated force).
     // ⚠ 输入通道是 @1304, 【不是】@576 (fd.raw) —— 见下面全量模型的说明。
+    // ⚠ 【fd.raw[] (@576) 也必须是同一帧的】: 一致性闸门拿它当参照物
+    //   (RelayCore 的 ForceReader 在【同一次 30004 收帧】里同时填 raw 与 sixForceRaw,
+    //    所以两者天然时间对齐, 不需要再对时)。填不上 (全 0) 会被判成不一致。
+    // ⚠ 闸门拒绝时 fd.compensated[] 全 6 个分量为 0 (不再透传 @1304)。
     void step(AppState::ForceData& fd, const double poseRxyz[6]);
 
     // ===== 全量模型 (2026-09-19, Task 6) =====
@@ -42,8 +46,51 @@ namespace ForceCompensation {
     // 全量模型的 A 是自由 3×3, 安装旋转/反射/非正交一起吸收, 式子里【没有 ψ】——
     // 这是 ψ 从补偿路径退场的那一步 (参数由 PayloadCalibration::fitRaw 在 @1304 上解出)。
     // A: 3×3 row-major (kg); biasForce (N) / biasTorque (N·m); comSensor 单位【米】。
+    // ⚠ A 不可用 (全零 / 非有限 / 数值退化) 时【拒绝安装】: 不更新任何参数、把状态打回
+    //   "未标定", 并在 stderr 上说出是 A 的哪一个毛病。这就是用户指令 3
+    //   (「全零 A 拒绝传递数据并报错」) 的落点 —— 让"全零 A"根本进不了"已标定"这个状态。
     void setCalibration(const double A[9], const double biasForce[3],
                         const double biasTorque[3], const double comSensor[3]);
+
+    // ===== 运行时一致性闸门 (2026-09-19) =====
+    // 判据: 【本地全量模型的输出】与【机械臂自报的 @576 (fd.raw)】逐通道比较。
+    //   · @1304 (fd.sixForceRaw) 是原始读数; 本地模型给出 compensated = @1304 − b_F − A·g,
+    //     是【外力】的一个估计。
+    //   · @576 (fd.raw) 是机械臂用【它自己的】负载模型减掉重力之后的估计 —— 同一个外力。
+    //   ⇒ 两个模型都对时两者应当一致; 不一致 ⇒ 至少一个错 ⇒ 拒绝把数据往下传。
+    // 这就是用户指令 1/2 的机制: 未标定或与标定不符 ⇒ 拒绝 + 报错; 而"标定后 @1304 与
+    // @576 应当一致"正是判据 (Task 8 下发正确负载之后它们才应当收敛)。
+    //
+    // 不一致 ⇒ 【compensated 全 6 个分量置零】(不是只置 haptic): 下游
+    //   ForcePipeline::step 从 compensated 推 filtered/hapticOut/F| 帧, 所以置零就把
+    //   触觉与约束力两条路一起断了。
+    // ⚠ 未标定 -> step() 不再透传 @1304 (旧行为会把 @1304 的 ~21.9 N 偏置经 ForcePipeline
+    //   的 0.0165×5 变成手上 ~1.8 N 的恒定推力; 置零之后没有这个偏置)。
+    //
+    // 两种拒绝原因【必须分得开】(处置一样 = 都拒绝, 但操作员要做的事不同):
+    //   UNCALIBRATED -> 去标定 (按 'm' 采多姿态 + 's' 解 A, 再 'z' 调零);
+    //   INCONSISTENT -> 去查负载参数有没有真的发进机械臂 (Task 8), 或重跑离线一致性检查。
+    enum class GuardState {
+        OK = 0,             // 模型在, 且逐通道一致 -> 数据放行
+        UNCALIBRATED = 1,   // 没有可用模型 (未标定 / A 全零 / A 退化) -> 拒绝
+        INCONSISTENT = 2    // 模型在, 但与 @576 对不上 -> 拒绝
+    };
+    struct GuardReport {
+        GuardState state = GuardState::UNCALIBRATED;
+        long   frames = 0;
+        bool   voted[6]    = {false, false, false, true, true, true};
+        bool   exceeded[6] = {false, false, false, false, false, false};
+        double ema[6] = {0, 0, 0, 0, 0, 0};   // compensated − @576 的 EMA (N / N·m)
+        double tol[6] = {0, 0, 0, 0, 0, 0};
+    };
+    GuardState  guardState();
+    void        guardReport(GuardReport& out);
+    const char* guardStateName(GuardState s);
+
+    // A 能不能当【重力模型】用: 非有限 / 全零 / |det A| 相对 ||A||_F³ 近零 (数值退化) 都不行。
+    // 返回 false 并把具体原因写进 why。装载 (ForceCalibration::loadFromFile) 与安装
+    // (setCalibration) 共用它 —— 同一条判据只许有一份实现。
+    bool modelUsable(const double A[9], char* why, int whyLen);
 
     // 读出当前生效的全量模型 (供「仅调零」把 A / c_s 原样保留着写回文件)。
     void currentModel(double A[9], double comSensor[3]);

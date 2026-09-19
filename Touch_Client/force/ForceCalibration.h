@@ -50,8 +50,15 @@ namespace ForceCalibration {
     // A / c_s 由 PayloadCalibration::fitRaw 在 @1304 上解出; 本模块的 TARE 只定零偏。
     bool saveToFile(const char* path, const double A[9], const double biasForce[3],
                     const double biasTorque[3], const double comSensor[3]);
-    // 返回 false = 文件不存在 / 读不动 / 【不是本格式】(旧版文件) —— 后者会在 stderr
-    // 响亮地说出来, 不会安静地退化成"没有标定"。四个输出数组在返回 false 时【未定义】。
+    // 返回 false = 文件不存在 / 读不动 / 【不是本格式】(旧版文件) / 【模型不可用】——
+    // 后两者会在 stderr 响亮地说出来 (指名道姓是哪个字段坏了), 不会安静地退化成"没有标定"。
+    // 【模型不可用】= A 非有限 / 全零 / 数值退化 (|det A| 相对 ||A||^3 近零), 或
+    // bias_force_n / bias_torque_nm / com_sensor_m 里有非有限数 —— 判据与
+    // ForceCompensation::setCalibration 共用 (ForceCompensation::modelUsable)。
+    // ⚠ 返回值分不开这两类: "文件不存在"与"模型不可用"都返回 false, 区别只在 stderr。
+    //   运行时闸门 (ForceCompensation::step) 会把它们都报成 ERR_FORCE_UNCALIBRATED,
+    //   并在 stderr 上重复那段原因 —— 所以"为什么没有模型"事后仍查得到。
+    // 四个输出数组在返回 false 时【未定义】。
     bool loadFromFile(const char* path, double A[9], double biasForce[3],
                       double biasTorque[3], double comSensor[3]);
 

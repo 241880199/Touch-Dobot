@@ -29,7 +29,13 @@ namespace TcpCalibration {
     // 同上, 但 psi 显式给出(度), 且【不读写模块状态】。
     // 存在的唯一理由: 负载标定要扫 psi —— 扫描时若反复 setSensorYawDeg, 一旦中途失败
     // 就会给运行时留下一个被污染的安装角。数学仍然只有一份: 二者走同一个
-    // rotateGravityByYaw (见 .cpp), 不是各写一份公式。运行时路径请用 gravitySensorFrame。
+    // rotateGravityByYaw (见 .cpp), 不是各写一份公式。
+    // ⚠ 2026-09-19 更正 (此处原写"运行时路径请用 gravitySensorFrame"): 【运行时路径现在
+    //   就是 gravitySensorFrameAtYaw(pose, 0.0, g)】。全量模型的 A 是自由 3×3, 安装旋转/
+    //   反射/非正交都被它吸收, 所以补偿式子里【没有 ψ】(见 ForceCompensation::step)。
+    //   gravitySensorFrame (读模块态 ψ 的那个) 现在【已经没有任何生产调用方】了 ——
+    //   grep 到的只剩 tests/test_payload_calibration.cpp 里的约定回归 (还有几处提到它的
+    //   旧注释)。删不删由所有者定, 但【不要】再把运行时路径指回它。
     void gravitySensorFrameAtYaw(const double pose[6], double psiDeg, double g[3]);
 
     // 传感器相对法兰绕工具 z 的安装偏转角 (度)。由负载标定解出并持久化;

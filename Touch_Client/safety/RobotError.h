@@ -32,6 +32,11 @@ enum class RobotErrorCode {
     ERR_ALARM_MODE9,            // 机器人进入 mode=9
     ERR_EMERGENCY_STOP,         // 急停被触发
     ERR_COLLISION,              // 碰撞检测触发
+    // RUNTIME-GUARD — 本地补偿的运行时一致性闸门 (2026-09-19)。【两个码必须分开】:
+    // 它们要做的事不同 —— 前者去按 'm'+'s' 重标模型, 后者去查负载参数有没有真的发进机械臂。
+    // 合成一句话会让操作员在两个完全不同的动作之间乱猜。
+    ERR_FORCE_UNCALIBRATED,     // 【没有可用模型】: 未标定 / A 全零 / A 数值退化 -> 拒绝传数据
+    ERR_FORCE_INCONSISTENT,     // 有模型, 但与机械臂自报的 @576 逐通道对不上 -> 拒绝传数据
 
     OK = -1                     // 无错误
 };
@@ -94,6 +99,16 @@ inline Severity getSeverity(RobotErrorCode code) {
         case RobotErrorCode::ERR_IK_SINGULAR:
         case RobotErrorCode::ERR_SERVOP_REJECTED:
         case RobotErrorCode::ERR_SERVOP_TIMEOUT:
+        // 一致性闸门: 语义就是 REJECT 的字面意思 ——「拒绝该帧运动」。
+        // 【不选 FATAL】的理由 (两条, 都是实测/操作事实, 不是偏好):
+        //   ① FATAL 会 DisableRobot, 而本闸门连续判决 —— 未标定/负载没发进去时它每一帧都拒,
+        //      于是 FATAL 会在启动后 1 秒内把机械臂禁掉, Task 8 那个"发负载 -> 看闸门放行"的
+        //      闭环就再也走不了 (闸门自己把要验证的那一步锁死)。
+        //   ② 真正"不许往下传"的东西 (compensated) 已经无条件置零了, 与严重度无关 ——
+        //      数据侧已经是 fail closed, FATAL 只会额外停掉【不依赖这份数据】的运动。
+        // 若日后要改成 FATAL: 改这一行即可, 其余不用动。
+        case RobotErrorCode::ERR_FORCE_UNCALIBRATED:
+        case RobotErrorCode::ERR_FORCE_INCONSISTENT:
             return Severity::REJECT;
 
         case RobotErrorCode::ERR_WORKSPACE_RADIUS:
@@ -136,6 +151,8 @@ inline const char* errorCodeName(RobotErrorCode code) {
         case RobotErrorCode::ERR_ALARM_MODE9:       return "ERR_ALARM_MODE9";
         case RobotErrorCode::ERR_EMERGENCY_STOP:    return "ERR_EMERGENCY_STOP";
         case RobotErrorCode::ERR_COLLISION:         return "ERR_COLLISION";
+        case RobotErrorCode::ERR_FORCE_UNCALIBRATED:   return "ERR_FORCE_UNCALIBRATED";
+        case RobotErrorCode::ERR_FORCE_INCONSISTENT:   return "ERR_FORCE_INCONSISTENT";
         default:                                    return "OK";
     }
 }

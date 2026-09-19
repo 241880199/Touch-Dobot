@@ -125,6 +125,38 @@ namespace Config {
     const double FORCE_BIAS_EMA_ALPHA = 0.01;             // 零偏 EMA 更新率 (仅静止态)
     const double FORCE_ACC_FILTER_CUTOFF_HZ = 10.0;       // 加速度估计低通截止 (Hz)
 
+    // ========== 运行时一致性闸门 (2026-09-19) ==========
+    // 逐通道比较【本地全量模型的输出 compensated】与【机械臂自报的 @576 (fd.raw)】:
+    // 两个模型都对时它们估计的是同一个量 (外力), 所以应当一致; 不一致 ⇒ 至少一个错 ⇒
+    // 拒绝把数据往下传 (compensated 置零)。
+    //
+    // 容差【由实测导出】, 不是猜的。量级依据 (推导见 .superpowers/sdd/runtime-guard-report.md;
+    // 全部数字由 tests/test_payload_calibration.cpp 的 test_runtime_consistency_guard_replay
+    // 在四份夹具上现算并打印, 那条用例同时断言"容差 > 这个量级"):
+    //   eps_F = eps_本地 + eps_模型类 = rmsForceN + max|σ(A) − σ̄|·9.81
+    //         四份夹具上 = 0.1726 / 0.2706 / 0.3127 / 0.1761 N, 最坏 0.3127 N (15:30);
+    //         · rmsForceN 是本地模型自己的失拟 (夹具实测量: 0.0224/0.0186/0.0191/0.0151 N);
+    //         · 第二项是【机械臂那一侧】的下界: 它的力模型是"标量质量 × 旋转",
+    //           而本地 A 是自由 3×3, 四份实测 A 的奇异值偏离其均值最多 0.0299 kg
+    //           (= 0.2937 N 的重力响应), 这一份它【结构上表达不出来】。
+    //   tol_F = 0.50 N = 1.60 × 0.3127 (逐份的比值 1.60~2.90)。
+    //   eps_M = rmsMomentNm + |c_s|·max|σ(A) − σ̄|·9.81 = 0.0012 + 0.0165 = 0.0177 N·m
+    //   tol_M = 0.03 N·m = 1.70 × 0.0177 (逐份的比值 1.70~3.13)。
+    // ⚠ 首版容差, 【必须在实机上复验】: 机械臂那一侧的真值要等正确的负载下发
+    //   (Task 8) 之后才量得到。上面的推导只覆盖了"模型类不同"这一项 ——
+    //   若 @576 的力矩参考点与传感器原点不同, 还会多出一项 |Δc × F|
+    //   (Δc ≤ 14.15 mm, 见 Docs/superpowers/plans/2026-09-19-raw-channel-calibration.md:226;
+    //    |F| ≤ 3.0932 N, 四份夹具 36 个姿态的 @576 力模最大值, 出现在 12:38 pose 4)
+    //   —— 那一项最大 14.15 mm × 3.0932 N = 0.0438 N·m, 比 tol_M 还大。
+    //   若它是真的, 力矩通道会在 Task 8 之后【永远拒绝】。测到之后再改, 不要凭猜放宽。
+    const double FORCE_GUARD_TOL_FORCE_N   = 0.50;   // 力通道 (x/y) 一致性容差 (N)
+    const double FORCE_GUARD_TOL_MOMENT_NM = 0.03;   // 力矩通道一致性容差 (N·m)
+    // 逐通道差的 EMA。alpha=0.02 @30Hz ⇒ 等效平均 ~100 帧 ≈ 3.3 s, 把逐帧噪声
+    // (夹具实测力 x/y 0.04~0.06 N, 力矩 0.002~0.006 N·m) 压到容差之下一个量级以上。
+    const double FORCE_GUARD_EMA_ALPHA = 0.02;
+    // 同一条错误最快多久重报一次 (ms)。状态一变立刻报, 不变的按这个间隔复报。
+    const int    FORCE_GUARD_REPORT_MS = 5000;
+
     // ========== 姿态控制参数 ==========
     const double ORIENT_MAX_STEP_DEG = 3.0;          // 单步最大角度增量 (degrees)
     const double ORIENT_DEADZONE_DEG = 0.05;         // 姿态死区 (degrees)

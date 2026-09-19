@@ -52,7 +52,7 @@ void RobotDiagnostics::log(const DiagnosticEvent& e) {
     // 错误计数
     if (e.error != RobotErrorCode::OK) {
         int idx = static_cast<int>(e.error);
-        if (idx >= 0 && idx < 24) {
+        if (idx >= 0 && idx < ERROR_CODE_SLOTS) {
             m_errorCounts[idx]++;
         }
     }
@@ -111,7 +111,7 @@ void RobotDiagnostics::logError(const RobotError& error, double constraintMag,
 
 int RobotDiagnostics::errorCount(RobotErrorCode code) const {
     int idx = static_cast<int>(code);
-    if (idx < 0 || idx >= 24) return 0;
+    if (idx < 0 || idx >= ERROR_CODE_SLOTS) return 0;
     return m_errorCounts[idx];
 }
 
@@ -125,7 +125,7 @@ void RobotDiagnostics::writeSessionReport() {
     strftime(timeBuf, sizeof(timeBuf), "%Y-%m-%d %H:%M:%S", &tmInfo);
 
     int warns = 0, degrades = 0, rejects = 0, fatals = 0;
-    for (int i = 0; i < 24; i++) {
+    for (int i = 0; i < ERROR_CODE_SLOTS; i++) {
         RobotErrorCode code = static_cast<RobotErrorCode>(i);
         Severity sev = getSeverity(code);
         switch (sev) {

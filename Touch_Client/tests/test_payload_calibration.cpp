@@ -2788,9 +2788,13 @@ static bool t6SolveNormal(int K, double AtA[6][6], const double Atb[6], double x
 // 力矩那三个方程按叉乘展开 (cross(dp,g)): Mx = bMx + dp1·g2 − dp2·g1, 等等。
 // skip = 要在拟合中【排除】的姿态下标 (-1 = 不排除), 供 LOO 用。
 // 输出 ssF/ssM = 拟合残差平方和 (只在【参与拟合的姿态】上累计)。
+// ⚠ dmOut 必须被 LOO 那条路用起来 (2026-09-19 复审): 旧模型是
+//      compensated = @576 − b_F − Δm·g
+//   只减 b_F 会漏掉 Δm·g 那一项, 把 LOO 那一列的旧模型残差抬高 —— 于是"旧 vs 新"的
+//   对比里旧的那一侧被冤枉, 而这一列是打印出来给人看的。
 static bool t6FitOldAtYaw(const T6Capture& cap, double psiDeg, int skip,
                           double bF[3], double bM[3], double dp[3],
-                          double& ssF, double& ssM) {
+                          double& ssF, double& ssM, double* dmOut = nullptr) {
     double A4[6][6] = {{0}}; double b4[6] = {0};
     double A6[6][6] = {{0}}; double b6[6] = {0};
     for (int i = 0; i < cap.n; i++) {
@@ -2823,6 +2827,7 @@ static bool t6FitOldAtYaw(const T6Capture& cap, double psiDeg, int skip,
     for (int a = 0; a < 3; a++) { bF[a] = x4[a]; bM[a] = x6[a]; }
     dp[0] = x6[3]; dp[1] = x6[4]; dp[2] = x6[5];
     const double dm = x4[3];
+    if (dmOut) *dmOut = dm;
 
     ssF = 0.0; ssM = 0.0;
     for (int i = 0; i < cap.n; i++) {
@@ -2878,6 +2883,34 @@ static double t6Spread(const double c[T6_MAXN][6], int n, int i0) {
     return sqrt(ss / (3.0 * n));
 }
 
+// 本地全量模型【应该】算出什么 —— 只给夹具重放用。
+//
+// 【为什么这里可以照写一遍公式】: 运行时一致性闸门 (2026-09-19) 要求 fd.raw (@576) 与
+// 本地模型算出来的东西一致才放行, 所以"想量模型输出"就必须先造一个一致的 @576。
+// 而闸门拒绝时 compensated 会被置零 —— 那量到的就不是模型输出, 而是 0。
+//
+// 两处约定都【不在这里另立】:
+//   · 重力 → 共享实现 TcpCalibration::gravitySensorFrameAtYaw(pose, 0.0, g) (ψ 传 0,
+//     因为 A 是自由 3×3, 安装旋转已被它吸收);
+//   · 公式 compensated = six − b − A·g / c_s×(A·g) 由 test_force_compensation 逐条钉住
+//     (comp_gravity_goes_through_A / comp_moment_is_cross_of_Ag)。
+// 惯性项不在这里出现: 重放里每个姿态都是静态单帧 (估计器 vel/acc 恒为 0), Fi ≡ 0。
+static void t6LocalModel(const PayloadCalibration::RawFit& fit, const double pose[6],
+                         const double six[6], double out[6]) {
+    double g[3];
+    TcpCalibration::gravitySensorFrameAtYaw(pose, 0.0, g);
+    double Fg[3];
+    for (int a = 0; a < 3; a++)
+        Fg[a] = fit.A[3 * a] * g[0] + fit.A[3 * a + 1] * g[1] + fit.A[3 * a + 2] * g[2];
+    const double Mg[3] = { fit.cS[1] * Fg[2] - fit.cS[2] * Fg[1],
+                           fit.cS[2] * Fg[0] - fit.cS[0] * Fg[2],
+                           fit.cS[0] * Fg[1] - fit.cS[1] * Fg[0] };
+    for (int a = 0; a < 3; a++) {
+        out[a]     = six[a]     - fit.bF[a] - Fg[a];
+        out[3 + a] = six[3 + a] - fit.bM[a] - Mg[a];
+    }
+}
+
 static void test_runtime_compensation_pose_independence() {
     TEST(runtime_compensation_pose_independence);
 
@@ -2918,6 +2951,18 @@ static void test_runtime_compensation_pose_independence() {
                 fd.sixForceRaw[a]     = cap.F1304[i][a];   // 力 x,y,z
                 fd.sixForceRaw[3 + a] = cap.M1304[i][a];   // 力矩 x,y,z
             }
+            // ⚠ 【一致性闸门要求 fd.raw 与本地模型一致才放行】(2026-09-19)。本用例量的是
+            // 【模型输出】, 所以把 @576 喂成"模型说多少就是多少" (t6LocalModel) —— 直接喂
+            // 夹具里的 @576 会让闸门拒绝并把 compensated 置零, 那时量到的是 0, 而它会以
+            // "口径自校不过"的样子红掉, 看的却不是它要测的东西。
+            // 闸门在【真实夹具 @576】上的判决由 test_runtime_consistency_guard_replay 断言。
+            double mdl[6];
+            for (int a = 0; a < 3; a++) {
+                mdl[a]     = cap.F1304[i][a];
+                mdl[3 + a] = cap.M1304[i][a];
+            }
+            t6LocalModel(fit, cap.poses[i], mdl, mdl);
+            for (int a = 0; a < 6; a++) fd.raw[a] = mdl[a];
             ForceCompensation::init();                       // 干净的估计器状态 (见文件头说明)
             ForceCompensation::setCalibration(fit.A, fit.bF, fit.bM, fit.cS);
             ForceCompensation::step(fd, cap.poses[i]);
@@ -2967,17 +3012,28 @@ static void test_runtime_compensation_pose_independence() {
                 fd.sixForceRaw[a]     = cap.F1304[i][a];
                 fd.sixForceRaw[3 + a] = cap.M1304[i][a];
             }
+            {   // 闸门的参照物: 由【留一那一次】的模型现算 (理由见 test_runtime_compensation_*)
+                double mdl[6];
+                for (int a = 0; a < 3; a++) {
+                    mdl[a]     = cap.F1304[i][a];
+                    mdl[3 + a] = cap.M1304[i][a];
+                }
+                t6LocalModel(f2, cap.poses[i], mdl, mdl);
+                for (int a = 0; a < 6; a++) fd.raw[a] = mdl[a];
+            }
             ForceCompensation::init();
             ForceCompensation::setCalibration(f2.A, f2.bF, f2.bM, f2.cS);
             ForceCompensation::step(fd, cap.poses[i]);
             for (int a = 0; a < 6; a++) looNew[looN][a] = fd.compensated[a];
 
             // 旧: ψ 固定为整份采集扫出来的那个, 只重定零偏与 Δm/Δp
-            double fF[3], fM[3], fdp[3], sF = 0.0, sM = 0.0;
-            if (!t6FitOldAtYaw(cap, psi, i, fF, fM, fdp, sF, sM)) continue;
+            double fF[3], fM[3], fdp[3], sF = 0.0, sM = 0.0, fdm = 0.0;
+            if (!t6FitOldAtYaw(cap, psi, i, fF, fM, fdp, sF, sM, &fdm)) continue;
             double g[3];
             TcpCalibration::gravitySensorFrameAtYaw(cap.poses[i], psi, g);
-            for (int a = 0; a < 3; a++) looOld[looN][a] = cap.F576[i][a] - fF[a];
+            // ⚠ 旧模型是 @576 − b_F − Δm·g —— 【两项都要减】。只减 b_F 会漏掉重力那一项,
+            //   把这一列(旧模型)的残差抬高, 对比就变成"新模型赢在一个被冤枉的对手上"。
+            for (int a = 0; a < 3; a++) looOld[looN][a] = cap.F576[i][a] - fF[a] - fdm * g[a];
             looOld[looN][3] = cap.M576[i][0] - (fM[0] + fdp[1] * g[2] - fdp[2] * g[1]);
             looOld[looN][4] = cap.M576[i][1] - (fM[1] + fdp[2] * g[0] - fdp[0] * g[2]);
             looOld[looN][5] = cap.M576[i][2] - (fM[2] + fdp[0] * g[1] - fdp[1] * g[0]);
@@ -3008,6 +3064,212 @@ static void test_runtime_compensation_pose_independence() {
     // 改断言 —— 【不许】把力矩那条断言删掉换成一句打印: 那就是把"没变好"藏进一个绿的里面。
     CHECK(worseF == 0);
     CHECK(worseM == 0);
+    PASS();
+}
+
+// ★★ 运行时一致性闸门在【四份实机采集】上怎么判 (2026-09-19, 用户指令 1/2)。
+//
+// 判据 (ForceCompensation::step 的 7b): 逐通道比较【本地全量模型输出的外力】与
+// 【机械臂自报的 @576】。两者都对时估计的是同一个量, 所以应当一致。
+//
+// 这一份是离线重放, 每个姿态喂一帧 (夹具的每一行本来就是该姿态的均值, 所以"一帧"就是
+// 那个姿态的平均读数 —— 与实机上静置时 EMA 收敛到的东西是同一个数)。
+//
+// 【要证明的两件事】
+//   (甲) 当前状态 (机械臂里存的负载是旧的) 下, 闸门【拒绝】—— 逐通道超限倍数印出来;
+//   (乙) 它【不是永远拒绝】: 把 @576 换成一致的值, 同样的姿态、同样的模型必须放行 ——
+//        这条是反面对照, 没有它"拒绝"可能只是因为闸门坏了。
+//   至于"发送正确负载之后应当放行" —— 那是实机上的事 (Task 8), 离线【量不到】,
+//   所以这里不做任何"它会通过"的断言, 只把容差与当前的超限倍数摆出来。
+// A 的三个奇异值 (降序)。测试侧独立算一遍 (不调被测函数): 对 AᵀA 做 Jacobi 求特征值。
+// 用途: 容差的【量级】里有一项是"机械臂那一侧的模型类差" —— 它的力模型是"标量质量 ×
+// 旋转"(3 个自由度), 而本地的 A 是自由 3×3; 这份差距的下界就是 A 的三个奇异值相对其
+// 均值的最大偏离, 乘 g。见 runtime-guard-report.md 的容差推导。
+static void t6SigmaA(const double A[9], double sg[3]) {
+    double M[3][3];
+    for (int i = 0; i < 3; i++) for (int j = 0; j < 3; j++) {
+        double s = 0.0;
+        for (int k = 0; k < 3; k++) s += A[k * 3 + i] * A[k * 3 + j];
+        M[i][j] = s;
+    }
+    for (int sweep = 0; sweep < 60; sweep++) {
+        if (fabs(M[0][1]) + fabs(M[0][2]) + fabs(M[1][2]) < 1e-18) break;
+        for (int p = 0; p < 2; p++) for (int q = p + 1; q < 3; q++) {
+            if (fabs(M[p][q]) < 1e-18) continue;
+            const double theta = (M[q][q] - M[p][p]) / (2.0 * M[p][q]);
+            const double t = (theta >= 0 ? 1.0 : -1.0) / (fabs(theta) + sqrt(theta * theta + 1.0));
+            const double c = 1.0 / sqrt(t * t + 1.0), s = t * c;
+            for (int k = 0; k < 3; k++) {
+                const double kp = M[k][p], kq = M[k][q];
+                M[k][p] = c * kp - s * kq;  M[k][q] = s * kp + c * kq;
+            }
+            for (int k = 0; k < 3; k++) {
+                const double pk = M[p][k], qk = M[q][k];
+                M[p][k] = c * pk - s * qk;  M[q][k] = s * pk + c * qk;
+            }
+        }
+    }
+    for (int i = 0; i < 3; i++) sg[i] = sqrt(M[i][i] > 0 ? M[i][i] : 0.0);
+    for (int i = 0; i < 2; i++) for (int j = i + 1; j < 3; j++)
+        if (sg[j] > sg[i]) { const double t = sg[i]; sg[i] = sg[j]; sg[j] = t; }
+}
+
+static void test_runtime_consistency_guard_replay() {
+    TEST(runtime_consistency_guard_replay);
+
+    static const char* FILES[4] = {
+        "calib_poses_2026-09-19.txt",
+        "calib_poses_2026-09-19_1525.txt",
+        "calib_poses_2026-09-19_1530.txt",
+        "calib_poses_2026-09-19_1533.txt"
+    };
+    static const char* LABELS[4] = { "12:38", "15:25", "15:30", "15:33" };
+    static const char* NM[6] = { "Fx", "Fy", "Fz", "Mx", "My", "Mz" };
+
+    int refused = 0, passedCtrl = 0, poses = 0;
+
+    const double tolF = Config::FORCE_GUARD_TOL_FORCE_N;
+    const double tolM = Config::FORCE_GUARD_TOL_MOMENT_NM;
+    const bool vote[6] = { true, true, false, true, true, true };   // Fz 不投票 (秩 2)
+    const double tol[6] = { tolF, tolF, tolF, tolM, tolM, tolM };
+
+    std::cout << std::endl;
+    std::cout << "    容差: 力 " << tolF << " N / 力矩 " << tolM
+              << " N·m (由实测导出, 见 Config.h 与 runtime-guard-report.md)" << std::endl;
+    std::cout << "    Fz 【不投票】: @576 的 z 响应实测秩 2 (奇异值 0.212/0.201/0.008)"
+                 " —— 它的比较结果照样报出来。" << std::endl;
+
+    for (int k = 0; k < 4; k++) {
+        T6Capture cap;
+        cap.label = LABELS[k];
+        cap.file  = FILES[k];
+        if (!t6Load(cap)) {
+            std::cout << "    FAIL: 夹具 " << FILES[k] << " 读不到" << std::endl;
+            g_failed++;
+            return;
+        }
+        PayloadCalibration::RawFit fit;
+        if (!PayloadCalibration::fitRawLinear(cap.poses, cap.F1304, cap.M1304, cap.n, fit)) {
+            std::cout << "    FAIL: " << cap.label << " 的 @1304 线性拟合失败" << std::endl;
+            g_failed++;
+            return;
+        }
+
+        // ===== 容差的量级依据 (逐份采集现算, 见报告"容差的推导") =====
+        //   eps_F = rmsForceN(本地模型自己的失拟) + max|σ(A) − σ̄|·9.81(机械臂那一侧的模型类差)
+        //   eps_M = rmsMomentNm + |c_s|·max|σ(A) − σ̄|·9.81
+        // 9.81 = 标准重力 (与 TcpCalibration 的重力约定同一个常数)。
+        {
+            double sg[3], sbar = 0.0, dev = 0.0, cs = 0.0;
+            t6SigmaA(fit.A, sg);
+            for (int a = 0; a < 3; a++) sbar += sg[a] / 3.0;
+            for (int a = 0; a < 3; a++) if (fabs(sg[a] - sbar) > dev) dev = fabs(sg[a] - sbar);
+            for (int a = 0; a < 3; a++) cs += fit.cS[a] * fit.cS[a];
+            cs = sqrt(cs);
+            const double epsClassF = dev * 9.81;
+            const double epsF = fit.rmsForceN + epsClassF;
+            const double epsM = fit.rmsMomentNm + cs * epsClassF;
+            std::cout << "      σ(A)=" << sg[0] << " " << sg[1] << " " << sg[2]
+                      << " kg, σ̄=" << sbar << ", max|σ−σ̄|=" << dev
+                      << " kg  ⇒ eps_F=" << epsF << " N (rms " << fit.rmsForceN
+                      << " + 类差 " << epsClassF << "),  eps_M=" << epsM << " N·m"
+                      << "   [容差/eps: 力 " << tolF / epsF << "x, 力矩 " << tolM / epsM << "x]"
+                      << std::endl;
+            // 容差【不许】落在实测导出的量级之下 —— 落下去就是"永远拒绝"，
+            // 而这条断言是那个决定唯一能被机器检查的地方。
+            if (!(tolF > epsF && tolM > epsM)) {
+                std::cout << "    FAIL: " << cap.label << " 容差低于实测导出的量级" << std::endl;
+                g_failed++;
+                return;
+            }
+        }
+
+        double worst[6] = {0, 0, 0, 0, 0, 0};   // 逐通道 |EMA|/容差 的最大值
+        double sum[6]   = {0, 0, 0, 0, 0, 0};   // 逐通道 EMA 的均值 (本份采集内)
+        std::cout << "    ---- " << cap.label << " (n=" << cap.n << ") ----" << std::endl;
+
+        for (int i = 0; i < cap.n; i++) {
+            double six[6];
+            for (int a = 0; a < 3; a++) {
+                six[a]     = cap.F1304[i][a];
+                six[3 + a] = cap.M1304[i][a];
+            }
+
+            // (甲) 真实夹具: @576 用夹具里的那一列
+            AppState::ForceData fd;
+            for (int a = 0; a < 6; a++) fd.sixForceRaw[a] = six[a];
+            fd.raw[0] = cap.F576[i][0]; fd.raw[1] = cap.F576[i][1]; fd.raw[2] = cap.F576[i][2];
+            fd.raw[3] = cap.M576[i][0]; fd.raw[4] = cap.M576[i][1]; fd.raw[5] = cap.M576[i][2];
+            ForceCompensation::init();
+            ForceCompensation::setCalibration(fit.A, fit.bF, fit.bM, fit.cS);
+            // 连喂 8 帧同样的读数: 闸门逐帧都判, 这里要的是"持续"那一侧的语义
+            // (EMA 由第 1 帧播种, 8 帧同值 ⇒ EMA 恒等于该姿态的均值差)。
+            for (int f = 0; f < 8; f++) ForceCompensation::step(fd, cap.poses[i]);
+
+            ForceCompensation::GuardReport rep;
+            ForceCompensation::guardReport(rep);
+            if (rep.state == ForceCompensation::GuardState::INCONSISTENT) refused++;
+            if (i == 0) {
+                char line[512];
+                int off = snprintf(line, sizeof(line), "      pose 1 逐通道 (EMA 差, 超限倍数):");
+                for (int a = 0; a < 6; a++) {
+                    if (!vote[a]) {
+                        off += snprintf(line + off, sizeof(line) - off, "  %s=不投票(秩2)", NM[a]);
+                    } else {
+                        off += snprintf(line + off, sizeof(line) - off, "  %s %+.3f(%.1fx)",
+                                        NM[a], rep.ema[a], fabs(rep.ema[a]) / tol[a]);
+                    }
+                }
+                std::cout << line << std::endl;
+            }
+            for (int a = 0; a < 6; a++) {
+                sum[a] += rep.ema[a] / cap.n;
+                if (!vote[a]) continue;
+                const double r = fabs(rep.ema[a]) / tol[a];
+                if (r > worst[a]) worst[a] = r;
+            }
+            poses++;
+            // 每一帧都必须拒绝: 任何一个姿态放行都是"闸门没在看数据"。
+            if (rep.state != ForceCompensation::GuardState::INCONSISTENT) {
+                std::cout << "    FAIL: " << cap.label << " pose " << (i + 1)
+                          << " 竟然放行了 (state=" << ForceCompensation::guardStateName(rep.state)
+                          << ")" << std::endl;
+                g_failed++;
+                return;
+            }
+
+            // (乙) 反面对照: 把 @576 换成与本地模型一致的值 -> 必须放行
+            double mdl[6];
+            for (int a = 0; a < 6; a++) mdl[a] = six[a];
+            t6LocalModel(fit, cap.poses[i], mdl, mdl);
+            AppState::ForceData fd2;
+            for (int a = 0; a < 6; a++) { fd2.sixForceRaw[a] = six[a]; fd2.raw[a] = mdl[a]; }
+            ForceCompensation::init();
+            ForceCompensation::setCalibration(fit.A, fit.bF, fit.bM, fit.cS);
+            for (int f = 0; f < 8; f++) ForceCompensation::step(fd2, cap.poses[i]);
+            if (ForceCompensation::guardState() == ForceCompensation::GuardState::OK) passedCtrl++;
+        }
+        std::cout << "      本份的逐通道 EMA 均值 (N / N·m):";
+        for (int a = 0; a < 6; a++) std::cout << "  " << NM[a] << " " << sum[a];
+        std::cout << std::endl;
+        std::cout << "      最大超限倍数 (逐通道, 只算投票通道):";
+        for (int a = 0; a < 6; a++) {
+            if (!vote[a]) continue;
+            std::cout << "  " << NM[a] << " " << worst[a] << "x";
+        }
+        std::cout << std::endl;
+    }
+
+    std::cout << "    => 真实夹具: " << refused << " / " << poses << " 个姿态【拒绝】"
+              << "    反面对照 (@576 与本地一致): " << passedCtrl << " / " << poses << " 个姿态放行"
+              << std::endl;
+
+    // 四份采集、【每一个】姿态都必须拒绝。若某一份里有一个姿态放行, 说明闸门在那个姿态上
+    // 看不见差异 —— 那是"闸门有洞", 必须先查清楚再放行, 不能把断言放宽。
+    CHECK(refused == poses);
+    // 反面对照也必须【全部】放行。这一条防的是"闸门永远拒绝"那半边: 只断言拒绝的话,
+    // 一个 return false 的桩也能全绿。
+    CHECK(passedCtrl == poses);
     PASS();
 }
 
@@ -3084,6 +3346,10 @@ int main() {
     // 【放在最后】: 它要跑生产补偿代码 (ForceCompensation::step), 并且会打一张表。
     std::cout << "--- Task 6 acceptance: pose-independence of local compensation ---" << std::endl;
     test_runtime_compensation_pose_independence();
+
+    // ★★ 运行时一致性闸门 (2026-09-19, 用户指令 1/2) 在同样四份夹具上的离线重放。
+    std::cout << "--- runtime consistency guard (replay on the four captures) ---" << std::endl;
+    test_runtime_consistency_guard_replay();
 
     std::cout << "\n" << g_passed << " passed, " << g_failed << " failed" << std::endl;
     return g_failed ? 1 : 0;

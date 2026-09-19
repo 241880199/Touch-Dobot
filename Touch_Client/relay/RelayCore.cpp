@@ -1690,8 +1690,11 @@ void RelayCore::pollForce() {
         }
     }
 
-    // Run compensation (uses calibrated params if available)
+    // Run compensation (uses calibrated params if available).
+    // ⚠ 一致性闸门在这里面: 模型缺失或与 @576 对不上时, step() 会把 compensated[] 全置零
+    //   (haptic / 约束力 / F| 一起断), 并把状态留在 ForceCompensation::guardState()。
     ForceCompensation::step(app.forceData, pose);
+    const int guardSt = static_cast<int>(ForceCompensation::guardState());
 
     // Run pipeline on compensated data
     ForcePipeline::step(app.forceData);
@@ -1735,6 +1738,39 @@ void RelayCore::pollForce() {
                      appState.forceFeedbackEnabled ? 1 : 0);
 
     sendRelayUpdate(buf);
+
+    // ===== 一致性闸门的报错 (2026-09-19) =====
+    // 走现成通道: RobotDiagnostics 记一条 (落 robot_diagnostics.log + 计数进会话报告),
+    // 并经 reportDiagnostic 把 D| 帧发给 MATLAB GUI。data 侧已经由 step() 无条件置零,
+    // 这里只管【把原因说清楚】。
+    // 【两种原因用两个错误码】—— 处置一样 (都拒绝), 但操作员要做的事不同:
+    //   ERR_FORCE_UNCALIBRATED -> 去按 'm'+'s' 重标模型;
+    //   ERR_FORCE_INCONSISTENT -> 去查负载参数有没有真的发进机械臂 (Task 8)。
+    // 合并成一个码会让这两件事在日志里长得一样, 而"该做什么"全靠这一位区分。
+    // 【只在状态变化时报, 不变的按 FORCE_GUARD_REPORT_MS 复报】—— 闸门每帧都判 (30Hz),
+    // 每帧落一行会把诊断日志冲掉。
+    {
+        static int   lastGuardSt = -1;
+        static DWORD lastGuardMs = 0;
+        if (guardSt != lastGuardSt ||
+            (guardSt != 0 && (now - lastGuardMs) > static_cast<DWORD>(Config::FORCE_GUARD_REPORT_MS))) {
+            lastGuardSt = guardSt;
+            lastGuardMs = now;
+            if (guardSt == 1 || guardSt == 2) {
+                RobotError err;
+                err.code = (guardSt == 1) ? RobotErrorCode::ERR_FORCE_UNCALIBRATED
+                                          : RobotErrorCode::ERR_FORCE_INCONSISTENT;
+                err.severity = getSeverity(err.code);
+                err.timestampMs = GetTickCount64();
+                EnterCriticalSection(&app.robotPoseMutex);
+                err.targetPosition = Vec3(app.robotActualPose.x, app.robotActualPose.y,
+                                          app.robotActualPose.z);
+                LeaveCriticalSection(&app.robotPoseMutex);
+                err.speedFactor = 0.0;   // 本帧的力数据未放行, 不参与任何速度调度
+                RobotDiagnostics::instance().logError(err, 0.0, m_stateMachine.currentState());
+            }
+        }
+    }
 }
 
 void RelayCore::shutdownForceReader() {

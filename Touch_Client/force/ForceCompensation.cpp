@@ -18,6 +18,36 @@ static double g_biasForce[3] = {0};
 static double g_biasTorque[3] = {0};
 static MotionEstimator g_motion;
 
+// ===== 运行时一致性闸门的状态 (2026-09-19) =====
+// 全部由 ForceReader/pollForce 线程访问 (step() 是唯一入口), 与 g_A 那些用 g_calibMutex
+// 保护的量不同 —— 这里不加锁, 与 g_motion 同理: 只有一个写者。
+static double g_guardEma[6]  = {0};      // compensated − @576 的逐通道 EMA
+// 逐通道容差。⚠ 【在静态初始化时就填好】, 不留"init() 没跑就是 0"的空档 ——
+// 容差为 0 时 |EMA| > 0 都成立, 判决会退化, 而"退化"的方向必须是【拒绝】而不是放行。
+static double g_guardTol[6]  = { Config::FORCE_GUARD_TOL_FORCE_N,  Config::FORCE_GUARD_TOL_FORCE_N,
+                                 Config::FORCE_GUARD_TOL_FORCE_N,  Config::FORCE_GUARD_TOL_MOMENT_NM,
+                                 Config::FORCE_GUARD_TOL_MOMENT_NM, Config::FORCE_GUARD_TOL_MOMENT_NM };
+static bool   g_guardSeeded  = false;    // EMA 是否已用第一帧播种
+static long   g_guardFrames  = 0;
+static ForceCompensation::GuardState g_guardState = ForceCompensation::GuardState::UNCALIBRATED;
+static DWORD  g_guardReportMs = 0;       // 上次打印/上报的时刻
+
+// 【哪些通道参与判决】。Fz 【不投票】—— 理由写在报告与 .h 里, 一行摘要:
+//   @576 的 z 通道响应实测秩 2 (奇异值 [0.212 0.201 0.008], 第三行比另两行小 8~15 倍,
+//   Docs/superpowers/plans/2026-09-19-raw-channel-calibration.md:268-274), 它在【我们唯一
+//   有的激励 (重力方向)】上不动。一个动不了的参考既证不了"一致", 也证不了"不一致"。
+//   · 让它投票不会让闸门永远通过 (Fx/Fy 在, 现在是 1.7~2.2 N 量级的拒绝);
+//   · 却会让闸门【永远拒绝】: 若它对外力也不响应, 则一旦有真实 z 接触, compensated_z
+//     有值而 @576_z 恒 ~0, 差值直接超限 —— 那就是用户明确禁止的"永远不通过"。
+//   所以处置是【每次都报出它的比较结果, 但不计票】, 不是"静默跳过"。
+//   ⚠ 这一列的证据到此为止: "是 @576 报得坏, 还是机械臂 z 补偿太强" 目前【没有分开】
+//     (计划书 :273-274 明说"不许猜")。分开之后应把它提升为投票通道。
+static const bool g_guardVote[6] = { true, true, false, true, true, true };
+
+// A 的可用性判据 —— 见头文件声明。|det| / ||A||_F³ 对"标量质量 × 正交"这一族恒为
+// 1/(3√3) = 0.19245, 而秩亏时趋于 0; 取 1e-3 ⇒ 离退化 3 个数量级、离正常 192 倍。
+static const double GUARD_MIN_DET_RATIO = 1e-3;
+
 // 质量尺度 m = |det A|^(1/3)。A = m·S·Q (见 PayloadCalibration::decompose), 所以它的
 // 三个奇异值的几何平均恰好是 m —— 而几何平均 = |det|^(1/3), 不需要 SVD。
 // 就是 decompose() 报的 massScale, 这里现算一份的理由见头文件 currentMassKg。
@@ -164,6 +194,78 @@ bool MotionEstimator::isStill() const {
             sqrt(asq) < Config::FORCE_MOTION_ACC_THRESH_MSS);
 }
 
+// ===== 闸门的报告 =====
+
+// 闸门状态迁移 + 响亮地报出【逐通道】的比较结果。
+// 只在【状态变化】时立刻打印; 状态不变时按 FORCE_GUARD_REPORT_MS 复报一次 ——
+// 闸门每帧都判 (30Hz), 每帧都印会把控制台冲掉, 而"看不过来"与"没报"在操作上是一回事。
+// ⚠ 复报【只对"拒绝"那一侧】: 放行是常态, 每 5 s 印一行"放行"同样是噪音
+//   (而且会把真正要紧的那段挤出可视区)。放行只在它【刚刚恢复】时印一次。
+static void setGuardState(ForceCompensation::GuardState st) {
+    const DWORD now = GetTickCount();
+    const bool changed = (st != g_guardState);
+    g_guardState = st;
+
+    if (st == ForceCompensation::GuardState::OK) {
+        if (changed) {
+            fprintf(stderr, "[Force] 一致性闸门: 放行 (本地全量模型与 @576 逐通道一致)\n");
+            fflush(stderr);
+        }
+        g_guardReportMs = now;
+        return;
+    }
+    if (!changed && (now - g_guardReportMs) < static_cast<DWORD>(Config::FORCE_GUARD_REPORT_MS)) return;
+    g_guardReportMs = now;
+
+    const bool uncal = (st == ForceCompensation::GuardState::UNCALIBRATED);
+    // 输出一律走 stderr —— 与 ForceCalibration 的"响亮地说出来"同一条路; stdout 有缓冲,
+    // 混着打会让这段在最需要它的时候缺半截。
+    fprintf(stderr,
+            "[Force] !! ============ 一致性闸门: 拒绝传递数据 ============\n"
+            "[Force] !! 原因: %s\n"
+            "[Force] !!   未标定 -> 去标定 ('m' 采多姿态 + 's' 解 A, 再 'z' 调零);\n"
+            "[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。\n"
+            "[Force] !!   【两者的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。\n"
+            "[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推\n"
+            "[Force] !!   filtered / hapticOut / F| 帧, 所以触觉与约束力两条路一起断。\n",
+            uncal ? "【没有可用模型】本地补偿未启用 —— 不是\"标定与机械臂不符\""
+                  : "【有模型, 但与机械臂对不上】两边估计的不是同一个外力");
+    static const char* NM[6] = { "Fx(N)", "Fy(N)", "Fz(N)", "Mx(Nm)", "My(Nm)", "Mz(Nm)" };
+    if (uncal) {
+        // 没有模型时【不打逐通道表】: 那时 compensated 恒为 0, 印出来会是"六个通道全在限内",
+        // 而"在限内"在这里没有意义 —— 那是把"没比过"说成"比过了且没问题"。
+        fprintf(stderr, "[Force] !! (没有模型可比较: 逐通道对比表不适用。上面那一段才是原因。)\n");
+        fprintf(stderr, "[Force] !! 处理: 先按 'm' 采多姿态 -> 's' 解出 A, 再按 'z' 调零存盘。\n");
+        fflush(stderr);
+        return;
+    }
+    fprintf(stderr, "[Force] !! 逐通道结果 (EMA 差 = compensated − @576; 单位见各行标签):\n");
+    for (int i = 0; i < 6; i++) {
+        const bool ex = (g_guardTol[i] > 0.0) && (fabs(g_guardEma[i]) > g_guardTol[i]);
+        if (!g_guardVote[i]) {
+            fprintf(stderr, "[Force] !!   %-6s %+10.4f  容差 %.4f  【不投票】"
+                            "@576 的 z 响应秩 2 (奇异值 0.212/0.201/0.008), 它动不了就证不了什么\n",
+                    NM[i], g_guardEma[i], g_guardTol[i]);
+        } else {
+            fprintf(stderr, "[Force] !!   %-6s %+10.4f  容差 %.4f  %s\n",
+                    NM[i], g_guardEma[i], g_guardTol[i], ex ? "超限  <== 触发" : "在限内");
+        }
+    }
+    // (走到这里只可能是 INCONSISTENT —— UNCALIBRATED 上面已经 return 了)
+    fprintf(stderr, "[Force] !! 处理: 查负载参数有没有真的发进机械臂 (Task 8), 或重跑离线一致性检查。\n"
+                    "[Force] !!   【不要】靠改容差把它压过去 —— 容差是由实测导出的。\n");
+    fflush(stderr);
+}
+
+// 把 EMA 复位 —— 换模型/重启之后必须重新采证据, 不能拿旧模型的 EMA 去判新模型。
+static void resetGuard() {
+    for (int i = 0; i < 6; i++) g_guardEma[i] = 0.0;
+    g_guardSeeded = false;
+    g_guardFrames = 0;
+    g_guardState  = ForceCompensation::GuardState::UNCALIBRATED;
+    g_guardReportMs = 0;
+}
+
 // ===== ForceCompensation namespace =====
 
 namespace ForceCompensation {
@@ -181,11 +283,42 @@ void init() {
         g_biasTorque[i] = 0.0;
     }
     g_motion.reset();
+
+    // 闸门: 逐通道容差与状态。容差的【出处】写在 Config.h 的注释里 (实测导出, 不是猜)。
+    for (int i = 0; i < 3; i++) {
+        g_guardTol[i]     = Config::FORCE_GUARD_TOL_FORCE_N;
+        g_guardTol[3 + i] = Config::FORCE_GUARD_TOL_MOMENT_NM;
+    }
+    resetGuard();
 }
 
 void setCalibration(const double A[9], const double biasForce[3],
                     const double biasTorque[3], const double comSensor[3])
 {
+    // ★ 用户指令 3「全零 A 拒绝传递数据并报错」的落点。
+    //   在这里拒掉, 而不是等 step() 每帧去判 —— 那样"已标定"这个状态本身就带着一个
+    //   没有重力项的模型, 而补偿后的读数依旧是 N, 不会有任何异常 (本项目最怕的那种
+    //   "安静地错")。拒掉之后 g_isCalibrated 保持 false, step() 于是走"没有可用模型"
+    //   那条路: 输出置零 + 报错 (ERR_FORCE_UNCALIBRATED)。
+    //   ⚠ 现场确实会走到这里: 从未解过 A 时按 'z' 调零, ForceCalibration::update 会拿
+    //     currentModel() 的空 A 回灌进来 (那时它自己也已经在报 WARNING)。
+    char why[192];
+    if (!modelUsable(A, why, sizeof(why))) {
+        fprintf(stderr,
+                "[Force] !! setCalibration 【拒绝安装】: %s\n"
+                "[Force] !!   本地补偿保持【未启用】—— 输出置零并报 ERR_FORCE_UNCALIBRATED。\n"
+                "[Force] !!   一份没有重力项 (或秩亏) 的模型不会报错, 只会安静地算错, 所以不收。\n"
+                "[Force] !!   处理: 按 'm' 采多姿态 -> 's' 解出 A (至少 4 个朝向不同的姿态), 再 'z' 调零。\n",
+                why);
+        fflush(stderr);
+        EnterCriticalSection(&g_calibMutex);
+        g_isCalibrated = false;      // 连旧的也一并作废: 拒绝安装的语义是"现在没有可用模型"
+        LeaveCriticalSection(&g_calibMutex);
+        resetGuard();
+        setGuardState(GuardState::UNCALIBRATED);
+        return;
+    }
+
     EnterCriticalSection(&g_calibMutex);
     for (int i = 0; i < 9; i++) g_A[i] = A[i];
     for (int i = 0; i < 3; i++) {
@@ -195,6 +328,9 @@ void setCalibration(const double A[9], const double biasForce[3],
     }
     g_isCalibrated = true;
     LeaveCriticalSection(&g_calibMutex);
+
+    // 换了模型就重新采证据: 拿旧模型的 EMA 去判新模型是错的。
+    resetGuard();
 }
 
 void currentModel(double A[9], double comSensor[3]) {
@@ -225,6 +361,67 @@ bool isCalibrated() {
     return g_isCalibrated;
 }
 
+// A 能不能当【重力模型】用。三个毛病各报各的 —— 它们要做的事不一样:
+//   · 非有限  -> 文件/内存被改坏了
+//   · 全零    -> 从没解过 A (或调零时 A 是空的): 这是用户指令 3 点名的那一种
+//   · 数值退化 -> "解出来了但秩亏": 姿态铺得太窄, 补偿里有两个方向根本没有模型
+bool modelUsable(const double A[9], char* why, int whyLen) {
+    if (why && whyLen > 0) why[0] = '\0';
+    for (int i = 0; i < 9; i++) {
+        if (!std::isfinite(A[i])) {
+            if (why) snprintf(why, whyLen, "A 的第 %d 个元素不是有限数 (NaN/Inf)", i);
+            return false;
+        }
+    }
+    bool allZero = true;
+    for (int i = 0; i < 9; i++) if (A[i] != 0.0) allZero = false;
+    if (allZero) {
+        if (why) snprintf(why, whyLen, "A 全为 0 (没有重力模型)");
+        return false;
+    }
+    const double det = A[0] * (A[4] * A[8] - A[5] * A[7])
+                     - A[1] * (A[3] * A[8] - A[5] * A[6])
+                     + A[2] * (A[3] * A[7] - A[4] * A[6]);
+    double fro2 = 0.0;
+    for (int i = 0; i < 9; i++) fro2 += A[i] * A[i];
+    const double fro = sqrt(fro2);
+    if (!(fro > 0.0)) {
+        if (why) snprintf(why, whyLen, "A 的 Frobenius 范数为 0");
+        return false;
+    }
+    const double ratio = fabs(det) / (fro * fro * fro);
+    if (!(ratio > GUARD_MIN_DET_RATIO)) {
+        if (why) snprintf(why, whyLen,
+                          "A 数值退化: |det A| / ||A||^3 = %.3g <= %.3g "
+                          "(秩亏 -> 至少一个力方向没有模型)", ratio, GUARD_MIN_DET_RATIO);
+        return false;
+    }
+    return true;
+}
+
+GuardState guardState() { return g_guardState; }
+
+void guardReport(GuardReport& out) {
+    out.state = g_guardState;
+    out.frames = g_guardFrames;
+    for (int i = 0; i < 6; i++) {
+        out.ema[i]       = g_guardEma[i];
+        out.tol[i]       = g_guardTol[i];
+        out.voted[i]     = g_guardVote[i];
+        out.exceeded[i]  = g_guardVote[i] && (g_guardTol[i] > 0.0)
+                        && (fabs(g_guardEma[i]) > g_guardTol[i]);
+    }
+}
+
+const char* guardStateName(GuardState s) {
+    switch (s) {
+        case GuardState::OK:            return "OK";
+        case GuardState::UNCALIBRATED:  return "UNCALIBRATED";
+        case GuardState::INCONSISTENT:  return "INCONSISTENT";
+    }
+    return "UNKNOWN";
+}
+
 double currentMassKg() {
     EnterCriticalSection(&g_calibMutex);
     double A[9];
@@ -240,15 +437,29 @@ void step(AppState::ForceData& fd, const double poseRxyz[6]) {
     double dt = 1.0 / static_cast<double>(Config::FORCE_EFFECTIVE_SAMPLE_RATE);
     g_motion.update(poseRxyz[0], poseRxyz[1], poseRxyz[2], dt);
 
-    // 2. Copy the raw channel to compensated as default (no-op if uncalibrated)
-    //    默认值取 @1304 (与下面标定后的公式【同一个通道】)。从前这里是 fd.raw (@576) ——
-    //    切换通道时漏掉这一行, 未标定时的读数就会来自另一个物理量, 而"标定前后读到的
-    //    不是同一件事"是查不出来的 (两边的量纲都是 N)。
-    for (int i = 0; i < 6; i++) {
-        fd.compensated[i] = fd.sixForceRaw[i];
+    // 2. 默认输出 = 零。【fail closed 的落点】: 任何没走到"闸门放行"的路径都在这里留下 0。
+    //    从前这里是"把 @1304 原样抄进 compensated" (透传) —— 那就是评审判定的 Critical:
+    //    未标定时 @1304 的 x 通道在零外力下也报 −19.0 ~ −22.7 N
+    //    (四份夹具 tests/fixtures/calib_poses_2026-09-19*.txt 的 F1304x 列, 36 个姿态实测),
+    //    经下游 ForcePipeline 的映射 (Config::FORCE_MAX_TOUCH_N / FORCE_MAX_SENSOR_N = 3.3/200)
+    //    与反射增益 5 之后以 21.9 N 计: 手上得到 ~1.8 N 的恒定推力 (21.9 × 3.3/200 × 5 = 1.81)。
+    //    【数据侧一律置零与严重度无关】—— REJECT 只是"拒绝这一帧的运动", 而"不许传递
+    //    数据"这件事由这一行无条件保证。
+    for (int i = 0; i < 6; i++) fd.compensated[i] = 0.0;
+    fd.isCalibrated = false;
+    fd.calibMassKg = 0.0;
+    for (int i = 0; i < 3; i++) {
+        fd.calibComSensor[i] = 0.0;
+        fd.calibBiasForce[i] = 0.0;
+        fd.calibBiasTorque[i] = 0.0;
     }
 
-    if (!g_isCalibrated) return;
+    if (!g_isCalibrated) {
+        // 指令 1/3: 没有可用模型 ⇒ 直接拒绝 + 报错, 不是透传。
+        // (A 全零/退化 的情形在 setCalibration 就被挡下了, 所以这里报的是同一类原因。)
+        setGuardState(GuardState::UNCALIBRATED);
+        return;
+    }
 
     // 3. Snapshot calibration globals under mutex
     EnterCriticalSection(&g_calibMutex);
@@ -260,7 +471,10 @@ void step(AppState::ForceData& fd, const double poseRxyz[6]) {
     bool calib = g_isCalibrated;
     LeaveCriticalSection(&g_calibMutex);
 
-    if (!calib) return; // setCalibration cleared calibration mid-flight
+    if (!calib) {   // setCalibration cleared calibration mid-flight
+        setGuardState(GuardState::UNCALIBRATED);
+        return;
+    }
 
     // 4-5. Gravity in the SENSOR frame, then through the fitted response A.
     //    g = gravitySensorFrameAtYaw(pose, 0.0, g) —— 【psi 传 0】: 全量模型的 A 是自由 3×3,
@@ -295,17 +509,50 @@ void step(AppState::ForceData& fd, const double poseRxyz[6]) {
     }
 
     // 7. Compensate: compensated = sixForceRaw − bias − gravity − inertia
-    fd.compensated[0] = fd.sixForceRaw[0] - bF[0] - Fg[0] - Fi[0];
-    fd.compensated[1] = fd.sixForceRaw[1] - bF[1] - Fg[1] - Fi[1];
-    fd.compensated[2] = fd.sixForceRaw[2] - bF[2] - Fg[2] - Fi[2];
-    fd.compensated[3] = fd.sixForceRaw[3] - bM[0] - Mg[0];
-    fd.compensated[4] = fd.sixForceRaw[4] - bM[1] - Mg[1];
-    fd.compensated[5] = fd.sixForceRaw[5] - bM[2] - Mg[2];
+    //    ⚠ 先算进【局部变量】, 不直接写 fd —— 闸门要在数据出门之前判。
+    double comp[6];
+    comp[0] = fd.sixForceRaw[0] - bF[0] - Fg[0] - Fi[0];
+    comp[1] = fd.sixForceRaw[1] - bF[1] - Fg[1] - Fi[1];
+    comp[2] = fd.sixForceRaw[2] - bF[2] - Fg[2] - Fi[2];
+    comp[3] = fd.sixForceRaw[3] - bM[0] - Mg[0];
+    comp[4] = fd.sixForceRaw[4] - bM[1] - Mg[1];
+    comp[5] = fd.sixForceRaw[5] - bM[2] - Mg[2];
+
+    // ===== 7b. 运行时一致性闸门 (用户指令 1/2) =====
+    // 判据与两个原因的分辨写在 .h 里; 这里只做: 更新逐通道 EMA -> 投票 -> 放行或拒绝。
+    // 【EMA 无条件更新】(包括正在拒绝的时候): 否则闸门一旦拒绝就再也回不来, 而 Task 8
+    //  "把负载发进去 -> 看它放行" 正是靠它回来的。
+    for (int i = 0; i < 6; i++) {
+        const double d = comp[i] - fd.raw[i];
+        if (!g_guardSeeded) g_guardEma[i] = d;
+        else g_guardEma[i] += Config::FORCE_GUARD_EMA_ALPHA * (d - g_guardEma[i]);
+    }
+    g_guardSeeded = true;
+    g_guardFrames++;
+
+    bool inconsistent = false;
+    for (int i = 0; i < 6; i++) {
+        if (!g_guardVote[i]) continue;               // Fz 不投票, 但照报 (见上面的说明)
+        if (!std::isfinite(g_guardEma[i])) { inconsistent = true; break; }  // NaN 也算不一致
+        if (fabs(g_guardEma[i]) > g_guardTol[i]) { inconsistent = true; break; }
+    }
+    if (inconsistent) {
+        // 拒绝: fd.compensated 保持第 2 步写下的全零, haptic / 约束力 / F| 随之断开。
+        setGuardState(GuardState::INCONSISTENT);
+        return;
+    }
+    setGuardState(GuardState::OK);
+
+    for (int i = 0; i < 6; i++) fd.compensated[i] = comp[i];
 
     // 8. Online EMA bias update (only when still) — 作用/时机/系数一字未改, 只有输入量
     //    跟着换成了 @1304。零偏是【这个通道】的零偏: 拿 @576 去更新它, 就是给另一路量的
     //    零偏做 EMA —— 两路的零偏不是一回事。实测出处: tests/fixtures/calib_poses_2026-09-19.txt
     //    7 个姿态的逐通道均值差 (@1304 − @576) = 19.8 / 1.6 / 1.7 N (x/y/z)。
+    //    ⚠ 【新增】只在与 @576 一致时才更新。不一致时继续在线学零偏, 等于闸门一边拒它、
+    //      一边把同样的数据学进 b_F (而 b_F 的 EMA 目标正是把 compensated 拉向 0) ——
+    //      那会让不一致自我掩盖, 而"安静地学错"正是这条闸门要防的东西。
+    //      代价: 拒绝期间零偏不再自跟踪; 闸门放行后自动恢复。
     if (g_motion.isStill()) {
         double alpha = Config::FORCE_BIAS_EMA_ALPHA;
         // Update local copy, then write back under mutex
@@ -339,6 +586,7 @@ void step(AppState::ForceData& fd, const double poseRxyz[6]) {
 void shutdown() {
     g_isCalibrated = false;
     g_motion.reset();
+    resetGuard();
     if (g_mutexInit) {
         DeleteCriticalSection(&g_calibMutex);
         g_mutexInit = false;

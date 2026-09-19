@@ -34,6 +34,10 @@ public:
     // 统计数据
     int errorCount(RobotErrorCode code) const;
 
+    // m_errorCounts 的槽位数。【新增错误码时必须同步改这里】—— 槽位不够时计数会被
+    // 静默丢掉 (下面的 log() 有边界判断), 会话报告就会少算, 而"少算"看不出来。
+    static const int ERROR_CODE_SLOTS = 25;
+
     // 环形缓冲区 (供 HUD 显示)
     static const int HISTORY_SIZE = 200;
     const DiagnosticEvent* history() const { return m_history; }
@@ -50,7 +54,7 @@ private:
     DiagnosticEvent m_history[HISTORY_SIZE];
     int m_writeIdx = 0;
     int m_count = 0;
-    int m_errorCounts[24] = {0};
+    int m_errorCounts[ERROR_CODE_SLOTS] = {0};
     FILE* m_logFile = nullptr;
     bool m_isShutdown = false;
     uint64_t m_sessionStartMs = 0;
