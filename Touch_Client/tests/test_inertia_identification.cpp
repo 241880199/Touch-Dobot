@@ -224,6 +224,103 @@ static void buildWrench(const Model& md, const Traj& tr, double t,
     }
 }
 
+// ===== 独立实现 4b: 【物理真值】形式的发生器 =====
+// 为什么另写一个: 上面 buildWrench 的 md.I 是【通道坐标系】里的张量 —— 那只在 W = A/m
+// 正交时与"传感器系里的物理惯量"是同一件事 (两者差一个正交变换)。真实器件的 W 有 6.5%
+// 的各向异性, 这时【必须】先把物理量写出来, 再让通道响应算子作用上去:
+//
+//     F_ch = b_F + A·g_s + A·a_com^S
+//     M_ch = b_M + c_s × (A·g_s) + c_s × (A·a_O^S)
+//                       + W · ( I_phys·α^S + ω^S × (I_phys·ω^S) )
+//
+// 于是真值被定义死了: I_phys 是工具绕【传感器测量原点】、表达在【传感器系】里的惯量, 是
+// 物理量, 与通道约定无关。模块若能精确还原, 它的 I_O 必须与 I_phys 有相同的本征值
+// (W 不正交时 I_O = W·I_phys·W⁻¹ 是相似变换, 特征值不变) —— 这是与通道坐标系无关的口径。
+static void buildWrenchPhys(const Model& md, const Traj& tr, double t,
+                            double pose[6], double speed[6], double wrench[6])
+{
+    double pos[3], rpy[3], vel[3], acc[3], rdot[3], rddot[3];
+    tr.eval(t, pos, rpy, vel, acc, rdot, rddot);
+    for (int i = 0; i < 3; i++) {
+        pose[i] = pos[i]; pose[3 + i] = rpy[i];
+        speed[i] = vel[i];
+        speed[3 + i] = rdot[i] / D2R;      // 度/s
+    }
+    double R[9];
+    tRpyToR(rpy[0], rpy[1], rpy[2], R);
+
+    double omegaS[3], alphaS[3];
+    tAngular(rpy, rdot, rddot, omegaS, alphaS);
+    double aOS[3];
+    tMatTVec(R, acc, aOS);                 // 传感器系, mm/s^2
+    for (int i = 0; i < 3; i++) aOS[i] /= 1000.0;   // -> m/s^2
+
+    double t1[3], t2[3], t3[3], acomS[3];
+    tCross(alphaS, md.cs, t1);
+    tCross(omegaS, md.cs, t2);
+    tCross(omegaS, t2, t3);
+    for (int i = 0; i < 3; i++) acomS[i] = aOS[i] + t1[i] + t3[i];
+
+    double gs[3];
+    tGravitySensor(pose, gs);
+    double Ag[3], AaO[3], Aac[3];
+    tMatVec(md.A, gs, Ag);
+    tMatVec(md.A, aOS, AaO);
+    tMatVec(md.A, acomS, Aac);
+
+    // 物理惯量作用在【传感器系】的角运动上, 结果再让通道响应算子 W = A/m 送进通道
+    double Iom[3], Ial[3], wIw[3], phys[3], Mc[3];
+    tMatVec(md.I, omegaS, Iom);
+    tMatVec(md.I, alphaS, Ial);
+    tCross(omegaS, Iom, wIw);
+    for (int i = 0; i < 3; i++) phys[i] = Ial[i] + wIw[i];
+    for (int a = 0; a < 3; a++)
+        Mc[a] = (md.A[a * 3 + 0] * phys[0] + md.A[a * 3 + 1] * phys[1]
+               + md.A[a * 3 + 2] * phys[2]) / md.m;
+
+    double cg[3], ca[3];
+    tCross(md.cs, Ag, cg);
+    tCross(md.cs, AaO, ca);
+
+    for (int a = 0; a < 3; a++) {
+        wrench[a]     = md.bF[a] + Ag[a] + Aac[a];
+        wrench[3 + a] = md.bM[a] + cg[a] + ca[a] + Mc[a];
+    }
+}
+
+static int g_physGen = 0;      // 0 = buildWrench (通道张量), 1 = buildWrenchPhys (物理真值)
+
+// ===== 独立实现 5: 对称 3x3 的特征值 (升序) =====
+// 解析闭式 (特征多项式 + 三角解法), 与模块里的 Jacobi 是两条不同的路。
+static void tSymEig3(const double S[9], double ev[3])
+{
+    const double p1 = S[1] * S[1] + S[2] * S[2] + S[5] * S[5];
+    if (p1 <= 0.0) {                       // 已经是对角阵
+        ev[0] = S[0]; ev[1] = S[4]; ev[2] = S[8];
+    } else {
+        const double q = (S[0] + S[4] + S[8]) / 3.0;
+        const double p2 = (S[0] - q) * (S[0] - q) + (S[4] - q) * (S[4] - q)
+                        + (S[8] - q) * (S[8] - q) + 2.0 * p1;
+        const double p = sqrt(p2 / 6.0);
+        double B[9];
+        for (int i = 0; i < 9; i++) B[i] = S[i];
+        B[0] -= q; B[4] -= q; B[8] -= q;
+        for (int i = 0; i < 9; i++) B[i] /= p;
+        double r = (B[0] * (B[4] * B[8] - B[5] * B[7])
+                  - B[1] * (B[3] * B[8] - B[5] * B[6])
+                  + B[2] * (B[3] * B[7] - B[4] * B[6])) / 2.0;
+        if (r < -1.0) r = -1.0;
+        if (r > 1.0) r = 1.0;
+        const double phi = acos(r) / 3.0;
+        ev[0] = q + 2.0 * p * cos(phi);
+        ev[2] = q + 2.0 * p * cos(phi + 2.0 * PI_T / 3.0);
+        ev[1] = 3.0 * q - ev[0] - ev[2];
+    }
+    for (int a = 0; a < 2; a++)
+        for (int b = a + 1; b < 3; b++)
+            if (ev[b] < ev[a]) { const double t = ev[a]; ev[a] = ev[b]; ev[b] = t; }
+}
+
 // ===== 场景组装 =====
 struct Scene {
     Model md;
@@ -246,9 +343,9 @@ static void defaultModel(Model& md, double m, double parity)
 
     // 工具链量级: 与 spec §6c 的 CAD 参考同量级 (10^-3 ~ 10^-4 kg·m^2)。
     // ⚠ 【必须是一个真的惯量张量】: 绕任一点的惯量张量正定且满足 I1+I2 >= I3。
-    //    spec §6c 给的那对 CAD 值 (Ixx=Iyy≈8.5e-3, Izz≈4.1e-4) 就【不满足】后者
-    //    (8.5e-3+8.5e-3 ≪ 17e-3), 所以这里不能照抄 —— 照抄造出来的是非物理数据。
     //    这里取一个"扁盘 + 小交叉项"的真张量: 8.5 + 14.5 >= 15.2 有余量。
+    //    (别拿"CAD 值不满足三角不等式"当理由 —— 那是错的: spec §6c 的 CAD 主惯量
+    //     4.136e-4 / 8.461e-3 / 8.613e-3 三个配对全都满足, 余量 3.0% / 4.9% / 4.8%。)
     md.I[0] = 8.5e-3;  md.I[1] = 2.0e-4;  md.I[2] = -1.0e-4;
     md.I[3] = 2.0e-4;  md.I[4] = 14.5e-3;  md.I[5] = 3.0e-4;
     md.I[6] = -1.0e-4; md.I[7] = 3.0e-4;   md.I[8] = 15.2e-3;
@@ -282,7 +379,8 @@ static int makeSamples(const Scene& sc, InertiaSample* out, double t0, double dt
     for (int i = 0; i < sc.n; i++) {
         const double t = t0 + i * dt;
         double pose[6], speed[6], wrench[6];
-        buildWrench(sc.md, sc.tr, t, pose, speed, wrench);
+        if (g_physGen) buildWrenchPhys(sc.md, sc.tr, t, pose, speed, wrench);
+        else           buildWrench(sc.md, sc.tr, t, pose, speed, wrench);
         InertiaSample& s = out[i];
         s.t = t;
         for (int k = 0; k < 6; k++) {
@@ -476,6 +574,10 @@ static void test_rejects_corrupted_speed_channel()
 
 // ★ 单轴往复【不足以保证可辨识】—— 恒有 M = (αE + ω[n]ₓ)(I·n), 只依赖 I·n 三个量,
 //   秩最多 3 < 6。必须拒绝, 而不是给一个"看着合理"的张量。
+// ⚠ 断言说清楚【是哪一条在拒绝】: determinacyOk 是一个合取式 (solved && ...), 光断言
+//   !determinacyOk 不能证明 σmax 那条规则在干活 —— 这里拒绝的是【秩】那一路 (solved
+//   为假, cond 报 inf)。σmax < 张量量级 那条本来就几乎不可能触发 (实测 σmax/||I|| ~ 1e-4),
+//   头文件里已照实写明它不是主力, 所以这里不去伪造一条它触发的用例。
 static void test_rejects_single_axis_excitation()
 {
     TEST(test_rejects_single_axis_excitation);
@@ -491,6 +593,11 @@ static void test_rejects_single_axis_excitation()
     InertiaFit f = runFit(sc, s, sc.n, tr.freqHz);
     CHECK(!f.ok);
     CHECK(!f.determinacyOk);
+    // 【是哪一路】: 秩亏 -> cond 报 inf (以前这里是 0, 打印出来像"完美条件数"),
+    // 参数全被置零, 于是失配度那一关也亮红。
+    CHECK(!(f.cond < 1.0e12));
+    CHECK(!f.momentLackOfFitOk);
+    for (int i = 0; i < 9; i++) CHECK_NEAR(f.I[i], 0.0, 1e-12);
     PASS();
 }
 
@@ -510,6 +617,140 @@ static void test_rejects_nonphysical_negative_inertia()
     CHECK(!f.ok);
     CHECK(!f.physicalOk);
     CHECK(f.eig[2] < 0.0);
+    PASS();
+}
+
+// ★ 通道响应各向异性 (实测 6.5%) —— 这是本套用例以前【完全覆盖不到】的那一格。
+//   别的用例都造 A = m·diag(1,1,parity)·Q, 于是 W = A/m 【精确正交】; 而真实器件恰恰
+//   【永远】不落在这一格上, 它就在这一格旁边 —— 也就是"从来没被生成过"的那片区域。
+//   W 不正交时模型 (m) 没有精确解: α 项要求 I_O = W·I_phys·W⁻¹ (相似变换, 一般不对称),
+//   ω×Iω 项要求 WᵀW = det(W)·I —— 两个要求指向不同的张量, 六参数对称族同时满足不了。
+//   最小二乘只能折中, 代价是百分之一量级的张量误差。本用例把这一格钉住: 误差要能被
+//   【看到】, 而不是又拿一个全绿的 ok=1 交差 (评审用一个独立探针就是在这一格上抓到
+//   ok=1 而解已经错了)。
+// 各向异性场景的两把尺子 (都与通道坐标系无关):
+//   · 主惯量相对偏差 —— I_O 与 I_phys 是相似关系 (W·I_phys·W⁻¹), 主惯量应当一致。物理口径。
+//   · 对 I* = W·I_phys·W⁻¹ 的最大元素偏差 (以 I* 的最大元素归一) —— α 项要求的那个张量。
+// ⚠ 偏差的大小取决于【张量形状与轨迹的搭配】, 不是判据变了: 换一张更"偏"的张量 (细长笔),
+//   同一段轨迹上的偏差就从 5‰ 涨到 1.4% —— 因为 ω×Iω 那一项的失配随 I 的各向异性放大。
+//   返回两者中的大者。
+static double anisotropyErr(const InertiaFit& f, const double evT[3], const double Istar[9],
+                            double* compOut)
+{
+    double err = 0.0;
+    const double evM[3] = { f.eig[0], f.eig[1], f.eig[2] };
+    for (int k = 0; k < 3; k++) {
+        const double e = fabs(evM[k] - evT[k]) / fabs(evT[k]);
+        if (e > err) err = e;
+    }
+    double normStar = 0.0, errComp = 0.0;
+    for (int i = 0; i < 9; i++) { const double a = fabs(Istar[i]); if (a > normStar) normStar = a; }
+    for (int i = 0; i < 9; i++) {
+        const double e = fabs(f.I[i] - Istar[i]) / normStar;
+        if (e > errComp) errComp = e;
+    }
+    if (compOut) *compOut = errComp;
+    return (errComp > err) ? errComp : err;
+}
+
+static void test_anisotropic_response_is_flagged()
+{
+    TEST(test_anisotropic_response_is_flagged);
+    Model md; defaultModel(md, 0.42, -1.0);
+
+    // 物理真值取【细长笔】那一份: spec §6c 的 CAD 参考 (主惯量 4.136e-4 / 8.461e-3 /
+    // 8.613e-3) 就是笔的形状 —— 主惯量差二十倍是形状, 不是不自洽 (见头文件)。
+    // 放在传感器系的主轴上, 交叉项为 0。
+    for (int i = 0; i < 9; i++) md.I[i] = 0.0;
+    md.I[0] = 8.461e-3; md.I[4] = 8.613e-3; md.I[8] = 4.136e-4;
+
+    // 实测的通道各向异性 σ1/σ3 = 1.065 (W = A/m 的两个主值 0.9791 / 1.0432), 主轴再绕
+    // 传感器 z 转 25 度 —— 这样 α 项那个相似变换【也】不是对称阵, 两种失配都落到解上。
+    // (A 仍是自由 3x3, 静力学标定本来就不对它做任何假设, 所以这是个合法的器件。)
+    {
+        double Q[9], Qt[9], D[9], W[9];
+        tRpyToR(0.0, 0.0, 25.0, Q);
+        for (int r = 0; r < 3; r++)
+            for (int c = 0; c < 3; c++) Qt[r * 3 + c] = Q[c * 3 + r];
+        for (int i = 0; i < 9; i++) D[i] = 0.0;
+        D[0] = 0.9791; D[4] = 0.9791; D[8] = 1.0432;
+        double T[9];
+        tMatMul(Q, D, T);
+        tMatMul(T, Qt, W);
+        for (int i = 0; i < 9; i++) md.A[i] = md.m * W[i];
+    }
+
+    Traj tr; defaultTraj(tr, 0.5);
+    Scene sc; sc.md = md; sc.tr = tr; sc.n = 750;
+
+    // 【无噪声】: 留下的残差就只剩模型形式错, 不看噪声脸色。
+    g_physGen = 1;
+    static InertiaSample s[MAXS];
+    makeSamples(sc, s, 0.0, 1.0 / 125.0, 0.0, 0.0);
+    g_physGen = 0;
+    InertiaFit f = runFit(sc, s, sc.n, tr.freqHz);
+
+    // 真值: I_phys 的主惯量 (I_O 与它是相似关系, 主惯量应当一致)
+    double evT[3];
+    tSymEig3(md.I, evT);
+    // 另一把尺子: 与【α 项要求的那个张量】I* = W·I_phys·W⁻¹ 逐元素比 (W 不正交时 I* 一般
+    // 不对称, 只能逐元素比; 归一化取 I* 的最大元素, 免得去碰近零的交叉项)。
+    double Wm[9], Wi[9], Istar[9];
+    for (int i = 0; i < 9; i++) Wm[i] = md.A[i] / md.m;
+    {
+        const double det = Wm[0]*(Wm[4]*Wm[8]-Wm[5]*Wm[7]) - Wm[1]*(Wm[3]*Wm[8]-Wm[5]*Wm[6])
+                         + Wm[2]*(Wm[3]*Wm[7]-Wm[4]*Wm[6]);
+        Wi[0] = (Wm[4]*Wm[8]-Wm[5]*Wm[7])/det; Wi[1] = (Wm[2]*Wm[7]-Wm[1]*Wm[8])/det;
+        Wi[2] = (Wm[1]*Wm[5]-Wm[2]*Wm[4])/det; Wi[3] = (Wm[5]*Wm[6]-Wm[3]*Wm[8])/det;
+        Wi[4] = (Wm[0]*Wm[8]-Wm[2]*Wm[6])/det; Wi[5] = (Wm[2]*Wm[3]-Wm[0]*Wm[5])/det;
+        Wi[6] = (Wm[3]*Wm[7]-Wm[4]*Wm[6])/det; Wi[7] = (Wm[1]*Wm[6]-Wm[0]*Wm[7])/det;
+        Wi[8] = (Wm[0]*Wm[4]-Wm[1]*Wm[3])/det;
+        double T[9];
+        tMatMul(Wm, md.I, T);
+        tMatMul(T, Wi, Istar);
+    }
+    const double err  = anisotropyErr(f, evT, Istar, nullptr);
+
+    // 【判据必须看得见】: 无噪声下残差里除了模型形式错什么也没有 —— 带外噪底是数值噪声级别,
+    // 所以失配度那一关必须亮红。这一条以前是【不存在】的: 那时所有用例的 W 都精确正交,
+    // 而真实器件永远不在那一格上。
+    CHECK(!f.ok);
+    CHECK(!f.momentLackOfFitOk);
+    if (!(err > 0.001)) FAILMSG("各向异性下的主惯量偏差太小, 这一格没被真的激励到");
+
+    // 【判据的边界, 照实记下来】: 加回与别的用例同一水平的实测噪声, 这个模型形式错的
+    // 残差签名(~4e-5 N·m)就落到噪底(~2.3e-3 N·m)下面去了, 失配度回到 1 附近, 抓不到。
+    // 这不是判据写坏了, 是它的【极限】: 从残差里看见一个比噪声低两个数量级的东西,
+    // 本来就不可能。头文件把这句写成"必要而不充分", 这里给它一个实测边界。
+    // 断言的是【偏差仍在】而不是"仍抓不到" —— 后者是能力上限, 不该被测试钉死成期望。
+    makeSamples(sc, s, 0.0, 1.0 / 125.0, 0.01, 0.004);
+    InertiaFit fn = runFit(sc, s, sc.n, tr.freqHz);
+    const double errN = anisotropyErr(fn, evT, Istar, nullptr);
+    std::cout << "(无噪声: 主惯量偏差 " << err * 100.0 << "%, 失配度 " << f.momentLackOfFitRatio
+              << ", 已拒绝 | 同噪声水平: 偏差 " << errN * 100.0 << "%, 失配度 "
+              << fn.momentLackOfFitRatio << ") ";
+    if (!(errN > 0.001)) FAILMSG("加了噪声之后主惯量偏差没了 —— 那不是模型形式错, 是噪声");
+    PASS();
+}
+
+// ★ 角速度那一半的独立检查必须真的能咬 —— 力矩方程吃的就是它, 而它没有第二个来源。
+//   (线性那一半的污染由上一个用例管; 这里只污染角速度, 线性通道、谐波拟合、力矩方程
+//    全都不动, 于是红的那一关只可能是角速度的交叉检查。)
+static void test_rejects_corrupted_angular_speed_channel()
+{
+    TEST(test_rejects_corrupted_angular_speed_channel);
+    Model md; defaultModel(md, 0.42, -1.0);
+    Traj tr; defaultTraj(tr, 0.5);
+    Scene sc; sc.md = md; sc.tr = tr; sc.n = 750;
+
+    static InertiaSample s[MAXS];
+    makeSamples(sc, s, 0.0, 1.0 / 125.0, 0.0, 0.0);
+    for (int i = 0; i < sc.n; i++) s[i].speed[3] += 900.0;      // 度/s 的假角速度 (只动角速度)
+    InertiaFit f = runFit(sc, s, sc.n, 0.5);
+    CHECK(!f.ok);
+    CHECK(!f.kinematicsOk);
+    CHECK(f.speedCheckRms < 1.0);            // 线性那一半没被动过 -> 它不该红
+    CHECK(f.angSpeedCheckRms > 400.0);       // 900/sqrt(3) ≈ 520 度/s
     PASS();
 }
 
@@ -563,9 +804,13 @@ int main()
     test_moment_equation_is_exactly_linear();
     test_sigma_is_calibrated();
 
+    std::cout << "--- 通道响应各向异性 (真实器件的常态) ---" << std::endl;
+    test_anisotropic_response_is_flagged();
+
     std::cout << "--- 拒绝 ---" << std::endl;
     test_rejects_wrong_excitation_frequency();
     test_rejects_corrupted_speed_channel();
+    test_rejects_corrupted_angular_speed_channel();
     test_rejects_single_axis_excitation();
     test_rejects_nonphysical_negative_inertia();
 

@@ -19,19 +19,17 @@
 //     M_i = b_M + c_s × (A · g_i)      c_s: 质心 (m, 传感器测量系)
 //     g_i = TcpCalibration::gravitySensorFrameAtYaw(pose_i, 0.0, g)      <- 【psi = 0】
 //
-// A 是【测量约定本身】: A = m · S · Q, S = diag(1,1,parity), Q = S·A/m。
+// A 是【测量约定本身】: A/m 为正交阵时 A = m·S·Q (S = diag(1,1,parity), Q = S·A/m);
+// 实物上 A/m 只是【接近】正交 —— 差的那一点正是下面 W 那一段要说的事。
 // 注意 g_i 不是"重力加速度矢量"—— 它是基座系矢量 (0,0,+9.81) 在传感器系里的坐标
 // (Rᵀ·(0,0,+G)), 也就是【比力】方向的反向; 重力加速度在基座系是 (0,0,−9.81)。
 // 符号约定整个被 A 吸收 (A 的 9 个元素本来就没有任何约束), 所以本模块【不拆 A】。
 //
 // 设 W := A / m (通道坐标系相对位姿系的映射; A 恰为 m×正交阵时 W 就是正交阵, 此时
-// 各向同性比 σ1/σ3 = 1)。把一个位姿系矢量 v 写成通道坐标 v^ch := W·v。静力学给出
-// 静态那一项 F_ch = A·g_s, 而 A·g_s = −m·g^ch_s (g^ch_s = W·g_s)。也就是说通道读的是
-//
-//     F_ch = b_F + m · ( a_com^ch − g^ch_s )
-//
-// 即【工具受到的接触力旋量】(牛顿, 作用在质心上), 只是表达在通道坐标里。把 a_com 拆成
-// a_O + α×c_s + ω×(ω×c_s), 并把静态那一项代回去 (A·g_s = −m·g^ch_s), 得到本模块用的模型:
+// 各向同性比 σ1/σ3 = 1)。把一个位姿系矢量 v 写成通道坐标 v^ch := W·v。A 是【线性响应
+// 算子】: 静力学那一半把它标定成 F_ch = b_F + A·g_s, 运动那一半按【同一个 A】线性延拓
+// (m·a_com^ch ≡ A·a_com^S 是恒等式, 与 W 是否正交无关)。把 a_com 拆成
+// a_O + α×c_s + ω×(ω×c_s), 得到本模块用的模型:
 //
 //   F_meas = b_F + A·g_s + m·a_com^ch                                     (f)
 //   M_meas = b_M + c_s × (A·g_s) + m·c_s × a_O^ch
@@ -55,6 +53,23 @@
 // ⚠ 它与"绕法兰面的惯量"差两次平行轴平移 (O → 质心 → 法兰面), 本模块【不做】这个换算:
 //   平移要显式写出并实测, 属于后续任务 (spec §6c 末段)。
 //
+// ⚠⚠ 【W 不正交时 (m) 没有精确解 —— 先把这个代价说清楚, 别把"ok=1"读成"惯量可信"】:
+//   · α 那一项: I_O·α^ch = W·I_b·α^S 对任意 α 成立, 要求 I_O = W·I_b·W⁻¹ —— 一个
+//     【相似变换】, 一般【不是对称阵】。本模块只解六分量的对称张量, 所以这一项本身就已经
+//     超出了解空间, 只能取它在对称族里的最佳逼近。
+//   · ω×(Iω) 那一项要能跟着搬过去, 需要 WᵀW = det(W)·I。实测的通道各向异性
+//     (W = diag(0.9791, 0.9791, 1.0432), 6.5%) 不满足 —— 两项要求的张量不同, 最小二乘
+//     只能在它们之间折中。代价的大小取决于张量形状与轨迹的搭配 (评审的独立探针量到
+//     某个分量差 5.9%; 本模块用例里细长笔 + 同一份各向异性量到主惯量差 1.4%), 但
+//     【不存在"精确"】这一点是确定的, 与数值无关。
+//   · 为什么仍然留着这个约定: 它是【唯一】能让零运动精确退化成静力学模型的那个 ——
+//     重力项与惯性项走同一个 W, 两边逐位抵消 (见上面"逐位相同"那句)。这条性质被
+//     zero-motion 用例钉死, 也是与静力学标定对接的唯一通道。
+//
+// ⚠⚠ 【自检是【必要而不充分】的】。上面那条就是反例: 存在一种让模型精确不成立的通道
+//   各向异性, 此时残差里多出来的东西【不是噪声】, 而是模型形式错, 而所有判据仍可能全绿。
+//   判据通过只说明"没有发现已知的失败模式", 不说明 I_O 准。真正的判据清单见 .cpp 第 6 节。
+//
 // ---------------------------------------------------------------------------------------
 // 微分 (spec §6c 点名的"本设计最容易出错的地方")
 // ---------------------------------------------------------------------------------------
@@ -74,39 +89,73 @@ namespace InertiaIdentification {
         double wrench[6];   // @1304 原始力/力矩 —— 测量值
     };
 
+    // 【噪底那把尺子】的状态 —— "没验过"与"验过、通过了"必须一眼分得开, 而且"为什么没有"
+    // 要能分开报 (阶数不够 vs 采样不够 vs 估计退化, 是完全不同的三件事)。
+    enum NoiseFloorStatus {
+        NOISE_FLOOR_OK           = 0,   // 尺子齐备 -> 下面两个判据真的做了
+        NOISE_FLOOR_NO_ORDER     = 1,   // 模型阶数已在搜索上限, 再往上没有阶可用来量带外
+        NOISE_FLOOR_NO_SAMPLES   = 2,   // 采样点数撑不起更高阶的谐波拟合
+        NOISE_FLOOR_DEGENERATE   = 3    // 估计值非正 (通道冻住 / 数据被拟合到完美)
+    };
+
     // 辨识结果。
     struct InertiaFit {
         // ===== 主要输出 =====
         double I[9];              // 绕传感器测量原点的惯量张量 (kg·m^2), 行主序, 对称
         double rmsForceN;         // 力通道残差 (N) —— 运动学检查的残差, 【不含 I_O】
         double rmsMomentNm;       // 力矩通道残差 (N·m)
-        double cond;              // 力矩设计矩阵的 cond = σmax/σmin (激励够不够)
-        double sigma[6];          // 六个独立分量的 1σ = sqrt(diag((JᵀJ)⁻¹)·σ²)
+        double cond;              // 力矩设计矩阵的 cond = σmax/σmin (激励够不够)。
+                                  // 【秩亏时是 inf(不是 0)】—— 0 读起来像"完美条件数", 正好说反。
+        double sigma[6];          // 六个独立分量的 1σ = sqrt(diag((JᵀJ)⁻¹)·(噪底)²)
                                   // 序: [Ixx, Iyy, Izz, Ixy, Ixz, Iyz]
+                                  // ⚠ 尺度取【与模型无关的带外噪底】, 【不取拟合残差】: 残差 =
+                                  //   噪声 + 模型形式错, 拿它当尺度就是自指 (模型越错门越松)。
         double speedCheckRms;     // 拟合速度 vs TCPSpeedActual 的 rms 差 (线性三分量, mm/s)
+        double angSpeedCheckRms;  // 同上, 但比【角速度三分量】: 两边都过同一个 "RPY 变化率 ->
+                                  // 机体角速度" 的换算再比 (度/s)。力矩方程吃的就是这一半。
         bool   ok;                // true = 全部自检通过。false = 【拒绝给参数】, 此时 I[9]
                                   // 是【未经自检】的线性解, 只供诊断, 调用方不得采用。
+                                  // ⚠ ok=true 只是"没有发现已知的失败模式", 【不等于】I_O 准:
+                                  //   见头文件 "自检是必要而不充分的" 那一段。
 
         // ===== 报告字段 (不进求解; 判据的尺度从它们来, 所以必须看得见) =====
         int    harmonicOrder;         // 谐波拟合选定的次数 K (基波 + K 次谐波)
         double harmonicFitRms;        // 位姿谐波拟合的【归一化】残差 rms (无量纲, 1 = 没拟合上)
         double harmonicSignalRms;     // 位姿谐波拟合解释掉的【归一化】信号 rms
         int    samples;               // 参与求解的采样点数
-        double momentNoiseNm;         // 力矩通道的【实测噪底】: 实测力矩对同一次谐波拟合的
-                                      // 带外残差 rms (N·m)。与 I_O 无关, 是量出来的。
+        double momentNoiseFloorNm;    // 力矩通道的【带外噪底】(N·m) —— σ 与失配度这两个判据的
+                                      // 尺子。它是【原始力矩通道】到【高阶】谐波拟合的残差 rms:
+                                      // 那个拟合里没有 I_O, 所以模型形式错【抬不高它】, 不会自指。
+                                      // ⚠ 它是【估计】不是噪底本身: 见 noiseFloorUpperBound。
+        int    noiseFloorOrder;       // 上面那把尺子用的谐波阶数 (数据自己给出的拐点)
+        bool   noiseFloorUpperBound;  // true = 阶数搜到上限仍在下降, 尺子里还混着带内信号
+                                      // (偏松)。false = 找到了拐点, 带内信号已经吃干净。
+        int    noiseFloorStatus;      // NoiseFloorStatus —— 尺子为什么有/没有
+        double momentLackOfFitRatio;  // rmsMomentNm / momentNoiseFloorNm (期望 ≈ 1)
         double inertiaSignalNm;       // 预测的惯性力矩信号 rms = rms|I·α + ω×(I·ω)| (N·m)
-        double inertiaScale;          // 张量自身的量级 = sqrt(Σ I_ij²) (kg·m^2) —— 确定性门限
-                                      // 拿它当尺子, 门限就是【比值 1】, 不是拍定的绝对值
+        double inertiaScale;          // 张量自身的量级 = sqrt(Σ I_ij²) (kg·m^2)
         double sigmaMax;              // max(sigma[0..5])
         double eig[3];                // I 的三个特征值 (升序) —— 物理门限 (正定) 用它
         double triangleMargin;        // 主惯量的三角不等式余量 I1+I2−I3。【报告量, 不作门限】:
-                                      // 见 .cpp 里 physicalOk 的说明 (它是二阶性质, 噪声可越界;
-                                      // 用户手上那份 CAD 参考值本身就差 12 倍)。
+                                      // 它是二阶性质, 噪声可以让一个对的解略微越界。
+                                      // 【怎么用它】: 与 CAD 参考值对照要先守住两条 ——
+                                      //   1) CAD 算的是【绕法兰面】的, 本模块给的是【绕传感器
+                                      //      测量原点】的, 差两次平行轴平移 (本模块明确不做);
+                                      //      要么先把平移补上, 要么只比【绕质心的主惯量】
+                                      //      (那一组与参考点无关, 可以直接比)。
+                                      //   2) 细长笔状工具的主惯量本来就可以差二十倍 (spec §6c
+                                      //      那份 CAD 参考是 4.14e-4 / 8.46e-3 / 8.61e-3),
+                                      //      三个配对的三角不等式余量分别 3.0% / 4.9% / 4.8%,
+                                      //      全都成立 —— 宽窄差得多是形状, 不是不自洽。
         // 逐条自检的结果 —— "没验过"与"验过、通过了"必须一眼分得开
-        bool   kinematicsOk;          // 速度两来源一致 + 谐波拟合解释了运动
-        bool   determinacyOk;         // 参数被激励定得下来 (不确定度 < 张量自身量级)
-        bool   physicalOk;            // I_O 正定 (绕任一点的惯量张量必正定) + 三角不等式
+        bool   kinematicsOk;          // 线性 + 角速度两个来源都一致, 且谐波拟合解释了运动
+        bool   determinacyOk;         // 参数被激励定得下来。【分层】: 主力是 solved (秩 + cond);
+                                      //   σmax < 张量量级 那一条几乎不触发 (实测比 1.2e-4);
+                                      //   真会咬的是"惯性力矩信号 > 噪底"(运动得压过噪声)。
+        bool   physicalOk;            // I_O 正定 (绕任一点的惯量张量必正定)
         bool   forceCheckOk;          // 力通道 (运动学检查) 的残差小于惯性力信号
+        bool   momentLackOfFitOk;     // 力矩残差与【带外噪底】同量级 —— 有可能真抓到"模型
+                                      // 形式错"的那一道。尺子不齐时恒为 false (整体拒绝)。
         double forceSignalN;          // 预测的惯性力信号 rms = rms|m·a_com^ch| (N)
     };
 
@@ -117,6 +166,8 @@ namespace InertiaIdentification {
     //   那个, w 是 N —— 所以它是米不是毫米, 别按 spec §6c 里"54.55 mm"那个写法直接传 54.55);
     //   A [kg]; bF [N]; bM [N·m]。InertiaSample 里的 pose/speed 才是 mm / mm·s⁻¹。
     // 返回 false = 拒绝给出惯量 (原因打到 stderr), 此时 out.ok 也是 false。
+    // 【尺子不齐也返回 false】: 带外噪底量不出来时, 确定性与失配度都无从判 —— 不给"没验过"
+    // 留后门 (PayloadCalibration::fitRaw 对"没有重复姿态对"就是同样处理)。
     bool identifyInertia(const InertiaSample* s, int n, double freqHz,
                          double m, const double comSensor[3],
                          const double A[9], const double bF[3], const double bM[3],

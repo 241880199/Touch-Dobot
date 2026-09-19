@@ -22,6 +22,15 @@ namespace InertiaIdentification {
     // 截断会让"用了多少数据"与调用方以为的不一致, 那种不一致不会报错。
     static const int MAX_SAMPLES = 4096;
 
+    // 噪底那把尺子的两个无量纲常数 (都不是物理量的绝对门限):
+    //   PLATEAU_KEEP —— 每升一阶, 残差要降到上一阶的这个比例以下, 才认为那一阶还在解释
+    //     真实信号; 降不下去就是拐点, 拐点处的残差就是【带外】那一份。纯比值。
+    //   LACK_OF_FIT_K —— 失配度门 1 + K·sqrt(2/dof) 里的单侧假拒率控制 (chi2/dof 的
+    //     标准差约为 sqrt(2/dof))。与 PayloadCalibration::fitRaw 的 modelFormLimit 同一族:
+    //     那里取 χ² 的 0.997 分位数 (≈ 均值 + 3σ), 这里用它的正态近似, 所以 K 也取 3。
+    static const double PLATEAU_KEEP   = 0.9;
+    static const double LACK_OF_FIT_K  = 3.0;
+
     // -----------------------------------------------------------------------------------
     // 小线性代数 (本模块自用; 不进任何别的模块)
     // -----------------------------------------------------------------------------------
@@ -264,10 +273,13 @@ namespace InertiaIdentification {
         for (int i = 0; i < 9; i++) out.I[i] = 0.0;
         out.rmsForceN = 0.0; out.rmsMomentNm = 0.0; out.cond = 0.0;
         for (int i = 0; i < 6; i++) out.sigma[i] = 0.0;
-        out.speedCheckRms = 0.0; out.ok = false;
+        out.speedCheckRms = 0.0; out.angSpeedCheckRms = 0.0; out.ok = false;
         out.harmonicOrder = 0; out.harmonicFitRms = 0.0; out.harmonicSignalRms = 0.0;
         out.samples = 0;
-        out.momentNoiseNm = 0.0; out.inertiaSignalNm = 0.0;
+        out.momentNoiseFloorNm = 0.0; out.inertiaSignalNm = 0.0;
+        out.noiseFloorOrder = 0; out.noiseFloorUpperBound = false;
+        out.noiseFloorStatus = NOISE_FLOOR_NO_ORDER;
+        out.momentLackOfFitRatio = 0.0; out.momentLackOfFitOk = false;
         out.inertiaScale = 0.0; out.sigmaMax = 0.0;
         out.eig[0] = out.eig[1] = out.eig[2] = 0.0;
         out.triangleMargin = 0.0;
@@ -393,6 +405,8 @@ namespace InertiaIdentification {
         std::vector<double> aOch((size_t)nUse * 3), alphaC((size_t)nUse * 3);
         std::vector<double> omegaC((size_t)nUse * 3), acomCh((size_t)nUse * 3);
         std::vector<double> vFit((size_t)nUse * 3);
+        // 角速度那一半的独立检查累加器 (拟合的 vs 自报的, 都在机体坐标系, rad/s)
+        double dAng2 = 0.0, wFit2 = 0.0, wRep2 = 0.0;
 
         for (int i = 0; i < nUse; i++) {
             const InertiaSample& smp = s[i];
@@ -425,6 +439,19 @@ namespace InertiaIdentification {
 
             double OmS[3], AlS[3], wDotB[3];
             angularState(R, Rz, RzRy, rdot, rddot, OmS, AlS, wDotB);
+
+            // 角速度那一半的独立检查: 把机器人自报的 RPY 变化率 (度/s) 用【同一个映射】送进
+            // 机体坐标系 —— 两边走同一条换算, 差的就只剩"两个来源报的运动是否一致"。
+            double rdotRep[3], rddotZero[3] = {0.0, 0.0, 0.0};
+            for (int c = 0; c < 3; c++) rdotRep[c] = smp.speed[3 + c] * PI_ / 180.0;
+            double wRepS[3], scratchA[3], scratchB[3];
+            angularState(R, Rz, RzRy, rdotRep, rddotZero, wRepS, scratchA, scratchB);
+            for (int c = 0; c < 3; c++) {
+                const double e = OmS[c] - wRepS[c];
+                dAng2 += e * e;
+                wFit2 += OmS[c] * OmS[c];
+                wRep2 += wRepS[c] * wRepS[c];
+            }
 
             double aOS[3];
             matTVec3(R, acc_m, aOS);               // a_O 在位姿系
@@ -519,12 +546,12 @@ namespace InertiaIdentification {
         bool rankOk = (lamMin > 0.0);
         bool solved = false;
         if (rankOk) {
-            if ((lamMax / lamMin) < 1.0e12) {
-                out.cond = sqrt(lamMax / lamMin);
-                solved = solveSym(JtJ, Jtb, PI6, sol, Cinv);
-            } else {
-                out.cond = sqrt(lamMax / lamMin);   // 数值上奇异, 报出来
-            }
+            out.cond = sqrt(lamMax / lamMin);       // 数值上奇异也报出来 (不是 0)
+            if ((lamMax / lamMin) < 1.0e12) solved = solveSym(JtJ, Jtb, PI6, sol, Cinv);
+        } else {
+            // σmin 非正 -> cond 数学上是无穷。从前这里留 0, 打印出来是 cond=0, 读起来正好
+            // 是"完美条件数", 与"秩亏"说反了 (评审指出的那一处)。
+            out.cond = HUGE_VAL;
         }
         if (!rankOk || !solved) {
             for (int k = 0; k < 6; k++) sol[k] = 0.0;   // 诊断用: 残差就退化成 |M_res| 本身
@@ -542,6 +569,75 @@ namespace InertiaIdentification {
         double I9[9] = { sol[IX],  sol[IXY], sol[IXZ],
                          sol[IXY], sol[IY],  sol[IYZ],
                          sol[IXZ], sol[IYZ], sol[IZ] };
+
+        // ===== 3b) 力矩通道的【噪底】—— σ 的尺子必须与 I_O 无关 =====
+        // 为什么不能用拟合残差当尺子: 残差 = 噪声 + 模型形式错。拿它当尺子, 模型越错尺子越松,
+        // 门对着自己放水 (PayloadCalibration::fitRaw 为这个自指病返工过三轮)。这里换一把
+        // 【不经过模型】的尺子: 把【原始】力矩通道拟合到更高阶的谐波上 —— 那个拟合里根本
+        // 没有 I_O, 所以模型形式错【不可能】把它抬高。
+        // ⚠ 有限阶的诚实说明 (别把估计当成本身): 力矩模型是 ω 的二次型, 而 ω 又由 RPY 的
+        //   非线性换算而来, 它的谱【不是】有限的 —— 无噪声时逐阶残差实测是
+        //   3.8e-4 -> 6.4e-5 -> 4.4e-6 -> 5.8e-7, 一直降。所以阶数取到【残差不再明显下降】
+        //   为止 (拐点由数据自己给出, 没有任何绝对 N·m 门限); 若一直降到底, 就把最高阶的
+        //   残差记下来并把 noiseFloorUpperBound 置真 —— 那里面还混着带内信号, 尺子偏松。
+        //   这一条写进头文件的"必要但不充分", 不在这里假装它是纯噪底。
+        double noiseFloor = 0.0;
+        int    noiseOrder = 0;
+        bool   noiseUpperBound = false;
+        int    noiseFail = NOISE_FLOOR_NO_ORDER;
+        {
+            const int q0 = bestK + 1;          // 与模型同阶的残差里一定还留着二次项的带内信号
+            double rPrev = -1.0;
+            if (q0 <= HARM_MAX_ORDER) {
+                for (int q = q0; q <= HARM_MAX_ORDER; q++) {
+                    double ss = 0.0;
+                    bool okQ = true;
+                    double thetaTmp[LA_MAX];
+                    for (int c = 0; c < 3; c++) {
+                        double xArr[MAX_SAMPLES];
+                        for (int i = 0; i < nUse; i++) xArr[i] = s[i].wrench[3 + c];
+                        double ssr = 0.0, sst = 0.0;
+                        if (!fitHarm(tArr, xArr, nUse, Omega, q, thetaTmp, ssr, sst)) { okQ = false; break; }
+                        ss += ssr;
+                    }
+                    if (!okQ) { noiseFail = NOISE_FLOOR_NO_SAMPLES; break; }
+                    const double r = sqrt(ss / (3.0 * nUse));
+                    if (rPrev >= 0.0 && r > PLATEAU_KEEP * rPrev) {
+                        // 再加一阶也降不下去了 -> 上一阶的残差就是带外的那一份
+                        noiseOrder = q - 1;
+                        noiseFloor = rPrev;
+                        noiseUpperBound = false;
+                        noiseFail = NOISE_FLOOR_OK;
+                        break;
+                    }
+                    rPrev = r;
+                    noiseOrder = q;
+                    noiseFloor = r;
+                    noiseUpperBound = true;    // 暂时; 找到拐点会被改回来
+                    noiseFail = NOISE_FLOOR_OK;
+                }
+            }
+        }
+        if (noiseFail == NOISE_FLOOR_OK && !(noiseFloor > 0.0)) {
+            noiseFail = NOISE_FLOOR_DEGENERATE;   // 通道冻住 / 完美拟合: 尺子不是正数, 做分母没有意义
+            noiseFloor = 0.0;
+        }
+        out.noiseFloorStatus = noiseFail;
+        if (noiseFail == NOISE_FLOOR_OK) {
+            out.momentNoiseFloorNm = noiseFloor;
+            out.noiseFloorOrder = noiseOrder;
+            out.noiseFloorUpperBound = noiseUpperBound;
+        } else {
+            fprintf(stderr, "[Inertia] 尺子不齐(%s): 力矩通道的带外噪底量不出来 —— %s。"
+                            " 没有这把与模型无关的尺子, 确定性与失配度都无从判, 因此【拒绝给参数】。\n",
+                    (noiseFail == NOISE_FLOOR_NO_ORDER) ? "阶数不够" :
+                    (noiseFail == NOISE_FLOOR_NO_SAMPLES) ? "采样不够" : "估计退化",
+                    (noiseFail == NOISE_FLOOR_NO_ORDER)
+                        ? "模型阶数已经是搜索上限, 再往上没有阶可用来量带外"
+                        : (noiseFail == NOISE_FLOOR_NO_SAMPLES)
+                          ? "采样点数撑不起更高阶的谐波拟合"
+                          : "估计值非正 (通道冻住, 或数据被拟合到完美)");
+        }
 
         // ===== 4) 残差与不确定度 =====
         double ssM = 0.0, sigI2 = 0.0, sigF2 = 0.0, ssF = 0.0;
@@ -572,8 +668,11 @@ namespace InertiaIdentification {
             }
             sigF2 += f2;
         }
-        const int dofM = 3 * nUse - PI6;
-        const double s2 = (dofM > 0) ? ssM / (double)dofM : 0.0;
+        // σ 的尺度【不取拟合残差】: 残差 = 噪声 + 模型形式错, 拿它当 s² 就是自指 ——
+        // 模型越错, s² 越大, σ 越大, "不确定度 < 张量量级"那一关反而越松。以前这里正是
+        // 这么写的 (评审实测: σ 从 2.6e-18 涨到 2.0e-6, 而解已经错了 4~35σ)。
+        // 尺度只从下面那把【不经过模型】的尺子来; 尺子不齐时 σ = 0 且整体拒绝。
+        const double s2 = out.momentNoiseFloorNm * out.momentNoiseFloorNm;
         out.rmsMomentNm = sqrt(ssM / (3.0 * nUse));
         out.rmsForceN   = sqrt(ssF / (3.0 * nUse));
         out.inertiaSignalNm = sqrt(sigI2 / (3.0 * nUse));
@@ -584,8 +683,12 @@ namespace InertiaIdentification {
                               + 2.0 * (sol[3] * sol[3] + sol[4] * sol[4] + sol[5] * sol[5]));
 
         // ===== 5) 运动学检查 (独立来源) =====
-        // 拟合出来的速度 vs 机器人自己报的 TCPSpeedActual。只比【线性三分量】:
-        // 角速度那一半的解释 (RPY 变化率 vs 机体角速度) 是通道定义问题, 不该混进来。
+        // 拟合出来的速度 vs 机器人自己报的 TCPSpeedActual。两半都比:
+        //   · 线性三分量: 直接比 (vFit 与 speed[0..2] 同单位, mm/s)。
+        //   · 角速度三分量: 【两边都走同一个 RPY 变化率 -> 机体角速度的换算】再比。
+        //     "RPY 变化率 != 机体角速度" 是【换算】, 不是"跳过这一半"的理由 —— 力矩方程
+        //     吃掉的正是这一半, 它没有独立的第二个来源, 所以这个换算过的交叉检查才有价值。
+        //     换算在下面的主循环里就地做 (用同一个 R/Rz/RzRy), 比的是同一个物理量。
         double d2 = 0.0, vf2 = 0.0, vr2 = 0.0;
         for (int i = 0; i < nUse; i++) {
             double dd = 0.0;
@@ -601,43 +704,60 @@ namespace InertiaIdentification {
         out.speedCheckRms = sqrt(d2 / (3.0 * nUse));
         const double vFitRms = sqrt(vf2 / (3.0 * nUse));
         const double vRepRms = sqrt(vr2 / (3.0 * nUse));
-
-        // 力矩通道的【实测噪底】: 实测力矩对同一次谐波拟合的带外残差。
-        // 它与 I_O 无关 (拟合里根本没有 I_O), 所以不是"自己量自己"。
-        double ssNoise = 0.0;
-        {
-            bool okNoise = true;
-            double thetaTmp[LA_MAX];
-            for (int c = 0; c < 3; c++) {
-                double xArr[MAX_SAMPLES];
-                for (int i = 0; i < nUse; i++) xArr[i] = s[i].wrench[3 + c];
-                double ssr = 0.0, sst = 0.0;
-                if (!fitHarm(tArr, xArr, nUse, Omega, bestK, thetaTmp, ssr, sst)) { okNoise = false; break; }
-                ssNoise += ssr;
-            }
-            if (okNoise) out.momentNoiseNm = sqrt(ssNoise / (3.0 * nUse));
-        }
+        // 角速度那一半 (rad/s 里做比较, 报出来换成度/s, 与 TCPSpeedActual 的角分量同单位)
+        const double R2D = 180.0 / PI_;
+        out.angSpeedCheckRms = sqrt(dAng2 / (3.0 * nUse)) * R2D;
+        const double wFitRms = sqrt(wFit2 / (3.0 * nUse)) * R2D;
+        const double wRepRms = sqrt(wRep2 / (3.0 * nUse)) * R2D;
 
         // ===== 6) 门限 —— 全部是【比值 1】或统计量自身分布给出的 =====
         //
-        // (a) 运动学: 两个【独立】来源必须对得上, 且对得比它们自己都小 ——
-        //     "差得比信号还大"就意味着至少有一个根本没在量这个运动。尺度取两者的【较小者】
-        //     (保守方向): 任一路变小 (拟合没拟合上, 或机器人报的速度不对), 门立刻收紧。
+        // ⚠⚠ 【这些门是【必要而不充分】的】。评审用一个独立探针证明了这一点: 让通道响应
+        //    A/m 带上真实的 6.5% 各向异性 (此时【不存在】任何对称 I_O 能让模型精确成立),
+        //    解已经错了, 而【每一道门都是绿的, ok=1】。原因见头文件 "通道约定"那一段,
+        //    以及下面 (f) 的尺子说明。判据通过 != 惯量可信。
+        //
+        // (a) 运动学: 两个【独立】来源必须对得上 (线性三分量 + 角三分量), 且对得比它们自己
+        //     都小 —— "差得比信号还大"就意味着至少有一个根本没在量这个运动。尺度取两者的
+        //     【较小者】(保守方向): 任一路变小 (拟合没拟合上, 或机器人报的速度不对), 门立刻收紧。
         // (b) 谐波拟合: 已知频率的谐波模型解释掉的, 必须比它没解释掉的多。
-        // (c) 确定性: 参数的不确定度必须小于张量自身的量级 —— 否则"解出来的数"其实是噪声。
-        //     σ 来自 (JᵀJ)⁻¹σ² (规格书第 6 步); 尺度 σ_scale 来自张量自己。比值 1。
+        // (c) 确定性: 【分层说清楚, 不假装是比值 1】。
+        //       · 真正在干活的是 solved (秩 + cond): 激励动不到六个分量时由它拒绝。
+        //       · σmax < 张量量级 这一条【几乎不可能触发】—— 评审实测 σmax/||I|| 是 1.2e-4,
+        //         要触发得让力矩信号比惯量量级小 17 倍。留着它是因为它【在一阶上】正好是
+        //         "解出来的数是不是噪声"这句话, 但别把它当主力。
+        //       · 加一条【真的会咬】的: 力矩通道的信噪比 —— 运动产生的惯性力矩信号必须
+        //         高过实测噪底, 否则整段数据就没有惯量信息可言。
+        //     ⚠ 这里 σ 的尺度【不再是拟合残差】(那是自指: 模型越错 σ 越大, 门越松),
+        //       而是 3b) 那把与模型无关的尺子 (高阶带外残差)。
         // (d) 物理: 绕任一点的惯量张量【必然正定】。
         //     这一条同时是【符号约定的护栏】: 力矩通道的惯性项若差一个负号, 解出来的是 −I_O,
         //     立刻非正定 -> 拒绝, 而不是报一个"看着合理"的负数张量。
         //     ⚠ 主惯量的【三角不等式】(I1+I2 >= I3) 对真张量同样成立, 但它【不作门限】:
-        //       它是二阶性质, 噪声可以让一个对的解略微越界, 而用户手上那份 CAD 参考值
-        //       (Ixx/Iyy ≈ 8.5e-3 与 Izz ≈ 4.1e-4, spec §6c) 本身就差了 12 倍 ——
-        //       说明那份参考值要么不是绕同一点的, 要么内部不自洽, 拿它当尺度靠不住。
-        //       所以照实报 margin, 判生死交给一阶的、对符号翻转锐利的正定性。
+        //       它是二阶性质, 噪声可以让一个对的解略微越界。照实报 margin (见头文件里
+        //       "怎么用它"那一段: 与 CAD 对照要先补齐平行轴平移, 或只比绕质心的主惯量)。
         // (e) 力通道 (运动学检查, 不含 I_O): 残差必须小于预测的惯性力信号。
+        // (f) 失配度: 模型残差必须与【那把与模型无关的尺子】同量级 —— 这才是有可能真的
+        //     抓到"模型形式错"的那一道。判据形如 χ²/dof <= 1 + K·sqrt(2/dof), K 是单侧
+        //     假拒率控制, 与 fitRaw 同一族。
+        //     实测 (单测 test_anisotropic_response_is_flagged): 细长笔 + 真实 6.5% 各向异性,
+        //     张量差 1.4%, 力矩残差是噪底的 13 倍 -> 这一道亮红。同样的数据一旦带上实测
+        //     噪声, 那点残差签名就沉到噪底下面 (比值回到 1.00), 抓不到了 —— 这就是"必要
+        //     而不充分"的实测边界, 也是评审那个全绿探针的成因。
+        //     尺子不齐 -> 不设这道门而是【整体拒绝】(见 3b), 不给"没验过"留后门。
         const double vRef = (vFitRms < vRepRms) ? vFitRms : vRepRms;
-        out.kinematicsOk = (out.speedCheckRms < vRef) && (out.harmonicFitRms < out.harmonicSignalRms);
-        out.determinacyOk = solved && (out.inertiaScale > 0.0) && (out.sigmaMax < out.inertiaScale);
+        const double wRef = (wFitRms < wRepRms) ? wFitRms : wRepRms;
+        out.kinematicsOk = (out.speedCheckRms < vRef) && (out.angSpeedCheckRms < wRef)
+                        && (out.harmonicFitRms < out.harmonicSignalRms);
+        const int dofFloor = 3 * nUse - 3 * harmDim(out.noiseFloorOrder);
+        const double lackBound = 1.0 + LACK_OF_FIT_K * sqrt(2.0 / (double)((dofFloor > 1) ? dofFloor : 1));
+        out.momentLackOfFitRatio = (out.momentNoiseFloorNm > 0.0)
+                                 ? (out.rmsMomentNm / out.momentNoiseFloorNm) : 0.0;
+        out.momentLackOfFitOk = (out.noiseFloorStatus == NOISE_FLOOR_OK)
+                             && (out.momentLackOfFitRatio < lackBound);
+        out.determinacyOk = solved && (out.inertiaScale > 0.0) && (out.sigmaMax > 0.0)
+                         && (out.sigmaMax < out.inertiaScale)
+                         && (out.inertiaSignalNm > out.momentNoiseFloorNm);
 
         double ev[3];
         symEig3(I9, ev);
@@ -648,7 +768,8 @@ namespace InertiaIdentification {
 
         // 照实填输出 (即使拒绝, 调用方也要能读到诊断) —— 但 ok 只在全过时置 true。
         for (int i = 0; i < 9; i++) out.I[i] = I9[i];
-        out.ok = out.kinematicsOk && out.determinacyOk && out.physicalOk && out.forceCheckOk;
+        out.ok = out.kinematicsOk && out.determinacyOk && out.physicalOk
+              && out.forceCheckOk && out.momentLackOfFitOk;
 
         // ===== 打印 (拒绝的时候比通过的时候更需要看得见) =====
         fprintf(stderr, "[Inertia] 谐波阶数 K=%d (BIC 从 0..%d 里选, 通道按各自标准差归一化):"
@@ -658,6 +779,10 @@ namespace InertiaIdentification {
         fprintf(stderr, "[Inertia] 运动学检查(独立来源): 拟合速度 rms %.4g mm/s vs "
                         "TCPSpeedActual rms %.4g mm/s -> 差 %.4g mm/s (门限 = 两者较小的 %.4g)\n",
                 vFitRms, vRepRms, out.speedCheckRms, vRef);
+        fprintf(stderr, "[Inertia] 运动学检查(独立来源, 角速度那一半, 两边都过 rpyToBody): "
+                        "拟合 rms %.4g 度/s vs TCPSpeedActual rms %.4g 度/s -> 差 %.4g 度/s"
+                        " (门限 = 两者较小的 %.4g)\n",
+                wFitRms, wRepRms, out.angSpeedCheckRms, wRef);
         fprintf(stderr, "[Inertia] I_O = [% .6g % .6g % .6g; % .6g % .6g % .6g; % .6g % .6g % .6g]"
                         " kg·m^2   (cond=%.4g)\n",
                 I9[0], I9[1], I9[2], I9[3], I9[4], I9[5], I9[6], I9[7], I9[8], out.cond);
@@ -667,21 +792,33 @@ namespace InertiaIdentification {
                 out.sigmaMax, out.inertiaScale);
         fprintf(stderr, "[Inertia] 主惯量 (升序) %.6g / %.6g / %.6g kg·m^2, 三角不等式余量 %.3g\n",
                 ev[0], ev[1], ev[2], out.triangleMargin);
-        fprintf(stderr, "[Inertia] 残差: 力矩 %.4g N·m (惯性力矩信号 %.4g N·m, 通道带外噪底 %.4g),"
-                        " 力 %.4g N (惯性力信号 %.4g N)\n",
-                out.rmsMomentNm, out.inertiaSignalNm, out.momentNoiseNm,
+        fprintf(stderr, "[Inertia] 残差: 力矩 %.4g N·m (惯性力矩信号 %.4g N·m, 带外噪底 %.4g N·m"
+                        " = 力矩通道到 %d 阶谐波拟合的带外残差%s), 力 %.4g N (惯性力信号 %.4g N)\n",
+                out.rmsMomentNm, out.inertiaSignalNm, out.momentNoiseFloorNm, out.noiseFloorOrder,
+                out.noiseFloorUpperBound ? " (⚠ 阶数搜到底仍在降: 里面还混着带内信号, 这把尺子偏松)" : "",
                 out.rmsForceN, out.forceSignalN);
+        fprintf(stderr, "[Inertia] 失配度: 力矩残差 / 噪底 = %.4g (门 %.4g = 1 + %.1f·sqrt(2/%d))\n",
+                out.momentLackOfFitRatio, lackBound, LACK_OF_FIT_K, dofFloor);
 
         if (!out.ok) {
             if (!out.kinematicsOk)
                 fprintf(stderr, "[Inertia] 自检拒绝(运动学): 拟合速度与 TCPSpeedActual 的差 "
-                                "%.4g mm/s 不小于两者的较小者 %.4g mm/s (或谐波模型剩得比解释得多,"
-                                " %.4g >= %.4g) —— 这段数据不是【已知频率的那个运动】, 微分不可信。\n",
-                        out.speedCheckRms, vRef, out.harmonicFitRms, out.harmonicSignalRms);
+                                "%.4g mm/s 不小于两者的较小者 %.4g mm/s, 或角速度那一半的差 "
+                                "%.4g 度/s 不小于 %.4g 度/s, 或谐波模型剩得比解释得多"
+                                " (%.4g >= %.4g) —— 这段数据不是【已知频率的那个运动】, 微分不可信。\n",
+                        out.speedCheckRms, vRef, out.angSpeedCheckRms, wRef,
+                        out.harmonicFitRms, out.harmonicSignalRms);
             if (!out.determinacyOk)
-                fprintf(stderr, "[Inertia] 自检拒绝(激发不足): σmax %.4g ≥ 张量量级 %.4g kg·m^2"
-                                " —— 参数的不确定度和参数本身一样大, 解出来的数是噪声。\n",
-                        out.sigmaMax, out.inertiaScale);
+                fprintf(stderr, "[Inertia] 自检拒绝(激发不足): σmax %.4g vs 张量量级 %.4g kg·m^2,"
+                                " 惯性力矩信号 %.4g N·m vs 噪底 %.4g N·m (尺子状态 %d)"
+                                " —— 参数定不下来, 或运动产生的惯性力矩压不过实测噪底。\n",
+                        out.sigmaMax, out.inertiaScale, out.inertiaSignalNm,
+                        out.momentNoiseFloorNm, (int)out.noiseFloorStatus);
+            if (!out.momentLackOfFitOk)
+                fprintf(stderr, "[Inertia] 自检拒绝(失配度): 力矩残差 %.4g N·m / 噪底 %.4g N·m = %.4g"
+                                " ≥ 门 %.4g —— 残差里除了噪声还有别的东西, 也就是【模型形式对不上】"
+                                " (通道约定各向异性、运动学量算错、或力矩通道的别的干扰)。\n",
+                        out.rmsMomentNm, out.momentNoiseFloorNm, out.momentLackOfFitRatio, lackBound);
             if (!out.physicalOk)
                 fprintf(stderr, "[Inertia] 自检拒绝(非物理): 主惯量 %.4g / %.4g / %.4g kg·m^2"
                                 " —— 绕一点的惯量张量必【正定】; 主惯量出现非正值, 多半是"
