@@ -1850,6 +1850,13 @@ static DWORD g_zeroCheckStartMs = 0;
 static double g_zeroCheckAccum[3] = {0, 0, 0};
 static int g_zeroCheckCount = 0;
 
+// 一致性闸门在拒绝时【本检查没法做】: fd.filtered 是从被闸门置零的 compensated 推出来的,
+// 那是一串 0, 不是零偏 —— 拿它算漂移必然得出 0, 于是这里会在闸门一直拒绝的时候
+// 【无条件打印"正常"】。那正是本项目最怕的"安静地错", 而且它是运行时闸门这一次改动
+// 【新造出来】的 (复审 Minor 5)。所以: 闸门在拒绝时把窗口重开、等它放行,
+// 最多等这么久; 到点仍不放行就明说"本次没查", 不打印任何结论。
+static const DWORD ZERO_CHECK_GUARD_WAIT_MS = 60000;
+
 // 启动加载 force_calib.json 是否成功 (成功才有"存储零偏"可比, 否则无可查)
 static bool g_hasStoredZeroCalib = false;
 
@@ -1868,6 +1875,27 @@ static void runZeroDriftCheck(bool hasStoredZero) {
 
     // 启动后前 2s 让读数稳定, 之后取 1s 均值
     if (fd.isStale || now - g_zeroCheckStartMs < 2000) return;
+
+    // ⚠ 闸门在拒绝 -> 读数被置零, 此刻量不到零偏。【不装作查过】。
+    if (ForceCompensation::guardState() != ForceCompensation::GuardState::OK) {
+        if (now - g_zeroCheckStartMs >= ZERO_CHECK_GUARD_WAIT_MS) {
+            g_zeroCheckDone = true;
+            std::cout << "[Force] 零偏漂移检查: 【未做】—— 一致性闸门一直在拒绝"
+                      << " (原因见上面 \"[Force] !!\" 那一段, 通常是负载参数没发进机械臂)。"
+                      << std::endl;
+            std::cout << "[Force]   闸门拒绝时 compensated (以及由它推出来的 filtered) 是全 0,"
+                      << " 0 不是零偏 —— 拿它算出来的\"漂移\"恒为 0, 所以本检查在拒绝期间"
+                      << " 给不出任何结论。" << std::endl;
+            std::cout << "[Force]   闸门放行之后重启本程序即可 (本检查是启动时的一次性检查)。"
+                      << std::endl;
+            return;
+        }
+        // 重开窗口: 已经积进去的那一段是闸门置的 0, 留着会把后面的真读数稀释掉。
+        g_zeroCheckStartMs = now;
+        g_zeroCheckCount = 0;
+        for (int i = 0; i < 3; i++) g_zeroCheckAccum[i] = 0.0;
+        return;
+    }
 
     for (int i = 0; i < 3; i++) g_zeroCheckAccum[i] += fd.filtered[i];
     g_zeroCheckCount++;

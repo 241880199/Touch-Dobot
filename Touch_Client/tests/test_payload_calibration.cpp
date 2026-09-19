@@ -2895,6 +2895,11 @@ static double t6Spread(const double c[T6_MAXN][6], int n, int i0) {
 //   · 公式 compensated = six − b − A·g / c_s×(A·g) 由 test_force_compensation 逐条钉住
 //     (comp_gravity_goes_through_A / comp_moment_is_cross_of_Ag)。
 // 惯性项不在这里出现: 重放里每个姿态都是静态单帧 (估计器 vel/acc 恒为 0), Fi ≡ 0。
+//
+// ⚠⚠ 但"照写一遍公式"这件事的【代价】必须写在旁边 (复审 Important 4): 用本函数造出来的
+//   @576 与本地模型输出【恒等】(d ≡ 0 是代数结论, 不是测量结论)。所以任何拿它当反面对照
+//   的用例, 量到的都是"闸门放行这条路通不通", 【量不到容差松紧】—— 容差放到 3 倍还是
+//   36/36 放行。反面对照只配当一个【分支存在性】的证据。
 static void t6LocalModel(const PayloadCalibration::RawFit& fit, const double pose[6],
                          const double six[6], double out[6]) {
     double g[3];
@@ -3127,6 +3132,7 @@ static void test_runtime_consistency_guard_replay() {
     static const char* NM[6] = { "Fx", "Fy", "Fz", "Mx", "My", "Mz" };
 
     int refused = 0, passedCtrl = 0, poses = 0;
+    double csLatMin = 1e9, csLatMax = -1e9;   // |c_s_横向| 的四份范围 (z 力漏洞的尺寸)
 
     const double tolF = Config::FORCE_GUARD_TOL_FORCE_N;
     const double tolM = Config::FORCE_GUARD_TOL_MOMENT_NM;
@@ -3156,9 +3162,19 @@ static void test_runtime_consistency_guard_replay() {
         }
 
         // ===== 容差的量级依据 (逐份采集现算, 见报告"容差的推导") =====
-        //   eps_F = rmsForceN(本地模型自己的失拟) + max|σ(A) − σ̄|·9.81(机械臂那一侧的模型类差)
-        //   eps_M = rmsMomentNm + |c_s|·max|σ(A) − σ̄|·9.81
+        //   eps_F = rmsForceN(本地模型自己的失拟) + dist_to_scalar·9.81(机械臂那一侧的模型类差)
+        //   eps_M = rmsMomentNm + |c_s|·dist_to_scalar·9.81
         // 9.81 = 标准重力 (与 TcpCalibration 的重力约定同一个常数)。
+        //
+        // ⚠ dist_to_scalar = (σ1−σ3)/2 是【精确的】那一个 (2026-09-19 复审 Important 3 改的):
+        //   机械臂那一侧的力模型是"标量质量 × 正交"(m·Q), 而 A 到最近的 m·Q 的算子范数距离
+        //   恰好是 (σ1−σ3)/2 (在 m = (σ1+σ3)/2 处取到)。从前的写法是 max|σ−σ̄|, 那个量
+        //   【不是下界而是上界】(它恒 ≥ (σ1−σ3)/2), 所以用它当依据会把"容差是合法差的几倍"
+        //   说小, 而原文还称它"fail-closed 的方向"—— 方向正好说反了 (取大了容差只会更松)。
+        //   现在用的既然是精确距离, 余量就只有那个倍数本身。容差的【数值】一个都没动
+        //   (0.50 N / 0.03 N·m): 变的只是"它是谁的几倍"这句话。
+        //   两个量都在下面打出来, 好在改口径时一眼看出差了多少 (实测 0~15%)。
+        double csLat = 0.0;      // |c_s| 的横向分量 (供 z 力漏洞那一条用, 见下)
         {
             double sg[3], sbar = 0.0, dev = 0.0, cs = 0.0;
             t6SigmaA(fit.A, sg);
@@ -3166,15 +3182,27 @@ static void test_runtime_consistency_guard_replay() {
             for (int a = 0; a < 3; a++) if (fabs(sg[a] - sbar) > dev) dev = fabs(sg[a] - sbar);
             for (int a = 0; a < 3; a++) cs += fit.cS[a] * fit.cS[a];
             cs = sqrt(cs);
-            const double epsClassF = dev * 9.81;
+            csLat = sqrt(fit.cS[0] * fit.cS[0] + fit.cS[1] * fit.cS[1]);
+            if (csLat < csLatMin) csLatMin = csLat;
+            if (csLat > csLatMax) csLatMax = csLat;
+            const double distScalar = 0.5 * (sg[0] - sg[2]);   // σ 已降序 (t6SigmaA 最后排过)
+            const double epsClassF = distScalar * 9.81;
             const double epsF = fit.rmsForceN + epsClassF;
             const double epsM = fit.rmsMomentNm + cs * epsClassF;
             std::cout << "      σ(A)=" << sg[0] << " " << sg[1] << " " << sg[2]
-                      << " kg, σ̄=" << sbar << ", max|σ−σ̄|=" << dev
-                      << " kg  ⇒ eps_F=" << epsF << " N (rms " << fit.rmsForceN
-                      << " + 类差 " << epsClassF << "),  eps_M=" << epsM << " N·m"
+                      << " kg, σ̄=" << sbar
+                      << "  (参考: max|σ−σ̄|=" << dev << " kg —— 这是【上界】, 只用于对照)"
+                      << std::endl;
+            std::cout << "      (σ1−σ3)/2=" << distScalar << " kg -> 类差 " << epsClassF
+                      << " N;  rms_力=" << fit.rmsForceN << " N, rms_力矩=" << fit.rmsMomentNm
+                      << " N·m" << std::endl;
+            std::cout << "      eps_F=" << epsF << " N,  eps_M=" << epsM << " N·m"
                       << "   [容差/eps: 力 " << tolF / epsF << "x, 力矩 " << tolM / epsM << "x]"
                       << std::endl;
+            // |c_s| 与它的横向分量 —— 【z 力漏洞的尺寸】就出在这两个数上 (复审 Important 2)。
+            std::cout << "      |c_s|=" << cs << " m (轴向 " << fit.cS[2] << "), |c_s_横向|="
+                      << csLat << " m  ⇒ 力矩通道能看见的 z 力误差下限 ~ tol_M/|c_s_横向| = "
+                      << (csLat > 0 ? tolM / csLat : 0.0) << " N" << std::endl;
             // 容差【不许】落在实测导出的量级之下 —— 落下去就是"永远拒绝"，
             // 而这条断言是那个决定唯一能被机器检查的地方。
             if (!(tolF > epsF && tolM > epsM)) {
@@ -3238,7 +3266,18 @@ static void test_runtime_consistency_guard_replay() {
                 return;
             }
 
-            // (乙) 反面对照: 把 @576 换成与本地模型一致的值 -> 必须放行
+            // (乙) 反面对照: 把 @576 换成与本地模型一致的值 -> 必须放行。
+            // ⚠⚠ 【这条能证明什么、不能证明什么 —— 如实说 (复审 Important 4/§0)】:
+            //   下面 mdl 是用 t6LocalModel 算的, 而 t6LocalModel 是 ForceCompensation::step()
+            //   那条公式的【逐字副本】。所以"@576 == 本地模型输出"这件事是【代数上恒真】的:
+            //   d ≡ 0, 与容差是多少【完全无关】。因此这半边
+            //     · 证明了: "放行"这条路是通的 (不是坏掉的闸门, 也不是一个恒 return false
+            //       的桩就能让整个用例全绿);
+            //     · 证明不了: 它【分辨不了】"0.50 N 的容差"与"1.5 N 的容差" —— 两种情况下
+            //       这里都是 36/36 放行。换句话说这是【分支存在性】检查, 不是【判别力】检查。
+            //   容差本身的量级由上面那段"容差 > 实测导出的 eps"来守; 而"容差会不会太松"
+            //   这一问【本轮没有机器可检查的答案】(见报告 §7)。不要把这一行读成
+            //   "容差被验证过了"。
             double mdl[6];
             for (int a = 0; a < 6; a++) mdl[a] = six[a];
             t6LocalModel(fit, cap.poses[i], mdl, mdl);
@@ -3263,6 +3302,15 @@ static void test_runtime_consistency_guard_replay() {
     std::cout << "    => 真实夹具: " << refused << " / " << poses << " 个姿态【拒绝】"
               << "    反面对照 (@576 与本地一致): " << passedCtrl << " / " << poses << " 个姿态放行"
               << std::endl;
+    // ⚠ 【z 力漏洞的尺寸】(复审 Important 2): Fz 不投票, 力矩通道是它唯一可能的替补,
+    //   而替补的门槛 = tol_M / |c_s_横向|。四份实测的 |c_s_横向| 范围决定这个洞有多大 ——
+    //   下面这行把它印出来, 免得"少一道闸门"这种话盖住了一个几十牛的孔。
+    std::cout << "    => z 力方向【没有闸门】: |c_s_横向| 四份范围 [" << csLatMin << ", " << csLatMax
+              << "] m ⇒ 力矩通道要看见 z 力模型误差, 它得大到 "
+              << tolM / csLatMax << " ~ " << tolM / csLatMin << " N (即几十牛)。"
+              << std::endl;
+    std::cout << "       Fz 不投票这一点本身由复审判定可接受, 但这个洞的大小必须写明"
+                 " —— 见报告里的未决项。" << std::endl;
 
     // 四份采集、【每一个】姿态都必须拒绝。若某一份里有一个姿态放行, 说明闸门在那个姿态上
     // 看不见差异 —— 那是"闸门有洞", 必须先查清楚再放行, 不能把断言放宽。

@@ -1694,7 +1694,7 @@ void RelayCore::pollForce() {
     // ⚠ 一致性闸门在这里面: 模型缺失或与 @576 对不上时, step() 会把 compensated[] 全置零
     //   (haptic / 约束力 / F| 一起断), 并把状态留在 ForceCompensation::guardState()。
     ForceCompensation::step(app.forceData, pose);
-    const int guardSt = static_cast<int>(ForceCompensation::guardState());
+    const ForceCompensation::GuardState guardSt = ForceCompensation::guardState();
 
     // Run pipeline on compensated data
     ForcePipeline::step(app.forceData);
@@ -1747,19 +1747,22 @@ void RelayCore::pollForce() {
     //   ERR_FORCE_UNCALIBRATED -> 去按 'm'+'s' 重标模型;
     //   ERR_FORCE_INCONSISTENT -> 去查负载参数有没有真的发进机械臂 (Task 8)。
     // 合并成一个码会让这两件事在日志里长得一样, 而"该做什么"全靠这一位区分。
+    // ⚠ 状态 -> 错误码的映射【只有一份实现】: ForceCompensation::guardErrorCode (见那里的
+    //   说明)。这里从前是 static_cast<int>(guardState()) 比字面量 1 / 2 —— 一改枚举的
+    //   数值就会把两条处置指引对调, 而且没有任何测试看得见。
     // 【只在状态变化时报, 不变的按 FORCE_GUARD_REPORT_MS 复报】—— 闸门每帧都判 (30Hz),
     // 每帧落一行会把诊断日志冲掉。
     {
         static int   lastGuardSt = -1;
         static DWORD lastGuardMs = 0;
-        if (guardSt != lastGuardSt ||
-            (guardSt != 0 && (now - lastGuardMs) > static_cast<DWORD>(Config::FORCE_GUARD_REPORT_MS))) {
-            lastGuardSt = guardSt;
+        if (static_cast<int>(guardSt) != lastGuardSt ||
+            (guardSt != ForceCompensation::GuardState::OK &&
+             (now - lastGuardMs) > static_cast<DWORD>(Config::FORCE_GUARD_REPORT_MS))) {
+            lastGuardSt = static_cast<int>(guardSt);
             lastGuardMs = now;
-            if (guardSt == 1 || guardSt == 2) {
+            if (guardSt != ForceCompensation::GuardState::OK) {
                 RobotError err;
-                err.code = (guardSt == 1) ? RobotErrorCode::ERR_FORCE_UNCALIBRATED
-                                          : RobotErrorCode::ERR_FORCE_INCONSISTENT;
+                err.code = ForceCompensation::guardErrorCode(guardSt);
                 err.severity = getSeverity(err.code);
                 err.timestampMs = GetTickCount64();
                 EnterCriticalSection(&app.robotPoseMutex);

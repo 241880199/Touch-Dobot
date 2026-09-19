@@ -3,7 +3,9 @@
 #include <cstdio>
 #include "../relay/CoordinateTransform.h"
 
-// ===== 机器人错误码 (24种) =====
+// ===== 机器人错误码 (25种) =====
+// ⚠ 这个数字必须与 RobotDiagnostics::ERROR_CODE_SLOTS 相等 (它决定计数槽位数, 槽位不够时
+//   计数被静默丢掉)。加码时两个地方一起改 —— 本注释是 2026-09-19 闸门加两个码时同步的。
 enum class RobotErrorCode {
     // PRE-MOTION — 运动前预判
     ERR_WORKSPACE_RADIUS,       // 超出 620mm 工作半径
@@ -100,13 +102,18 @@ inline Severity getSeverity(RobotErrorCode code) {
         case RobotErrorCode::ERR_SERVOP_REJECTED:
         case RobotErrorCode::ERR_SERVOP_TIMEOUT:
         // 一致性闸门: 语义就是 REJECT 的字面意思 ——「拒绝该帧运动」。
-        // 【不选 FATAL】的理由 (两条, 都是实测/操作事实, 不是偏好):
-        //   ① FATAL 会 DisableRobot, 而本闸门连续判决 —— 未标定/负载没发进去时它每一帧都拒,
-        //      于是 FATAL 会在启动后 1 秒内把机械臂禁掉, Task 8 那个"发负载 -> 看闸门放行"的
-        //      闭环就再也走不了 (闸门自己把要验证的那一步锁死)。
-        //   ② 真正"不许往下传"的东西 (compensated) 已经无条件置零了, 与严重度无关 ——
-        //      数据侧已经是 fail closed, FATAL 只会额外停掉【不依赖这份数据】的运动。
-        // 若日后要改成 FATAL: 改这一行即可, 其余不用动。
+        // ⚠ 2026-09-19 复审更正: 这里【现在根本不消费严重度】, 所以"为什么选 REJECT 而不是
+        //   FATAL"这个问题在本轮【没有实际后果】, 写在前一版里的理由也就站不住 ——
+        //   事实是: 报错走的是 RobotDiagnostics::logError (RobotDiagnostics.cpp:94-110),
+        //   它只做两件事 —— 写日志 + RelayCore::reportDiagnostic 发一条 D| 帧给 MATLAB;
+        //   它【不调用】RobotStateMachine::onError。也就是说这里填 FATAL 同样不会
+        //   DisableRobot, 填 REJECT 也不会"拒绝该帧运动" —— 两条路的【效果】完全一样。
+        //   (前一版写的"FATAL 会在启动后 1 秒内把机械臂禁掉"因此是错的。)
+        // 本轮的【真实效果】是: compensated 全 6 个分量无条件置零 (数据侧 fail closed,
+        //   见 ForceCompensation::step) + 三条咨询性消息 (stderr / robot_diagnostics.log /
+        //   D| 帧)。严重度【目前只是给日志读的一个标签】。
+        // 保留 REJECT 的理由只剩一条, 而且很弱: 它的字面语义与"本帧数据不可用"最贴。
+        // 若日后要让严重度真的生效 (接进 onError), 那时才需要重新论证 REJECT vs FATAL。
         case RobotErrorCode::ERR_FORCE_UNCALIBRATED:
         case RobotErrorCode::ERR_FORCE_INCONSISTENT:
             return Severity::REJECT;

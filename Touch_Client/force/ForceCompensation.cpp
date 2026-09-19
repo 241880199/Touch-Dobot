@@ -42,10 +42,28 @@ static DWORD  g_guardReportMs = 0;       // 上次打印/上报的时刻
 //   所以处置是【每次都报出它的比较结果, 但不计票】, 不是"静默跳过"。
 //   ⚠ 这一列的证据到此为止: "是 @576 报得坏, 还是机械臂 z 补偿太强" 目前【没有分开】
 //     (计划书 :273-274 明说"不许猜")。分开之后应把它提升为投票通道。
+//
+// ⚠⚠ 【这一列不投票代价有多大 —— 给出数, 不要只说"少一道闸门"】(2026-09-19 复审要求)。
+//   力矩门【理论上】能给 z 力当后盾: z 上的模型误差 ΔFz 会经 c_s 叉乘出一个力矩误差
+//   Δc × ΔF, 其横向分量量级 = |c_s_横向| · ΔFz。但 c_s 的横向分量实测只有
+//   【0.47 ~ 0.78 mm】(四份拟合的 sqrt(cs_x²+cs_y²), 由 test_runtime_consistency_guard_replay
+//   现算打印), 而力矩容差是 tol_M = 0.03 N·m ⇒ 若 c_s 向量的横向分量恰好是对的那个方向,
+//   ΔFz 要到 tol_M / |c_s_横向| ≈ 0.03 / 0.00078 ~ 0.03 / 0.00047 = 【38 ~ 64 N】量级
+//   才能把力矩顶超限。也就是说: z 力方向的模型误差要靠力矩通道兜住, 得大到几十牛 ——
+//   本闸门实际上【看不见 z 方向的力模型错误】。这是本次改动里【最大的一处已知漏洞】,
+//   明确交给用户定夺 (是补一个 z 的独立判据, 还是接受这个洞), 不是可以靠调容差解决的。
+//   (数字来源: 同一份测试打印的两列 —— 逐份 |c_s_横向| 与 tol_M/|c_s_横向|。)
 static const bool g_guardVote[6] = { true, true, false, true, true, true };
 
 // A 的可用性判据 —— 见头文件声明。|det| / ||A||_F³ 对"标量质量 × 正交"这一族恒为
-// 1/(3√3) = 0.19245, 而秩亏时趋于 0; 取 1e-3 ⇒ 离退化 3 个数量级、离正常 192 倍。
+// 1/(3√3) = 0.19245, 而秩亏时趋于 0。
+// ⚠ 取 1e-3 是【很松】的一道: 它挡的是"几乎完全秩亏", 不是"一般病态"。
+//   把门限翻译成条件数 (cond = σ1/σ3, 同一个 cond 下比值最大的形状是 σ1=σ2=σ3·cond):
+//   比值 = 1/(2.828·cond) ⇒ 1e-3 对应的 cond ≈ 354。也就是说: 只有当 cond ≳ 354
+//   才【必然】被拦下; cond 在 350 以内的矩阵里总有一些形状能过, 无论它多病态。
+//   用户指令 3 真正点名的"全零 A"由上面那条 allZero 分支挡住 (与这个比值无关),
+//   所以这里不必收紧; 但【消息里不许再说"至少一个力方向没有模型"】: 那句话描述的是秩亏,
+//   而这条判据拦的是"离秩亏还差三个数量级"的东西。
 static const double GUARD_MIN_DET_RATIO = 1e-3;
 
 // 质量尺度 m = |det A|^(1/3)。A = m·S·Q (见 PayloadCalibration::decompose), 所以它的
@@ -227,7 +245,9 @@ static void setGuardState(ForceCompensation::GuardState st) {
             "[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。\n"
             "[Force] !!   【两者的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。\n"
             "[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推\n"
-            "[Force] !!   filtered / hapticOut / F| 帧, 所以触觉与约束力两条路一起断。\n",
+            "[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。\n"
+            "[Force] !!   (虚拟约束力【不受影响】: 它在 HapticCallback.cpp:168 由位置现算,\n"
+            "[Force] !!    与 compensated 无关 —— 安全边界的推手还在, 只是不再有传感器力。)\n",
             uncal ? "【没有可用模型】本地补偿未启用 —— 不是\"标定与机械臂不符\""
                   : "【有模型, 但与机械臂对不上】两边估计的不是同一个外力");
     static const char* NM[6] = { "Fx(N)", "Fy(N)", "Fz(N)", "Mx(Nm)", "My(Nm)", "Mz(Nm)" };
@@ -302,6 +322,33 @@ void setCalibration(const double A[9], const double biasForce[3],
     //   那条路: 输出置零 + 报错 (ERR_FORCE_UNCALIBRATED)。
     //   ⚠ 现场确实会走到这里: 从未解过 A 时按 'z' 调零, ForceCalibration::update 会拿
     //     currentModel() 的空 A 回灌进来 (那时它自己也已经在报 WARNING)。
+    // ⚠ 与装载路径 (ForceCalibration::loadFromFile) 【校验同一组东西】: 那边四个数组都判
+    //   有限性, 这里从前只判 A —— 于是"从内存直接装一份带 inf 的零偏"这条不经过文件的路
+    //   会静默收下一个 inf, 而 inf 会让 compensated 变 inf 再把闸门的 EMA 污染成 NaN。
+    //   (NaN 在闸门里算不一致 -> 拒绝, 但那已经是"用一个坏模型报警", 不如根本不许装进来。)
+    for (int i = 0; i < 3; i++) {
+        if (!std::isfinite(biasForce[i]) || !std::isfinite(biasTorque[i]) ||
+            !std::isfinite(comSensor[i])) {
+            fprintf(stderr,
+                    "[Force] !! setCalibration 【拒绝安装】: 第 %d 个分量不是有限数 "
+                    "(b_F %.6g/%.6g/%.6g, b_M %.6g/%.6g/%.6g, c_s %.6g/%.6g/%.6g)。\n"
+                    "[Force] !!   本地补偿保持【未启用】—— 输出置零并报 ERR_FORCE_UNCALIBRATED。\n"
+                    "[Force] !!   判据与装载路径 (ForceCalibration::loadFromFile) 完全一致:\n"
+                    "[Force] !!   同一个模型不该因为【来自文件】还是【来自内存】而一个收一个不收。\n",
+                    i,
+                    biasForce[0], biasForce[1], biasForce[2],
+                    biasTorque[0], biasTorque[1], biasTorque[2],
+                    comSensor[0], comSensor[1], comSensor[2]);
+            fflush(stderr);
+            EnterCriticalSection(&g_calibMutex);
+            g_isCalibrated = false;      // 连旧的也一并作废: 拒绝安装的语义是"现在没有可用模型"
+            LeaveCriticalSection(&g_calibMutex);
+            resetGuard();
+            setGuardState(GuardState::UNCALIBRATED);
+            return;
+        }
+    }
+
     char why[192];
     if (!modelUsable(A, why, sizeof(why))) {
         fprintf(stderr,
@@ -391,9 +438,13 @@ bool modelUsable(const double A[9], char* why, int whyLen) {
     }
     const double ratio = fabs(det) / (fro * fro * fro);
     if (!(ratio > GUARD_MIN_DET_RATIO)) {
+        // ⚠ 措辞对得上判据 (2026-09-19 复审): 这条拦的是"接近完全秩亏", 不是"任何一个
+        //   方向病态" —— 1e-3 换算成条件数约 354 (推导见 GUARD_MIN_DET_RATIO 处的注释),
+        //   所以别再说"至少一个力方向没有模型"。
         if (why) snprintf(why, whyLen,
                           "A 数值退化: |det A| / ||A||^3 = %.3g <= %.3g "
-                          "(秩亏 -> 至少一个力方向没有模型)", ratio, GUARD_MIN_DET_RATIO);
+                          "(接近完全秩亏: 该比值对'标量质量 x 正交'恒为 0.19245, "
+                          "本门限约等于条件数 354)", ratio, GUARD_MIN_DET_RATIO);
         return false;
     }
     return true;
@@ -420,6 +471,25 @@ const char* guardStateName(GuardState s) {
         case GuardState::INCONSISTENT:  return "INCONSISTENT";
     }
     return "UNKNOWN";
+}
+
+// 闸门状态 -> 错误码。
+// RelayCore 从前自己拿 static_cast<int>(guardState()) 去比字面量 1 和 2 —— 那是把
+// "哪个状态配哪个码"存在【两个地方的巧合】里: 改一次枚举的数值, "去标定"与"去查负载
+// 参数"这两条完全不同的处置指引就被对调, 而且没有任何测试会发现。现在这里是唯一的实现。
+//
+// 【"穷举"到什么程度, 说实话】: 这个 switch 没有 default, 所以加了新的 GuardState 而
+// 忘了配错误码时, /W4 会给 C4062 (unhandled enumerator)。但本项目按 /W1 编译,
+// 那条警告【不会】出现, 而末尾那句 return 又让它照样编得过 —— 所以真正把这张表钉住的
+// 是 test_force_compensation 的 guard_error_code_mapping (三条映射逐条断言 + 与
+// errorCodeName 对上), 不是编译器。末尾那句是"宁可返回 OK 也不掉出函数尾"的兜底。
+RobotErrorCode guardErrorCode(GuardState s) {
+    switch (s) {
+        case GuardState::OK:            return RobotErrorCode::OK;
+        case GuardState::UNCALIBRATED:  return RobotErrorCode::ERR_FORCE_UNCALIBRATED;
+        case GuardState::INCONSISTENT:  return RobotErrorCode::ERR_FORCE_INCONSISTENT;
+    }
+    return RobotErrorCode::OK;
 }
 
 double currentMassKg() {

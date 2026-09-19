@@ -1,5 +1,6 @@
 #pragma once
 #include "../core/AppState.h"
+#include "../safety/RobotError.h"   // RobotErrorCode —— 闸门状态 -> 错误码的映射在这里 (见 guardErrorCode)
 
 // Motion estimator: tracks tool velocity & acceleration from position history
 // Uses 5-point ring buffer for central-difference acceleration estimation
@@ -62,8 +63,13 @@ namespace ForceCompensation {
     // @576 应当一致"正是判据 (Task 8 下发正确负载之后它们才应当收敛)。
     //
     // 不一致 ⇒ 【compensated 全 6 个分量置零】(不是只置 haptic): 下游
-    //   ForcePipeline::step 从 compensated 推 filtered/hapticOut/F| 帧, 所以置零就把
-    //   触觉与约束力两条路一起断了。
+    //   ForcePipeline::step 从 compensated 推 filtered/hapticOut/F| 帧 —— 所以断掉的是
+    //   【传感器力那一条路】(Touch 上的反射力 + 发给 MATLAB 的 F| 帧)。
+    // ⚠ 它【不断】虚拟约束力: 那一条在 HapticCallback.cpp:168 由【位置】现算
+    //   (SafetyPredictor::computeConstraintForce), 与 compensated 无关, 也对
+    //   orientExtraForce / orientRepulsionForce 一样 —— 那两条同样是位置驱动的。
+    //   不要把这里写成"触觉与约束力两条路一起断": 那是错的, 会让人以为拒绝之后
+    //   操作员连安全边界的推手都没有了。
     // ⚠ 未标定 -> step() 不再透传 @1304 (旧行为会把 @1304 的 ~21.9 N 偏置经 ForcePipeline
     //   的 0.0165×5 变成手上 ~1.8 N 的恒定推力; 置零之后没有这个偏置)。
     //
@@ -78,7 +84,11 @@ namespace ForceCompensation {
     struct GuardReport {
         GuardState state = GuardState::UNCALIBRATED;
         long   frames = 0;
-        bool   voted[6]    = {false, false, false, true, true, true};
+        // ⚠ 默认值必须与 ForceCompensation.cpp 里真正生效的 g_guardVote 逐位一致
+        //   ({true,true,false,true,true,true} —— Fz 不投票)。写成"前三个 false"会让一个
+        //   默认构造的 GuardReport 声称 Fx/Fy 不投票, 那是把通道掩码说了两遍、还说反了。
+        //   掩码的【唯一一份实现】是 .cpp 里的 g_guardVote; 这里只是同一份东西的初值。
+        bool   voted[6]    = {true, true, false, true, true, true};
         bool   exceeded[6] = {false, false, false, false, false, false};
         double ema[6] = {0, 0, 0, 0, 0, 0};   // compensated − @576 的 EMA (N / N·m)
         double tol[6] = {0, 0, 0, 0, 0, 0};
@@ -86,6 +96,15 @@ namespace ForceCompensation {
     GuardState  guardState();
     void        guardReport(GuardReport& out);
     const char* guardStateName(GuardState s);
+
+    // ===== GuardState -> RobotErrorCode (闸门唯一一处"状态转错误码") =====
+    // 用 switch 穷举 (没有 default), 所以【加一个新的 GuardState 而忘了配错误码】
+    // 会在编译期炸掉 (C4715: 不是所有路径都有返回值), 而不是在运行期悄悄把两个错误码
+    // 换个个儿 —— RelayCore 从前拿 static_cast<int>(guardState()) 去比字面量 1 和 2,
+    // 于是"给 GuardState 换顺序"这种无害重构会把"去标定"与"去查负载参数"两条完全不同的
+    // 处置指引对调, 而用户指令 1 的全部意义就在于告诉操作员【该做哪件事】。
+    // OK -> RobotErrorCode::OK (调用方据此跳过上报)。
+    RobotErrorCode guardErrorCode(GuardState s);
 
     // A 能不能当【重力模型】用: 非有限 / 全零 / |det A| 相对 ||A||_F³ 近零 (数值退化) 都不行。
     // 返回 false 并把具体原因写进 why。装载 (ForceCalibration::loadFromFile) 与安装

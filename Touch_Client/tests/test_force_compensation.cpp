@@ -299,6 +299,48 @@ static void test_guard_two_causes_are_distinguishable() {
     PASS();
 }
 
+// ★★ 状态 -> 错误码的映射 (2026-09-19 复审 Important 4)。
+//   在此之前 RelayCore 自己拿 static_cast<int>(guardState()) 去比字面量 1 和 2, 而这条
+//   映射【没有任何测试】: 给 GuardState 换个顺序, ERR_FORCE_UNCALIBRATED 与
+//   ERR_FORCE_INCONSISTENT 就悄悄对调, 而用户指令 1 的全部意义就是告诉操作员
+//   【该去标定还是该去查负载参数】—— 报错报反了比不报还坏。
+//   现在唯一的实现是 ForceCompensation::guardErrorCode, 本用例把它的三个输入逐条钉住,
+//   并顺手钉住"错误码 -> 名字 -> 严重度"这条下游链 (报告里说的"严重度现在是咨询性的"
+//   也在这条链上: 这里只断言它是 REJECT, 断言不了它有没有被消费)。
+static void test_guard_error_code_mapping() {
+    TEST(guard_error_code_mapping);
+
+    using ForceCompensation::GuardState;
+    const RobotErrorCode cOk   = ForceCompensation::guardErrorCode(GuardState::OK);
+    const RobotErrorCode cUnc  = ForceCompensation::guardErrorCode(GuardState::UNCALIBRATED);
+    const RobotErrorCode cInc  = ForceCompensation::guardErrorCode(GuardState::INCONSISTENT);
+
+    CHECK(cOk == RobotErrorCode::OK);                                  // 放行 -> 不上报
+    CHECK(cUnc == RobotErrorCode::ERR_FORCE_UNCALIBRATED);
+    CHECK(cInc == RobotErrorCode::ERR_FORCE_INCONSISTENT);
+    // 两个码必须不同 —— 否则"两种原因分开报"这件事在日志里根本不成立。
+    CHECK(cUnc != cInc);
+    // 与枚举的数值索引【无关】: 这两个码在 RobotErrorCode 里的位置本来就与 GuardState 不同,
+    // 所以"按 static_cast<int> 对上"这种巧合不许再被依赖。
+    CHECK(static_cast<int>(cUnc) != static_cast<int>(GuardState::UNCALIBRATED));
+    CHECK(static_cast<int>(cInc) != static_cast<int>(GuardState::INCONSISTENT));
+
+    // 名字 (进 robot_diagnostics.log 与 D| 帧的那一个) 也必须对得上, 且分得开。
+    CHECK(std::string(errorCodeName(cUnc)) == "ERR_FORCE_UNCALIBRATED");
+    CHECK(std::string(errorCodeName(cInc)) == "ERR_FORCE_INCONSISTENT");
+
+    // 严重度: 两个码都是 REJECT —— 而且二者一致 (给操作员看的档位不该因原因而不同)。
+    CHECK(getSeverity(cUnc) == Severity::REJECT);
+    CHECK(getSeverity(cInc) == Severity::REJECT);
+    CHECK(getSeverity(cUnc) == getSeverity(cInc));
+
+    // 名字函数: 三个状态都要能读出来, 且互不相同。
+    CHECK(std::string(ForceCompensation::guardStateName(GuardState::OK)) == "OK");
+    CHECK(std::string(ForceCompensation::guardStateName(GuardState::UNCALIBRATED)) !=
+          std::string(ForceCompensation::guardStateName(GuardState::INCONSISTENT)));
+    PASS();
+}
+
 // ★ Fz 【不投票】但【照报】—— @576 的 z 响应实测秩 2, 它动不了就证不了"一致"。
 //   本用例钉住两件事: (a) 巨大 z 差不会让闸门拒绝 (不然就是"永远不通过");
 //   (b) 它的比较结果仍然读得出来 (不然就是"静默"跳过, 简报明令禁止)。
@@ -775,6 +817,7 @@ int main() {
     test_guard_passes_when_consistent();
     test_guard_refuses_when_inconsistent();
     test_guard_two_causes_are_distinguishable();
+    test_guard_error_code_mapping();
     test_guard_fz_reported_but_not_voted();
     test_guard_moment_channel_votes();
     test_guard_ema_needs_sustained_mismatch();
