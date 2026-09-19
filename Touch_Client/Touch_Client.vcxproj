@@ -80,6 +80,7 @@
     <ClCompile Include="core\AppState.cpp" />
     <ClInclude Include="core\CalibStore.h" />
     <ClCompile Include="core\CalibStore.cpp" />
+    <ClInclude Include="core\SessionReport.h" />
     <ClInclude Include="core\MathUtils.h" />
     <!-- robot -->
     <ClInclude Include="robot\RobotConnection.h" />
