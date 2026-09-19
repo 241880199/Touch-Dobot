@@ -101,7 +101,7 @@ namespace PayloadCalibration {
     //       残差里那 2 倍于姿态内噪声的部分不是"噪声", 是姿态间复现性, 却被当成罪证;
     //     · 门限自指: 尺子从残差来 -> 形式错 -> 残差涨 -> 尺子涨 -> 门对着自己放水。
     //   所以它现在只做两件事: 报"这个姿态采得稳不稳"; 从重复对的差值里扣掉噪声那一份
-    //   (见 RepeatPair 与 .cpp 的 yardstickPerChannel)。
+    //   (见 RepeatPair 与 .cpp 的 yardstickPooled)。
     struct PoseNoise {
         int    n;         // 该姿态参与平均的样本数 (1 = 没平均, 但方差已知)
         double varF[3];   // 力三个分量的样本方差 (N²)
@@ -120,8 +120,18 @@ namespace PayloadCalibration {
     // 摆完所有姿态后回到第 1 个姿态, 按 'r' 再采一次, 登记的就是 (0, 那一次))。【不能】用
     // "姿态距离小于某容差就算同一个姿态"去认 —— 那就是一个预设, 而且"差多少算同一个姿态"
     // 正是这里要量的事情。
-    // repeat == nullptr / 下标越界 / 两次是同一行 = 没有重复对 -> 模型形式【没有尺子】,
-    // fitRaw 因此返回 false (见 ModelFormStatus / ModelFormPolicy)。
+    //
+    // ===== 它是【一串】对, 不是一对 (2026-09-19 第三次修复) =====
+    // 按 'r' 是【追加】—— 每按一次多一对。为什么必须能有多对:
+    //   · 尺子自己也有【自由度】。一对只给 1 个自由度 (见 .cpp 的 yardstickPooled 与
+    //     fitRaw 的判决), 而一对的估量本身离散极大: 两次访问凑巧对得很齐 (d≈0) 与凑巧差
+    //     很多 (d 大) 是常事, 于是"这次到底该不该判模型错"在一对之下几乎由运气决定。
+    //     多池化几对, 尺子的离散按 1/sqrt(N_pairs) 收敛, 判决才稳。
+    //   · 因此"判决贴着线过"时【补一对】是真的有用 —— 而不是把同一个 1 自由度的估量
+    //     再算一遍 (从前的实现按 'r' 会【覆盖】前一对, 那个补救承诺是空的)。
+    // 数组由调用方持有, count 为元素个数; nullptr / count ≤ 0 / 下标越界 / 两次是同一行 =
+    // 没有可用的对 -> 模型形式【没有尺子】, fitRaw 因此返回 false (见 ModelFormStatus /
+    // ModelFormPolicy)。
     struct RepeatPair {
         int first;    // 第 1 次访问的下标 (协议里是 0; 机制本身不依赖这一点)
         int second;   // 第 2 次访问的下标 (与 first 之间要有真实运动)
@@ -131,7 +141,7 @@ namespace PayloadCalibration {
     // "尺子为什么没有"要能分开报 (通道坏了 vs 协议没走完, 是完全不同的两件事)。
     enum ModelFormStatus {
         MODEL_FORM_OK           = 0,   // 尺子齐备 -> 检验真的做了 (modelFormChecked = true)
-        MODEL_FORM_NO_NOISE     = 1,   // 没有逐姿态噪声估计 (没传 / N<1 / 六个通道全没数据)
+        MODEL_FORM_NO_NOISE     = 1,   // 没有逐姿态噪声估计 (没传 / N<1)
         MODEL_FORM_NO_REPEAT    = 2,   // 没有重复姿态对 -> 量不出姿态间复现性
         MODEL_FORM_DEAD_CHANNEL = 3,   // 某通道【整批】方差恒为 0 而别的通道是活的: 通道冻住/没接上
         MODEL_FORM_NOISE_HOLES  = 4,   // 【个别】姿态/通道方差为 0 (通道没死, 是那一笔没采到)
@@ -147,9 +157,10 @@ namespace PayloadCalibration {
         I_ACCEPT_UNVERIFIED_MODEL_FORM = 1,   // 我认了: 没验过也给我参数 (modelFormChecked 仍为 false)
     };
 
-    // 模型形式检验的置信倍数 K —— 【不是阈值本身】。阈值 = 1 + K·sqrt(2/dof) 是这个统计量
-    // 自己的分布 (χ²/dof 的均值 1、标准差 sqrt(2/dof)) 给出的, 尺度全部来自数据;
-    // K 只是"我愿意认几倍标准差", 与 N / N·m 的量级无关。(实现在 .cpp)
+    // 模型形式检验的【显著性水平】—— 【不是物理阈值】。它是统计惯例: "我愿意认几成的
+    // 冤枉率"。检验统计量是残差与尺子的比值 (χ²_rep/dof), 它自己的分布由数据定; 这个数只
+    // 决定在它的分布上切在哪一刀。推导与实测的冤枉率见 .cpp 的 modelFormLimit。
+    // 现在【两侧都用它】: 分子的 χ² 分位数、分母 (尺子) 的单侧置信下界。
     // 逐姿态残差的报告上限 (超过就截断: 只影响打印, 不影响判决)。
     static const int RAW_POSE_REPORT_MAX = 16;
 
@@ -200,14 +211,25 @@ namespace PayloadCalibration {
         // 由【重复姿态对】测出 (见 RepeatPair): 同一姿态两次访问之差, 扣掉姿态内噪声那一份,
         // 剩下的才是"换一次姿态再回来, 读数能差多少"。残差与它比, 问的才是正确的问题:
         // "模型的失配, 有没有超出这台设备复现同一个姿态的能力?"
-        int    repeatFirst;          // 尺子用的两行下标; -1 = 没有可用重复对
+        int    repeatFirst;          // 池化的第 1 对的两次访问下标; -1 = 没有可用重复对
         int    repeatSecond;
-        double repeatDiffF[3];       // 两次访问的实测差 (N) —— 尺子的原始观测, 照实报
+        int    repeatPairCount;      // 池化了几对 = 尺子的【自由度】; 0 = 没有尺子
+        double repeatDiffF[3];       // 池化后各通道的 |两次访问差| 尺度 (N) —— 照实报
         double repeatDiffM[3];       // 同上 (N·m)
-        double repeatSigmaF[3];      // 逐通道姿态间复现性 σ_rep (N) —— 尺子本身
+        double repeatSigmaF[3];      // 逐通道姿态间复现性 σ_rep (N) —— 尺子本身 (池化)
         double repeatSigmaM[3];      // 同上 (N·m)
+        // 尺子的【两个分量】: σ_rep² = σ_sys² + floor² (池化后)。
+        // σ_sys² = "回到同位姿再来一次的离散"; floor² = 单次测量自身有多准 (姿态内噪声)。
+        // 判决门限要按 σ_sys²【自己的自由度】放宽 (那是估量, floor² 是申报的已知量), 所以
+        // 这两个分量必须都留着。
+        double repeatSysF[3];        // σ_sys² (N²)
+        double repeatSysM[3];        // σ_sys² (N·m)²
+        double repeatFloorF[3];      // floor² (N²)
+        double repeatFloorM[3];      // floor² (N·m)²
         double chi2RepForceRatio;    // Σ(e/σ_rep)² / dofF —— 【判据】; 正确模型下期望 ≈ 1
-        double lackOfFitMomentRatio; // 力矩失拟 / 6: 自由 12 参数 vs 受约束 6 参数, 按 σ_rep,M² 折算
+        double chi2RepForceLimit;    // 上面那个判据的门限 (推导见 .cpp 的 modelFormLimit)
+        double lackOfFitMomentRatio; // Σ_a(ssM_a − ssFree_a)/σ_rep,M,a² / 6 —— 【判据】
+        double lackOfFitMomentLimit; // 同上, 门限
         int    lackOfFitMomentDof;   // 6, 或 0 = 做不了 (方程数不足以养自由模型)
 
         // ===== 逐姿态残差 (spec §3 表格第 4 行) —— 分得清"一个坏姿态"与"整体形式错" =====
@@ -220,8 +242,22 @@ namespace PayloadCalibration {
 
         int    modelFormStatus;      // ModelFormStatus —— 尺子的状态 (为什么有/没有)
         bool   modelFormChecked;     // true = 力通道【有尺子且判决通过】
-        bool   momentFormChecked;    // true = 力矩通道的失拟检验真的做了 (自由模型解得出来)
+        // true = 力矩通道的失拟检验【做了且通过了】—— 与 modelFormChecked 同义 (都是
+        // "这一半验过了")。从前它只表示"检验做了", 于是在【力通道被判错、整体拒绝】时
+        // 它照样是 true, 读起来像"至少那半边是好的"。现在两个标志只在同一个地方置 true。
+        bool   momentFormChecked;
     };
+
+    // 模型形式检验的【判决门限】: 拒绝 ⇔ 统计量 > modelFormLimit(...)。
+    //   dofFit   = 分子 (残差) 的自由度: 力通道 3n−12, 力矩失拟 6
+    //   repPairs = 分母 (尺子) 的自由度 = 池化进来的重复对数
+    //   sys2     = 尺子的【估量】那一半 (σ_sys², 逐通道); floor2 = 申报的已知那一半 (floor²)
+    // 尺度全部来自这两个实测/申报量; α 只是显著性水平 (见 .cpp 的 RAW_MODEL_FORM_ALPHA)。
+    // 推导、它为什么不是 "1 + K·sqrt(2/dof)"、以及实测的冤枉率 P(拒绝 | 模型正确) 都写在
+    // .cpp 的 modelFormLimit 上面。公开它只为让测试与诊断能【独立复算】门限 ——
+    // 生产路径不需要直接调它 (fitRaw 已经把结果放进 RawFit::chi2RepForceLimit 等字段)。
+    double modelFormLimit(double dofFit, int repPairs,
+                          const double sys2[3], const double floor2[3]);
 
     // 纯函数: 线性拟合并做【物理自检】。返回 false = 拒绝给出参数 (原因打到 stderr),
     // 此时 out 里是【未经自检】的线性解, 只供诊断打印, 调用方不得采用。
@@ -242,24 +278,26 @@ namespace PayloadCalibration {
     // 只有逐字写出 I_ACCEPT_UNVERIFIED_MODEL_FORM 的调用方 (离线重放, 现场数据本来就不全)
     // 才能拿到参数; 那时 out.modelFormChecked 仍然是 false —— 它【不会】被伪装成通过。
     //
-    // noise  = 逐姿态实测噪声 (从重复对的差值里扣掉"噪声那一份"要用它; 也是报告量)。
-    // repeat = 重复姿态对 (尺子的来源)。
+    // noise   = 逐姿态实测噪声 (从重复对的差值里扣掉"噪声那一份"要用它; 也是报告量)。
+    // repeats = 重复姿态对的【数组】(尺子的来源); repeatCount = 元素个数。
+    //           [1, count) 里的每一对都并进同一把尺子, 尺子的自由度 = 池化进来的对数
+    //           (不合法的对会被跳过, 不进自由度)。count ≤ 0 / nullptr = 没有尺子。
     // 前置条件: out 的内存由调用方持有; noise 非空时其 n 个元素必须与 poses/forces/moments
-    //           同序; repeat 非空时其两个下标必须落在 [0, n) 且不相等。
+    //           同序; repeats 里每一对的两个下标都必须落在 [0, n) 且不相等。
     bool fitRaw(const double poses[][6], const double forces[][3], const double moments[][3],
                 int n, RawFit& out, const PoseNoise* noise = nullptr,
-                const RepeatPair* repeat = nullptr,
+                const RepeatPair* repeats = nullptr, int repeatCount = 1,
                 ModelFormPolicy policy = MODEL_FORM_REQUIRED);
 
     // 纯函数: 只做线性拟合, 【不做任何物理自检】。
     // 单独暴露的理由: 自检是【物理结论】的门, 而"任意 3×3 能否被复原"是【线性代数】的性质 ——
     // 两者必须能分开测。一个明显非正交 (甚至带反射) 的 A 可以被精确复原, 而它该不该被采信
     // 是另一个问题; 只有把两层分开, 这两件事才各有各的断言。(生产路径请用 fitRaw。)
-    // noise / repeat 只影响那些【检验用】的报告字段 (尺子、χ²、逐姿态残差), 不参与求解 ——
+    // noise / repeats 只影响那些【检验用】的报告字段 (尺子、χ²、逐姿态残差), 不参与求解 ——
     // 拟合本身永远是无权的普通最小二乘 (加权的更换属于改线性代数, 不在本任务内)。
     bool fitRawLinear(const double poses[][6], const double forces[][3], const double moments[][3],
                       int n, RawFit& out, const PoseNoise* noise = nullptr,
-                      const RepeatPair* repeat = nullptr);
+                      const RepeatPair* repeats = nullptr, int repeatCount = 1);
 
     // 从 A 读回物理量 —— 这一步才是"标定", 不是"猜"。
     //
