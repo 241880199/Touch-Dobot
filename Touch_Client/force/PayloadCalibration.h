@@ -284,7 +284,7 @@ namespace PayloadCalibration {
     //        【力通道估出来的 A】, 而它自己的叉乘结构吃不掉 A 的估计误差。实测占零假设膨胀的
     //        **88%**, 超额 **∝|δA|²** (剂量响应 0.249~0.254 @s=0.5, 预测 0.25)。
     //        实测冤枉率: 力矩分支 R=3 约 7~23%、R=5 约 1~5%; 同一次蒙特卡洛里力通道 0/12000。
-    //        出处: .superpowers/sdd/moment-gate-diagnosis-report.md、
+    //        出处: Docs/superpowers/evidence/moment-gate-diagnosis-report.md、
     //              moment-gate-dA-correction-report.md。
     //
     //     ⇒ 教训 (与本模块栽过多次的那一类同型): 【一份写对的备案, 被移植到一个结构不同的

@@ -127,7 +127,7 @@
 
 口径: 用生产 `fitRaw` 跑合成采集 (10 姿态 + 5 对, 与 15:33 同尺度), 把**同一批全精度数据**
 分别按旧/新精度写成文本再读回来比对, 12 组独立噪声。
-出处: `.superpowers/sdd/precision-sufficiency-report.md`。
+出处: `Docs/superpowers/evidence/precision-sufficiency-report.md`。
 
 | 列 | 旧 | 新 | 只把这一组按旧精度写, 力矩失拟偏 | 只按旧精度写, 力通道统计量偏 |
 |---|---|---|---|---|
@@ -189,7 +189,7 @@ fitRaw = false           modelFormStatus = MODEL_FORM_OK        ← 判决完全
 实测最坏 **0.037%**, 与 §7.1 那份合成数据的预测 (0.032% / 最坏 0.184%) 吻合,
 **比任何判据的余量低一个数量级以上 —— 不需要再动。**
 
-出处: `.superpowers/sdd/console-vs-replay-report.md`。
+出处: `Docs/superpowers/evidence/console-vs-replay-report.md`。
 
 ⚠ 已冻结的三份夹具 (`tests/fixtures/calib_poses_2026-09-19*.txt`) **仍是旧的粗精度**,
 它们对应的金标 (6.97/18.36/33.74) **不要改** —— 那三份是历史记录, 不是实现回归。
@@ -197,7 +197,7 @@ fitRaw = false           modelFormStatus = MODEL_FORM_OK        ← 判决完全
 ## 8. 力矩模型到底缺什么 (2026-09-19 下午, 离线, 未上机)
 
 **一句话: 模型形式不用改, 要改的是 `A` 的估计方式。** 而"15:30/15:33 超出零分布 ⇒ 模型缺结构"
-这条结论 (见 §1/§4 与 `.superpowers/sdd/moment-gate-calibration-report.md` §4) **要更正** —— 见 §8.5。
+这条结论 (见 §1/§4 与 `Docs/superpowers/evidence/moment-gate-calibration-report.md` §4) **要更正** —— 见 §8.5。
 
 ### 8.1 先排掉"实现错了"这一类
 
@@ -278,7 +278,7 @@ A           5.4e-13 ~ 9.4e-12
 | 估计 | **联合估 `A`** (两通道按各自噪声加权) | λ 交集非空 + `σ(A_m)` 小 2.4~10.7 倍。**唯一有实测依据的改动。** 风险: 力门从 1.46/1.02 涨到 2.05/3.31, 权重不能想当然 |
 | 门 | **语义已证伪, 需重做** | 现在这扇"模型形式门"把三样混在一起: 模型形式错 / `A_F` 估计差 / 真实通道矛盾 —— **它分不开**。λ 区间是否重叠才是能分开的判据 |
 
-**出处**: `.superpowers/sdd/moment-model-structure-report.md` (含 §7 全部表格与 λ 扫描),
+**出处**: `Docs/superpowers/evidence/moment-model-structure-report.md` (含 §7 全部表格与 λ 扫描),
 `moment-gate-diagnosis-report.md`, `moment-gate-dA-correction-report.md`。
 
 ---
@@ -332,7 +332,7 @@ z 分量的离散**不是质量尺度造成的** (只解释 18% 的方差), 它�
 离散在一阶上可以 (共同偏移会抵消); 但**不严格** —— 原点误差通过
 `δ × (A·g)` 这种**随姿态变**的项泄漏, 而四次的姿态数不同 (7/9/10/10), 泄漏量不同。
 
-**出处**: `.superpowers/sdd/cs-bias-report.md` (378 行, 含全部表格与规范敏感性分析)。
+**出处**: `Docs/superpowers/evidence/cs-bias-report.md` (378 行, 含全部表格与规范敏感性分析)。
 
 ---
 

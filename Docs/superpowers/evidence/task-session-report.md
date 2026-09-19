@@ -2,7 +2,7 @@
 
 - 日期: 2026-09-19
 - 分支: `feat/pen-clamp-redesign`
-- 依据: `.superpowers/sdd/task-session-report-brief.md` (硬要求 1~9)
+- 依据: `Docs/superpowers/evidence/task-session-report-brief.md` (硬要求 1~9)
 
 ---
 

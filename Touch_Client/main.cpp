@@ -135,7 +135,7 @@ namespace BiasCheck {
     //   (旧文案里的 12%/4.9%/2.5% 是放宽前 α=0.997 那一列 —— 当时只把 R=1 的括注改成了新值,
     //    R=2/R=3 一直虚高约 18x/50x, 把"再多采几对"的好处说得比实测大。)
     // 力矩分支 —— 来源: 生产 fitRaw 直接驱动的零假设蒙特卡洛, 每格 2e5 次、两套噪声模型
-    //   (.superpowers/sdd/moment-gate-dA-correction-report.md 的计数,
+    //   (Docs/superpowers/evidence/moment-gate-dA-correction-report.md 的计数,
     //    moment-gate-calibration-report.md §2/§3 的口径)。
     //   ⚠ 夹具把力矩量化到 0.001 N·m, 所以下面是【下界】, 真值只会更差。
     //   为什么差这么多 (2026-09-19 查明): δA —— 力矩模型复用的是【力通道估出来的 A】, 而它自己的
@@ -787,7 +787,7 @@ namespace BiasCheck {
         // ×1.30 / ×0.895 / ×0.551 —— 因为分子与分母都在动。不存在"统一差了两倍"这回事。
         // 下面每一条都是【量出来的】: 用生产 fitRaw 跑合成采集 (10 姿态 + 5 对, 与 15:33 同尺度),
         // 把同一批全精度数据分别按旧/新精度写成文本再读回来比对, 12 组独立噪声。
-        // 出处: .superpowers/sdd/precision-sufficiency-report.md
+        // 出处: Docs/superpowers/evidence/precision-sufficiency-report.md
         //
         //   F1304*/M1304*: %.3f -> %.9f      【主因: 力矩失拟偏 −52.4%】
         //     力矩重复对的真实差值 d ≈ 2e-4 N·m, 而旧台阶 1e-3 比 d 本身还大五倍 —— d 于是被换成

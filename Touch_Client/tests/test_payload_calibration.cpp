@@ -1809,7 +1809,7 @@ static const int MG_MAXREP = 8;
 //   ⇒ 下面 refRatio/refLimit 钉的是【夹具重放】的值 (可复现、可回归); 控制台那六个数
 //     另存一列 (conRatio/conLimit/consoleCond), 【只打印、不断言】—— 断言它们等于夹具
 //     的值是错的, 断言它们等于控制台的值也是做不到的。详见
-//     .superpowers/sdd/moment-gate-calibration-report.md。
+//     Docs/superpowers/evidence/moment-gate-calibration-report.md。
 //
 // 容差见 RTOL_MG。refPass = 力通道与力矩通道【两个门都过】才为 true (fitRaw 的返回值) ——
 // 这一列【夹具重放与控制台完全一致】(通过 / 拒绝 / 拒绝), 也是本表里唯一可以直接对控制台的那一列。

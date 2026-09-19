@@ -217,7 +217,7 @@ feat(payload-calib): fit the raw force channel linearly and decompose it, with n
 ```
 （`RelayCore.cpp:99-107` 已在读，只打印。）**实测记录**：
 `机械臂自报 load = 0.404 kg  center = (0.3, -0.1, 68.7) mm`，且**回读与下发分毫不差**
-⇒ 它确实采纳了负载（`.superpowers/sdd/robot-baseline-report.md:52`、`progress.md:602`）。
+⇒ 它确实采纳了负载（`Docs/superpowers/evidence/robot-baseline-report.md:52`、`progress.md:602`）。
 
 **⑤ 于是 `d` 就算出来了，而且自洽：**
 ```
