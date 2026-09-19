@@ -10,6 +10,11 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
+#include <ctime>
+#ifdef _WIN32
+#include <io.h>          // _dup / _dup2 / _close —— 蒙特卡洛要把 stderr 静音
+#include <fcntl.h>       // _O_WRONLY
+#endif
 #include "../force/PayloadCalibration.h"
 #include "../force/RepeatPairRegistry.h"
 #include "../calibration/TcpCalibration.h"
@@ -1758,6 +1763,609 @@ static void test_replay_real_capture() {
     PASS();
 }
 
+// =====================================================================================
+// ★ 力矩门限的实机标定 (2026-09-19 三次采集: 15:25 / 15:30 / 15:33)
+//
+// 【问题】三次采集的【力通道全过】, 只有【力矩失拟】一次比一次大 (5.36 / 20.5 / 61.2), 而
+//   门限落在 5~8 —— 且姿态铺得越开 (cond 207 -> 44 -> 18) 它越大。两种读法的处置相反:
+//     (i)  力矩模型 M = b_M + c_s × (A·g) 真的不完备 —— 自由 12 参数模型确实找到了叉乘
+//          结构解释不了的那一份结构;
+//     (ii) 门限对"受约束那一侧少 6 个参数"这件事标定得不对 —— 正确模型在这个统计量上本来
+//          就跑这么高, 门限把统计量的零分布切错了位置。
+//
+// 【怎么把它们分开】把三份采集的姿态 / 重复对 / 逐姿态样本数 / 逐姿态 sd 原样冻进夹具
+//   (fixtures/calib_poses_2026-09-19_15*.txt), 再用【生产代码 fitRaw 本身】跑零假设蒙特卡洛:
+//   用该次采集【自己拟合出来的】A / c_s / b_M 造力与力矩 —— 于是"叉乘模型为真"是【构造】
+//   出来的, 不是假设的 —— 加实测尺度的噪声, 再看 fitRaw 判不判。实测值落在零分布尾巴里
+//   -> (i); 零分布自己就有一大片超过实测值 -> (ii)。
+//
+// ⚠ 【必须驱动生产代码, 不得重推公式】: 控制器曾离线重写一份统计量, 得到 4.95 / 13.36 /
+//   11.06, 与实机打印的 5.36 / 20.5 / 61.2 差 4~5 倍 (而它算的 σ_rep,M 与打印值一致) ——
+//   那份重写件不可信, 不得作为任何结论的依据。所以这里【只调用】PayloadCalibration::fitRaw,
+//   一个字都不重推它的公式。
+//
+// ⚠ 【本用例只测量, 不改】: 不动任何门限 / 模型 / 判决逻辑。金标是【实机的记录】——
+//   谁改了统计量或门限, 这里必须【变红】, 而不是"顺手把数改成新的"。
+// =====================================================================================
+
+static const int MG_MAXN   = PayloadCalibration::RAW_POSE_REPORT_MAX;
+static const int MG_MAXREP = 8;
+
+// 三次采集的金标。
+//
+// ⚠ 【必须先说的是: 这张表【不是】控制台当时打印的那几个数】。
+//   实机控制台 (runs 001-003 的原始输出, Docs/superpowers/specs/2026-09-19-raw-channel-calibration-*)
+//   打印的是 5.359 / 20.51 / 61.22, 而【从冻结夹具重放得不到它们】, 得到的是
+//   6.973 / 18.36 / 33.74。原因不是实现回归, 是【夹具存不下那几个数】:
+//     · 夹具是 calib_poses.txt 的原样副本, 而它把姿态写成 %.1f/%.3f、把 @1304 的力与力矩
+//       写成 %.3f —— 力矩的量化台阶 0.001 N·m 比【重复姿态对的真实差值】(~0.0002 N·m)
+//       还大, 于是从夹具算出的 σ_sys,M 被量化噪声顶上去 (0.00071 vs 控制台的 0.0005),
+//       尺子变粗, 失拟统计量被除以一个更大的分母 —— 这三个数就是这么变小的;
+//     · 控制台读的是内存里的【全精度 double】, 夹具存的是它的 3 位小数截断。
+//   实测 (用夹具的量化台阶做还原抽样, 400 次, 用生产 fitRaw): 只把"四舍五入丢掉的那
+//   一点"按均匀分布补回去, 统计量就在 2.26~19.96 / 6.97~45.15 / 14.18~63.16 之间跑,
+//   门限在 5.32~11.48 / 5.08~7.86 / 5.27~8.65 之间跑 —— 控制台的三个数【全都落在这个
+//   区间里】。所以: 夹具重放与控制台打印【本来就是两个数】, 差多少由量化决定。
+//   ⇒ 下面 refRatio/refLimit 钉的是【夹具重放】的值 (可复现、可回归); 控制台那六个数
+//     另存一列 (conRatio/conLimit/consoleCond), 【只打印、不断言】—— 断言它们等于夹具
+//     的值是错的, 断言它们等于控制台的值也是做不到的。详见
+//     .superpowers/sdd/moment-gate-calibration-report.md。
+//
+// 容差见 RTOL_MG。refPass = 力通道与力矩通道【两个门都过】才为 true (fitRaw 的返回值) ——
+// 这一列【夹具重放与控制台完全一致】(通过 / 拒绝 / 拒绝), 也是本表里唯一可以直接对控制台的那一列。
+struct MomentCapture {
+    const char* tag;
+    const char* fixture;
+    int         poses;
+    int         refPairs;
+    double      refRatio;      // 夹具重放的 lackOfFitMomentRatio (金标, 断言)
+    double      refLimit;      // 夹具重放的 lackOfFitMomentLimit (金标, 断言)
+    bool        refPass;       // 夹具重放的判决 (金标, 断言)
+    double      conRatio;      // 控制台当时打印的失拟 (记录, 不断言)
+    double      conLimit;      // 控制台当时打印的门限 (记录, 不断言)
+    double      conCond;       // 控制台当时打印的 cond  (记录, 不断言)
+};
+
+static const MomentCapture MG_CAPS[3] = {
+    { "15:25", "calib_poses_2026-09-19_1525.txt",  9, 3,
+      6.973380689, 7.402061054, true,   5.359, 7.998, 206.606  },
+    { "15:30", "calib_poses_2026-09-19_1530.txt", 10, 5,
+      18.36001184, 6.050025293, false,  20.51,  6.321,  43.9034 },
+    { "15:33", "calib_poses_2026-09-19_1533.txt", 10, 5,
+      33.74121269, 6.440865571, false,  61.22,  5.239,  18.2353 }
+};
+
+// 【容差】= 该量自身的 1e-6 (先按 1e-3 跑一遍读出全精度值, 再收紧到这里)。
+//   · 数值可复现性: 同一份夹具、同一个二进制走同一条确定性算术, 逐位一致; 换编译器/libm 的
+//     差异经 12 参数正规方程放大也只有 ~1e-12 相对。1e-6 宽出 6 个数量级。
+//   · 回归灵敏度: 本用例要拦的每一类错 (统计量的分母口径、失拟的自由度、σ_rep 的池化、
+//     门限的 χ² 分位/折扣) 都会让这两个数动 >= 1e-2 相对 —— 比容差大四个数量级。
+//     (夹具那 3 位小数的量化本身就会让统计量动 >= 2 倍, 但它已经冻在夹具里了, 不是变量。)
+static const double RTOL_MG = 1e-6;
+
+// 夹具读出来的一份采集: 姿态 (求解器序) / 力 / 力矩 / 逐姿态样本数与 sd / 重复对。
+struct MomentCaptureData {
+    int    n;
+    double poses[MG_MAXN][6];              // [x,y,z,rx,ry,rz] —— 与 main.cpp 的重排逐字相同
+    double F[MG_MAXN][3], M[MG_MAXN][3];   // @1304 原始未镜像
+    double sdF[MG_MAXN][3], sdM[MG_MAXN][3];
+    int    nsamp[MG_MAXN];
+    PayloadCalibration::RepeatPair reps[MG_MAXREP];
+    int    repCount;
+};
+
+// 夹具的四个候选路径 —— 与 REF 那条同一套 (夹具已入库: 四个都找不到 = 检出坏了, 记 FAIL)。
+static char g_mgFixturePath[512];
+
+static bool mgOpenFixture(const char* name, FILE** out) {
+    static const char* DIRS[4] = { "fixtures/", "tests/fixtures/",
+                                   "Touch_Client/tests/fixtures/",
+                                   "../../Touch_Client/tests/fixtures/" };
+    for (int i = 0; i < 4; i++) {
+        snprintf(g_mgFixturePath, sizeof(g_mgFixturePath), "%s%s", DIRS[i], name);
+        FILE* f = fopen(g_mgFixturePath, "r");
+        if (f) { *out = f; return true; }
+    }
+    g_mgFixturePath[0] = '\0';
+    return false;
+}
+
+// "# repeat: first=1,3,5 seconds=2,4,6  (共 3 对...)" -> 0 基下标对。返回解析出的对数。
+// "# repeat: none" -> 0。列号是 1 基的行号, 与 main.cpp 落盘时逐字一致。
+static int mgParseRepeat(const char* line, PayloadCalibration::RepeatPair* out, int maxOut) {
+    int firsts[16], seconds[16], nf = 0, ns = 0;
+    const char* p = strstr(line, "first=");
+    if (!p) return 0;
+    p += 6;
+    while (*p && *p != ' ' && nf < 16) {
+        char* e = nullptr;
+        const long v = strtol(p, &e, 10);
+        if (e == p) break;
+        firsts[nf++] = (int)v;
+        p = e;
+        if (*p == ',') p++;
+    }
+    p = strstr(line, "seconds=");
+    if (!p) return 0;
+    p += 8;
+    while (*p && *p != ' ' && ns < 16) {
+        char* e = nullptr;
+        const long v = strtol(p, &e, 10);
+        if (e == p) break;
+        seconds[ns++] = (int)v;
+        p = e;
+        if (*p == ',') p++;
+    }
+    int cnt = (nf < ns) ? nf : ns;
+    if (cnt > maxOut) cnt = maxOut;
+    for (int i = 0; i < cnt; i++) { out[i].first = firsts[i] - 1; out[i].second = seconds[i] - 1; }
+    return cnt;
+}
+
+// 逗号分隔的一行 -> 逐列。【数一下列数】: 列数不是 25 = 布局变了, 不静默跳行 ——
+// 拿一个列序读歪的表去对金标, 只会得出一个假的结论。
+static int mgSplitRow(const char* q, double* out, int maxOut) {
+    int k = 0;
+    while (*q && k < maxOut) {
+        char* e = nullptr;
+        const double v = strtod(q, &e);
+        if (e == q) break;
+        out[k++] = v;
+        q = e;
+        if (*q == ',') q++; else break;
+    }
+    return k;
+}
+
+// 夹具 -> MomentCaptureData。25 列 = 18 均值 + N1304 + 6 个 sd (见夹具的 # 头)。
+static bool mgLoad(const char* fixture, MomentCaptureData& d, const char*& pathUsed) {
+    FILE* fp = nullptr;
+    if (!mgOpenFixture(fixture, &fp)) return false;
+    pathUsed = g_mgFixturePath;
+    d.n = 0; d.repCount = 0;
+    char line[1024];
+    while (fgets(line, sizeof(line), fp)) {
+        if (strstr(line, "# repeat:") != nullptr) {
+            d.repCount = mgParseRepeat(line, d.reps, MG_MAXREP);
+            continue;
+        }
+        const char* q = line;
+        while (*q == ' ' || *q == '\t') q++;
+        if (*q == '\0' || *q == '\r' || *q == '\n' || *q == '#') continue;
+        if (d.n >= MG_MAXN) { fclose(fp); return false; }
+        double c[25];
+        if (mgSplitRow(q, c, 25) != 25) { fclose(fp); return false; }
+        // 列序 (main.cpp 落盘时写明): rx,ry,rz,x,y,z, F576*, M576*, F1304*, M1304*, N1304, sd*
+        double src[6];
+        for (int a = 0; a < 6; a++) src[a] = c[a];
+        repackPoseRow(src, d.poses[d.n]);      // 与实机路径【逐字相同】的重排
+        for (int a = 0; a < 3; a++) {
+            d.F[d.n][a]     = c[12 + a];
+            d.M[d.n][a]     = c[15 + a];
+            d.sdF[d.n][a]   = c[19 + a];
+            d.sdM[d.n][a]   = c[22 + a];
+        }
+        d.nsamp[d.n] = (int)(c[18] + 0.5);
+        if (d.nsamp[d.n] < 1) { fclose(fp); return false; }
+        d.n++;
+    }
+    fclose(fp);
+    if (d.n <= 0) return false;
+    for (int i = 0; i < d.n; i++)
+        for (int a = 0; a < 3; a++)
+            if (!(d.sdF[i][a] > 0.0) || !(d.sdM[i][a] > 0.0)) return false;
+    return true;
+}
+
+// 夹具的 (N, sd) -> fitRaw 要的 PoseNoise: var = sd², n = N1304。
+// 【口径必须说清】夹具的 sd 是【单个样本】的标准差, 而 fitRaw 内部把它折算成【均值】的方差
+// (var/N)。所以零假设里给"均值"加的抖动必须按 sd/√N 抽 —— 这样申报的 floor² 与真实抖动
+// 【逐位一致】; 若直接按 sd 抽, 合成数据会比实机噪 √N ≈ 4.5 倍, 那是另一场实验。
+static void mgDeclareNoise(const MomentCaptureData& d, PayloadCalibration::PoseNoise* nz) {
+    for (int i = 0; i < d.n; i++) {
+        nz[i].n = d.nsamp[i];
+        for (int a = 0; a < 3; a++) {
+            nz[i].varF[a] = d.sdF[i][a] * d.sdF[i][a];
+            nz[i].varM[a] = d.sdM[i][a] * d.sdM[i][a];
+        }
+    }
+}
+
+// 蒙特卡洛会成千上万次调用 fitRaw, 每次拒绝都往 stderr 写几行 —— 要的是统计量, 不是几万行
+// 日志。把 fd 2 接到 NUL, 跑完接回来 (不碰 stdout)。
+static int g_savedStderrFd = -1;
+
+static void mgMuteStderr() {
+#ifdef _WIN32
+    fflush(stderr);
+    g_savedStderrFd = _dup(2);
+    if (g_savedStderrFd >= 0) {
+        const int nul = _open("NUL", _O_WRONLY);
+        if (nul >= 0) { _dup2(nul, 2); _close(nul); }
+    }
+#endif
+}
+
+static void mgUnmuteStderr() {
+#ifdef _WIN32
+    fflush(stderr);
+    if (g_savedStderrFd >= 0) {
+        _dup2(g_savedStderrFd, 2);
+        _close(g_savedStderrFd);
+        g_savedStderrFd = -1;
+    }
+#endif
+}
+
+// 确定性 RNG (固定种子 -> 整个蒙特卡洛可复现): 64 位 LCG + Box-Muller。
+struct MgRng {
+    unsigned long long s;
+    void seed(unsigned long long v) { s = v ? v : 1ULL; }
+    double uni() {
+        s = s * 6364136223846793005ULL + 1442695040888963407ULL;
+        return (double)((s >> 11) & 0x1FFFFFFFFFFFFFULL) / 9007199254740992.0;
+    }
+    double norm() {
+        double u1 = uni();
+        if (!(u1 > 0.0)) u1 = 1e-300;
+        const double u2 = uni();
+        return sqrt(-2.0 * log(u1)) * cos(6.283185307179586476925286766559 * u2);
+    }
+};
+
+// -------------------------------------------------------------------------------------
+// 1) 金标: 三份冻结夹具各跑一次生产 fitRaw, 断言统计量 / 门限 / 判决。
+// -------------------------------------------------------------------------------------
+static void test_moment_gate_real_captures_golden() {
+    std::cout << "  moment_gate_real_captures_golden..." << std::endl;
+    int bad = 0;
+    mgMuteStderr();
+    for (int k = 0; k < 3; k++) {
+        MomentCaptureData d;
+        const char* used = nullptr;
+        if (!mgLoad(MG_CAPS[k].fixture, d, used)) {
+            mgUnmuteStderr();
+            std::cout << "    FAIL: 读不到夹具 " << MG_CAPS[k].fixture
+                      << " —— 它【已入库】的只读副本, 缺了说明这次检出是坏的。" << std::endl;
+            g_failed++;
+            return;
+        }
+        if (d.n != MG_CAPS[k].poses || d.repCount != MG_CAPS[k].refPairs) {
+            mgUnmuteStderr();
+            std::cout << "    FAIL: 夹具 " << MG_CAPS[k].fixture << " 里是 " << d.n << " 个姿态 / "
+                      << d.repCount << " 对, 而金标只对 " << MG_CAPS[k].poses << " 个 / "
+                      << MG_CAPS[k].refPairs << " 对那一次采集成立 —— 这是【另一次采集】,"
+                         " 不是实现回归: 请【新增】夹具并【显式】重导金标, 不要就地改数。"
+                      << std::endl;
+            g_failed++;
+            return;
+        }
+        PayloadCalibration::PoseNoise nz[MG_MAXN];
+        mgDeclareNoise(d, nz);
+        PayloadCalibration::RawFit fit;
+        const bool ok = PayloadCalibration::fitRaw(d.poses, d.F, d.M, d.n, fit, nz,
+                                                   d.reps, d.repCount,
+                                                   PayloadCalibration::MODEL_FORM_REQUIRED);
+        mgUnmuteStderr();
+
+        printf("    [%s] %s  n=%d pairs=%d cond=%.6g rmsF=%.6g N rmsM=%.6g N·m\n",
+               MG_CAPS[k].tag, used, d.n, d.repCount, fit.cond, fit.rmsForceN, fit.rmsMomentNm);
+        printf("         力通道  χ²_rep/dof = %.10g  门限 = %.10g  -> %s\n",
+               fit.chi2RepForceRatio, fit.chi2RepForceLimit,
+               (fit.chi2RepForceRatio < fit.chi2RepForceLimit) ? "过" : "拒");
+        printf("         力矩失拟 ratio   = %.10g  门限 = %.10g  dof=%d  -> %s\n",
+               fit.lackOfFitMomentRatio, fit.lackOfFitMomentLimit, fit.lackOfFitMomentDof,
+               (fit.lackOfFitMomentRatio < fit.lackOfFitMomentLimit) ? "过" : "拒");
+        printf("         尺子 σ_rep,M = (%.6g, %.6g, %.6g) N·m;  σ_rep,F = (%.6g, %.6g, %.6g) N\n",
+               fit.repeatSigmaM[0], fit.repeatSigmaM[1], fit.repeatSigmaM[2],
+               fit.repeatSigmaF[0], fit.repeatSigmaF[1], fit.repeatSigmaF[2]);
+        printf("         判决 fitRaw = %s (modelFormChecked=%d, momentFormChecked=%d)\n",
+               ok ? "通过" : "拒绝", (int)fit.modelFormChecked, (int)fit.momentFormChecked);
+        // 控制台当时打印的 (记录, 不断言) —— 与夹具重放的差就是【夹具存不下的那点精度】。
+        printf("         对照 控制台: cond=%.6g 失拟=%.4g 门限=%.4g  [夹具/控制台 失拟比 = %.3f,"
+               " 门限比 = %.3f, cond 比 = %.6f]\n",
+               MG_CAPS[k].conCond, MG_CAPS[k].conRatio, MG_CAPS[k].conLimit,
+               fit.lackOfFitMomentRatio / MG_CAPS[k].conRatio,
+               fit.lackOfFitMomentLimit / MG_CAPS[k].conLimit,
+               fit.cond / MG_CAPS[k].conCond);
+
+        nearRef(bad, "lackOfFitMomentRatio", fit.lackOfFitMomentRatio,
+                MG_CAPS[k].refRatio, RTOL_MG * fabs(MG_CAPS[k].refRatio));
+        nearRef(bad, "lackOfFitMomentLimit", fit.lackOfFitMomentLimit,
+                MG_CAPS[k].refLimit, RTOL_MG * fabs(MG_CAPS[k].refLimit));
+        if (ok != MG_CAPS[k].refPass) {
+            std::cout << "    !! [" << MG_CAPS[k].tag << "] 判决 = " << (ok ? "通过" : "拒绝")
+                      << " (金标 " << (MG_CAPS[k].refPass ? "通过" : "拒绝") << ")" << std::endl;
+            bad++;
+        }
+    }
+    if (bad != 0) {
+        std::cout << "FAIL (" << bad << " 项对不上金标 —— 这些数是实机的记录, 要查的是实现)" << std::endl;
+        g_failed++;
+        return;
+    }
+    PASS();
+}
+
+// -------------------------------------------------------------------------------------
+// 2) 零假设蒙特卡洛: 用生产 fitRaw 量【叉乘模型为真】时被拒的概率 (力/力矩两条门分开报)。
+//
+// 两套噪声模型, 【都报】—— 免得结论挂在一套噪声模型上:
+//   A "brief 口径": 只有姿态内噪声。逐姿态均值按 N(0, sd²/N) 抖 (sd 与 N 都照夹具),
+//     申报给 fitRaw 的也正是 (n = N1304, var = sd²) —— 于是门限读到的 floor² 与真实抖动
+//     【逐位一致】。这一套里"回到同一姿态再采一次"只差噪声, 尺子最细, 是最保守的一套。
+//   B "同复现性口径": A 之外, 【每一次访问】再各自加一份 σ_sys 偏移 (逐通道), 大小取该次
+//     采集【自己测出来的】repeatSys[]。实机上"回到同一个位姿"的离散是真有的 (重复对差值
+//     表里就看得见), 不把它放进零假设等于让尺子比现实细 —— 那会做出一个假的冤枉率。
+//   两套的差就是"零假设的另一个自由度", 报出来才知道结论稳不稳。
+// -------------------------------------------------------------------------------------
+
+static const int MOMENT_MC_ITERS = 2000;
+
+static double g_mcNull[3][2][MOMENT_MC_ITERS];   // [采集][噪声模型][第几次] -> 失拟统计量 (-1 = 没算出来)
+
+struct McTally {
+    int iters;
+    int anyReject;       // fitRaw 返回 false (任何一种理由)
+    int statusBad;       // 尺子不齐 (通道冻住/有洞/没有对/自由度 0)
+    int forceReject;     // 尺子齐备、力通道判据被拒
+    int momentReached;   // 走到力矩判据的次数 (力通道已过)
+    int momentReject;    // 力矩判据被拒
+    int otherReject;     // 两条门都过了, 仍被 fitRaw 的其它自检拒 (质量尺度/cond/秩亏)
+};
+
+static McTally g_mcTally[3][2];
+static double  g_mcObs[3];
+
+static void mgRunNull(int capIdx, int variant, const MomentCaptureData& d,
+                      const PayloadCalibration::PoseNoise* nz,
+                      const double A[9], const double bF[3], const double cS[3], const double bM[3],
+                      const double sysF[3], const double sysM[3],
+                      McTally& t, double* statOut)
+{
+    for (int it = 0; it < MOMENT_MC_ITERS; it++) statOut[it] = -1.0;
+    t.iters = MOMENT_MC_ITERS;
+    t.anyReject = t.statusBad = t.forceReject = 0;
+    t.momentReached = t.momentReject = t.otherReject = 0;
+
+    MgRng rng;
+    rng.seed(20260919ULL + 1000ULL * (unsigned long long)capIdx
+                          + 10ULL * (unsigned long long)variant);
+    PayloadCalibration::PoseNoise nzSim[MG_MAXN];
+    for (int i = 0; i < d.n; i++) nzSim[i] = nz[i];
+
+    double F[MG_MAXN][3], M[MG_MAXN][3];
+    for (int it = 0; it < MOMENT_MC_ITERS; it++) {
+        // (a) 从【该次采集自己拟合出来的】A / b_F / c_s / b_M 造"真值" —— 叉乘模型为真
+        for (int i = 0; i < d.n; i++) {
+            double g[3];
+            TcpCalibration::gravitySensorFrameAtYaw(d.poses[i], 0.0, g);
+            double w[3];
+            for (int a = 0; a < 3; a++)
+                w[a] = A[a * 3 + 0] * g[0] + A[a * 3 + 1] * g[1] + A[a * 3 + 2] * g[2];
+            const double muF[3] = { bF[0] + w[0], bF[1] + w[1], bF[2] + w[2] };
+            const double muM[3] = { bM[0] + cS[1] * w[2] - cS[2] * w[1],
+                                    bM[1] + cS[2] * w[0] - cS[0] * w[2],
+                                    bM[2] + cS[0] * w[1] - cS[1] * w[0] };
+            for (int a = 0; a < 3; a++) {
+                // 姿态内噪声: 均值的 1σ = sd/√N (即门限读到的 floor)
+                const double sF = d.sdF[i][a] / sqrt((double)d.nsamp[i]);
+                const double sM = d.sdM[i][a] / sqrt((double)d.nsamp[i]);
+                double eF = sF * rng.norm();
+                double eM = sM * rng.norm();
+                if (variant == 1) {          // 每一次访问各一份 σ_sys 偏移 (逐通道)
+                    eF += sqrt(sysF[a]) * rng.norm();
+                    eM += sqrt(sysM[a]) * rng.norm();
+                }
+                F[i][a] = muF[a] + eF;
+                M[i][a] = muM[a] + eM;
+            }
+        }
+        // (b) 生产判决 (与实机路径逐字同参: 同一个 nz、同一串重复对、同一个 policy)
+        PayloadCalibration::RawFit fit;
+        const bool ok = PayloadCalibration::fitRaw(d.poses, F, M, d.n, fit, nzSim,
+                                                   d.reps, d.repCount,
+                                                   PayloadCalibration::MODEL_FORM_REQUIRED);
+        if (!ok) t.anyReject++;
+        if (fit.modelFormStatus != PayloadCalibration::MODEL_FORM_OK) { t.statusBad++; continue; }
+        if (!(fit.chi2RepForceRatio < fit.chi2RepForceLimit)) { t.forceReject++; continue; }
+        if (fit.lackOfFitMomentDof > 0) {
+            t.momentReached++;
+            statOut[it] = fit.lackOfFitMomentRatio;
+            // 力矩门拒了就【不再往"其它自检"里数】—— 两条出路只能占一条。
+            if (!(fit.lackOfFitMomentRatio < fit.lackOfFitMomentLimit)) { t.momentReject++; continue; }
+        }
+        if (!ok) t.otherReject++;
+    }
+}
+
+// 观测值在零分布里的百分位 (严格小的算 1, 相等的算 1/2)。无效样本 (统计量没算出来) 不计。
+static double mgPercentile(const double* v, int n, double x) {
+    int below = 0, equal = 0, valid = 0;
+    for (int i = 0; i < n; i++) {
+        if (!(v[i] >= 0.0)) continue;
+        valid++;
+        if (v[i] < x) below++;
+        else if (v[i] == x) equal++;
+    }
+    return (valid > 0) ? ((double)below + 0.5 * (double)equal) / (double)valid : -1.0;
+}
+
+static double mgMean(const double* v, int n) {
+    double s = 0.0; int c = 0;
+    for (int i = 0; i < n; i++) if (v[i] >= 0.0) { s += v[i]; c++; }
+    return c ? s / (double)c : -1.0;
+}
+
+static int mgCmpDouble(const void* a, const void* b) {
+    const double x = *(const double*)a, y = *(const double*)b;
+    return (x < y) ? -1 : ((x > y) ? 1 : 0);
+}
+
+// 零分布的分位数 (最近秩法, 只在有效样本上) —— 纯报告量。
+static double mgQuantile(const double* v, int n, double p) {
+    static double buf[MOMENT_MC_ITERS];
+    int c = 0;
+    for (int i = 0; i < n; i++) if (v[i] >= 0.0) buf[c++] = v[i];
+    if (c <= 0) return -1.0;
+    qsort(buf, (size_t)c, sizeof(double), mgCmpDouble);
+    int idx = (int)(p * (double)(c - 1) + 0.5);
+    if (idx < 0) idx = 0;
+    if (idx >= c) idx = c - 1;
+    return buf[idx];
+}
+
+static void test_moment_gate_null_false_reject_rate() {
+    std::cout << "  moment_gate_null_false_reject_rate..." << std::endl;
+    static const char* VARNAME[2] = { "A(只有逐姿态噪声)", "B(+每次访问 sigma_sys)" };
+
+    const clock_t t0 = clock();
+    mgMuteStderr();
+    for (int k = 0; k < 3; k++) {
+        MomentCaptureData d;
+        const char* used = nullptr;
+        if (!mgLoad(MG_CAPS[k].fixture, d, used)) {
+            mgUnmuteStderr();
+            std::cout << "    FAIL: 读不到夹具 " << MG_CAPS[k].fixture << std::endl;
+            g_failed++;
+            return;
+        }
+        PayloadCalibration::PoseNoise nz[MG_MAXN];
+        mgDeclareNoise(d, nz);
+        // 实机那一次的拟合 —— 被拒也要 A / b_F / c_s / b_M (线性解在, 头文件的契约如此):
+        // 蒙特卡洛的"真值"就是从这几个数来的。
+        PayloadCalibration::RawFit real;
+        PayloadCalibration::fitRaw(d.poses, d.F, d.M, d.n, real, nz, d.reps, d.repCount,
+                                   PayloadCalibration::MODEL_FORM_REQUIRED);
+        const double obs = real.lackOfFitMomentRatio;
+        mgUnmuteStderr();
+
+        printf("    [%s] n=%d pairs=%d  实测 lackOfFitMomentRatio = %.6g (门限 %.6g, %s)\n",
+               MG_CAPS[k].tag, d.n, d.repCount, obs, real.lackOfFitMomentLimit,
+               (obs < real.lackOfFitMomentLimit) ? "过" : "拒");
+        printf("         σ_sys,M = (%.3g, %.3g, %.3g);  σ_rep,M = (%.4g, %.4g, %.4g) N·m\n",
+               sqrt(real.repeatSysM[0]), sqrt(real.repeatSysM[1]), sqrt(real.repeatSysM[2]),
+               real.repeatSigmaM[0], real.repeatSigmaM[1], real.repeatSigmaM[2]);
+        // 门限自己读的那个比值 (三通道"和的比", 与 modelFormLimit 同一口径) —— 门限的宽窄由它定,
+        // 所以它必须与判决一起报。力矩那一半与力那一半分开算。
+        static double rM = 0.0, rF = 0.0;
+        {
+            double sM = 0, fM = 0, sF = 0, fF = 0;
+            for (int a = 0; a < 3; a++) {
+                sM += real.repeatSysM[a]; fM += real.repeatFloorM[a];
+                sF += real.repeatSysF[a]; fF += real.repeatFloorF[a];
+            }
+            rM = (fM > 0.0) ? sM / fM : 0.0;
+            rF = (fF > 0.0) ? sF / fF : 0.0;
+        }
+        printf("         门限读到的 r = Σσ_sys²/Σfloor²:  力矩 %.4g,  力 %.4g\n", rM, rF);
+
+        for (int v = 0; v < 2; v++) {
+            McTally t;
+            mgMuteStderr();
+            mgRunNull(k, v, d, nz, real.A, real.bF, real.cS, real.bM,
+                      real.repeatSysF, real.repeatSysM, t, g_mcNull[k][v]);
+            mgUnmuteStderr();
+            g_mcTally[k][v] = t;
+            const double pct = mgPercentile(g_mcNull[k][v], MOMENT_MC_ITERS, obs);
+            printf("         零假设 %s: %d 次; 任何理由被拒 %d (%.3f%%);  尺子不齐 %d;"
+                   "  力通道拒 %d (%.3f%%);  走到力矩门 %d 次, 被拒 %d (%.3f%%);  其它自检拒 %d\n",
+                   VARNAME[v], t.iters, t.anyReject, 100.0 * t.anyReject / t.iters,
+                   t.statusBad, t.forceReject, 100.0 * t.forceReject / t.iters,
+                   t.momentReached, t.momentReject,
+                   100.0 * (t.momentReached ? (double)t.momentReject / (double)t.momentReached : 0.0),
+                   t.otherReject);
+            printf("                  零分布统计量: 均值 %.4g, 中位 %.4g, 90%% %.4g, 99%% %.4g,"
+                   " 最大 %.4g  ->  夹具值 %.6g 落在 %.2f 百分位;  控制台值 %.4g 落在 %.2f 百分位\n",
+                   mgMean(g_mcNull[k][v], MOMENT_MC_ITERS),
+                   mgQuantile(g_mcNull[k][v], MOMENT_MC_ITERS, 0.50),
+                   mgQuantile(g_mcNull[k][v], MOMENT_MC_ITERS, 0.90),
+                   mgQuantile(g_mcNull[k][v], MOMENT_MC_ITERS, 0.99),
+                   mgQuantile(g_mcNull[k][v], MOMENT_MC_ITERS, 1.0), obs, 100.0 * pct,
+                   MG_CAPS[k].conRatio,
+                   100.0 * mgPercentile(g_mcNull[k][v], MOMENT_MC_ITERS, MG_CAPS[k].conRatio));
+        }
+        g_mcObs[k] = obs;
+    }
+    // 性能与规模【照实报】, 否则"2000 次"只是个没有代价的数字。
+    const double secs = (double)(clock() - t0) / (double)CLOCKS_PER_SEC;
+    printf("    蒙特卡洛: 3 采集 x 2 噪声模型 x %d 次 = %d 次生产 fitRaw, 用时 %.1f s\n",
+           MOMENT_MC_ITERS, 3 * 2 * MOMENT_MC_ITERS, secs);
+
+    // ---- 冻结的实测值 (确定性种子 -> 逐次可复现; 容差见下) ----
+    // 力矩分支的冤枉率 (分子是【走到力矩门】的次数, 分母是走到的次数)。力分支一次都没拒
+    // (唯一的例外: 15:25 的 B 里 2 次, 记在下面), 所以两条门的分母几乎相同。
+    // 容差 ±5 次 (占 2000 的 0.25 个百分点): 只容"边界上几次抽样翻转", 容不下任何真实改动
+    // —— 统计量/门限动一下, 这些计数动的是成百上千。
+    static const int REF_MOMENT_REJECT[3][2] = { { 127, 438 }, { 33, 90 }, { 20, 18 } };
+    static const int REF_FORCE_REJECT[3][2]  = { {   0,   2 }, {  0,  0 }, {  0,  0 } };
+    static const int REF_REACHED[3][2]       = { {2000,1998 }, {2000,2000 }, {2000,2000 } };
+    static const int MC_TOL = 5;
+    for (int k = 0; k < 3; k++) {
+        for (int v = 0; v < 2; v++) {
+            const McTally& t = g_mcTally[k][v];
+            if (t.iters != MOMENT_MC_ITERS) {
+                std::cout << "    FAIL: [" << MG_CAPS[k].tag << "/" << VARNAME[v] << "] 只跑了 "
+                          << t.iters << " 次" << std::endl;
+                g_failed++;
+                return;
+            }
+            // 计数自洽 (四条出路必须把每一次都分完, 且只能占一条)
+            if (t.anyReject != t.statusBad + t.forceReject + t.momentReject + t.otherReject
+             || t.statusBad + t.forceReject + t.momentReached != t.iters) {
+                std::cout << "    FAIL: [" << MG_CAPS[k].tag << "/" << VARNAME[v]
+                          << "] 计数不自洽 (拒 " << t.anyReject << " != 尺子不齐 " << t.statusBad
+                          << " + 力 " << t.forceReject << " + 力矩 " << t.momentReject
+                          << " + 其它 " << t.otherReject << ";  走到力矩门 " << t.momentReached
+                          << " + 力拒 " << t.forceReject << " + 尺子不齐 " << t.statusBad
+                          << " != " << t.iters << ")" << std::endl;
+                g_failed++;
+                return;
+            }
+            const int dM = t.momentReject - REF_MOMENT_REJECT[k][v];
+            const int dF = t.forceReject  - REF_FORCE_REJECT[k][v];
+            const int dR = t.momentReached - REF_REACHED[k][v];
+            if (dM > MC_TOL || dM < -MC_TOL || dF > MC_TOL || dF < -MC_TOL
+             || dR > MC_TOL || dR < -MC_TOL) {
+                std::cout << "    FAIL: [" << MG_CAPS[k].tag << "/" << VARNAME[v]
+                          << "] 零假设下的计数变了: 力矩拒 " << t.momentReject << " (冻结 "
+                          << REF_MOMENT_REJECT[k][v] << "), 力拒 " << t.forceReject << " (冻结 "
+                          << REF_FORCE_REJECT[k][v] << "), 走到力矩门 " << t.momentReached
+                          << " (冻结 " << REF_REACHED[k][v] << ") —— 容差 ±" << MC_TOL
+                          << " 次。统计量/门限被改过就会是这样。" << std::endl;
+                g_failed++;
+                return;
+            }
+        }
+    }
+
+    // ---- (i)/(ii) 的分界, 钉成不变量 ----
+    // 分界线 = 【零分布的最大值】: 实测值在它【之内】-> 这套装置本身就产出这么高的统计量,
+    // 门限切错了 (ii); 在它【之外】-> 自由模型找到了零假设里根本没有的结构 (i)。
+    // 两套噪声模型都各判一次, 结论必须一致 (否则说明结论挂在噪声模型上, 不能报)。
+    int verdict_i = 0, verdict_ii = 0;
+    for (int k = 0; k < 3; k++) {
+        for (int v = 0; v < 2; v++) {
+            const double mx = mgQuantile(g_mcNull[k][v], MOMENT_MC_ITERS, 1.0);
+            if (g_mcObs[k] > mx) verdict_i++;
+            else                  verdict_ii++;
+            printf("    [%s/%s] 零分布最大 %.4g  vs  实测 %.6g  ->  %s\n",
+                   MG_CAPS[k].tag, VARNAME[v], mx, g_mcObs[k],
+                   (g_mcObs[k] > mx) ? "(i) 零假设解释不了, 力矩模型真的少了结构"
+                                     : "(ii) 落在零分布之内, 门限自己切错了");
+        }
+    }
+    // 冻结: 15:25 两套都落在零分布【之内】(ii); 15:30、15:33 两套都在【之外】(i)。
+    // 这条断言是本次测量的结论本身 —— 谁改统计量/门限、或换夹具, 它必须变红。
+    if (verdict_i != 4 || verdict_ii != 2) {
+        std::cout << "    FAIL: (i)/(ii) 的分界变了: 落在零分布之外的次数 = " << verdict_i
+                  << " (冻结 4), 落在之内 = " << verdict_ii << " (冻结 2)" << std::endl;
+        g_failed++;
+        return;
+    }
+    PASS();
+}
+
 int main() {
     std::cout << "=== PayloadCalibration Tests ===" << std::endl;
     test_recovers_true_payload();
@@ -1814,6 +2422,13 @@ int main() {
     // 【放在最后】: 它会把 [Payload] 的逐姿态残差表与"接受未检验模型形式"的告警打到
     // stderr, 排在最后免得那些输出插在别的用例中间。
     test_replay_real_capture();
+
+    // ★ 力矩门限的实机标定 (2026-09-19 三次采集: 15:25 / 15:30 / 15:33):
+    //   金标 + 零假设蒙特卡洛 —— 用【生产 fitRaw】量"叉乘模型为真时被拒的概率", 以分开
+    //   (i) 力矩模型真不完备 与 (ii) 门限对"少 6 个参数"标偏。只测量, 不改任何门限。
+    std::cout << "--- moment gate calibration (real captures, production fitRaw) ---" << std::endl;
+    test_moment_gate_real_captures_golden();
+    test_moment_gate_null_false_reject_rate();
 
     std::cout << "\n" << g_passed << " passed, " << g_failed << " failed" << std::endl;
     return g_failed ? 1 : 0;
