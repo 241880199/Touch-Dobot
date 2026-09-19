@@ -1691,8 +1691,12 @@ void RelayCore::pollForce() {
     }
 
     // Run compensation (uses calibrated params if available).
-    // ⚠ 一致性闸门在这里面: 模型缺失或与 @576 对不上时, step() 会把 compensated[] 全置零
-    //   (haptic / 约束力 / F| 一起断), 并把状态留在 ForceCompensation::guardState()。
+    // ⚠ 一致性闸门在这里面: 模型缺失或与 @576 对不上时, step() 会把 compensated[] 全置零,
+    //   下游由它推的 filtered / hapticOut / F| 帧随之断开 (即【传感器力那一条路】)。
+    //   ⚠ 【虚拟约束力不断】: 它在 HapticCallback.cpp:168 由【位置】现算
+    //   (SafetyPredictor::computeConstraintForce), 与 compensated 无关 —— 别写成
+    //   "触觉 / 约束力 / F| 一起断", 那会让人以为拒绝之后连安全边界的推手都没了。
+    //   闸门状态留在 ForceCompensation::guardState()。
     ForceCompensation::step(app.forceData, pose);
     const ForceCompensation::GuardState guardSt = ForceCompensation::guardState();
 

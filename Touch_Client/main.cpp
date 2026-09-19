@@ -1846,15 +1846,26 @@ namespace BiasCheck {
 //   负载正确时残余力与姿态无关, 因此任意静止姿态读一次 "补偿后读数" 就是漂移量。
 // 零操作负担: 不摆姿态、不阻断、不写盘。
 static bool g_zeroCheckDone = false;
-static DWORD g_zeroCheckStartMs = 0;
+static DWORD g_zeroCheckStartMs = 0;          // 累计窗口的起点 —— 闸门每次拒绝都会【重开】它
+static bool  g_zeroCheckRefusalSeen = false;  // 是否已经历过第一次被拒
+static DWORD g_zeroCheckFirstRefusalMs = 0;   // 第一次被拒的时刻 —— 【只设一次】, 重开窗口不动它
 static double g_zeroCheckAccum[3] = {0, 0, 0};
 static int g_zeroCheckCount = 0;
 
 // 一致性闸门在拒绝时【本检查没法做】: fd.filtered 是从被闸门置零的 compensated 推出来的,
 // 那是一串 0, 不是零偏 —— 拿它算漂移必然得出 0, 于是这里会在闸门一直拒绝的时候
 // 【无条件打印"正常"】。那正是本项目最怕的"安静地错", 而且它是运行时闸门这一次改动
-// 【新造出来】的 (复审 Minor 5)。所以: 闸门在拒绝时把窗口重开、等它放行,
-// 最多等这么久; 到点仍不放行就明说"本次没查", 不打印任何结论。
+// 【新造出来】的 (复审 Minor 5)。所以: 闸门在拒绝时不作结论、把累计窗口清零重开、等它放行,
+// 最多等这么久; 到点仍不放行就定稿并明说"本次没查", 不打印任何结论。
+//
+// ⚠ 等待与累计【用的是两个时钟】(2026-09-19 复审 Important 1):
+//   累计窗口的起点 g_zeroCheckStartMs 在每次拒绝时都被重开, 所以它量不到"等了多久" ——
+//   当初拿它当等待的截止时刻, 这个截止就永远到不了 (每 2 s 被推后一次), 结果是闸门一直
+//   拒绝时【一行都不打印】: 既不报结论, 也不报"没查"。等待改用 g_zeroCheckFirstRefusalMs:
+//   只在第一次被拒那一刻设一次, 之后重开窗口不动它 ⇒ 从第一次被拒起算满 60 s 仍不放行
+//   就定稿并打印【未做】。
+//   (另一条路是删掉截止、无限重试直到闸门放行 —— 那样更"贴心"(修好负载参数就不必重启),
+//    但漂移检查在闸门一直拒绝时会永远安静; 这里选截止 + 明说, 因为"没查"必须有句话。)
 static const DWORD ZERO_CHECK_GUARD_WAIT_MS = 60000;
 
 // 启动加载 force_calib.json 是否成功 (成功才有"存储零偏"可比, 否则无可查)
@@ -1878,19 +1889,30 @@ static void runZeroDriftCheck(bool hasStoredZero) {
 
     // ⚠ 闸门在拒绝 -> 读数被置零, 此刻量不到零偏。【不装作查过】。
     if (ForceCompensation::guardState() != ForceCompensation::GuardState::OK) {
-        if (now - g_zeroCheckStartMs >= ZERO_CHECK_GUARD_WAIT_MS) {
+        // 等待的起点是【第一次】被拒那一刻 —— 下面每次都会重开累计窗口, 拿窗口起点当
+        // 等待起点的话这个截止永远到不了 (复审 Important 1)。
+        if (!g_zeroCheckRefusalSeen) {
+            g_zeroCheckRefusalSeen = true;
+            g_zeroCheckFirstRefusalMs = now;
+        }
+        if (now - g_zeroCheckFirstRefusalMs >= ZERO_CHECK_GUARD_WAIT_MS) {
             g_zeroCheckDone = true;
-            std::cout << "[Force] 零偏漂移检查: 【未做】—— 一致性闸门一直在拒绝"
-                      << " (原因见上面 \"[Force] !!\" 那一段, 通常是负载参数没发进机械臂)。"
-                      << std::endl;
+            std::cout << "[Force] 零偏漂移检查: 【未做】—— 一致性闸门从第一次拒绝起已 "
+                      << (now - g_zeroCheckFirstRefusalMs) / 1000 << " s 一直在拒绝"
+                      << " (原因见上面 \"[Force] !!\" 那一段, 那一段分得开'没有可用模型'与"
+                      << "'有模型但对不上')。" << std::endl;
             std::cout << "[Force]   闸门拒绝时 compensated (以及由它推出来的 filtered) 是全 0,"
                       << " 0 不是零偏 —— 拿它算出来的\"漂移\"恒为 0, 所以本检查在拒绝期间"
                       << " 给不出任何结论。" << std::endl;
+            std::cout << "[Force]   ⚠ '对不上'不止'负载参数没发进机械臂'一种来源: 零偏漂到"
+                      << "超出容差同样会让两边对不上 (有模型但不一致时, 上面那段里的逐通道表"
+                      << "写着是哪些通道超了限)。别只查下发那一处。" << std::endl;
             std::cout << "[Force]   闸门放行之后重启本程序即可 (本检查是启动时的一次性检查)。"
                       << std::endl;
             return;
         }
         // 重开窗口: 已经积进去的那一段是闸门置的 0, 留着会把后面的真读数稀释掉。
+        // (只动累计窗口, 不动上面那个等待时钟。)
         g_zeroCheckStartMs = now;
         g_zeroCheckCount = 0;
         for (int i = 0; i < 3; i++) g_zeroCheckAccum[i] = 0.0;

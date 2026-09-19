@@ -478,11 +478,12 @@ const char* guardStateName(GuardState s) {
 // "哪个状态配哪个码"存在【两个地方的巧合】里: 改一次枚举的数值, "去标定"与"去查负载
 // 参数"这两条完全不同的处置指引就被对调, 而且没有任何测试会发现。现在这里是唯一的实现。
 //
-// 【"穷举"到什么程度, 说实话】: 这个 switch 没有 default, 所以加了新的 GuardState 而
-// 忘了配错误码时, /W4 会给 C4062 (unhandled enumerator)。但本项目按 /W1 编译,
-// 那条警告【不会】出现, 而末尾那句 return 又让它照样编得过 —— 所以真正把这张表钉住的
-// 是 test_force_compensation 的 guard_error_code_mapping (三条映射逐条断言 + 与
-// errorCodeName 对上), 不是编译器。末尾那句是"宁可返回 OK 也不掉出函数尾"的兜底。
+// 【"穷举"到什么程度, 说实话】: 这个 switch 没有 default, 但加了新的 GuardState 而忘了配
+// 错误码时【编译器不会拦你】: 末尾那句 return 让缺失返回路径不存在 (没有 C4715), 而
+// C4062 (unhandled enumerator) 默认关闭 —— 2026-09-19 用探针实测: /W1 /W3 /W4 都不报,
+// 只有 /Wall 报, 本项目按 /W1 编译。所以真正把这张表钉住的是 test_force_compensation 的
+// guard_error_code_mapping (三条映射逐条断言 + 与 errorCodeName 对上), 不是编译器。
+// 末尾那句是"宁可返回 OK 也不掉出函数尾"的兜底。
 RobotErrorCode guardErrorCode(GuardState s) {
     switch (s) {
         case GuardState::OK:            return RobotErrorCode::OK;
@@ -607,7 +608,9 @@ void step(AppState::ForceData& fd, const double poseRxyz[6]) {
         if (fabs(g_guardEma[i]) > g_guardTol[i]) { inconsistent = true; break; }
     }
     if (inconsistent) {
-        // 拒绝: fd.compensated 保持第 2 步写下的全零, haptic / 约束力 / F| 随之断开。
+        // 拒绝: fd.compensated 保持第 2 步写下的全零 -> 下游由它推的 filtered / hapticOut /
+        // F| 帧断开 (即【传感器力那一条路】)。⚠ 虚拟约束力【不断】—— 它在 HapticCallback.cpp:168
+        // 由位置现算, 与 compensated 无关 (同 ForceCompensation.h 顶部与 RelayCore.cpp 那段)。
         setGuardState(GuardState::INCONSISTENT);
         return;
     }

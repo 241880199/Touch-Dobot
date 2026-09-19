@@ -98,9 +98,14 @@ namespace ForceCompensation {
     const char* guardStateName(GuardState s);
 
     // ===== GuardState -> RobotErrorCode (闸门唯一一处"状态转错误码") =====
-    // 用 switch 穷举 (没有 default), 所以【加一个新的 GuardState 而忘了配错误码】
-    // 会在编译期炸掉 (C4715: 不是所有路径都有返回值), 而不是在运行期悄悄把两个错误码
-    // 换个个儿 —— RelayCore 从前拿 static_cast<int>(guardState()) 去比字面量 1 和 2,
+    // 用 switch 穷举 (没有 default), 但【别指望编译器替你发现漏配】: 末尾那句
+    // return RobotErrorCode::OK 让"漏了一个 GuardState"照样编得过 —— 没有缺失返回路径,
+    // 就没有 C4715; 而 C4062 (unhandled enumerator) 【默认关闭】: 2026-09-19 用一个
+    // "漏一个 case + 末尾兜底 return" 的探针实测过, /W1 /W3 /W4 都不报, 只有 /Wall 报。
+    // 本项目按 /W1 编译。真正把这张表钉住的是 test_force_compensation 的
+    // guard_error_code_mapping (三条映射逐条断言 + 与 errorCodeName 对上), 不是编译器。
+    // 同一段说明也写在 ForceCompensation.cpp 的实现处。
+    // 为什么非要有这张表 —— RelayCore 从前拿 static_cast<int>(guardState()) 去比字面量 1 和 2,
     // 于是"给 GuardState 换顺序"这种无害重构会把"去标定"与"去查负载参数"两条完全不同的
     // 处置指引对调, 而用户指令 1 的全部意义就在于告诉操作员【该做哪件事】。
     // OK -> RobotErrorCode::OK (调用方据此跳过上报)。
