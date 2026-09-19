@@ -121,6 +121,26 @@ if %ERRORLEVEL% EQU 0 (
 )
 echo.
 
+echo --- Building test_session_report ---
+call "%TESTDIR%\build_session_report_test.bat"
+if %ERRORLEVEL% EQU 0 (
+    echo   Build OK
+    echo.
+    echo === test_session_report.exe ===
+    "%TESTDIR%\test_session_report.exe"
+    if %ERRORLEVEL% EQU 0 (
+        set /a PASSED+=1
+        echo   [OK]
+    ) else (
+        set /a FAILED+=1
+        echo   [FAIL]
+    )
+) else (
+    echo   [FAIL: build error]
+    set /a FAILED+=1
+)
+echo.
+
 echo ================================================
 echo   Tests complete
 echo ================================================
