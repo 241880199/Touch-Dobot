@@ -1285,9 +1285,9 @@ namespace PayloadCalibration {
                                 "在这批姿态上秩亏/数值奇异) —— 叉乘结构这一半【没有被检验】。\n"
                                 "         力通道的模型形式检验是各自独立的, 上面的结论不受影响。\n");
             }
-            // 走到这里才是【验过且通过】—— modelFormChecked 与 momentFormChecked 唯一被置
-            // true 的地方。后者从前在求解层就置了 true, 于是"力通道被判错、整体拒绝"时它
-            // 照样亮着, 读起来像"至少力矩那半边是好的" —— 现在两个标志同进同退。
+            // 走到这里才是【验过且通过】—— 两个标志唯一被赋值的地方。后者从前在求解层就置了
+            // true, 于是"力通道被判错、整体拒绝"时它照样亮着, 读起来像"至少力矩那半边是好的"
+            // —— 但【两者不同进同退】: 前者无条件 true, 后者按 dof > 0, 在 dof == 0 处分岔。
             out.modelFormChecked = true;
             out.momentFormChecked = (out.lackOfFitMomentDof > 0);
         }

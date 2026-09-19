@@ -83,6 +83,33 @@ static std::string readWholeFile(const std::string& path) {
     return out;
 }
 
+// 【工作目录钉在 exe 自己那个目录】—— 这个测试按【相对路径】读 ../main.cpp 与 fixtures/。
+// 从别处跑这个 exe 时, 那些 CHECK(!src.empty()) 会红, 而"红"看起来【像闸门判了本地替库下结论】
+// (其实一个字节都没读到)。一次环境错误冒充一次判决, 是最费时间的误报 —— 所以钉住它。
+// 两个 .bat 本来就 cd 到 tests/ 再跑, exe 也建在 tests/, 行为一个字节不变。
+static void pinCwdToTheExeDirectory() {
+    const char* exe = _pgmptr;          // MSVC CRT: 本进程可执行文件的完整路径
+    if (exe == nullptr || *exe == '\0') return;
+    std::string dir(exe);
+    const size_t cut = dir.find_last_of("\\/");
+    if (cut == std::string::npos) return;
+    dir.erase(cut);
+    _chdir(dir.c_str());                // 失败就算了: 真读不到源文件时下面会把目录印出来
+}
+
+// 读 main.cpp 的源文本 (这条闸门读的是【文本】, 不是行为 —— 见它自己那一段"局限")。
+// 读不到时【把环境问题喊出来】: 否则 CHECK(!src.empty()) 那一行会被人当成"闸门又误报了"。
+static std::string readMainCpp() {
+    const std::string src = readWholeFile("../main.cpp");
+    if (src.empty()) {
+        char cwd[1024] = {0};
+        if (_getcwd(cwd, sizeof(cwd)) == nullptr) cwd[0] = '\0';
+        std::printf("\n    ⚠ 环境问题, 【不是】闸门判决: 读不到 ../main.cpp (工作目录 = %s)\n"
+                    "      (这个 exe 要跟 tests/ 目录一起用; 见 pinCwdToTheExeDirectory)\n", cwd);
+    }
+    return src;
+}
+
 static const char* TS = "2026-09-19 15:33:38";
 
 // 一段"像真的"的诊断正文: 多行、含中文、含 % 与数字、以换行结尾
@@ -366,7 +393,7 @@ static void test_append_on_unreadable_file_reports_failure_without_truncating() 
 // 这个测试因此是【回归闸门】: 谁在求解路径里直接打印, 它就会红。
 static void test_solve_path_prints_only_through_the_sink() {
     TEST(solve_path_prints_only_through_the_sink);
-    const std::string src = readWholeFile("../main.cpp");
+    const std::string src = readMainCpp();
     CHECK(!src.empty());
 
     // 取 solveAndApply 的函数体: 从它的定义行到停用块之前 —— 用【那一行的原文】当标记 (不数括号,
@@ -445,52 +472,113 @@ static std::string printedTextStream(const std::string& code) {
     return out;
 }
 
-// 去掉一个字面量里的箭头 (ASCII 的 -> 与 =>, 以及 U+2192 的 →): 它是指路, 不是比较算子。
-// 【为什么必须把箭头剥掉, 而不是拿它当算子】: `->` 里的那个 '>' 会【假冒】比较算子 ——
-// `门限 %.4g -> 通过` 若原样交给下面的邻接判据, 命中的是那个无关的 '>' 而不是结论本身。
-// 也正因为剥了, 箭头【两侧】的东西会被拉近: 这正是"门限 X -> 通过"这类写法上一版能全绿的
-// 原因 (剥掉 '->' 后又没有"通过"这个令牌, 于是无词可用)。所以这里剥箭头与下面加【结论词】
-// 是一对, 缺一个就漏。
-// 【局限】只认这三种: 别的箭头字形 (⇒ U+21D2 / ➔ / ⟶ …) 与英文措辞一样在盲区里, 见下面
+// 【箭头怎么处理: 让它【不再是算子】, 但【仍然看得见】—— 两件事缺一件, 就会出上一版那种事】
+//
+// 一、它不能留作算子。`->` 里的那个 '>' 会【假冒】比较算子: 本屏正面要求的那句话
+//     `门限 %.4g -> 见 [Payload] 行` 若原样交给邻接判据, 命中的是那个无关的 '>'。
+//     `=>` 同理 (它自带 '=')。从前这里是【删掉】箭头 (withoutArrows), 删掉之后那句话就绿了
+//     —— 那一步是对的。
+//
+// 二、它不能【消失】。删掉之后, 流上这两句话长得一模一样:
+//        门限 %.4g -> 通过          ← 箭头指着判决: 【本地替库下了结论】, 必须红
+//        门限 %.4g 通过与否以...      ← "通过"只是普通词: 递话给人, 【必须绿】
+//     而它们的意思相反。上一版为了抓住前者, 把"通过/拒绝"当成【无条件】结论词收进令牌表 ——
+//     于是后者那一整类写法全部误报 (2026-09-19 复审实测五种, 见下面"假阳性"那一段)。
+//     箭头一消失, "箭头指着谁"这件事就无从判断了, 歧义只剩下"这两个字出现过没有"。
+//
+// 所以: 整根箭头换成一个【中性标记字节】(0x01) —— 一个字节, 不是零个、也不是原长。
+//   · 0x01 不是比较算子 -> 一、成立 (`-> 见 [Payload] 行` 那种句子不再被 '>' 假命中);
+//   · 一个字节表示"这里有个箭头", 箭头【在哪儿、指着谁】仍然看得见 -> "箭头的目标是判决词"
+//     可以被单独判 (见 kPointed 与 arrowAsserting), 二、成立;
+//   · 【为什么是一字节而不是零字节】: 零字节 (= 上一版的删掉) 就是二、失效的那个版本;
+//   · 【为什么是一字节而不是原长】: 原长会把箭头【两侧】的东西按箭头宽度推开 (→ 宽 3 字节),
+//     于是 `门限 %.4g → 通过` 里的"通过"正好被推到窗口边上 [实测: 窗口右界是 p+16, 它落在
+//     p+16, 差一个字节就漏] —— 而"箭头两侧的措辞挨得很近"恰恰是这一类写法【现实的样子】。
+//     压到一个字节 = 与上一版的相对距离几乎一样 (只少压缩 1~2 字节), 但算子那件事不再假命中。
+// 【局限】只认这三种字形: 别的箭头 (⇒ U+21D2 / ➔ / ⟶ …) 与英文措辞一样在盲区里, 见下面
 // 那一段"这条闸门到底管到哪"。
-static std::string withoutArrows(const std::string& s) {
+static const char kArrowMark = '\x01';
+static std::string neutralizeArrows(const std::string& s) {
     std::string out;
     out.reserve(s.size());
     for (size_t i = 0; i < s.size(); i++) {
-        if (s[i] == '-' && i + 1 < s.size() && s[i + 1] == '>') { i++; continue; }
-        if (s[i] == '=' && i + 1 < s.size() && s[i + 1] == '>') { i++; continue; }
+        if (s[i] == '-' && i + 1 < s.size() && s[i + 1] == '>') {
+            out += kArrowMark; i++; continue;                    // ->
+        }
+        if (s[i] == '=' && i + 1 < s.size() && s[i + 1] == '>') {
+            out += kArrowMark; i++; continue;                    // =>
+        }
         // → = UTF-8 E2 86 92 (三个字节一起吃掉, 否则留下半截字节会变成乱码碎片)
         if ((unsigned char)s[i] == 0xE2 && i + 2 < s.size()
             && (unsigned char)s[i + 1] == 0x86 && (unsigned char)s[i + 2] == 0x92) {
-            i += 2; continue;
+            out += kArrowMark; i += 2; continue;                 // →
         }
         out += s[i];
     }
     return out;
 }
 
-// 【类级判据: 本地不许替库下"统计量与门限"的结论】。
-// 命中就返回那一段文字 (给失败信息看), 没命中返回空串。
-//   · 门限词: 门限 / 门槛 / 越线 / 超线 / 过线 —— 后三个【自带】那个"线", 只能由"与门限比过"
-//     得出, 所以它们一旦出现就命中 (不必旁边还有"门限"二字); "门槛"是"门限"的同义词
-//     (2026-09-19 复审补: 同义替换曾是盲区)。
-//   · 结论词: 单独一个不算, 必须与门限词【挨着】。两类:
-//       (a) 比较算子 < > ≤ ≥ 超过 大于 小于 低于 高于 / 越线 超线 过线;
-//       (b) 说结论的措辞 以内 通过 拒绝 √ 未超 未越 —— 2026-09-19 复审补的一组。
-//     补 (b) 的理由: 上一版只收算子, 于是"在门限 X 以内" / "门限 X -> 通过" / "门限 X √" /
-//     "未超门限 X" 四种【都带结论】的写法全让闸门保持全绿 (实测)。箭头那一类尤其阴: 箭头被
-//     withoutArrows 剥掉之后, 连它自带的 '>' 都不在了, 只剩"门限 X 通过"这种无处落脚的形状。
-//     "拒绝" 是"通过"的同位词 (判决那一支两边都禁), "未越"是"未超"的同源写法。
-//   · 判据: 一个门限词与一个结论词相距不到 W 字节 = 本地替库下了结论。
+// 位置 q 之前【紧挨着的是一个箭头】吗 —— 是的话返回【那个箭头的位置】, 否则 npos。
+// 【为什么返回箭头的位置而不是 true】: 判决是被【箭头】断言出来的, 不是被它后面那串装饰
+// (空格、`【`) 断言出来的。窗口判据因此锚在箭头上: `门限 %.4g → 【拒绝】` 里的"拒绝"比
+// 窗口右界多出 1 个字节 (那个 `【` 占 3 字节), 但箭头本身就在窗口里 —— 拿词的位置去量会漏掉
+// 这个写法, 拿箭头的位置去量才跟上"箭头两侧措辞挨得很近"这件事。
+// 【为什么要把 【 也算装饰】: 本屏印判决用的就是这个带括号的字形 (main.cpp 里
+// `fitOk ? "通过" : "【拒绝】"`), 箭头指着它的时候中间夹着那个半边括号 ——
+// `-> 【拒绝】` 与 `-> 拒绝` 是同一件事的两种写法, 都得认。
+// 【为什么只跳空格/括号, 不跳标点】: 跳多了就会把 `门限 %.4g, 通过与否...` 里那个逗号也跨过去,
+// 于是递话句又被误报 —— 上一版栽的就是这个跟头。
+static size_t arrowAsserting(const std::string& s, size_t q) {
+    size_t i = q;
+    while (i > 0) {
+        if (s[i - 1] == ' ') { i--; continue; }
+        if (s[i - 1] == '[') { i--; continue; }
+        if (i >= 3 && (unsigned char)s[i - 3] == 0xE3 && (unsigned char)s[i - 2] == 0x80
+            && (unsigned char)s[i - 1] == 0x90) { i -= 3; continue; }     // 【 = E3 80 90
+        break;
+    }
+    return (i > 0 && s[i - 1] == kArrowMark) ? (i - 1) : std::string::npos;
+}
+
+// 【类级判据: 本地不许替库下"统计量与门限"的结论】。命中返回那一段文字 (给失败信息看), 否则空串。
+//
+// 令牌分【两类】, 判法不同 —— 这是 2026-09-19 第二次复审的核心改动 (第一次复审只往表里加词,
+// 加出了一个比原缺陷更坏的东西, 见下面"假阳性")。
+//
+// (甲) kConcl —— 【结论词/算子】: 一旦出现就是结论, 只要与门限词挨着就命中, 不看上下文。
+//       比较算子: < > ≤ ≥ 超过 大于 小于 低于 高于 / 越线 超线 过线;
+//       说结论的措辞: 以内 √ 未超 未越 未通过。
+//      · 补这一组 (第一轮复审) 的理由: 只收算子时, "在门限 X 以内" / "门限 X √" / "未超门限 X"
+//        三种【都带结论】的写法让闸门保持全绿 (实测)。
+//      · "未超/未越/未通过"是【带否定前缀的判决】: 否定的方向相反, 但它仍然是一个判决
+//        ("没超过"= 过), 不是本屏的普通措辞。所以它们【不收】进"前面有递话标记就不算"那一类 ——
+//        那正是"方向 1"的陷阱: `不超过门限 X` 若因为前面有个"不"就放行, 一句【假通过】
+//        就大摇大摆地过去了 (这一条是复审三个方向里【没有】采用方向 1 的具体理由)。
+//      · 注意"越线/超线/过线"【自带】那个"线", 只能由"与门限比过"得出, 所以它们同时也是门限词。
+// (乙) kPointed —— 【判决词】通过 / 拒绝: 【只有箭头指着它时】才算结论。
+//      · 为什么不能无条件算: 这两个词在本屏是【普通词】, 递话句式里天天用 —— "通过与否以
+//        [Payload] 行为准" / "不判通过与否" / "是否通过, 见 [Payload] 行" / "【通过/拒绝】都不在
+//        本行判"。无条件收进去 = 这一整类【明确拒绝下结论、把手指向库】的句子全部误报
+//        (复审实测五种, 见下面"假阳性")。而这一屏有 11 处 通过/拒绝、9 处 门限, 它们本来就挨得近。
+//      · 为什么"箭头指着"就够了: 本屏写"结果是什么"用的就是这个形状 (`-> 通过`), 而指向本身还是
+//        `-> 见 [Payload] 行` 那种【递话】形状 —— 两者的区别恰好是"箭头指着的是不是判决词"。
+//        neutralizeArrows 把箭头换成中性标记而不是删掉, 就是为了让这个区别在流上仍然看得见。
+//      · 残留的洞 (明写的, 不是没想到): 光秃秃的 `门限 %.4g 通过` (没有箭头) 现在【绿】。
+//        见下面"管到哪"那一段, 并且有一个用例故意把它断言成绿。
+//
+// · 门限词 kLimit: 门限 / 门槛 / 越线 / 超线 / 过线 —— "门槛"是"门限"的同义词 (第一轮复审补:
+//   同义替换曾是盲区)。
+// · 判据: 一个门限词与一个结论令牌相距不到 W 字节 = 本地替库下了结论。
 // 为什么按字节距离而不是"同一个字面量": 一行打印常被拆成两个字面量, 只看单个字面量会漏掉
 // 这样写的 `"...= %.4g  <" "  门限 %.4g..."` —— 而这类回归正是闸门要拦的。W 取小: 措辞的
 // 邻接是【很近】的 ("超过门限"/"= %.4g 门限"), 拉大只会把无关的两句话配成对。W=10 也因此
-// 是这条闸门的量纲: 中间插进别的话就漏 (见下面"这条闸门到底管到哪")。
+// 是这条闸门的量纲 (余量有多大, 见下面"假阳性"那一段)。
 static std::string localVerdictExcerpt(const std::string& stream) {
     static const char* kLimit[]   = {"门限", "门槛", "越线", "超线", "过线"};
     static const char* kConcl[]   = {"<", ">", "≤", "≥", "超过", "大于", "小于", "低于", "高于",
                                      "越线", "超线", "过线",
-                                     "以内", "通过", "拒绝", "√", "未超", "未越"};
+                                     "以内", "√", "未超", "未越", "未通过"};
+    static const char* kPointed[] = {"通过", "拒绝"};
     const size_t W = 10;
     for (size_t li = 0; li < sizeof(kLimit) / sizeof(kLimit[0]); li++) {
         const size_t llen = strlen(kLimit[li]);
@@ -498,19 +586,40 @@ static std::string localVerdictExcerpt(const std::string& stream) {
              p = stream.find(kLimit[li], p + 1)) {
             const size_t lo = (p > W) ? p - W : 0;      // 窗口: 门限词前后各 W 字节
             const size_t hi = p + llen + W;
-            for (size_t ci = 0; ci < sizeof(kConcl) / sizeof(kConcl[0]); ci++) {
+            bool hit = false;
+            for (size_t ci = 0; ci < sizeof(kConcl) / sizeof(kConcl[0]) && !hit; ci++) {
                 const size_t clen = strlen(kConcl[ci]);
                 for (size_t q = stream.find(kConcl[ci]); q != std::string::npos;
                      q = stream.find(kConcl[ci], q + 1)) {
-                    if (q < hi && q + clen > lo) {      // 与窗口相交 -> 命中
-                        size_t a = (lo > 30) ? lo - 30 : 0;
-                        size_t b = (hi + 30 < stream.size()) ? hi + 30 : stream.size();
-                        // 别切在多字节字的中间: 失败信息是给人看的, 半截字节只会印成乱码
-                        while (a < b && (stream[a] & 0xC0) == 0x80) a++;
-                        while (b > a && (stream[b] & 0xC0) == 0x80) b--;
-                        return stream.substr(a, b - a);
+                    if (q < hi && q + clen > lo) { hit = true; break; }   // 与窗口相交
+                }
+            }
+            // (乙) 判决词: 同样的邻接判据【再加一条】—— 箭头得指着它 (窗口锚在那个箭头上,
+            //      理由见 arrowAsserting)
+            for (size_t ci = 0; ci < sizeof(kPointed) / sizeof(kPointed[0]) && !hit; ci++) {
+                for (size_t q = stream.find(kPointed[ci]); q != std::string::npos;
+                     q = stream.find(kPointed[ci], q + 1)) {
+                    const size_t arrow = arrowAsserting(stream, q);
+                    if (arrow != std::string::npos && arrow < hi && arrow + 1 > lo) {
+                        hit = true; break;
                     }
                 }
+            }
+            if (hit) {
+                size_t a = (lo > 30) ? lo - 30 : 0;
+                size_t b = (hi + 30 < stream.size()) ? hi + 30 : stream.size();
+                // 别切在多字节字的中间: 失败信息是给人看的, 半截字节只会印成乱码
+                while (a < b && (stream[a] & 0xC0) == 0x80) a++;
+                while (b > a && (stream[b] & 0xC0) == 0x80) b--;
+                // 把中性标记还原成 "->" 再交出去: 判据用的是标记本身 (它才是"这里有个箭头"),
+                // 但失败信息是给人看的 —— 一个 0x01 字节在终端上印出来是看不见的 (或者更糟:
+                // 一个笑脸), 而"箭头"恰恰是这句命中里最要紧的那半个信息。
+                std::string ex;
+                for (size_t i = a; i < b; i++) {
+                    if (stream[i] == kArrowMark) ex += "->";
+                    else ex += stream[i];
+                }
+                return ex;
             }
         }
     }
@@ -542,27 +651,56 @@ static std::string localVerdictExcerpt(const std::string& stream) {
 // lackOfFitMomentDof = 0, 于是屏幕上印出 "0  <  0": 一个【假通过】, 还 append 进了
 // calib_report.md。假失败把人支去查没坏的通道; 【假通过让人什么都不查】。
 // 所以现在扫的是【打给人看的那条文字流】(见上面的 printedTextStream): 一个【门限/门槛词】与一个
-// 【结论词】(比较算子, 或"以内/通过/拒绝/√/未超/未越"这类直接说结论的措辞) 挨在一起就红。
+// 【结论词】(比较算子, 或"以内/√/未超/未越"这类直接说结论的措辞) 挨在一起就红; 判决词
+// "通过/拒绝"另有一层条件 (箭头得指着它), 见下面第二次复审那一段。
 // 拆成几个字面量骗不过它 (文字流是首尾相接的, 见上面为什么按字节距离判)。
 //
-// ===== 【这条闸门到底管到哪】—— 2026-09-19 复审: 这里原来写着"通过/拒绝两支、拆成几个字面量、
-//   换成哪个同义词, 都跑不掉"。那句话【是假的】, 已删。复审实测【全绿漏过】的五种写法:
+// ===== 【这条闸门到底管到哪】—— 2026-09-19, 两轮复审 =====
+// 【第一轮】: 这里原来写着"通过/拒绝两支、拆成几个字面量、换成哪个同义词, 都跑不掉"。那句话
+//   【是假的】, 已删。实测【全绿漏过】的五种写法:
 //     `… 在门限 %.4g 以内` / `… 门限 %.4g -> 通过` / `… 门限 %.4g √` / `未超门限 %.4g` / `门槛`
-//   —— 其中 `… 门限 %.4g -> 通过` 就是一次【假通过】被写进 calib_report.md 这份永久记录, 而
-//   闸门照旧全绿。前四种现已收进令牌表 (箭头两种字形 -> 与 → 都收), "门槛"收进门限词。
-//   现在它能抓什么、抓不到什么, 一次说清 (别再让注释比代码能打):
-//     · 抓得住: 门限词 ±10 字节内出现令牌表里任何一个【结论词/算子】—— 无论哪一支、无论拆成
-//       几个字面量、无论中间夹着 -> 还是 →。这是【中文措辞的令牌匹配 + 邻接】。
+//   —— 其中 `… 门限 %.4g -> 通过` 就是一次【假通过】被写进 calib_report.md 这份永久记录。
+//   那一次把"以内/通过/拒绝/√/未超/未越"一股脑收进了令牌表。
+// 【第二轮】: 那一次收得太宽 —— 【误报】那一半当时一个字都没写, 于是没人看见代价:
+//   "通过/拒绝"被当成【无条件】结论词, 而这两个字在本屏是普通词。实测【全红误报】的五种
+//   【明确递话给人、拒绝下结论】的写法 (恰恰是这一屏最自然的写法):
+//     `门限 %.4g, 通过与否以 [Payload] 行为准`   (分隔符是一个逗号)
+//     `门限 %.4g (通过与否以 [Payload] 行为准)`  (分隔符是一个括号)
+//     `【门限】与【通过/拒绝】都不在本行判`
+//     `门限与是否通过, 见 [Payload] 行`
+//     `本行只印门限, 不判通过与否`
+//   对照: `门限 %.4g —— 通过与否见 [Payload] 行` 当时【绿】—— 结论在"逗号(1 字节) / ——(3 字节) /
+//   箭头"之间翻转。这就是"无条件令牌 + 10 字节邻接"必然有的样子。
+//   【为什么它比原缺陷更坏】: 下一个人只要把力/力矩那一行 (或它上面那句声明) 改成"提一句门限 +
+//   提一句过没过"的同一个短句 —— 屏幕上最自然的一句话 —— 闸门就红, 而它指着的那句话恰恰写着
+//   "以 [Payload] 行为准"。他要不是白跑一趟, 就是【去砍令牌表】, 把六个漏网重新打开。
+//   现在: 判决词只在【箭头指着它】时算结论 (见 kPointed / arrowAsserting)。箭头是"这次判决的
+//   结果是…", 无箭头的"通过/拒绝"是措辞 —— 这两半在流上本来就分得开, 是上一版把它们混成了一个。
+//   ⇒ 现在它能抓什么、抓不到什么, 一次说清 (别再让注释比代码能打):
+//     · 抓得住: 门限词 ±10 字节内出现 (甲) 任何一个算子/结论词, 或 (乙) 被箭头指着的判决词
+//       —— 无论哪一支、无论拆成几个字面量、无论中间夹着 -> 还是 →。这是【中文措辞的令牌匹配
+//       + 邻接 + 指向】。
 //     · 抓不住 (明确的盲区): 令牌表外的措辞 —— 任何【英文写法】("below the limit" / "pass"),
 //       以及换了说法又不带门限词的中文 ("合格" / "没超标" / "在允许范围内" / "不存在显著差异");
 //       把比较藏在代码里 (先算 bool, 再印 "结论" 二字) —— 本闸门读的是【字面量】, 不是控制流;
 //       窗口外的措辞 (门限 X, 详见附表, 以内 —— 中间插进别的话就把邻接撑破);
-//       别的箭头字形 (⇒ U+21D2 / ⟶ …) 与别的同义词。
+//       别的箭头字形 (⇒ U+21D2 / ⟶ …) 与别的同义词;
+//       【没有箭头的 `门限 X 通过`】(第二轮留下的、明写的洞 —— 有一个用例故意断言它是绿的)。
+//     · 余量 (两轮都栽在"没量过"上, 所以量出来写在这儿, 数字取自 2026-09-19 的实测):
+//       窗口 W = 10 字节。现网 solveAndApply 里最紧的一对【合法】搭配是 43 字节 ——
+//       main.cpp:1346 那句 `↑ 【不参与任何接受/拒绝判据】: 它来自拟合残差, 拿它当门限就是自指`
+//       里, "拒绝"距最近的门限词 43 字节: 余量只有 33 字节, 下一次改动把它拉近 34 字节就误报。
+//       判决词改成"要箭头指着"之后, 这一类不再有窗口问题; 但 (甲) 的算子【同样】有这个暴露面:
+//       现网里算子与门限词最近的一对是 100 字节 (`≥5 对` 与 `3n−12 要 > 0` 那两处, 余量 90 字节;
+//       本屏合法地印 `≥5 对` 两遍)。量它们不是学术: 上一版的误报正是"只差 3 个字节"。
+//       改这一屏时若把某个 `>` / `≥` 挪到离"门限"二字 10 字节以内, 那【不是】误报 —— 只要
+//       它比的是门限, 这条闸门本来就该红; 但它若在说别的事 (自由度、配对数), 就得回来把 W
+//       或令牌表重新想一遍, 【而不是】把令牌砍掉。
 //   ⇒ 它是一道【中文措辞的绊线】, 不是"本地再也不会替库下结论"的证明。改这一屏时人还是要读一遍。
 //      (上面 (2)(2b)(3) 那几条正面断言是同一条防线, 各自钉住"该说的话还在不在"。)
 static void test_reject_line_does_not_restate_the_library_verdict() {
     TEST(reject_line_does_not_restate_the_library_verdict);
-    const std::string src = readWholeFile("../main.cpp");
+    const std::string src = readMainCpp();
     CHECK(!src.empty());
 
     const size_t fn = src.find("static void solveAndApply() {");
@@ -578,7 +716,7 @@ static void test_reject_line_does_not_restate_the_library_verdict() {
     // (1) 【核心, 类级】打给人看的那条文字流里, 不许有【本地替库下的比较结论】。
     //     (上一版这里是 `code.find("超过门限") == npos` —— 词组级, 看得见那四个字, 看不见
     //      `> 门限` / `大于门限` / `越线`, 也看不见判决通过那一支的 `0 < 0`。)
-    const std::string stream = withoutArrows(printedTextStream(code));
+    const std::string stream = neutralizeArrows(printedTextStream(code));
     CHECK(stream.size() > 3000);                    // 真的取到了那一屏的字 (取不到先红)
     CHECK(stream.find("门限") != std::string::npos);  // 反面: 门限词确实在流里 (否命题谁都能满足)
     const std::string hit = localVerdictExcerpt(stream);
@@ -618,6 +756,106 @@ static void test_reject_line_does_not_restate_the_library_verdict() {
     //     库打 0.0208 N 而本地打 0.1349 N (sqrt(Σσ/3), 差 6.5 倍), 两个数顶着一个名字。
     CHECK(code.find("fit.repeatSigmaF[0] * fit.repeatSigmaF[0]") != std::string::npos);
     CHECK(code.find("fit.repeatSigmaM[0] * fit.repeatSigmaM[0]") != std::string::npos);
+    PASS();
+}
+
+// ===== 【这条闸门自己的验收: 两个方向缺一不可】=====
+//
+// 2026-09-19 第二次复审: 上一版只往令牌表里加词, 把"通过/拒绝"当成【无条件】结论词, 于是闸门
+// 开始对【明确拒绝下结论、把手指向库】的句子误报 —— 而那正是这一屏最自然的写法。那一次的
+// 教训是【一个只在"漏"的方向上自述、对"误报"方向一字不写的闸门, 会逼着下一个人去砍令牌表】
+// (砍了就重新漏掉六个写法)。所以这一节把两个方向都钉住, 并且用【main.cpp 那种源文本形状】
+// 喂进去 (走的就是真闸门那三步: stripLineComments -> printedTextStream -> neutralizeArrows),
+// 而不是拿现成的字符串直接调判据 —— 拆字面量、注释、转义这几件事都得跟着一起过。
+//
+// 【红】(wantHit = true): 本地替库下了结论的写法 —— 第一轮复审抓到的六个漏网一个都不许再漏,
+//   外加判决【拒绝】那一支、以及历史上那两个真出过事的形状 (`> 门限` 与 `0 < 0` 那个假通过)。
+// 【绿】(wantHit = false): 明确递话给人的写法 —— 五种误报一个都不许再红, 外加本屏在用的几句。
+//   最后两条是【明写的盲区】, 故意断言成绿 (英文措辞 / 没有箭头的 `门限 X 通过`) —— 故意的:
+//   将来谁想收紧, 会先在这里红一次, 于是非得回来把"管到哪"那一段重读一遍不可。
+struct GateCase { const char* what; const char* snippet; bool wantHit; };
+
+// 走真闸门那三步 (与 test_reject_line_... 里读 main.cpp 时一模一样)
+static std::string gateHit(const char* snippet) {
+    return localVerdictExcerpt(neutralizeArrows(printedTextStream(stripLineComments(snippet))));
+}
+
+static void test_gate_both_directions_are_pinned() {
+    TEST(gate_both_directions_are_pinned);
+    static const GateCase kCase[] = {
+        // ---------- 红: 第一轮复审抓到、必须一直抓得住的六个 ----------
+        {"漏网1 箭头(ASCII)指判决",
+         R"SRC(        diagEmitf("      力通道:   残差÷尺子 χ²/dof = %.4g  门限 %.4g -> 通过   (dof=%d)\n", ...);)SRC", true},
+        {"漏网2 箭头(→)指判决",
+         R"SRC(        diagEmitf("      力通道:   残差÷尺子 χ²/dof = %.4g  门限 %.4g → 通过   (dof=%d)\n", ...);)SRC", true},
+        {"漏网3 在门限 X 以内",
+         R"SRC(        diagEmitf("      力通道:   χ²/dof = %.4g 在门限 %.4g 以内\n", ...);)SRC", true},
+        {"漏网4 门限 X √",
+         R"SRC(        diagEmitf("      力通道:   门限 %.4g √\n", ...);)SRC", true},
+        {"漏网5 未超门限 X",
+         R"SRC(        diagEmitf("      力矩通道: 未超门限 %.4g —— 这一半没事\n", ...);)SRC", true},
+        {"漏网6 门槛 X 超过 (同义词替换)",
+         R"SRC(        diagEmitf("      力矩通道: 失拟 %.4g  门槛 %.4g 超过\n", ...);)SRC", true},
+        // ---------- 红: 判决【拒绝】那一支 (两种箭头字形 + 本屏的带括号字形) ----------
+        {"拒绝支 门限 X -> 拒绝",
+         R"SRC(        diagEmitf("      力矩通道: 失拟 = %.4g  门限 %.4g -> 拒绝\n", ...);)SRC", true},
+        {"拒绝支 门限 X → 【拒绝】(本屏的括号字形)",
+         R"SRC(        diagEmitf("      力矩通道: 失拟 = %.4g  门限 %.4g → 【拒绝】\n", ...);)SRC", true},
+        // ---------- 红: 上一版 (词组级) 就抓得住的那两个形状, 不许回退 ----------
+        {"老1 比较算子 > (词组级那一版抓的就是它)",
+         R"SRC(        diagEmitf("      力通道:   χ²/dof = %.4g  >  门限 %.4g\n", ...);)SRC", true},
+        {"老2 超过门限 (词组级的原文)",
+         R"SRC(        diagEmitf("      力通道:   残差÷尺子 %.4g 超过门限 %.4g\n", ...);)SRC", true},
+        {"老3 判决通过那一支的假通过 0 < 0 (力矩没验也照印)",
+         R"SRC(        diagEmitf("      力矩通道: 失拟统计量 = %.4g  <  门限 %.4g\n", ...);)SRC", true},
+        {"(甲) 没有箭头的否定式判决: 门限 X 未通过",
+         R"SRC(        diagEmitf("      力通道:   门限 %.4g 未通过\n", ...);)SRC", true},
+
+        // ---------- 绿: 第二次复审实测误报的那五种 (一个都不许再红) ----------
+        {"误报1 门限 X, 通过与否以 [Payload] 行为准",
+         R"SRC(        diagEmitf("      力通道:   χ²/dof = %.4g  门限 %.4g, 通过与否以 [Payload] 行为准\n", ...);)SRC", false},
+        {"误报2 门限 X (通过与否以 [Payload] 行为准)",
+         R"SRC(        diagEmitf("      力通道:   χ²/dof = %.4g  门限 %.4g (通过与否以 [Payload] 行为准)\n", ...);)SRC", false},
+        {"误报3 【门限】与【通过/拒绝】都不在本行判",
+         R"SRC(        diagOut() << "      ↑ 【门限】与【通过/拒绝】都不在本行判 —— 判据只在库里有那一份" << std::endl;)SRC", false},
+        {"误报4 门限与是否通过, 见 [Payload] 行",
+         R"SRC(        diagOut() << "      ↑ 门限与是否通过, 见 [Payload] 行" << std::endl;)SRC", false},
+        {"误报5 本行只印门限, 不判通过与否",
+         R"SRC(        diagOut() << "      ↑ 本行只印门限, 不判通过与否" << std::endl;)SRC", false},
+
+        // ---------- 绿: 本屏在用的几句 (改闸门不许把它们弄红) ----------
+        {"本屏1 门限 X —— 通过与否见 [Payload] 行 (上一版靠字节数侥幸绿, 现在靠指不指向绿)",
+         R"SRC(        diagEmitf("      力通道:   χ²/dof = %.4g  门限 %.4g —— 通过与否见 [Payload] 行\n", ...);)SRC", false},
+        {"本屏2 门限 X -> 见 [Payload] 行 (箭头【不许】被当成算子: 原样留下那个 '>' 就假命中这条)",
+         R"SRC(        diagEmitf("      力通道:   χ²/dof = %.4g  门限 %.4g -> 见 [Payload] 行\n", ...);)SRC", false},
+        {"本屏3 main.cpp:1346 那两句逐字 (现网最紧的一对合法搭配: 43 字节, 余量 33)",
+         R"SRC(        diagOut() << "      ↑ 【不参与任何接受/拒绝判据】: 它来自拟合残差, 拿它当门限就是自指"
+                  << " (模型形式错 -> 残差涨 -> 门限跟着松)。" << std::endl;)SRC", false},
+
+        // ---------- 绿: 明写的盲区 (故意钉绿, 谁想收紧就会先在这里红) ----------
+        {"盲区1 英文措辞 (令牌表是中文的)",
+         R"SRC(        diagEmitf("      力通道:   chi2/dof = %.4g  limit %.4g -> pass\n", ...);)SRC", false},
+        {"盲区2 没有箭头的 `门限 X 通过` (第二次复审留下的洞; 收紧它要连注释一起改)",
+         R"SRC(        diagEmitf("      力通道:   χ²/dof = %.4g  门限 %.4g 通过\n", ...);)SRC", false},
+    };
+    int nRed = 0, nGreen = 0;
+    for (size_t i = 0; i < sizeof(kCase) / sizeof(kCase[0]); i++) {
+        const GateCase& c = kCase[i];
+        const std::string hit = gateHit(c.snippet);
+        if (c.wantHit) {
+            nRed++;
+            if (hit.empty()) std::printf("\n    【漏】%s —— 闸门没红 (这一段本该红)\n", c.what);
+            CHECK(!hit.empty());
+        } else {
+            nGreen++;
+            if (!hit.empty())
+                std::printf("\n    【误报】%s —— 闸门红了: ...%s...\n", c.what, hit.c_str());
+            CHECK(hit.empty());
+        }
+    }
+    // 表格没被人删掉一半: 两个方向都还在 (上面每一条都已经 CHECK 过了, 这里只钉"条数")
+    CHECK(nRed == 12);
+    CHECK(nGreen == 10);
     PASS();
 }
 
@@ -867,6 +1105,9 @@ static void test_capture_tmp_path_is_unique_and_recognizable() {
 
 int main() {
     std::printf("=== SessionReport Tests ===\n");
+    // 【第一件事】: 把工作目录钉到 exe 自己那儿 —— 本文件按相对路径读 ../main.cpp 与 fixtures/,
+    // 从别处跑时那些 CHECK 会红, 而红色看起来【像闸门判了本地替库下结论】(见上面那段)。
+    pinCwdToTheExeDirectory();
     _mkdir(TMPDIR);
 
     test_block_header_format();
@@ -882,6 +1123,7 @@ int main() {
     test_append_on_unreadable_file_reports_failure_without_truncating();
     test_solve_path_prints_only_through_the_sink();
     test_reject_line_does_not_restate_the_library_verdict();
+    test_gate_both_directions_are_pinned();
     test_stderr_capture_roundtrip_and_restore();
     test_stderr_capture_begin_failure_leaves_stderr_alone();
     test_stderr_capture_end_read_failure_keeps_the_bytes();
