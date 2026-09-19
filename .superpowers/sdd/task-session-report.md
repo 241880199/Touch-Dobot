@@ -738,3 +738,122 @@ $ Touch_Client\tests\test_payload_calibration.exe
    F1 指的那两行里**, 而这一段是被 `126cadc` 连同它的两个用例一起定过的 (用例里断言了
    `find("变负") == npos`、`find("✓") == npos` 等), 单独改它属于**扩大本次范围**, 所以没动 ——
    但它会出现在同一个块的尾节里, 建议下一轮连它的用例一起收拾。
+
+---
+
+# 追加轮 (2026-09-19, HEAD `a3724e3` 之后) —— 上一轮 §「没能验证的地方」第 4 条的收尾
+
+上一轮的报告末尾自己记着一条**同类未改项**: `core/SessionReport.h` 里那句
+「反向的约定给的是另一个数、**不是负数**」。本轮就是把它连同**所有同类副本**一起收拾掉 ——
+方法上刻意**不照抄上一轮给的行号**, 而是**按【主张】重新全库搜一遍** (这正是上一轮回
+「只改了一处、没搜其它副本」的教训)。
+
+## 1. 全文搜索 —— 命中清单 (按主张搜, 不按字符串搜)
+
+主张 = 「反向的那个约定给的是另一个**正数** / **不会变负**」(即: 两支里反向那支必为正)。
+
+搜法与词表: 全库 (含 `.cpp/.h/.hpp`、`tests/`、`Docs/`) 依次搜
+`反向`、`另一个正数 / 另一个数 / 不是负数 / 变负 / 不是负`、`正数 / 为正 / 都是正`、
+`变号 / 整体变号 / 偏大 / 取负 / 另一支`、`落到零以下 / 低于零 / 124.256 / 13.144`、
+`约定一 / 约定二 / payloadDSection / 两种符号约定 / 成对读`、以及正则
+`反向[^\n]{0,40}(正|负)|(正|负)[^\n]{0,30}反向`。逐条判读如下。
+
+| # | 位置 | 形态 | 真的吗 | 处置 |
+|---|---|---|---|---|
+| 1 | `Touch_Client/core/SessionReport.h:107` | **输出文本** (经 `payloadDSection` → 块尾, **会落盘**) | ✗ **一般化为假** —— 只在 `c_s_z > 0` 时真 (`c_s_z = −100`、`cz_robot = 68.7` ⇒ 反向那支 = `−31.3`) | **改** |
+| 2 | `Touch_Client/core/SessionReport.h:79-80` | 注释 (同一主张的"一般性"表述) | ✗ **一般化为假** —— 所引的 `cz_robot = +68.7, c_s_z = +55.556` 恰好让它是正的, 但文字读起来是通例 (上一轮把这句话**搬进了输出**) | **改** |
+| 3 | `Touch_Client/main.cpp:1024-1028` | 注释 | ✓ **已经是对的** —— 它只是**引用**那句话并**限定**"只在 `c_s_z > 0` 时成立", 反面例子就在紧邻的下一行 | **不动** (上一轮 a3724e3 已修) |
+| 4 | `Touch_Client/tests/test_session_report.cpp:194-195` | 注释 (用例头) | ✗ **一般化为假** —— 把"反向给的是另一个正数"当作对旧错的**更正**来陈述 | **改** (限定到本例) |
+| 5 | `Touch_Client/tests/test_session_report.cpp:219-222` | 注释 + 断言 | 注释 ✗ 一般化为假; **断言本身 ✓** (`CHECK(czRobot + csZ > 0.0)` 断言的是 run-001 那一组数的**事实**) | **改注释, 留断言** (断言注释加"仅本例") |
+| 6 | `Docs/superpowers/specs/2026-09-19-on-machine-checklist.md:121-127` | 文档 | ✓ **不是那句主张** —— 只给 run-001 的**实测**两个数及它们各自的 ✓/✗, 并明写"这一条要按两种符号约定各算一次" | **不动** (报备) |
+| 7 | `Docs/superpowers/specs/2026-09-19-raw-channel-calibration-design.md:411-423` | 文档 | ✓ 同上 ("实测差着十倍", 例子级 + 判据表) | **不动** (报备) |
+
+**结论: 主张的副本共 5 处 (全在 `.cpp/.h` 里), 其中 4 处为假、全部改掉; 1 处 (main.cpp) 上一轮已修。**
+另有两处 `Docs/` 命中是**例子级**的实测记录, 不含那条一般化断言, 故不改。
+其余 `反向` 命中 (`safety/EscalationTracker.h`、`relay/RelayCore.cpp`、
+`calibration/TcpCalibration.h`、`force/PayloadCalibration.cpp`、`force/InertiaIdentification.h`、
+`Hardware/tools/compute_payload.py` 等) 与 `d` 的符号无关, 未列。
+
+## 2. 改了什么
+
+**`core/SessionReport.h:79-82` (注释)** —— 改成只说**关系**:
+> 反向的约定【不是】"把 d 整体变负"—— 两支差 `2·c_s_z`, 谁偏大、谁落到零以下都随 `c_s_z`
+> 的符号翻。这里引的例子 (…) 算出 `68.700 + 55.556 = 124.256 mm`, 恰好仍是正数; 换成
+> `c_s_z = −100` 就是 `68.700 + (−100) = −31.3 mm` —— 负数照样会出现在这一支上。
+
+**`core/SessionReport.h:108-112` (输出文本, 这一处会落盘)** —— 原句
+「…逐字不变,\n 反向的约定给的是另一个数、不是负数。所以这里【不】给单一的勾/叉…」
+改为:
+> (c_s 的 z 向【符号】不由数据决定: 模型在 `g → −g, A → −A, c_s → −c_s` 下逐字不变。
+> 两支差 `2·c_s_z`, 即【约定二 = 约定一 + `2·c_s_z`】: `c_s_z` 为正时约定二偏大、为负时
+> 约定一偏大, 谁落到零以下也跟着翻 (负的 `c_s_z` 下落到零以下的正是【反向】这一支)。
+> 所以这里【不】给单一的勾/叉 —— 整节一个勾都不出现, …【通过】去。)
+
+与 `main.cpp` 那段说的是**同一个关系**(约定二 = 约定一 + `2·c_s_z`)。**没有新判决、没有
+引入任何 ✓/✗**, 也没有动两个 `d` 的算式 / 判据 / 阈值 / 标签 / 结论行 —— 改的只是
+"这句解释在说什么"。
+
+**`tests/test_session_report.cpp:194-197` / `:219-226` (注释)** —— 把"反向给的是另一个正数"
+限定到 `c_s_z > 0` 的本例, 并写明"一般化的说法只在 `c_s_z > 0` 时真"。
+
+## 3. 上一轮那个「哪个测试钉住了它」的问题 —— 答案: **没有测试钉住那句话**
+
+上一轮的 §「没能验证的地方」第 2 条说的是 **main.cpp 里那句字面量**没有单测。
+本轮这一处在 `payloadDSection` 里, **同样没有**: 最接近的是用例
+`payload_d_section_prints_both_sign_conventions` 的 `CHECK(s.find("变负") == npos)` ——
+但**旧句子里根本没有"变负"这两个字**(它写的是"不是负数"), 所以那条断言在**改前改后都绿**。
+也就是说: 上一轮"只改一处"能溜过去, 一半的原因就在这里。
+
+因此**把这个用例补成真正的回归闸门** (改后新增 3 条断言):
+```cpp
+CHECK(s.find("另一个正数") == std::string::npos);
+CHECK(s.find("不是负数")   == std::string::npos);   // ← 旧句子会被它当场抓住
+CHECK(s.find("2·c_s_z")    != std::string::npos);   // ← 关系在 (可搬走的真话)
+```
+原有的**性质**照旧全在: 两支的 `%.17g` 数值都在、`【在范围内】`/`【在范围外】`/`【相反】` 都在、
+`✓`/`✗` 一个都没有、`本块【不给单一的勾】`/`成对读` 都在。
+
+**红检 (照旧实测过, 不是声称)**: 把输出那句**临时改回旧文**再重编重跑 ⇒
+`17 passed, 1 failed`, 红的正是
+`payload_d_section_prints_both_sign_conventions... FAIL: s.find("不是负数") == std::string::npos`;
+改回后重编重跑 ⇒ `18 passed, 0 failed`。负 `c_s_z` 的那条用例
+(`..._negative_cs_prints_no_fabricated_signs`) 拿的是**同一个** `payloadDSection`, 所以新断言
+对两支符号都成立 (它自己的 `+-`/`−-`/两个真值断言也照旧全绿)。
+
+## 4. 硬要求 1 (控制台字节不变) —— 针对本次改动**重新核实过**, 不是照抄
+
+* `payloadDSection(...)` 的返回值**只有三个去处**, 且三处都是 `diagFinish( diagPayloadSection(...) )`:
+  `main.cpp:1097` (姿态数不足)、`:1153` (没有重复对)、`:1477` (正常收尾) —— 全库 grep `payloadDSection` 无第四处。
+* `diagFinish` (`main.cpp:951-960`) 对 `trailer` 只做一件事: 交给
+  `SessionReport::block(s_diagTs, …, s_diagBody, trailer)`; 而 `block` 的返回值只进
+  `appendToFile` (失败时多打一行 `[BIAS] ⚠ 本次报告没落盘`, 与本次改动无关)。
+* `block` (`core/SessionReport.h:57-67`) 把 `trailer` **接在收尾的 ``` 之后** ⇒ 它**不在**
+  ```` ```text ```` 正文里。正文是 `s_diagBody`, 也就是 `diagEmit` 逐字节同时交给 stdout 的那一份。
+* 屏幕那一半 (`diagEmit`/`diagEmitf`/`diagOut`) **从不接触** `payloadDSection` 的返回 —— 上面
+  那三处调用点没有一处把它喂给 sink。
+* 结构性回归闸门 `solve_path_prints_only_through_the_sink` (它断言 `solveAndApply` 体内没有
+  `std::cout/std::cerr/fprintf/fputs/fwrite/puts/putchar`、且 `printf(` 前面必须是字母) 照旧绿。
+
+⇒ 本次改动**只影响块尾 `### 机械臂自报负载` 那一节的解释文字**, 控制台上一个字节没变。
+
+## 5. 验收命令与输出
+
+* `cmd.exe //c "D:\Projects\Touch\Touch_Client\build.bat"` ⇒ `Build OK.`
+  (无 `LNK1168`, 全程**没有结束任何进程**; 只有既有的 MSB8004 / C4005 警告)
+* `tests\build_session_report_test.bat` (BUILD_EXIT=0) + `tests\test_session_report.exe`
+  ⇒ **`18 passed, 0 failed`** (条数不变 —— 新增的是用例内断言, 不是新用例)
+  * 红检 (旧句子) ⇒ `17 passed, 1 failed`, 见 §3
+* `tests\build_payload_calibration_test.bat` (BUILD_EXIT=0) + `tests\test_payload_calibration.exe`
+  ⇒ **`45 passed, 0 failed`**
+
+## 6. 没能验证的地方 (照实说)
+
+1. **端到端仍然没做**: 没有设备, 不能真跑一次 `'s'` 去比对"屏幕那一屏"与 `calib_report.md`
+   里那一块 (与上一轮、与 brief §验收同一个缺口)。§4 的结论是**读代码 + grep 全部调用点**
+   核实的, 不是实机比对。
+2. 新句子的**算术**只在纸上与代码上核过: 约定二 = 约定一 + `2·c_s_z`, 代 `c_s_z = ±100`
+   两种符号各推一遍 (`c_s_z = −100` ⇒ 约定一 `168.7` / 约定二 `−31.3`); 这条关系块里
+   `main.cpp:1032` 已在说同一件事, **两处文字有重复** (没合并: 一处是 main.cpp 的字面量、
+   一处是纯函数的输出, 合并会动到其中一处的结构)。
+3. `Docs/` 里那两处**例子级**命中 (上表 #6/#7) 保留原样: 它们给的是 run-001 的**实测**两个数
+   各自的 ✓/✗, 不是那条一般化断言 —— 我判断它们不需要改, 但这是我**判读**的, 没有第三方确认。

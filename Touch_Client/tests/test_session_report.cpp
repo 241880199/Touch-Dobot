@@ -191,8 +191,10 @@ static void test_block_wraps_a_real_console_screen_verbatim() {
 // cz_robot 与 |c_s_z| 给出两个 d, 而 (0, 31.5) mm 对它们的结论可以【相反】。用 run-001 的实数:
 //   同向  68.700 − 55.556 =  13.144 mm  -> 在范围内
 //   反向  68.700 + 55.556 = 124.256 mm  -> 在范围外
-// 从前这里只打一支, 而且块里的句子说"若实际反向, d 会整体变负" —— 那是算错的 (反向给的是另一个
-// 正数), 会把操作员引到错的地方。这个用例把"两支都打 + 不给单一结论"钉住。
+// 从前这里只打一支, 而且块里的句子说"若实际反向, d 会整体变负" —— 那是算错的。真正的说法是
+// 【两支差 2·c_s_z】: 本例 c_s_z > 0, 所以反向那支偏大且仍是正数; c_s_z < 0 时偏大的是同向那支、
+// 落到零以下的才是反向那支 —— "反向给的是另一个正数"这种一般化的说法只在 c_s_z > 0 时真。
+// 这个用例把"两支都打 + 不给单一结论"钉住。
 static void test_payload_d_section_prints_both_sign_conventions() {
     TEST(payload_d_section_prints_both_sign_conventions);
     // run-001 的自报值, 全精度 (取自那次上机的 30004 帧读数)
@@ -216,10 +218,14 @@ static void test_payload_d_section_prints_both_sign_conventions() {
     CHECK(s.find("本块【不给单一的勾】") != std::string::npos);
     CHECK(s.find("成对读") != std::string::npos);
 
-    // 【那句算错的话不许再出现】: 反向约定给的是另一个正数, 不是负数
+    // 【那句算错的话不许再出现】: 说"反向给的是另一个正数"是把本例 (c_s_z > 0) 当成了通例 ——
+    //   c_s_z < 0 时负的正是反向那一支 (见下面那个负 c_s_z 的用例)。块里改成只说【两支的关系】。
     CHECK(s.find("变负") == std::string::npos);
+    CHECK(s.find("另一个正数") == std::string::npos);
+    CHECK(s.find("不是负数") == std::string::npos);
+    CHECK(s.find("2·c_s_z") != std::string::npos);   // ← 关系在, 而且【关系】才是可搬走的真话
     snprintf(buf, sizeof(buf), "%.17g", czRobot + csZ);
-    CHECK(czRobot + csZ > 0.0);            // 事实层面: 反向那一支是正的 (run-001: 124.256 mm)
+    CHECK(czRobot + csZ > 0.0);            // 事实层面(仅本例): 反向那一支是正的 (run-001: 124.256 mm)
     CHECK(s.find(buf) != std::string::npos);
 
     // 缺 cz_robot 的那一支由 main.cpp 自己写 (【不可用】), 不在这里 —— 这里只管有数的时候。
