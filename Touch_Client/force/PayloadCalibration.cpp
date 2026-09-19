@@ -233,6 +233,341 @@ namespace PayloadCalibration {
         return true;
     }
 
+    // =================================================================================
+    // 原始力通道的线性模型 (2026-09-19 重做; 取代上面的 psi 扫描)
+    //
+    //   F_i = b_F + A · g_i            A: 3×3, 9 个元素全自由
+    //   M_i = b_M + c_s × (A · g_i)    c_s: 3, 质心 (m, 传感器测量系)
+    //   g_i = gravitySensorFrameAtYaw(pose_i, 0.0, g)      <- 【psi = 0, 没有 psi】
+    //
+    // 力通道 12 个未知 (b_F 3 + A 9), 每个姿态 3 个方程; 力矩通道 6 个 (b_M 3 + c_s 3),
+    // 给定 A 之后仍线性。两段各自一次最小二乘, 不扫描、不预设。
+    // =================================================================================
+    static const int    RAW_MIN_POSES   = 4;      // 12 个未知量 -> 至少要 4 个姿态 (3n >= 12)
+    static const double RAW_MAX_COND    = 1.0e3;  // 力通道设计矩阵的条件数上限 (姿态激发)
+    static const double RAW_SINGULAR_REL= 1.0e12; // cond 超过它 = 数值上奇异, 线性层直接拒
+    static const double RAW_MASS_MIN_KG = 0.05;   // 量程下限: 工具链不可能轻于此
+    static const double RAW_MASS_MAX_KG = 3.0;    // 量程上限: CR3 额定负载 3 kg
+                                                  // (Docs/机械臂资料/Dobot CR3机械臂参数文档.md)
+    static const double RAW_ISO_SIGMA_K = 3.0;    // 各向同性门限的 σ 倍数, 推导见 fitRaw
+
+    // 重力在【传感器系】的表示, psi 恒为 0 —— 新模型里 A 吸收了一切, 不存在安装角。
+    // 【这里必须走 AtYaw 而不是 gravitySensorFrame】: 后者读 TcpCalibration 的模块状态,
+    // 那样拟合结果就会随一个与数据无关的全局变量变 —— 那正是 psi 时代的问题。
+    static void gravityNoYaw(const double pose[6], double g[3]) {
+        TcpCalibration::gravitySensorFrameAtYaw(pose, 0.0, g);
+    }
+
+    // 对称矩阵的 Jacobi 特征分解 (n×n, row-major; M 被就地破坏)。
+    // 只用得到特征值, 所以不累积特征向量。n ≤ 12, 几十次扫描的代价可以忽略。
+    // 用途: A 的奇异值 (AᵀA 的特征值开方) 与 cond(J) (JᵀJ 的特征值之比开方)。
+    static void jacobiEigenSym(double* M, int n, double* evalOut) {
+        for (int sweep = 0; sweep < 60; sweep++) {
+            double off = 0.0, diag2 = 0.0;
+            for (int i = 0; i < n; i++) {
+                diag2 += M[i * n + i] * M[i * n + i];
+                for (int j = i + 1; j < n; j++) off += M[i * n + j] * M[i * n + j];
+            }
+            if (off <= 1e-28 * (diag2 + 1e-300)) break;      // 相对判据: 尺度和量级无关
+            for (int p = 0; p < n; p++) {
+                for (int q = p + 1; q < n; q++) {
+                    const double apq = M[p * n + q];
+                    if (fabs(apq) <= 1e-300) continue;
+                    const double theta = (M[q * n + q] - M[p * n + p]) / (2.0 * apq);
+                    const double sgn = (theta >= 0.0) ? 1.0 : -1.0;
+                    const double t = sgn / (fabs(theta) + sqrt(theta * theta + 1.0));
+                    const double c = 1.0 / sqrt(t * t + 1.0), s = t * c;
+                    for (int k = 0; k < n; k++) {            // 列变换
+                        const double mkp = M[k * n + p], mkq = M[k * n + q];
+                        M[k * n + p] = c * mkp - s * mkq;
+                        M[k * n + q] = s * mkp + c * mkq;
+                    }
+                    for (int k = 0; k < n; k++) {            // 行变换
+                        const double mpk = M[p * n + k], mqk = M[q * n + k];
+                        M[p * n + k] = c * mpk - s * mqk;
+                        M[q * n + k] = s * mpk + c * mqk;
+                    }
+                    M[p * n + q] = 0.0;                      // 消干净, 免得留下舍入残渣
+                    M[q * n + p] = 0.0;
+                }
+            }
+        }
+        for (int i = 0; i < n; i++) evalOut[i] = M[i * n + i];
+    }
+
+    // Gauss-Jordan 求逆 + 解方程: 输入 AtA (p×p, 对称正定) 与 Atb (p), 输出 x = (AtA)⁻¹·Atb
+    // 与 C = (AtA)⁻¹ (paramSigma 要的就是它的对角)。返回 false = 主元塌了 (秩亏)。
+    // 阈值取【相对的】(对 AtA 的最大对角元): AtA 的量级随姿态数/重力模长变 (几十~几千),
+    // 绝对阈值在两种尺度下不可能同时对。
+    static bool solveNormal(const double* AtA, const double* Atb, int p, double* x, double* C) {
+        double scale = 0.0;
+        for (int i = 0; i < p; i++) if (AtA[i * p + i] > scale) scale = AtA[i * p + i];
+        if (!(scale > 0.0)) return false;
+
+        double M[12][24];        // p <= 12
+        for (int r = 0; r < p; r++) {
+            for (int c = 0; c < p; c++) M[r][c] = AtA[r * p + c];
+            for (int c = 0; c < p; c++) M[r][p + c] = (r == c) ? 1.0 : 0.0;
+        }
+        for (int col = 0; col < p; col++) {
+            int piv = col;
+            for (int r = col + 1; r < p; r++)
+                if (fabs(M[r][col]) > fabs(M[piv][col])) piv = r;
+            if (!(fabs(M[piv][col]) > 1e-10 * scale)) return false;
+            if (piv != col)
+                for (int c = 0; c < 2 * p; c++) {
+                    const double t = M[col][c]; M[col][c] = M[piv][c]; M[piv][c] = t;
+                }
+            const double d = M[col][col];
+            for (int c = 0; c < 2 * p; c++) M[col][c] /= d;
+            for (int r = 0; r < p; r++) {
+                if (r == col) continue;
+                const double f = M[r][col];
+                if (f == 0.0) continue;
+                for (int c = 0; c < 2 * p; c++) M[r][c] -= f * M[col][c];
+            }
+        }
+        for (int r = 0; r < p; r++) {
+            for (int c = 0; c < p; c++) C[r * p + c] = M[r][p + c];
+            double acc = 0.0;
+            for (int c = 0; c < p; c++) acc += M[r][p + c] * Atb[c];
+            x[r] = acc;
+        }
+        return true;
+    }
+
+    // 对称矩阵的 min/max 特征值 (只给 cond 用; 矩阵被就地破坏)
+    static bool symExtremes(double* M, int n, double& lo, double& hi) {
+        double ev[12];
+        jacobiEigenSym(M, n, ev);
+        lo = ev[0]; hi = ev[0];
+        for (int i = 1; i < n; i++) {
+            if (ev[i] < lo) lo = ev[i];
+            if (ev[i] > hi) hi = ev[i];
+        }
+        return lo > 0.0;
+    }
+
+    bool fitRawLinear(const double posesIn[][6], const double forces[][3],
+                      const double moments[][3], int n, RawFit& out)
+    {
+        if (n < RAW_MIN_POSES) return false;
+
+        // ===== 力通道: x = [b_F(3), A(9)] (A row-major) =====
+        const int PF = 12;
+        double AtA[144] = {0}, Atb[12] = {0};
+        for (int i = 0; i < n; i++) {
+            double g[3];
+            gravityNoYaw(posesIn[i], g);
+            for (int a = 0; a < 3; a++) {
+                double row[12] = {0};
+                row[a] = 1.0;
+                for (int c = 0; c < 3; c++) row[3 + 3 * a + c] = g[c];
+                for (int c = 0; c < PF; c++) {
+                    for (int e = 0; e < PF; e++) AtA[c * PF + e] += row[c] * row[e];
+                    Atb[c] += row[c] * forces[i][a];
+                }
+            }
+        }
+        // cond(J) = sqrt(λmax/λmin) of AtA = JᵀJ —— 奇异值之比与是否正交无关, 直接可读。
+        double AtAcopy[144];
+        for (int i = 0; i < PF * PF; i++) AtAcopy[i] = AtA[i];
+        double lamMin = 0.0, lamMax = 0.0;
+        if (!symExtremes(AtAcopy, PF, lamMin, lamMax)) return false;   // λ ≤ 0 -> 秩亏
+        const double condJ = sqrt(lamMax / lamMin);
+        if (!(condJ < RAW_SINGULAR_REL)) return false;                 // 数值上奇异
+
+        double xF[12], CF[144];
+        if (!solveNormal(AtA, Atb, PF, xF, CF)) return false;
+
+        double bF[3] = {xF[0], xF[1], xF[2]};
+        double A[9];
+        for (int i = 0; i < 9; i++) A[i] = xF[3 + i];
+
+        // 力通道残差与参数不确定度
+        double ssF = 0.0;
+        for (int i = 0; i < n; i++) {
+            double g[3];
+            gravityNoYaw(posesIn[i], g);
+            for (int a = 0; a < 3; a++) {
+                double pred = bF[a];
+                for (int c = 0; c < 3; c++) pred += A[a * 3 + c] * g[c];
+                const double e = pred - forces[i][a];
+                ssF += e * e;
+            }
+        }
+        const int dofF = 3 * n - PF;
+        // 零自由度 (n = 4) 时估不出噪声方差 —— 报 0, 自检的门限随之退化成"必须严格正交"。
+        const double s2F = (dofF > 0) ? ssF / (double)dofF : 0.0;
+
+        // ===== 力矩通道: 给定 A 后 y = [b_M(3), c_s(3)], 每个姿态 3 个方程 =====
+        const int PM = 6;
+        double MtM[36] = {0}, Mtb[6] = {0};
+        for (int i = 0; i < n; i++) {
+            double g[3];
+            gravityNoYaw(posesIn[i], g);
+            double w[3];                                  // w = A·g (传感器系的重力响应)
+            for (int a = 0; a < 3; a++)
+                w[a] = A[a * 3 + 0] * g[0] + A[a * 3 + 1] * g[1] + A[a * 3 + 2] * g[2];
+            for (int a = 0; a < 3; a++) {
+                double row[6] = {0};
+                row[a] = 1.0;
+                // (c_s × w) 的第 a 个分量 —— 叉乘结构写成分量, 不是独立的 3×3
+                if (a == 0) { row[3 + 1] =  w[2]; row[3 + 2] = -w[1]; }
+                if (a == 1) { row[3 + 2] =  w[0]; row[3 + 0] = -w[2]; }
+                if (a == 2) { row[3 + 0] =  w[1]; row[3 + 1] = -w[0]; }
+                for (int c = 0; c < PM; c++) {
+                    for (int e = 0; e < PM; e++) MtM[c * PM + e] += row[c] * row[e];
+                    Mtb[c] += row[c] * moments[i][a];
+                }
+            }
+        }
+        {   // 力矩通道同样要能判秩亏 (给定 A 后设计矩阵只由姿态与 A 定)
+            double MtMcopy[36];
+            for (int i = 0; i < PM * PM; i++) MtMcopy[i] = MtM[i];
+            double lo = 0.0, hi = 0.0;
+            if (!symExtremes(MtMcopy, PM, lo, hi)) return false;
+            if (!(sqrt(hi / lo) < RAW_SINGULAR_REL)) return false;
+        }
+        double xM[6], CM[36];
+        if (!solveNormal(MtM, Mtb, PM, xM, CM)) return false;
+
+        double bM[3] = {xM[0], xM[1], xM[2]};
+        double cS[3] = {xM[3], xM[4], xM[5]};
+
+        double ssM = 0.0;
+        for (int i = 0; i < n; i++) {
+            double g[3];
+            gravityNoYaw(posesIn[i], g);
+            double w[3];
+            for (int a = 0; a < 3; a++)
+                w[a] = A[a * 3 + 0] * g[0] + A[a * 3 + 1] * g[1] + A[a * 3 + 2] * g[2];
+            const double pred[3] = { bM[0] + cS[1] * w[2] - cS[2] * w[1],
+                                     bM[1] + cS[2] * w[0] - cS[0] * w[2],
+                                     bM[2] + cS[0] * w[1] - cS[1] * w[0] };
+            for (int a = 0; a < 3; a++) {
+                const double e = pred[a] - moments[i][a];
+                ssM += e * e;
+            }
+        }
+        const int dofM = 3 * n - PM;
+        const double s2M = (dofM > 0) ? ssM / (double)dofM : 0.0;
+
+        // ===== 汇总 =====
+        for (int i = 0; i < 9; i++) out.A[i] = A[i];
+        for (int i = 0; i < 3; i++) { out.bF[i] = bF[i]; out.cS[i] = cS[i]; out.bM[i] = bM[i]; }
+        out.rmsForceN   = sqrt(ssF / (3.0 * n));
+        out.rmsMomentNm = sqrt(ssM / (3.0 * n));
+        out.cond        = condJ;
+        // 布局与 RawFit 的字段同序: [0..8] = A, [9..11] = bF, [12..14] = cS, [15..17] = bM
+        for (int i = 0; i < 9; i++) out.paramSigma[i] = sqrt(CF[(3 + i) * PF + (3 + i)] * s2F);
+        for (int i = 0; i < 3; i++) out.paramSigma[9 + i]  = sqrt(CF[i * PF + i] * s2F);
+        for (int i = 0; i < 3; i++) out.paramSigma[12 + i] = sqrt(CM[(3 + i) * PM + (3 + i)] * s2M);
+        for (int i = 0; i < 3; i++) out.paramSigma[15 + i] = sqrt(CM[i * PM + i] * s2M);
+        return true;
+    }
+
+    bool decompose(const double Ain[9], Decomp& out) {
+        // AᵀA 的特征值开方 = A 的奇异值 (3×3 对称, Jacobi 足够且稳)
+        double M[9], ev[3];
+        for (int i = 0; i < 3; i++)
+            for (int j = 0; j < 3; j++) {
+                double acc = 0.0;
+                for (int k = 0; k < 3; k++) acc += Ain[k * 3 + i] * Ain[k * 3 + j];
+                M[i * 3 + j] = acc;
+            }
+        jacobiEigenSym(M, 3, ev);
+        double sv[3] = {sqrt(fabs(ev[0])), sqrt(fabs(ev[1])), sqrt(fabs(ev[2]))};
+        for (int a = 0; a < 2; a++)                       // 降序 (σ1 >= σ2 >= σ3)
+            for (int b = a + 1; b < 3; b++)
+                if (sv[b] > sv[a]) { const double t = sv[a]; sv[a] = sv[b]; sv[b] = t; }
+
+        const double detA = Ain[0] * (Ain[4] * Ain[8] - Ain[5] * Ain[7])
+                          - Ain[1] * (Ain[3] * Ain[8] - Ain[5] * Ain[6])
+                          + Ain[2] * (Ain[3] * Ain[7] - Ain[4] * Ain[6]);
+        // 奇异 A: 定不出手系也定不出尺度 (σ3/σ1 太小 = 数值上秩亏)
+        if (!(sv[0] > 0.0) || !(sv[2] > 1e-12 * sv[0])) return false;
+
+        // m = (σ1σ2σ3)^(1/3) (> 0) ; parity = sign(det A) ; S = diag(1,1,parity) ; Q = S·A/m
+        // 于是 A = m·S·Q 恒【精确】成立 (Q 的正交性不在恒等式里, 它只在 A 恰好是正交尺度阵时
+        // 才正交 —— 那正是自检在查的事)。
+        const double m = pow(sv[0] * sv[1] * sv[2], 1.0 / 3.0);
+        const double parity = (detA < 0.0) ? -1.0 : 1.0;
+        for (int i = 0; i < 3; i++)
+            for (int j = 0; j < 3; j++)
+                out.Q[i * 3 + j] = ((i == 2) ? parity : 1.0) * Ain[i * 3 + j] / m;
+        out.m = m;
+        out.parity = parity;
+        for (int i = 0; i < 3; i++) out.sv[i] = sv[i];
+        out.isotropyRatio = sv[0] / sv[2];
+        return true;
+    }
+
+    bool fitRaw(const double posesIn[][6], const double forces[][3], const double moments[][3],
+                int n, RawFit& out)
+    {
+        if (!fitRawLinear(posesIn, forces, moments, n, out)) return false;
+
+        Decomp d;
+        if (!decompose(out.A, d)) {
+            fprintf(stderr, "[Payload] 自检拒绝: A 奇异 (σ3/σ1 过小), 定不出安装姿态与质量尺度。\n");
+            return false;
+        }
+
+        // ---- 自检 1: 条件数 (12 个参数定不定得下来) ----
+        // 姿态激发不足 -> A 的每个分量都在大误差里, 后面两条判据也就没了意义, 所以先判它。
+        if (!(out.cond < RAW_MAX_COND)) {
+            fprintf(stderr, "[Payload] 自检拒绝: 力通道 cond=%.3g >= %.3g —— 姿态激发不足,"
+                            " 12 个参数定不下来 (姿态要够散, 不能只在小角度里晃)。\n",
+                    out.cond, RAW_MAX_COND);
+            return false;
+        }
+
+        // ---- 自检 2: 质量尺度必须落在 EnableRobot 的负载量程里 ----
+        // CR3 额定 3 kg (Docs/机械臂资料/Dobot CR3机械臂参数文档.md §最大负载);
+        // 下限 0.05 kg: 工具链(传感器+笔夹+笔)不可能轻于此, 解到更小说明解出的不是工具重量。
+        if (!(d.m > RAW_MASS_MIN_KG) || d.m > RAW_MASS_MAX_KG) {
+            fprintf(stderr, "[Payload] 自检拒绝: 质量尺度 m=%.4g kg 超出量程 (%.2f, %.2f] kg"
+                            " —— 这不是工具链的重量。\n",
+                    d.m, RAW_MASS_MIN_KG, RAW_MASS_MAX_KG);
+            return false;
+        }
+
+        // ---- 自检 3: 各向同性 —— 【判据由 paramSigma 导出, 不是固定的比例】 ----
+        //
+        // A 若真是"质量尺度 × 含手系的安装旋转", 它的三个奇异值必须相等 (都 = m)。实测到的
+        // 展布 isotropyRatio = σ1/σ3 > 1 有两个来源: 噪声, 与"模型形式不对"。要靠量级把两者
+        // 分开, 只能用【参数的不确定度】—— 一个固定的比例是猜的, 而用户明确不要猜。
+        //
+        //   尺子 sigmaScale = max_i paramSigma[i] (i = 0..8, A 的 9 个分量)
+        //     —— m 是从 A 的谱里读出来的, 它的不确定度不可能小于 A 本身定得最差的那个分量;
+        //        取 max 是保守侧 (宁可放过也不错杀: 错杀的代价是"标定不了", 放过的代价由
+        //        残差与闭环验证兜着)。
+        //   门限 1 + K·sigmaScale/m,  K = 3 (3σ)
+        //
+        // 实机对照 (2026-09-19, 7 个姿态): sigmaScale = 0.014129 kg, m = 0.422357 kg
+        //   -> sigmaScale/m = 3.345%
+        //   K = 3 -> 门限 1.10036 ; 实解 isotropyRatio = 1.06546 -> 通过 (富余 3.5%)
+        //   K = 2 -> 门限 1.06690 ; 同一个解【几乎贴在线上】—— 只勉强接受自己正确答案的门
+        //            不是门, 是把判决交给舍入误差。
+        // 控制器第一版用的固定 1.05 会【拒掉这个正确的解】, 这就是为什么要对着不确定度判。
+        // 反过来, 明确的形式错 (各向异性几倍这种) 在任何噪声水平下都远超 3σ, 照拒。
+        // 另外: 无噪声的精确数据 (sigmaScale -> 0) 会把门限压到 1.0 —— 这是对的, 那时候
+        // 模型形式就是被数据精确检验的, 任何非正交都说明形式不成立。
+        double sigmaScale = 0.0;
+        for (int i = 0; i < 9; i++)
+            if (out.paramSigma[i] > sigmaScale) sigmaScale = out.paramSigma[i];
+        const double isoLimit = 1.0 + RAW_ISO_SIGMA_K * sigmaScale / d.m;
+        if (!(d.isotropyRatio < isoLimit)) {
+            fprintf(stderr, "[Payload] 自检拒绝: 各向同性比 σ1/σ3=%.5g 超出噪声能解释的范围"
+                            " (门限 %.5g = 1 + %.0fσ, σ=%.4g kg)。模型形式与数据不符,"
+                            " 拒绝给出参数。\n",
+                    d.isotropyRatio, isoLimit, RAW_ISO_SIGMA_K, sigmaScale);
+            return false;
+        }
+        return true;
+    }
+
     void effective(double& massKgOut, double comMmOut[3]) {
         if (enabled) {
             massKgOut = massKg;

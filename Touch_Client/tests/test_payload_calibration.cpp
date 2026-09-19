@@ -529,6 +529,406 @@ static void test_scan_cannot_fix_transposed_gravity() {
     PASS();
 }
 
+// =====================================================================================
+// 原始力通道 (无 psi 的线性模型) 的用例
+//
+// 模型:   F_i = b_F + A·g_i          A: 任意 3×3
+//         M_i = b_M + c_s × (A·g_i)  c_s: 质心
+//         g_i = 重力在法兰系的表示 (psi = 0, 数据里【不存在】安装角)
+// 参考数 (控制器 2026-09-19 由 7 个实机姿态离线算出, 见 task-1-brief):
+//         A / b_F / m / parity / sv / isotropyRatio / c_s / 两个 rms
+// =====================================================================================
+
+// 3×3 行列式 (测试侧独立实现)
+static double det3(const double M[9]) {
+    return M[0] * (M[4] * M[8] - M[5] * M[7])
+         - M[1] * (M[3] * M[8] - M[5] * M[6])
+         + M[2] * (M[3] * M[7] - M[4] * M[6]);
+}
+
+// A 的 9 个分量里最大的那个 1σ —— 各向同性门限的尺子。测试侧独立算一遍 (不调被测函数)。
+static double maxSigmaA(const PayloadCalibration::RawFit& f) {
+    double s = 0.0;
+    for (int i = 0; i < 9; i++) if (f.paramSigma[i] > s) s = f.paramSigma[i];
+    return s;
+}
+
+// 合成器: 由【任意 3×3 A】造原始力/力矩。
+// 【刻意不复用上面的 synthesize()】: 那一份是按"psi 纯偏航"模型造的 (solve() 用), 它的入参里
+// 根本没有 A 这个概念。这一份拿任意 A 造数, 重力只用 psi = 0 —— 数据里不存在任何安装角,
+// 这正是新模型要能拟合的东西。(生成器与估计器不共用代码, 见 gravitySensorRefAt 的说明。)
+static void synthRaw(const double A[9], const double bF[3], const double cs[3],
+                     const double bM[3], const double poses[][6], int n,
+                     double forces[][3], double moments[][3])
+{
+    for (int i = 0; i < n; i++) {
+        double g[3];
+        gravitySensorRefAt(poses[i], 0.0, g);
+        double w[3];
+        for (int a = 0; a < 3; a++)
+            w[a] = A[a * 3 + 0] * g[0] + A[a * 3 + 1] * g[1] + A[a * 3 + 2] * g[2];
+        for (int a = 0; a < 3; a++) forces[i][a] = bF[a] + w[a];
+        // M = b_M + c_s × w
+        moments[i][0] = bM[0] + cs[1] * w[2] - cs[2] * w[1];
+        moments[i][1] = bM[1] + cs[2] * w[0] - cs[0] * w[2];
+        moments[i][2] = bM[2] + cs[0] * w[1] - cs[1] * w[0];
+    }
+}
+
+// A = m · diag(1,1,parity) · Rz(theta) · P   (P 由调用方给)
+static void buildAWithP(double m, double parity, double thetaDeg, const double P[9], double A[9]) {
+    const double D2R = 3.14159265358979323846 / 180.0;
+    const double t = thetaDeg * D2R, c = cos(t), s = sin(t);
+    const double R[9] = { c, -s, 0.0,  s, c, 0.0,  0.0, 0.0, 1.0 };
+    double RP[9];
+    for (int i = 0; i < 3; i++)
+        for (int j = 0; j < 3; j++) {
+            double acc = 0.0;
+            for (int q = 0; q < 3; q++) acc += R[i * 3 + q] * P[q * 3 + j];
+            RP[i * 3 + j] = acc;
+        }
+    for (int i = 0; i < 3; i++)
+        for (int j = 0; j < 3; j++)
+            A[i * 3 + j] = m * ((i == 2) ? parity : 1.0) * RP[i * 3 + j];
+}
+
+// P = I + k·u·vᵀ: k = 0 时 A 恰好是"质量尺度 × 含手系的旋转"; k ≠ 0 时 A 非正交。
+static void buildA(double m, double parity, double thetaDeg, double k,
+                   const double u[3], const double v[3], double A[9]) {
+    double P[9];
+    for (int i = 0; i < 3; i++)
+        for (int j = 0; j < 3; j++) P[i * 3 + j] = (i == j ? 1.0 : 0.0) + k * u[i] * v[j];
+    buildAWithP(m, parity, thetaDeg, P, A);
+}
+
+// 加噪声 (与 test_noise_robustness 同一套 LCG, 免得两处的"噪声"含义不同)
+static void addRawNoise(double forces[][3], double moments[][3], int n,
+                        double sigF, double sigM, unsigned& seed) {
+    for (int i = 0; i < n; i++)
+        for (int a = 0; a < 3; a++) {
+            seed = seed * 1103515245u + 12345u;
+            forces[i][a] += ((double)((seed >> 16) & 0x7fff) / 32767.0 - 0.5) * 2.0 * sigF;
+            seed = seed * 1103515245u + 12345u;
+            moments[i][a] += ((double)((seed >> 16) & 0x7fff) / 32767.0 - 0.5) * 2.0 * sigM;
+        }
+}
+
+static const double ARB_U[3] = {0.5, 0.8, 0.2};
+static const double ARB_V[3] = {0.6, -0.3, 0.45};
+
+// 任意 3×3 (含【反射】与【非正交】) 的逐元素复原。
+// 这一条走 fitRawLinear —— 它【不做物理自检】。这样安排是刻意的: 见 isotropy 那两条用例。
+static void test_rawfit_recovers_arbitrary_A() {
+    TEST(rawfit_recovers_arbitrary_A);
+    double A[9];
+    buildA(0.51, -1.0, 32.0, 0.12, ARB_U, ARB_V, A);     // 反射 + 非正交 (奇异值比 ≈ 1.10)
+    const double bF[3] = {1.7, -0.9, 2.3};
+    const double cs[3] = {0.021, -0.034, 0.118};
+    const double bM[3] = {0.05, -0.02, 0.011};
+    double F[NP][3], M[NP][3];
+    synthRaw(A, bF, cs, bM, g_poses, NP, F, M);
+
+    PayloadCalibration::RawFit fit;
+    CHECK(PayloadCalibration::fitRawLinear(g_poses, F, M, NP, fit));
+    for (int i = 0; i < 9; i++) CHECK(fabs(fit.A[i] - A[i]) < 1e-12);
+    for (int i = 0; i < 3; i++) {
+        CHECK(fabs(fit.bF[i] - bF[i]) < 1e-12);
+        CHECK(fabs(fit.cS[i] - cs[i]) < 1e-12);
+        CHECK(fabs(fit.bM[i] - bM[i]) < 1e-12);
+    }
+    printf("[noiseless: rmsF=%.1e rmsM=%.1e cond=%.1f] ", fit.rmsForceN, fit.rmsMomentNm, fit.cond);
+    CHECK(fit.rmsForceN < 1e-12 && fit.rmsMomentNm < 1e-12);
+
+    // 加噪声: 容差【按 paramSigma】—— 9 个分量各按自己的 4σ 判, 不是拍一个绝对数。
+    unsigned seed = 20260919u;
+    addRawNoise(F, M, NP, 0.02, 0.001, seed);
+    CHECK(PayloadCalibration::fitRawLinear(g_poses, F, M, NP, fit));
+    int worst = 0;
+    for (int i = 0; i < 9; i++) {
+        const double tol = 4.0 * fit.paramSigma[i];
+        CHECK(tol > 1e-9);                                  // paramSigma 得是真估出来的
+        if (fabs(fit.A[i] - A[i]) > fabs(fit.A[worst] - A[worst])) worst = i;
+        CHECK(fabs(fit.A[i] - A[i]) < tol);
+    }
+    for (int i = 0; i < 3; i++) {
+        CHECK(fabs(fit.cS[i] - cs[i]) < 4.0 * fit.paramSigma[12 + i]);
+        CHECK(fabs(fit.bM[i] - bM[i]) < 4.0 * fit.paramSigma[15 + i]);
+        CHECK(fabs(fit.bF[i] - bF[i]) < 4.0 * fit.paramSigma[9 + i]);
+    }
+    printf("[noisy: A[%d] err=%.1e (4sig=%.1e), rmsF=%.4f] ",
+           worst, fabs(fit.A[worst] - A[worst]), 4.0 * fit.paramSigma[worst], fit.rmsForceN);
+    // 尺度: 质量尺度也该复原 (它是 A 的奇异值几何平均, 不是单独拟合的参数)
+    PayloadCalibration::Decomp d;
+    CHECK(PayloadCalibration::decompose(fit.A, d));
+    CHECK(fabs(d.m - 0.51304) < 0.02);
+    PASS();
+}
+
+// 分解: 已知角度 + 已知手系 → m / parity / theta 都要能读回来。
+static void test_decompose_recovers_rotation_and_parity() {
+    TEST(decompose_recovers_rotation_and_parity);
+    const double m = 0.657;
+    const double thetas[3] = {0.0, 32.0, -141.5};
+    const double parities[2] = {+1.0, -1.0};
+    for (int pi = 0; pi < 2; pi++) {
+        for (int ti = 0; ti < 3; ti++) {
+            double A[9];
+            buildA(m, parities[pi], thetas[ti], 0.0, ARB_U, ARB_V, A);   // 恰好 m·S·Rz(theta)
+            PayloadCalibration::Decomp d;
+            CHECK(PayloadCalibration::decompose(A, d));
+            CHECK(fabs(d.m - m) < 1e-12);
+            CHECK(fabs(d.parity - parities[pi]) < 1e-12);
+            for (int k = 0; k < 3; k++) CHECK(fabs(d.sv[k] - m) < 1e-12);
+            CHECK(fabs(d.isotropyRatio - 1.0) < 1e-12);
+            // Q 必须【就是】Rz(theta): Q = S·A/m = S·S·Rz = Rz。约定被钉死在这一条上 ——
+            // 谁改了约定 (比如换成 U·diag(1,1,parity)·Vᵀ), 这里立刻红。
+            const double D2R = 3.14159265358979323846 / 180.0;
+            const double t = thetas[ti] * D2R;
+            const double R[9] = { cos(t), -sin(t), 0.0,  sin(t), cos(t), 0.0,  0.0, 0.0, 1.0 };
+            for (int i = 0; i < 9; i++) CHECK(fabs(d.Q[i] - R[i]) < 1e-12);
+            CHECK(fabs(det3(d.Q) - 1.0) < 1e-12);   // Q 恒为旋转 (det = +1), 手系在 parity 里
+        }
+    }
+    printf("[12 组合 (m, parity, theta) 全部复原] ");
+    PASS();
+}
+
+// round-trip: 由 (m, S=diag(1,1,parity), Q) 重建 A, 与输入【逐位】相等。
+// 这条对【任意可逆 A】都成立 (不只是正交的 A) —— 这是约定良定义的证明。
+static void test_decompose_roundtrip_exact() {
+    TEST(decompose_roundtrip_exact);
+    double cases[3][9];
+    buildA(0.51, -1.0, 32.0, 0.12, ARB_U, ARB_V, cases[0]);       // 非正交 + 反射
+    buildA(0.83, +1.0, -77.0, -0.20, ARB_V, ARB_U, cases[1]);     // 非正交, 手系为正
+    // 参考 A (task-1-brief 里控制器给的那一份, 5 位小数)
+    const double ref[9] = { 0.36456, 0.21055, -0.00003,
+                           -0.21828, 0.37331,  0.00298,
+                           -0.01155, -0.01493, -0.41390 };
+    for (int i = 0; i < 9; i++) cases[2][i] = ref[i];
+
+    for (int c = 0; c < 3; c++) {
+        PayloadCalibration::Decomp d;
+        CHECK(PayloadCalibration::decompose(cases[c], d));
+        // A_rebuilt = m · diag(1,1,parity) · Q
+        double rebuilt[9];
+        for (int i = 0; i < 3; i++)
+            for (int j = 0; j < 3; j++)
+                rebuilt[i * 3 + j] = d.m * ((i == 2) ? d.parity : 1.0) * d.Q[i * 3 + j];
+        for (int i = 0; i < 9; i++) CHECK(fabs(rebuilt[i] - cases[c][i]) < 1e-12);
+    }
+    PASS();
+}
+
+// 分解还必须能对上控制器给的参考数 (task-1-brief): 这是"与实机离线结果一致"的静态锚点。
+static void test_decompose_matches_reference_numbers() {
+    TEST(decompose_matches_reference_numbers);
+    const double ref[9] = { 0.36456, 0.21055, -0.00003,
+                           -0.21828, 0.37331,  0.00298,
+                           -0.01155, -0.01493, -0.41390 };
+    PayloadCalibration::Decomp d;
+    CHECK(PayloadCalibration::decompose(ref, d));
+    printf("[m=%.5f parity=%+.0f sv=[%.5f %.5f %.5f] iso=%.5f] ",
+           d.m, d.parity, d.sv[0], d.sv[1], d.sv[2], d.isotropyRatio);
+    CHECK(fabs(d.m - 0.42236) < 1e-4);
+    CHECK(fabs(d.parity - (-1.0)) < 1e-12);
+    CHECK(fabs(d.sv[0] - 0.43386) < 1e-4);
+    CHECK(fabs(d.sv[1] - 0.42647) < 1e-4);
+    CHECK(fabs(d.sv[2] - 0.40720) < 1e-4);
+    CHECK(fabs(d.isotropyRatio - 1.0655) < 1e-3);
+    CHECK(fabs(det3(ref) - (-0.075342)) < 1e-4);
+    PASS();
+}
+
+// 各向同性自检: 明显各向异性的 A (奇异值比 = 4) 必须被【拒】, 且拒在门限上, 不是拒在拟合上。
+static void test_isotropy_gate_rejects_nonorthogonal() {
+    TEST(isotropy_gate_rejects_nonorthogonal);
+    const double D[9] = {1.0, 0.0, 0.0,  0.0, 1.0, 0.0,  0.0, 0.0, 0.25};
+    double A[9];
+    buildAWithP(0.45, -1.0, 10.0, D, A);          // 奇异值 (0.45, 0.45, 0.1125), 比 = 4
+    const double bF[3] = {0.4, 0.3, -0.2};
+    const double cs[3] = {0.01, 0.02, 0.09};
+    const double bM[3] = {0.01, -0.01, 0.005};
+    double F[NP][3], M[NP][3];
+    synthRaw(A, bF, cs, bM, g_poses, NP, F, M);
+    unsigned seed = 7u;
+    addRawNoise(F, M, NP, 0.01, 0.0005, seed);
+
+    // 线性层照样解得出来 (数据本身完全符合模型) —— 被拒的是【物理自检】, 不是拟合。
+    PayloadCalibration::RawFit fit;
+    CHECK(PayloadCalibration::fitRawLinear(g_poses, F, M, NP, fit));
+    PayloadCalibration::Decomp d;
+    CHECK(PayloadCalibration::decompose(fit.A, d));
+    printf("[iso=%.4f 被拒, 线性层 rmsF=%.4f] ", d.isotropyRatio, fit.rmsForceN);
+    CHECK(d.isotropyRatio > 3.5);                 // 确实是那个明显各向异性的 A
+    CHECK(fit.rmsForceN < 0.05);                  // 而且拟合得很"好" ——
+
+    // —— 这正是本任务的重点: 残差小【不能】证明模型形式对。门必须自己拒。
+    CHECK(!PayloadCalibration::fitRaw(g_poses, F, M, NP, fit));
+    PASS();
+}
+
+// 门限【随不确定度走】: 同一个 A, 同一个几何, 只有噪声水平变了 —— 判据要跟着翻。
+// 这条是"门限不是固定的 1.05"的直接证明。
+static void test_isotropy_gate_tracks_param_sigma() {
+    TEST(isotropy_gate_tracks_param_sigma);
+    const double D[9] = {1.0, 0.0, 0.0,  0.0, 1.0, 0.0,  0.0, 0.0, 0.95};   // 奇异值比 = 1.0526
+    double A[9];
+    buildAWithP(0.50, -1.0, 32.0, D, A);
+    const double bF[3] = {0.4, 0.3, -0.2};
+    const double cs[3] = {0.01, 0.02, 0.09};
+    const double bM[3] = {0.01, -0.01, 0.005};
+    double F[NP][3], M[NP][3];
+    PayloadCalibration::RawFit fit;
+    PayloadCalibration::Decomp d;
+
+    // (a) 噪声极小 (0.0005 N): 参数不确定度 ~0.03%, 5% 的展布解释不了 -> 拒绝
+    synthRaw(A, bF, cs, bM, g_poses, NP, F, M);
+    unsigned seed = 99u;
+    addRawNoise(F, M, NP, 0.0005, 0.00002, seed);
+    CHECK(PayloadCalibration::fitRawLinear(g_poses, F, M, NP, fit));
+    CHECK(PayloadCalibration::decompose(fit.A, d));
+    printf("[0.0005N: iso=%.3f, 判据=1+3s/m=%.3f -> 拒] ",
+           d.isotropyRatio, 1.0 + 3.0 * maxSigmaA(fit) / d.m);
+    CHECK(!PayloadCalibration::fitRaw(g_poses, F, M, NP, fit));
+
+    // (b) 同一个 A、同一个几何, 只把噪声放大 (0.30 N): 判据随不确定度抬上去 -> 通过
+    synthRaw(A, bF, cs, bM, g_poses, NP, F, M);
+    seed = 99u;
+    addRawNoise(F, M, NP, 0.30, 0.015, seed);
+    CHECK(PayloadCalibration::fitRawLinear(g_poses, F, M, NP, fit));
+    CHECK(PayloadCalibration::decompose(fit.A, d));
+    printf("[0.30N: iso=%.3f, 判据=1+3s/m=%.3f -> 过] ",
+           d.isotropyRatio, 1.0 + 3.0 * maxSigmaA(fit) / d.m);
+    CHECK(PayloadCalibration::fitRaw(g_poses, F, M, NP, fit));
+    PASS();
+}
+
+// 各向同性自检不能太紧: 实机那条正确的解 iso = 1.0655 (6.5% 展布) 必须过。
+// 这里用参考 A 的形状 + 与实机同量级的噪声造数据 —— 门限若做成固定的 1.05, 这里就红。
+static void test_isotropy_gate_accepts_realistic_spread() {
+    TEST(isotropy_gate_accepts_realistic_spread);
+    const double ref[9] = { 0.36456, 0.21055, -0.00003,
+                           -0.21828, 0.37331,  0.00298,
+                           -0.01155, -0.01493, -0.41390 };
+    const double bF[3] = {-18.55, -2.44, 0.82};
+    const double cs[3] = {0.0006, -0.0005, 0.0545};
+    const double bM[3] = {-0.16, 0.57, -0.02};
+    double F[NP][3], M[NP][3];
+    synthRaw(ref, bF, cs, bM, g_poses, NP, F, M);
+    unsigned seed = 1304u;
+    // 噪声取 0.15 N: 与实机那批同量级的不确定度 (实机 σ = 0.034 N, 但姿态只有 7 个、
+    // 自由度 9; 这里的 6 个姿态自由度更少, 要让 sigmaScale/m 落在同一个 ~3% 附近)。
+    addRawNoise(F, M, NP, 0.15, 0.008, seed);
+
+    PayloadCalibration::RawFit fit;
+    CHECK(PayloadCalibration::fitRawLinear(g_poses, F, M, NP, fit));
+    PayloadCalibration::Decomp d;
+    CHECK(PayloadCalibration::decompose(fit.A, d));
+    printf("[iso=%.4f, 限=1+3s/m=%.4f -> 过, m=%.4f kg, parity=%+.0f] ",
+           d.isotropyRatio, 1.0 + 3.0 * maxSigmaA(fit) / d.m, d.m, d.parity);
+    CHECK(d.isotropyRatio > 1.02);                // 确实带着实机那种量级的展布 (不是碰巧正交)
+    CHECK(PayloadCalibration::fitRaw(g_poses, F, M, NP, fit));   // 门必须放行
+    CHECK(fabs(d.parity - (-1.0)) < 1e-12);       // 参考 A 的手系是负的
+    CHECK(fabs(d.m - 0.4224) < 0.06);
+    PASS();
+}
+
+// 拟合器【不读 psi】: 这个模型里根本没有 psi。
+// (a) 含反射的数据也能拟合到机器精度 —— 纯偏航模型做不到 (它当年靠翻质量符号去凑);
+// (b) 把 psi 的模块状态改成任何值, 结果【逐位】不变。
+static void test_rawfit_uses_no_psi() {
+    TEST(rawfit_uses_no_psi);
+    double A[9];
+    buildA(0.657, -1.0, 24.0, 0.0, ARB_U, ARB_V, A);     // 恰好是 m·S·Rz(24°): 含反射
+    const double bF[3] = {0.31, -0.22, 0.17};
+    const double cs[3] = {0.004, -0.007, 0.081};
+    const double bM[3] = {0.003, -0.004, 0.002};
+    double F[NP][3], M[NP][3];
+    synthRaw(A, bF, cs, bM, g_poses, NP, F, M);
+
+    PayloadCalibration::RawFit withYaw, withoutYaw;
+    TcpCalibration::setSensorYawDeg(137.5);              // 一个绝不可能被"扫"到的角
+    CHECK(PayloadCalibration::fitRawLinear(g_poses, F, M, NP, withYaw));
+    TcpCalibration::setSensorYawDeg(PSI_DEG);            // 模块状态还原 (别的用例依赖它)
+    CHECK(PayloadCalibration::fitRawLinear(g_poses, F, M, NP, withoutYaw));
+
+    for (int i = 0; i < 9; i++) CHECK(withYaw.A[i] == withoutYaw.A[i]);   // 逐位
+    for (int i = 0; i < 3; i++) {
+        CHECK(withYaw.bF[i] == withoutYaw.bF[i]);
+        CHECK(withYaw.cS[i] == withoutYaw.cS[i]);
+        CHECK(withYaw.bM[i] == withoutYaw.bM[i]);
+    }
+    printf("[反射数据 psi=137.5deg 与 psi=%.0fdeg 结果逐位相同, rmsF=%.1e] ",
+           PSI_DEG, withoutYaw.rmsForceN);
+    CHECK(withoutYaw.rmsForceN < 1e-12 && withoutYaw.rmsMomentNm < 1e-12);
+    for (int i = 0; i < 9; i++) CHECK(fabs(withoutYaw.A[i] - A[i]) < 1e-12);
+    // 模块状态确实还原了 (否则后面的用例会跑在另一个重力模型上)
+    CHECK(fabs(TcpCalibration::sensorYawDeg() - PSI_DEG) < 1e-12);
+    PASS();
+}
+
+// 姿态数不足: 12 个未知量, 3 个姿态只给 9 个方程 -> 解不出
+static void test_rawfit_rejects_too_few_poses() {
+    TEST(rawfit_rejects_too_few_poses);
+    double A[9];
+    buildA(0.51, -1.0, 32.0, 0.0, ARB_U, ARB_V, A);
+    const double bF[3] = {0, 0, 0}, cs[3] = {0, 0, 0.08}, bM[3] = {0, 0, 0};
+    double F[NP][3], M[NP][3];
+    synthRaw(A, bF, cs, bM, g_poses, NP, F, M);
+    PayloadCalibration::RawFit fit;
+    CHECK(!PayloadCalibration::fitRawLinear(g_poses, F, M, 3, fit));
+    CHECK(!PayloadCalibration::fitRaw(g_poses, F, M, 3, fit));
+    CHECK(PayloadCalibration::fitRawLinear(g_poses, F, M, 4, fit));   // 4 个正好够
+    PASS();
+}
+
+// 姿态退化: 全部同姿态 -> J 的 A 列与常数项共线 -> 秩亏
+static void test_rawfit_rejects_degenerate_poses() {
+    TEST(rawfit_rejects_degenerate_poses);
+    double same[NP][6];
+    for (int i = 0; i < NP; i++)
+        for (int a = 0; a < 6; a++) same[i][a] = g_poses[0][a];
+    double A[9];
+    buildA(0.51, -1.0, 32.0, 0.0, ARB_U, ARB_V, A);
+    const double bF[3] = {0, 0, 0}, cs[3] = {0, 0, 0.08}, bM[3] = {0, 0, 0};
+    double F[NP][3], M[NP][3];
+    synthRaw(A, bF, cs, bM, same, NP, F, M);
+    PayloadCalibration::RawFit fit;
+    CHECK(!PayloadCalibration::fitRawLinear(same, F, M, NP, fit));
+    CHECK(!PayloadCalibration::fitRaw(same, F, M, NP, fit));
+    PASS();
+}
+
+// 质量尺度自检: 解出的尺度必须落在 CR3 的负载量程里 (EnableRobot 的量程)
+static void test_rawfit_rejects_bad_mass_scale() {
+    TEST(rawfit_rejects_bad_mass_scale);
+    const double bF[3] = {0, 0, 0}, cs[3] = {0, 0, 0.08}, bM[3] = {0, 0, 0};
+    double A[9], F[NP][3], M[NP][3];
+    PayloadCalibration::RawFit fit;
+
+    buildA(0.001, -1.0, 32.0, 0.0, ARB_U, ARB_V, A);      // 1 g —— 不是工具, 是模型形式错
+    synthRaw(A, bF, cs, bM, g_poses, NP, F, M);
+    CHECK(PayloadCalibration::fitRawLinear(g_poses, F, M, NP, fit));   // 线性层解得出来
+    CHECK(!PayloadCalibration::fitRaw(g_poses, F, M, NP, fit));        // 门拒掉
+
+    buildA(12.0, -1.0, 32.0, 0.0, ARB_U, ARB_V, A);       // 12 kg —— 超过 CR3 的 3 kg
+    synthRaw(A, bF, cs, bM, g_poses, NP, F, M);
+    CHECK(PayloadCalibration::fitRawLinear(g_poses, F, M, NP, fit));
+    CHECK(!PayloadCalibration::fitRaw(g_poses, F, M, NP, fit));
+    PASS();
+}
+
+// 分解的退化解: 奇异 A 定不出手系与尺度
+static void test_decompose_rejects_singular_A() {
+    TEST(decompose_rejects_singular_A);
+    const double zero[9] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
+    const double flat[9] = {1, 2, 3, 2, 4, 6, 0, 0, 0};    // 奇异值 (0, 0, ~8.1)
+    PayloadCalibration::Decomp d;
+    CHECK(!PayloadCalibration::decompose(zero, d));
+    CHECK(!PayloadCalibration::decompose(flat, d));
+    PASS();
+}
+
 int main() {
     std::cout << "=== PayloadCalibration Tests ===" << std::endl;
     test_recovers_true_payload();
@@ -552,6 +952,22 @@ int main() {
     test_recovers_sensor_yaw(35.0);
     test_recovers_sensor_yaw(80.25);   // 故意落在网格【之间】—— 验证容差 (半个步长) 不是摆设
     test_scan_cannot_fix_transposed_gravity();
+
+    // 原始力通道 (线性模型 + 分解 + 自检) —— 新模型, 不含 psi
+    std::cout << "--- raw channel (linear model, no psi) ---" << std::endl;
+    test_decompose_recovers_rotation_and_parity();
+    test_decompose_roundtrip_exact();
+    test_decompose_matches_reference_numbers();
+    test_decompose_rejects_singular_A();
+    test_rawfit_recovers_arbitrary_A();
+    test_rawfit_uses_no_psi();
+    test_isotropy_gate_rejects_nonorthogonal();
+    test_isotropy_gate_tracks_param_sigma();
+    test_isotropy_gate_accepts_realistic_spread();
+    test_rawfit_rejects_too_few_poses();
+    test_rawfit_rejects_degenerate_poses();
+    test_rawfit_rejects_bad_mass_scale();
+
     std::cout << "\n" << g_passed << " passed, " << g_failed << " failed" << std::endl;
     return g_failed ? 1 : 0;
 }
