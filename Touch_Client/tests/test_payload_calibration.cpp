@@ -1502,6 +1502,213 @@ static void test_decompose_rejects_singular_A() {
     PASS();
 }
 
+// =====================================================================================
+// ★ 实机回归 (Task 2): 用 7 个【真实姿态】的采集文件重放, 钉住整条求解链
+//   (fitRaw 的线性解 + decompose 的物理量)。
+//
+// 【为什么需要它】: 本文件其余每一条用例的数据都是【合成】的 —— 生成器与估计器虽然刻意不
+//   共用代码, 却终究出自同一套约定。calib_poses.txt 是运行期产物 (main.cpp 的 BiasCheck
+//   落盘), 它【早于】本轮的模型形式协议存在 (没有重复姿态对, 也没有逐姿态方差), 是手上
+//   唯一一份"我们没有参与制造"的数据。把它拟合出的 12 + 6 个参数钉死, 是"实现真的在解
+//   实机上那件事"的硬证据。
+//
+// ⚠ 【这些数是金标, 不是快照】: 它们由控制器用 Python 独立算出、经两轮独立复算确认
+//   (task-2-brief 的表)。**不得为了迁就将来某次改动而修改** —— 对不上就是实现回归了,
+//   要查的是实现, 不是这张表。谁在这里改数, 这条用例就死了 (从此对什么都不敏感)。
+//   每段尾注是控制器的表: 那边给 5~6 位小数, 这里是同一批数据的全精度值 (逐位核对过)。
+//
+// ⚠ 【文件是运行期产物, 未纳入版本控制】: 不在 => SKIP (不算失败), 但【必须把"跳过了"
+//   打出来】, 否则一次绿色会被误读成"这条覆盖率跑过了"。在、但姿态数不是 7 => 那是另一次
+//   采集, 金标对它不成立: 【大声失败】, 而不是拿新数据去对旧金标 (那会退化成"什么都能过")。
+//
+// 列布局 (文件头自己写着, 已逐行核对, 18 列):
+//   rx,ry,rz,x,y,z,F576*,M576*,F1304*,M1304*
+// 拟合吃 @1304 那一份 (原始通道); @576 不进拟合, 忽略。
+// ⚠ 用的是【原始未镜像】的列: 参考 A 的第三行整体为负、而它的 2×2 块 det = +0.182, 正是
+//   z 镜像还没叠上去的样子 (镜像版会得到 A[2] = +[0.0115 0.0149 0.4139], det = +0.0753)。
+//   main.cpp 只在喂给实时求解器的那一份拷贝上做镜像; 落盘与离线分析用的都是没动过的原件。
+// =====================================================================================
+
+// 金标只对 2026-09-19 12:38:19 那次采集 (7 姿态) 成立。
+static const int REF_POSES = 7;
+
+// 参考值 (全精度; 括号里是控制器表上的 5~6 位小数版本)
+static const double REF_M     = 0.4223567251;          // 0.422357 kg
+static const double REF_A[9]  = {  0.3645611253,  0.2105461118, -0.0000294763,   // 0.36456  0.21055 -0.00003
+                                  -0.2182776660,  0.3733052719,  0.0029763987,   // -0.21828 0.37331  0.00298
+                                  -0.0115452228, -0.0149328140, -0.4139021828 }; // -0.01155 -0.01493 -0.41390
+static const double REF_SV[3] = { 0.4338551651, 0.4264690060, 0.4071983364 };   // 0.43386 0.42647 0.40720
+static const double REF_ISO   = 1.0654639921;          // 1.06546
+static const double REF_DET   = -0.0753421902;         // -0.075342 -> parity -1
+static const double REF_RMSF  = 0.0223861767;          // 0.022386 N
+static const double REF_RMSM  = 0.0013974296;          // 0.001397 N·m
+static const double REF_CSMM[3] = { 0.5981153164, -0.5015476115, 54.5494358039 };  // (0.60, -0.50, 54.55) mm
+static const double REF_SIGA  = 0.0141280725;          // 0.014128 —— A 的 9 个分量里最大的 1σ
+static const double REF_COND  = 75.8194558;            // 75.82
+
+// A 的 9 个元素【共用矩阵量级】作尺子 (见下)。
+static const double REF_A_SCALE = 0.4139021828;
+
+// 【容差】= 该量自身参考量级的 1e-5 (A 的 9 个元素例外, 见下)。
+// 两头的余量都量过:
+//   · 数值可复现性: 参考值来自 Python/numpy 的 SVD 最小二乘, 本仓库走正规方程 + Jacobi
+//     特征分解 —— 两套不同实现、不同 libm, 同一个模型。实测吻合到 ~1e-12 相对; 而
+//     sin/cos 的 1 ulp 差异经 cond ≈ 76 放大也只有 ~1e-14 相对。1e-5 宽出 7~9 个数量级,
+//     换编译器/换数学库都不会误伤。
+//   · 回归灵敏度: 本用例要拦的每一类错 (姿态列序搞反、重力误用带 psi 的那一支、力矩不走
+//     叉乘、分解换约定、paramSigma 的自由度算错) 都会让这些数动 >= 1e-2 相对 —— 比容差
+//     大三个数量级。
+// ⇔ 松到不会被编译器差异误伤, 紧到任何真实回归都躲不过。
+// A 是唯一的例外: 它的 9 个元素跨 4 个数量级 (-2.9e-5 到 -0.4139), 逐元素取相对容差会让
+// 近零那一项的容差小到 3e-10 —— 那不是判断力, 是在测浮点噪声。所以 9 个元素共用矩阵量级。
+static const double RTOL = 1e-5;
+
+// 金标回归专用断言: 【不 return】—— 一次把所有对不上的量都打出来, 免得修一个冒一个。
+static void nearRef(int& bad, const char* what, double got, double ref, double tol) {
+    const double d = fabs(got - ref);
+    if (!(d <= tol)) {
+        std::cout << "\n    !! " << what << " = " << got << " (参考 " << ref
+                  << ", 差了 " << d << " > 容差 " << tol << ")" << std::endl;
+        bad++;
+    }
+}
+
+// 采集文件里姿态是 [rx,ry,rz,x,y,z], 求解器要 [x,y,z,rx,ry,rz] —— 与 main.cpp 的实时路径
+// 逐字相同的重排。**这个置换必须写死、必须注明**: 排错的话求解器会把【位置】当成角度去算
+// 重力, 而得到的 A 依旧长得像一个合法的响应矩阵 (只是错的) —— 又一次"安静地解错"。
+static void repackPoseRow(const double src[6], double dst[6]) {
+    dst[0] = src[3]; dst[1] = src[4]; dst[2] = src[5];    // x,y,z    <- 文件的第 4..6 列
+    dst[3] = src[0]; dst[4] = src[1]; dst[5] = src[2];    // rx,ry,rz <- 文件的第 1..3 列
+}
+
+static void test_replay_real_capture() {
+    std::cout << "  replay_real_capture... ";
+
+    // 候选路径: 本 exe 从 tests\ 跑 (构建脚本就会 cd 到那里), 或从 Touch_Client\ / 仓库根跑。
+    static const char* CAND[] = {
+        "calib/calib_poses.txt",
+        "../calib/calib_poses.txt",
+        "Touch_Client/calib/calib_poses.txt",
+        "../../Touch_Client/calib/calib_poses.txt"
+    };
+    FILE* fp = nullptr;
+    const char* used = nullptr;
+    for (size_t i = 0; i < sizeof(CAND) / sizeof(CAND[0]) && !fp; i++) {
+        fp = fopen(CAND[i], "r");
+        if (fp) used = CAND[i];
+    }
+    if (!fp) {
+        // 运行期产物: 这台机器上没有那次采集, 不是失败。
+        // 【但"跳过了"必须打出来】—— 绿不等于这条覆盖率真跑过。
+        std::cout << "SKIP (四个候选路径都没有 calib_poses.txt; 它是运行期产物, 允许不存在。"
+                     "本次【没有】校验实机拟合 —— 想要这条覆盖率, 先在实机上采一次,"
+                     " 或把那份夹具放回来) " << std::endl;
+        g_passed++;
+        return;
+    }
+    std::cout << "[" << used << "] ";
+
+    // 与 RawFit 的逐姿态残差表同尺寸: 超过它就没法逐姿态看残差, 也就没法诊断。
+    static const int MAXN = PayloadCalibration::RAW_POSE_REPORT_MAX;
+    double rawRows[MAXN][6];          // 文件给的 [rx,ry,rz,x,y,z]
+    double F[MAXN][3], M[MAXN][3];
+    int n = 0;
+    char line[512];
+    while (fgets(line, sizeof(line), fp)) {
+        const char* q = line;
+        while (*q == ' ' || *q == '\t') q++;
+        if (*q == '\0' || *q == '\r' || *q == '\n' || *q == '#') continue;   // 空行与注释头
+        if (n >= MAXN) { n = -1; break; }                                    // 行数超上限
+        double c[18];
+        // 【不静默跳行】: 列数对不上 = 布局变了, 拿它去对金标只会得出一个假的结论。
+        if (sscanf(q, "%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf",
+                   &c[0], &c[1], &c[2], &c[3], &c[4], &c[5], &c[6], &c[7], &c[8],
+                   &c[9], &c[10], &c[11], &c[12], &c[13], &c[14], &c[15], &c[16], &c[17]) != 18) {
+            n = -2;
+            break;
+        }
+        for (int a = 0; a < 6; a++) rawRows[n][a] = c[a];
+        // @1304 = 第 13..18 列 (下标 12..17): 拟合吃的那一份原始通道
+        for (int a = 0; a < 3; a++) { F[n][a] = c[12 + a]; M[n][a] = c[15 + a]; }
+        n++;
+    }
+    fclose(fp);
+
+    if (n < 0) {
+        std::cout << "FAIL: 采集文件读不动 (行数超上限 或 有一行不是 18 列浮点) ——"
+                     " 布局变了就别拿它去对金标。" << std::endl;
+        g_failed++;
+        return;
+    }
+    if (n != REF_POSES) {
+        std::cout << "FAIL: 文件里有 " << n << " 个姿态, 而金标只对 " << REF_POSES
+                  << " 个姿态那一批 (2026-09-19 12:38:19) 成立。" << std::endl
+                  << "      这是【另一次采集】, 不是实现回归 —— 要么把那份夹具放回来,"
+                     " 要么【显式】重新导出金标并在报告里说明; 不要就地改数。" << std::endl;
+        g_failed++;
+        return;
+    }
+
+    double poses[MAXN][6];
+    for (int i = 0; i < n; i++) repackPoseRow(rawRows[i], poses[i]);
+
+    PayloadCalibration::RawFit fit;
+
+    // (a) 不带令牌: 这批数据是旧协议采集的 (没有重复姿态对, 也没有逐姿态方差), 尺子不齐
+    //     -> 新契约【拒给参数】。这不是"实现坏了", 正是门在按设计工作 —— 先把它钉住,
+    //     免得将来有人用"放宽门限"把这条回放变成生产采纳路径。
+    CHECK(!PayloadCalibration::fitRaw(poses, F, M, n, fit));
+    CHECK(fit.modelFormStatus == PayloadCalibration::MODEL_FORM_NO_NOISE);
+    CHECK(!fit.modelFormChecked);
+
+    // (b) 逐字写出那个令牌: 离线重放 (手上本来就没有采集现场、拿不到重复姿态对) 才拿得到
+    //     参数 —— 而它【仍然】不会被伪装成"验过了"。
+    CHECK(PayloadCalibration::fitRaw(poses, F, M, n, fit, nullptr, nullptr, 1,
+                                     PayloadCalibration::I_ACCEPT_UNVERIFIED_MODEL_FORM));
+    CHECK(!fit.modelFormChecked);
+    CHECK(fit.modelFormStatus == PayloadCalibration::MODEL_FORM_NO_NOISE);
+
+    // ---- 金标: 12 + 6 个参数与派生的物理量, 逐项对 ----
+    int bad = 0;
+    for (int i = 0; i < 9; i++) {
+        char what[16];
+        snprintf(what, sizeof(what), "A[%d][%d]", i / 3, i % 3);
+        nearRef(bad, what, fit.A[i], REF_A[i], RTOL * REF_A_SCALE);
+    }
+    nearRef(bad, "massScale (kg)",   fit.massScale,       REF_M,      RTOL * fabs(REF_M));
+    nearRef(bad, "parity",           fit.parity,         -1.0,        1e-12);
+    nearRef(bad, "isotropyRatio",    fit.isotropyRatio,   REF_ISO,    RTOL * fabs(REF_ISO));
+    nearRef(bad, "rmsForceN",        fit.rmsForceN,       REF_RMSF,   RTOL * fabs(REF_RMSF));
+    nearRef(bad, "rmsMomentNm",      fit.rmsMomentNm,     REF_RMSM,   RTOL * fabs(REF_RMSM));
+    nearRef(bad, "cS[0] (mm)",       fit.cS[0] * 1000.0,  REF_CSMM[0], RTOL * fabs(REF_CSMM[0]));
+    nearRef(bad, "cS[1] (mm)",       fit.cS[1] * 1000.0,  REF_CSMM[1], RTOL * fabs(REF_CSMM[1]));
+    nearRef(bad, "cS[2] (mm)",       fit.cS[2] * 1000.0,  REF_CSMM[2], RTOL * fabs(REF_CSMM[2]));
+    nearRef(bad, "max paramSigma(A)", maxSigmaA(fit),     REF_SIGA,   RTOL * fabs(REF_SIGA));
+    nearRef(bad, "cond",             fit.cond,            REF_COND,   RTOL * fabs(REF_COND));
+
+    // 分解那一半: 奇异值 / 行列式 (行列式用测试自己的 det3, 与 decompose 的 parity 互为对照)。
+    // RawFit 只报 m/parity/isotropyRatio, 奇异值要走 decompose —— 两条路必须落在同一批数上。
+    PayloadCalibration::Decomp d;
+    CHECK(PayloadCalibration::decompose(fit.A, d));
+    for (int k = 0; k < 3; k++) {
+        char what[16];
+        snprintf(what, sizeof(what), "sv[%d]", k);
+        nearRef(bad, what, d.sv[k], REF_SV[k], RTOL * fabs(REF_SV[k]));
+    }
+    nearRef(bad, "decompose.m",      d.m,             REF_M,   RTOL * fabs(REF_M));
+    nearRef(bad, "decompose.parity", d.parity,       -1.0,     1e-12);
+    nearRef(bad, "decompose.iso",    d.isotropyRatio, REF_ISO, RTOL * fabs(REF_ISO));
+    nearRef(bad, "det(A)",           det3(fit.A),     REF_DET, RTOL * fabs(REF_DET));
+
+    printf("[7 姿态实机: m=%.6f kg, parity=%+.0f, iso=%.5f, rmsF=%.6f N, rmsM=%.6f N·m,"
+           " cS=(%.4f, %.4f, %.4f) mm, cond=%.4f, maxSigmaA=%.7f] ",
+           fit.massScale, fit.parity, fit.isotropyRatio, fit.rmsForceN, fit.rmsMomentNm,
+           fit.cS[0] * 1000.0, fit.cS[1] * 1000.0, fit.cS[2] * 1000.0, fit.cond, maxSigmaA(fit));
+
+    if (bad != 0) { std::cout << "FAIL (" << bad << " 项对不上金标)" << std::endl; g_failed++; return; }
+    PASS();
+}
+
 int main() {
     std::cout << "=== PayloadCalibration Tests ===" << std::endl;
     test_recovers_true_payload();
@@ -1552,6 +1759,10 @@ int main() {
     test_rawfit_rejects_too_few_poses();
     test_rawfit_rejects_degenerate_poses();
     test_rawfit_rejects_bad_mass_scale();
+    // ★ 实机回归: 7 个真实姿态的采集文件重放, 逐项对金标 (文件不在则 SKIP)。
+    // 【放在最后】: 它会把 [Payload] 的逐姿态残差表与"接受未检验模型形式"的告警打到
+    // stderr, 排在最后免得那些输出插在别的用例中间。
+    test_replay_real_capture();
 
     std::cout << "\n" << g_passed << " passed, " << g_failed << " failed" << std::endl;
     return g_failed ? 1 : 0;
