@@ -117,13 +117,20 @@ static DWORD WINAPI forceReaderThread(LPVOID) {
             // (见 AppState.h 的说明)。现在只镜像进 ForceData, 供运动探针并排打印对照。
             const double* tcpPosePtr = reinterpret_cast<const double*>(buf + 624);
             const double* tcpSpeedPtr = reinterpret_cast<const double*>(buf + 672);
+            // 同一帧里的 SixForceValue @1304 = "当前六维力数据原始值" —— 与 @576 的派生量
+            // 是【两个不同的量】, 见 AppState.h。六维力在线状态 @1037 (char, 单字节)。
+            // 帧长 1440: 1304+48=1352 与 1037 都在范围内。
+            double* sixForcePtr = reinterpret_cast<double*>(buf + 1304);
+            const int sixForceOnline = static_cast<int>(static_cast<unsigned char>(buf[1037]));
             EnterCriticalSection(&app.forceDataMutex);
             for (int i = 0; i < 6; i++) {
                 app.forceData.raw[i] = forcePtr[i];
                 app.forceData.tcpForce[i] = tcpForcePtr[i];
                 app.forceData.tcpPoseActual[i] = tcpPosePtr[i];
                 app.forceData.tcpSpeedActual[i] = tcpSpeedPtr[i];
+                app.forceData.sixForceRaw[i] = sixForcePtr[i];
             }
+            app.forceData.sixForceOnline = sixForceOnline;
             app.forceData.lastUpdateMs = GetTickCount();
             app.forceData.isStale = false;
             LeaveCriticalSection(&app.forceDataMutex);

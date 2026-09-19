@@ -58,11 +58,15 @@ namespace BiasCheck {
     static int   avgCount = 0;
     static double accum[6];
     static double accumTcp[6];           // 同上, 但累加 @720 TCPForce
+    static double accumSix[6];           // 同上, 但累加 @1304 SixForceValue (原始值)
     static double pose[MAX_POSES][6];    // Rx,Ry,Rz (deg) + X,Y,Z (mm)
     static double bias[MAX_POSES][6];    // 该姿态平均 raw 力/力矩 (@576 ActualTCPForce)
     // 该姿态平均 @720 TCPForce。两路一起采、一起报, 好对比哪一路才反映负载参数。
     // 2026-09-18 实测: 改 EnableRobot 的负载时 @576 完全不跟着变, @720 按比例变。
     static double biasTcp[MAX_POSES][6];
+    // 该姿态平均 @1304 SixForceValue (原始值)。三路一起采、一起报 —— 每次求解落盘的
+    // calib_poses.txt 就是给这三路做裁决用的: 传感器离线 / 读错字段 / z 通道真的死了。
+    static double biasSix[MAX_POSES][6];
 
     // 数据只有在「机械臂配置 == 采集时的配置」时才可用于复验。
     // 求解改了负载/本地补偿 -> 已采数据作废 (拒绝 report 判定)。
@@ -79,7 +83,7 @@ namespace BiasCheck {
         count = 0;
         sampling = false;
         avgCount = 0;
-        for (int i = 0; i < 6; i++) { accum[i] = 0.0; accumTcp[i] = 0.0; }
+        for (int i = 0; i < 6; i++) { accum[i] = 0.0; accumTcp[i] = 0.0; accumSix[i] = 0.0; }
     }
 
     // 静默退出 (被其他采集模式抢占时调用, 丢弃已采姿态)
@@ -109,7 +113,7 @@ namespace BiasCheck {
             std::cout << "[BIAS] 已达 " << MAX_POSES << " 个姿态, 按 'm' 输出报告" << std::endl;
             return;
         }
-        for (int i = 0; i < 6; i++) { accum[i] = 0.0; accumTcp[i] = 0.0; }
+        for (int i = 0; i < 6; i++) { accum[i] = 0.0; accumTcp[i] = 0.0; accumSix[i] = 0.0; }
         avgCount = 0;
         lastSampleMs = 0;
         sampleStartMs = GetTickCount();
@@ -137,6 +141,7 @@ namespace BiasCheck {
         for (int i = 0; i < 6; i++) {
             accum[i] += fd.raw[i];
             accumTcp[i] += fd.tcpForce[i];   // 同时采 @720, 见 biasTcp 的说明
+            accumSix[i] += fd.sixForceRaw[i]; // 同时采 @1304, 见 biasSix 的说明
         }
         avgCount++;
 
@@ -152,6 +157,7 @@ namespace BiasCheck {
         for (int i = 0; i < 6; i++) {
             bias[count][i]    = accum[i] / avgCount;
             biasTcp[count][i] = accumTcp[i] / avgCount;
+            biasSix[count][i] = accumSix[i] / avgCount;
         }
 
         EnterCriticalSection(&appState.robotPoseMutex);
@@ -163,9 +169,23 @@ namespace BiasCheck {
         pose[count][5] = appState.robotActualPose.z;
         LeaveCriticalSection(&appState.robotPoseMutex);
 
-        printf("[BIAS] Pose %d: R=(%+.1f,%+.1f,%+.1f)deg F=(%+.3f,%+.3f,%+.3f) N\n",
-               count + 1, pose[count][0], pose[count][1], pose[count][2],
-               bias[count][0], bias[count][1], bias[count][2]);
+        // 三路并排: @576 派生量 / @720 关节电流反推 / @1304 原始读数 —— 看的是"哪一路
+        // 才反映负载", 以及传感器是否真的在线。姿态行保持原有前缀不变 (R=...deg),
+        // 力向量各自带偏移标签另起一行, 免得三路被看混。
+        // 在线状态取自本帧快照 fd (已在锁内拷贝), 不再去读 appState。
+        printf("[BIAS] Pose %d: R=(%+.1f,%+.1f,%+.1f)deg\n",
+               count + 1, pose[count][0], pose[count][1], pose[count][2]);
+        printf("       @576  F=(%+.3f,%+.3f,%+.3f)  M=(%+.3f,%+.3f,%+.3f)\n",
+               bias[count][0], bias[count][1], bias[count][2],
+               bias[count][3], bias[count][4], bias[count][5]);
+        printf("       @720  F=(%+.3f,%+.3f,%+.3f)  M=(%+.3f,%+.3f,%+.3f)\n",
+               biasTcp[count][0], biasTcp[count][1], biasTcp[count][2],
+               biasTcp[count][3], biasTcp[count][4], biasTcp[count][5]);
+        printf("       @1304 F=(%+.3f,%+.3f,%+.3f)  M=(%+.3f,%+.3f,%+.3f)"
+               "   SixForceOnline=%d\n",
+               biasSix[count][0], biasSix[count][1], biasSix[count][2],
+               biasSix[count][3], biasSix[count][4], biasSix[count][5],
+               fd.sixForceOnline);
         count++;
     }
 
@@ -368,6 +388,50 @@ namespace BiasCheck {
         fclose(f);
     }
 
+    // 每次求解尝试都把这批姿态连同三路力数据落成 CSV —— 控制台会滚掉, 而"三个力通道
+    // 到底哪个是真的"要靠并排的原始数据裁决 (@576 派生量 / @1304 原始读数)。
+    // 与 logCalibAttempt 同址 (calib\calib_poses.txt), 同样【只追加, 永不截断】:
+    // 打开方式必须是 "a+", 绝不能先试 "r" 再决定 "w"/"a" (理由同 logCalibAttempt)。
+    // 表头每次尝试都写, 一个块自描述, 便于单独截一段去分析。
+    // 姿态列的顺序是 BiasCheck 的存储顺序 [rx,ry,rz,x,y,z], 【不是】求解器要的
+    // [x,y,z,rx,ry,rz] —— 表头已注明, 读的人别搞反。
+    static void logPoseData()
+    {
+        // fileFor 返回 static 缓冲, 调用方必须立即拷贝 (头文件已注明)。
+        char path[512];
+        snprintf(path, sizeof(path), "%s", CalibStore::fileFor("calib_poses.txt"));
+
+        FILE* f = fopen(path, "a+");
+        if (!f) return;
+
+        char ts[24];
+        const std::time_t now = std::time(nullptr);
+        std::tm tmInfo;
+        localtime_s(&tmInfo, &now);
+        strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", &tmInfo);
+
+        int online = -1;
+        EnterCriticalSection(&appState.forceDataMutex);
+        online = appState.forceData.sixForceOnline;
+        LeaveCriticalSection(&appState.forceDataMutex);
+
+        fprintf(f, "# attempt %s  poses=%d  sixForceOnline=%d\n", ts, count, online);
+        fprintf(f, "# rx,ry,rz,x,y,z,F576x,F576y,F576z,M576x,M576y,M576z,"
+                   "F1304x,F1304y,F1304z,M1304x,M1304y,M1304z\n");
+        for (int i = 0; i < count; i++) {
+            fprintf(f, "%.1f,%.1f,%.1f,%.3f,%.3f,%.3f,"
+                       "%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,"
+                       "%.3f,%.3f,%.3f,%.3f,%.3f,%.3f\n",
+                    pose[i][0], pose[i][1], pose[i][2],
+                    pose[i][3], pose[i][4], pose[i][5],
+                    bias[i][0], bias[i][1], bias[i][2],
+                    bias[i][3], bias[i][4], bias[i][5],
+                    biasSix[i][0], biasSix[i][1], biasSix[i][2],
+                    biasSix[i][3], biasSix[i][4], biasSix[i][5]);
+        }
+        fclose(f);
+    }
+
     // 's': 用已采数据最小二乘求解负载参数 → 把【残余量】装进本地补偿的本会话生效值;
     //      force_calib.json 里落盘的 mass_kg 却是 0。
     //      ⚠ 内存与落盘故意不同 (差的就是"本会话"), 缘由见下面 [本地补偿] 一节的说明 —— 别去"对齐"。
@@ -390,6 +454,9 @@ namespace BiasCheck {
             logCalibAttempt(outcome, nullptr);
             return;
         }
+        // 姿态数够了就落盘 —— 【在任何拒绝判据之前】: 被拒绝的那几次同样要留下数据,
+        // 否则"为什么被拒"这件事就只剩控制台上滚掉的那几行。只追加, 见 logPoseData。
+        logPoseData();
         // 采样中途不允许求解
         if (sampling) {
             std::cout << "[BIAS] 正在采样, 稍后再求解" << std::endl;

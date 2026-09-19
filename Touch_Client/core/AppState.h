@@ -149,6 +149,13 @@ public:
         // 30004 帧里的 TCPSpeedActual @672 = "TCP笛卡尔实际速度值" (6×double)。
         double tcpSpeedActual[6] = {0};
 
+        // 30004 帧 @1304 SixForceValue[6] = "当前六维力数据原始值" (厂商文档 P76)。
+        // 与 raw[] (@576 ActualTCPForce = "TCP传感器力值【通过六维力计算】") 是【两个不同的量】:
+        // @576 是【派生量】, 这个是原始读数。我们一直只读 @576。
+        double sixForceRaw[6] = {0};
+        // 30004 帧 @1037 SixForceOnline = "六维力在线状态" (char)。原样存放, 不作解释。
+        int sixForceOnline = -1;
+
         // 标定参数 (由 ForceCalibration 求解, ForceCompensation 读取)
         bool isCalibrated = false;
         double calibMassKg = 0.0;           // 末端等效质量 (kg)
