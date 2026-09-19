@@ -585,6 +585,20 @@ static void synthRaw(const double A[9], const double bF[3], const double cs[3],
     synthRawWith(gravitySensorRefAt, 0.0, A, bF, cs, bM, poses, n, forces, moments);
 }
 
+// ===== 重复姿态对 (模型形式检验的尺子) =====
+// 采集协议: 摆完所有姿态后【回到第 1 个姿态】(位置和姿态都回来) 再采一次, 中间有真实运动。
+// 合成数据里就是"把第 1 行那个姿态再放一遍, 给它独立的一份噪声"。
+// 【为什么必须新加一行, 而不是原地复制一遍】: 那一行要有【自己的】噪声与自己的偏差 —— 尺子
+// 量的正是"同一位姿再来一次会差多少", 复制一份只会量出 0。
+static const int NQ = NP + 1;
+static const PayloadCalibration::RepeatPair REP_PAIR = {0, NP};
+
+static void buildRepeatPoses(double out[NQ][6]) {
+    for (int i = 0; i < NP; i++)
+        for (int a = 0; a < 6; a++) out[i][a] = g_poses[i][a];
+    for (int a = 0; a < 6; a++) out[NP][a] = g_poses[0][a];   // 第二次访问: 同一个位姿
+}
+
 // 逐姿态的噪声申报 —— 测试【自己知道】它往均值里加了多少噪声 (addRawNoise 的 sigF/sigM),
 // 所以它把加进去的量如实申报成"这个输入值的 1σ"。N = 1 = 没有做平均 (噪声是直接加在均值上
 // 的), var = σ² -> σ_mean = σ。
@@ -599,6 +613,14 @@ static void declareNoise(int n, double sigF, double sigM, PayloadCalibration::Po
             nz[i].varM[a] = sigM * sigM;
         }
     }
+}
+
+// 姿态级尺子 (力) —— 测试侧独立算一遍, 与 poseResidualRatioF 的分母同口径。
+// 不去读那个比值再反推: 反推会把"分母算错"这类 bug 一起消掉。
+static double yardFromFit(const PayloadCalibration::RawFit& f) {
+    return sqrt((f.repeatSigmaF[0] * f.repeatSigmaF[0]
+               + f.repeatSigmaF[1] * f.repeatSigmaF[1]
+               + f.repeatSigmaF[2] * f.repeatSigmaF[2]) / 3.0);
 }
 
 // A = m · diag(1,1,parity) · Rz(theta) · P   (P 由调用方给)
@@ -777,22 +799,24 @@ static void test_isotropy_ratio_is_reported_not_gated() {
     const double bF[3] = {0.4, 0.3, -0.2};
     const double cs[3] = {0.01, 0.02, 0.09};
     const double bM[3] = {0.01, -0.01, 0.005};
-    double F[NP][3], M[NP][3];
-    synthRaw(A, bF, cs, bM, g_poses, NP, F, M);
+    double poses[NQ][6], F[NQ][3], M[NQ][3];
+    buildRepeatPoses(poses);
+    synthRaw(A, bF, cs, bM, poses, NQ, F, M);
     unsigned seed = 7u;
-    addRawNoise(F, M, NP, 0.01, 0.0005, seed);
+    addRawNoise(F, M, NQ, 0.01, 0.0005, seed);
 
-    PayloadCalibration::PoseNoise nz[NP];
-    declareNoise(NP, 0.01, 0.0005, nz);
+    PayloadCalibration::PoseNoise nz[NQ];
+    declareNoise(NQ, 0.01, 0.0005, nz);
 
     // 接受 —— 且是【过了模型形式检验】才接受的 (不是"没做检验")。
     PayloadCalibration::RawFit fit;
-    CHECK(PayloadCalibration::fitRaw(g_poses, F, M, NP, fit, nz));
+    CHECK(PayloadCalibration::fitRaw(poses, F, M, NQ, fit, nz, &REP_PAIR));
     CHECK(fit.modelFormChecked);
-    printf("[iso=%.4f 报告 (m=%.4f kg), 残差 %.4f N vs 噪声 %.4f N -> 过] ",
-           fit.isotropyRatio, fit.massScale, fit.rmsForceN, fit.noiseForceN);
+    CHECK(fit.modelFormStatus == PayloadCalibration::MODEL_FORM_OK);
+    printf("[iso=%.4f 报告 (m=%.4f kg), 残差 %.4f N vs 尺子 %.4f N (姿态内噪声 %.4f N) -> 过] ",
+           fit.isotropyRatio, fit.massScale, fit.rmsForceN, yardFromFit(fit), fit.noiseForceN);
     CHECK(fit.isotropyRatio > 3.5);              // 展布照实报出来 (4:1)
-    CHECK(fit.chi2ForceRatio < 1.0 + 3.0 * sqrt(2.0 / fit.chi2DofForce));
+    CHECK(fit.chi2RepForceRatio < 1.0 + 3.0 * sqrt(2.0 / fit.chi2DofForce));
     // 报告量与 decompose 是同一个数 (不是另算一份口径)
     PayloadCalibration::Decomp d;
     CHECK(PayloadCalibration::decompose(fit.A, d));
@@ -801,11 +825,14 @@ static void test_isotropy_ratio_is_reported_not_gated() {
     PASS();
 }
 
-// ★ 评审的反例 (本次修复要拦住的正是它): 真值【完全各向同性】, 数据用历史上的【转置回归量】
+// ★ 评审的反例 (两轮修复都要拦住的正是它): 真值【完全各向同性】, 数据用历史上的【转置回归量】
 //   生成 (就是那个让实机安静地解错两次的 bug), 0.02 N 噪声。
-//   旧的各向同性门限拿它没办法: 拟合 iso≈2.01, 而门限 1+3σ/m 随残差一起涨到 ≈2.59
-//   → 【接受】, 返回 m≈0.4159 (真值 0.42)。这正是"安静地给出错答案"。
-//   新判据必须拒: 残差 ~0.47 N 对上实测噪声 0.02 N, χ²/dof 差着几个数量级。
+//   · 第一版的各向同性门限拿它没办法: 拟合 iso≈2.01, 而门限 1+3σ/m 随残差一起涨到 ≈2.59
+//     → 【接受】, 返回 m≈0.4159 (真值 0.42)。这正是"安静地给出错答案"。
+//   · 第二版的"残差 vs 姿态内噪声"χ² 能拦它, 但同一把尺子会错杀实机那条正确的解 (见下一条
+//     用例): 姿态内噪声量不出姿态间的系统差。
+//   本轮的判据 (残差 vs 【姿态间复现性】) 照样拒: 重复访问这一对只差姿态内噪声, 尺子很细,
+//   而残差 0.46 N 差着 20 倍以上。
 static void test_modelform_rejects_transposed_convention() {
     TEST(modelform_rejects_transposed_convention);
     double A[9];
@@ -813,32 +840,35 @@ static void test_modelform_rejects_transposed_convention() {
     const double bF[3] = {0.0, 0.0, 0.0};
     const double cs[3] = {0.0, 0.0, 0.08};
     const double bM[3] = {0.0, 0.0, 0.0};
-    double F[NP][3], M[NP][3];
-    synthRawWith(gravityTransposedAt, 0.0, A, bF, cs, bM, g_poses, NP, F, M);
+    double poses[NQ][6], F[NQ][3], M[NQ][3];
+    buildRepeatPoses(poses);
+    synthRawWith(gravityTransposedAt, 0.0, A, bF, cs, bM, poses, NQ, F, M);
     unsigned seed = 20260919u;
-    addRawNoise(F, M, NP, 0.02, 0.001, seed);
+    addRawNoise(F, M, NQ, 0.02, 0.001, seed);
 
-    PayloadCalibration::PoseNoise nz[NP];
-    declareNoise(NP, 0.02, 0.001, nz);
+    PayloadCalibration::PoseNoise nz[NQ];
+    declareNoise(NQ, 0.02, 0.001, nz);
 
     // 线性层照样解得出来 —— 被拒的是模型形式, 不是拟合。
     PayloadCalibration::RawFit fit;
-    CHECK(PayloadCalibration::fitRawLinear(g_poses, F, M, NP, fit, nz));
+    CHECK(PayloadCalibration::fitRawLinear(poses, F, M, NQ, fit, nz, &REP_PAIR));
     PayloadCalibration::Decomp d;
     CHECK(PayloadCalibration::decompose(fit.A, d));
-    // 旧门限的自指关系照实算出来 (供对照, 不作断言依据): 残差涨 -> σ 涨 -> 门限涨得比 iso 快。
+    // 旧各向同性门限的自指关系照实算出来 (供对照, 不作断言依据): 残差涨 -> σ 涨 -> 门限涨得比 iso 快。
     const double oldLimit = 1.0 + 3.0 * maxSigmaA(fit) / d.m;
-    printf("[转置数据: rmsF=%.4f N, 噪声=%.4f N, iso=%.3f, 旧门限 1+3s/m=%.3f -> 旧行为接受] ",
-           fit.rmsForceN, fit.noiseForceN, d.isotropyRatio, oldLimit);
+    printf("[转置数据: rmsF=%.4f N, 尺子=%.4f N, iso=%.3f, 旧门限 1+3s/m=%.3f -> 旧行为接受] ",
+           fit.rmsForceN, yardFromFit(fit), d.isotropyRatio, oldLimit);
     CHECK(d.isotropyRatio < oldLimit);            // 旧门限确实放它过去 (这就是那个漏洞)
-    CHECK(fit.rmsForceN > 0.1);                   // 残差远大于噪声 —— 数据与模型形式不符
+    CHECK(fit.rmsForceN > 0.1);                   // 残差远大于尺子 —— 数据与模型形式不符
 
-    // 新判据: 拒。
-    CHECK(!PayloadCalibration::fitRaw(g_poses, F, M, NP, fit, nz));
-    printf("[χ²/dof=%.1f (dof=%d, 限=%.2f) -> 拒] ",
-           fit.chi2ForceRatio, fit.chi2DofForce,
-           1.0 + 3.0 * sqrt(2.0 / fit.chi2DofForce));
-    CHECK(fit.chi2ForceRatio > 1.0 + 3.0 * sqrt(2.0 / fit.chi2DofForce));
+    // 判据 (残差 vs 姿态间复现性): 拒。
+    CHECK(!PayloadCalibration::fitRaw(poses, F, M, NQ, fit, nz, &REP_PAIR));
+    printf("[χ²rep/dof=%.1f (dof=%d, 限=%.2f) -> 拒; 最差 pose %d] ",
+           fit.chi2RepForceRatio, fit.chi2DofForce,
+           1.0 + 3.0 * sqrt(2.0 / fit.chi2DofForce), fit.worstPoseF + 1);
+    CHECK(fit.modelFormStatus == PayloadCalibration::MODEL_FORM_OK);   // 尺子是齐的, 是判决拒的
+    CHECK(!fit.modelFormChecked);                                      // 拒了就不算"验过"
+    CHECK(fit.chi2RepForceRatio > 1.0 + 3.0 * sqrt(2.0 / fit.chi2DofForce));
     PASS();
 }
 
@@ -851,65 +881,92 @@ static void test_modelform_accepts_correct_fit_with_noise() {
     const double bF[3] = {1.2, -0.4, 0.3};
     const double cs[3] = {0.005, -0.008, 0.061};
     const double bM[3] = {0.01, -0.01, 0.005};
-    double F[NP][3], M[NP][3];
-    synthRaw(A, bF, cs, bM, g_poses, NP, F, M);
+    double poses[NQ][6], F[NQ][3], M[NQ][3];
+    buildRepeatPoses(poses);
+    synthRaw(A, bF, cs, bM, poses, NQ, F, M);
     unsigned seed = 20260919u;
-    addRawNoise(F, M, NP, 0.02, 0.001, seed);
+    addRawNoise(F, M, NQ, 0.02, 0.001, seed);
 
-    PayloadCalibration::PoseNoise nz[NP];
-    declareNoise(NP, 0.02, 0.001, nz);
+    PayloadCalibration::PoseNoise nz[NQ];
+    declareNoise(NQ, 0.02, 0.001, nz);
 
     PayloadCalibration::RawFit fit;
-    CHECK(PayloadCalibration::fitRawLinear(g_poses, F, M, NP, fit, nz));
-    printf("[正确约定: rmsF=%.4f N, 噪声=%.4f N, χ²/dof=%.2f (dof=%d), 力矩失拟=%.2f (dof=%d)] ",
-           fit.rmsForceN, fit.noiseForceN, fit.chi2ForceRatio, fit.chi2DofForce,
+    CHECK(PayloadCalibration::fitRawLinear(poses, F, M, NQ, fit, nz, &REP_PAIR));
+    printf("[正确约定: rmsF=%.4f N, 尺子=%.4f N, χ²rep/dof=%.2f (dof=%d), 力矩失拟=%.2f (dof=%d)] ",
+           fit.rmsForceN, yardFromFit(fit), fit.chi2RepForceRatio, fit.chi2DofForce,
            fit.lackOfFitMomentRatio, fit.lackOfFitMomentDof);
-    CHECK(PayloadCalibration::fitRaw(g_poses, F, M, NP, fit, nz));
+    CHECK(PayloadCalibration::fitRaw(poses, F, M, NQ, fit, nz, &REP_PAIR));
     CHECK(fit.modelFormChecked);
-    // 正确模型下 χ²/dof 应落在 1 附近 —— 门限 1+3·sqrt(2/dof) 之内, 且不该小得离谱
-    // (太小说明噪声被报大了, 那会让判据失去分辨力)。
-    CHECK(fit.chi2ForceRatio < 1.0 + 3.0 * sqrt(2.0 / fit.chi2DofForce));
-    CHECK(fit.chi2ForceRatio > 0.2);
+    CHECK(fit.momentFormChecked);            // 力矩那一半也真的验了 (不是悄悄跳过)
+    // 正确模型下 χ²rep/dof 应落在 1 附近 —— 门限 1+3·sqrt(2/dof) 之内, 且不该小得离谱
+    // (太小说明尺子被报大了, 那会让判据失去分辨力)。
+    CHECK(fit.chi2RepForceRatio < 1.0 + 3.0 * sqrt(2.0 / fit.chi2DofForce));
+    CHECK(fit.chi2RepForceRatio > 0.2);
     printf("[A[0] err=%.1e] ", fabs(fit.A[0] - A[0]));
     CHECK(fabs(fit.A[0] - A[0]) < 4.0 * fit.paramSigma[0]);
     PASS();
 }
 
-// 门限【随实测噪声走】: 同一批数据 (同一个模型形式错), 只把【申报的】噪声改掉 —— 判决跟着翻。
-// 这条是"阈值来自实测噪声, 不是固定的 N 数"的直接证明:
-//   (a) 申报 0.02 N: 残差 0.47 N 解释不了 -> 拒;
-//   (b) 申报 0.60 N: 0.47 N 的残差与这么吵的测量并不矛盾 -> 接受。
-// (取代 isotropy_gate_tracks_param_sigma: 它当年用【同一批数据 + 两个噪声水平】证明"门限随
-//  paramSigma 走", 而 paramSigma 来自残差 —— 噪声大残差也大, 那个"随"是自指的。)
-static void test_modelform_gate_tracks_measured_noise() {
-    TEST(modelform_gate_tracks_measured_noise);
+// ★ 本轮修复的核心性质 (brief 点名要的那条): 【判决跟着姿态间复现性走, 不跟着姿态内噪声走】。
+//   同一批数据、同一个重复姿态, 只把【第二次访问】的读数改掉:
+//     (a) 第二次访问与第一次一致 (复现性好) -> 尺子只有姿态内噪声那么细 -> 残差远超尺子 -> 拒;
+//     (b) 第二次访问漂了一截 (现场复现性就这么差) -> 尺子涨到与残差同量级 -> 过。
+//   【两例里的姿态内噪声逐位相同、申报值也相同】, 所以这一对直接证否了"拿姿态内噪声当尺子":
+//   那把尺子对两例给出同一个判决, 而"残差有没有超出复现性"这个问题的答案两例不同。
+//   (取代 modelform_gate_tracks_measured_noise: 那条证明的是"门限随实测噪声走", 但它量的
+//    噪声是【姿态内】的 —— 尺度确实来自数据, 只是量错了对象。)
+static void test_modelform_gate_tracks_repeat_reproducibility() {
+    TEST(modelform_gate_tracks_repeat_reproducibility);
     double A[9];
     buildA(0.42, -1.0, 30.0, 0.0, ARB_U, ARB_V, A);
-    const double bF[3] = {0.0, 0.0, 0.0};
-    const double cs[3] = {0.0, 0.0, 0.08};
-    const double bM[3] = {0.0, 0.0, 0.0};
-    double F[NP][3], M[NP][3];
-    synthRawWith(gravityTransposedAt, 0.0, A, bF, cs, bM, g_poses, NP, F, M);
+    const double bF[3] = {1.0, -0.5, 0.2};
+    const double cs[3] = {0.005, -0.008, 0.061};
+    const double bM[3] = {0.01, -0.01, 0.005};
+    double poses[NQ][6], F[NQ][3], M[NQ][3];
+    buildRepeatPoses(poses);
+    synthRaw(A, bF, cs, bM, poses, NQ, F, M);
+    // 姿态相关的模型误差: g 的二次项, 线性模型 (b + A·g) 【吸收不掉】—— 余下的就是"形式错"。
+    // 【关键】它是位姿的函数: 同一个姿态两次访问, 这一项一模一样, 所以它【不抬高尺子】——
+    // 姿态相关的误差正是靠这一点与"复现性差"区分开的。
+    for (int i = 0; i < NQ; i++) {
+        double g[3];
+        gravitySensorRefAt(poses[i], 0.0, g);
+        const double u = (g[0] * g[1]) / (G * G);
+        F[i][0] += 1.40 * u; F[i][1] += -1.12 * u; F[i][2] += 1.68 * u;
+    }
     unsigned seed = 20260919u;
-    addRawNoise(F, M, NP, 0.02, 0.001, seed);      // 真实噪声: 0.02 N
+    addRawNoise(F, M, NQ, 0.02, 0.001, seed);
+    PayloadCalibration::PoseNoise nz[NQ];
+    declareNoise(NQ, 0.02, 0.001, nz);
 
     PayloadCalibration::RawFit fit;
-    PayloadCalibration::PoseNoise nz[NP];
 
-    // (a) 如实申报 0.02 N -> 残差与之不符 -> 拒
-    declareNoise(NP, 0.02, 0.001, nz);
-    CHECK(PayloadCalibration::fitRawLinear(g_poses, F, M, NP, fit, nz));
-    printf("[申报 0.02N: χ²/dof=%.1f -> 拒] ", fit.chi2ForceRatio);
-    CHECK(!PayloadCalibration::fitRaw(g_poses, F, M, NP, fit, nz));
+    // (a) 复现性好: 第二次访问与第一次一致 (只差各自那份姿态内噪声) -> 尺子细 -> 拒
+    CHECK(PayloadCalibration::fitRawLinear(poses, F, M, NQ, fit, nz, &REP_PAIR));
+    printf("[(a) 尺子=%.4f N, 残差=%.4f N, χ²rep/dof=%.2f (限 %.2f) -> 拒] ",
+           yardFromFit(fit), fit.rmsForceN, fit.chi2RepForceRatio,
+           1.0 + 3.0 * sqrt(2.0 / fit.chi2DofForce));
+    CHECK(fit.chi2RepForceRatio > 1.0 + 3.0 * sqrt(2.0 / fit.chi2DofForce));
+    CHECK(!PayloadCalibration::fitRaw(poses, F, M, NQ, fit, nz, &REP_PAIR));
+    CHECK(fit.modelFormStatus == PayloadCalibration::MODEL_FORM_OK);   // 尺子齐, 是判决拒的
+    CHECK(!fit.modelFormChecked);
+    const double residualKept = fit.rmsForceN;
 
-    // (b) 同一个拟合, 只把噪声申报成 0.60 N -> 同一个残差落进门限 -> 接受
-    declareNoise(NP, 0.60, 0.03, nz);
-    CHECK(PayloadCalibration::fitRawLinear(g_poses, F, M, NP, fit, nz));
-    printf("[申报 0.60N: χ²/dof=%.2f (限 %.2f), 力矩失拟=%.2f -> 过] ",
-           fit.chi2ForceRatio, 1.0 + 3.0 * sqrt(2.0 / fit.chi2DofForce),
-           fit.lackOfFitMomentRatio);
-    CHECK(PayloadCalibration::fitRaw(g_poses, F, M, NP, fit, nz));
-    CHECK(fit.chi2ForceRatio < 1.0 + 3.0 * sqrt(2.0 / fit.chi2DofForce));
+    // (b) 复现性差: 只是第二次访问漂了一截 (力与力矩一起漂 = 现场级的漂移, 不是单通道坏)
+    for (int a = 0; a < 3; a++) {
+        F[NP][a] += 0.50;
+        M[NP][a] += 0.020;
+    }
+    CHECK(PayloadCalibration::fitRawLinear(poses, F, M, NQ, fit, nz, &REP_PAIR));
+    printf("[(b) 尺子=%.4f N, 残差=%.4f N, χ²rep/dof=%.2f (限 %.2f) -> 过] ",
+           yardFromFit(fit), fit.rmsForceN, fit.chi2RepForceRatio,
+           1.0 + 3.0 * sqrt(2.0 / fit.chi2DofForce));
+    CHECK(fit.chi2RepForceRatio < 1.0 + 3.0 * sqrt(2.0 / fit.chi2DofForce));
+    CHECK(PayloadCalibration::fitRaw(poses, F, M, NQ, fit, nz, &REP_PAIR));
+    CHECK(fit.modelFormChecked);
+    // 【同一个残差量级, 判决相反】—— 差别只在尺子。这一行是这条用例的立身之本。
+    printf("[残差量级 (a)=%.4f N / (b)=%.4f N, 判决 拒 -> 过] ", residualKept, fit.rmsForceN);
+    CHECK(fit.rmsForceN > 0.5 * residualKept);
     PASS();
 }
 
@@ -929,11 +986,12 @@ static void test_moment_lack_of_fit_rejects_non_cross_product() {
     const double N[9] = { 0.001, 0.004, 0.000,
                           0.004, 0.002, 0.000,
                           0.000, 0.000, 0.003 };
-    double F[NP][3], M[NP][3];
-    synthRaw(A, bF, cs, bM, g_poses, NP, F, M);
-    for (int i = 0; i < NP; i++) {
+    double poses[NQ][6], F[NQ][3], M[NQ][3];
+    buildRepeatPoses(poses);
+    synthRaw(A, bF, cs, bM, poses, NQ, F, M);
+    for (int i = 0; i < NQ; i++) {
         double g[3], w[3];
-        gravitySensorRefAt(g_poses[i], 0.0, g);          // 测试侧自己算, 不调被测函数
+        gravitySensorRefAt(poses[i], 0.0, g);            // 测试侧自己算, 不调被测函数
         for (int a = 0; a < 3; a++)
             w[a] = A[a * 3 + 0] * g[0] + A[a * 3 + 1] * g[1] + A[a * 3 + 2] * g[2];
         for (int a = 0; a < 3; a++) {
@@ -946,24 +1004,24 @@ static void test_moment_lack_of_fit_rejects_non_cross_product() {
         }
     }
     unsigned seed = 4242u;
-    addRawNoise(F, M, NP, 0.02, 0.001, seed);
-    PayloadCalibration::PoseNoise nz[NP];
-    declareNoise(NP, 0.02, 0.001, nz);
+    addRawNoise(F, M, NQ, 0.02, 0.001, seed);
+    PayloadCalibration::PoseNoise nz[NQ];
+    declareNoise(NQ, 0.02, 0.001, nz);
 
     PayloadCalibration::RawFit fit;
-    CHECK(PayloadCalibration::fitRawLinear(g_poses, F, M, NP, fit, nz));
-    printf("[力通道 χ²/dof=%.2f (合格), 力矩失拟=%.2f (dof=%d, 限=%.2f) -> 拒] ",
-           fit.chi2ForceRatio, fit.lackOfFitMomentRatio, fit.lackOfFitMomentDof,
+    CHECK(PayloadCalibration::fitRawLinear(poses, F, M, NQ, fit, nz, &REP_PAIR));
+    printf("[力通道 χ²rep/dof=%.2f (合格), 力矩失拟=%.2f (dof=%d, 限=%.2f) -> 拒] ",
+           fit.chi2RepForceRatio, fit.lackOfFitMomentRatio, fit.lackOfFitMomentDof,
            1.0 + 3.0 * sqrt(2.0 / fit.lackOfFitMomentDof));
     // 力通道没问题 (它是自由拟合, 数据也确实符合) —— 拒的理由必须来自力矩那一条
-    CHECK(fit.chi2ForceRatio < 1.0 + 3.0 * sqrt(2.0 / fit.chi2DofForce));
+    CHECK(fit.chi2RepForceRatio < 1.0 + 3.0 * sqrt(2.0 / fit.chi2DofForce));
     CHECK(fit.lackOfFitMomentRatio > 1.0 + 3.0 * sqrt(2.0 / fit.lackOfFitMomentDof));
-    CHECK(!PayloadCalibration::fitRaw(g_poses, F, M, NP, fit, nz));
+    CHECK(!PayloadCalibration::fitRaw(poses, F, M, NQ, fit, nz, &REP_PAIR));
     PASS();
 }
 
 // 实机那条正确的解 (参考 A, iso = 1.0655, 6.5% 的物理非正交) 必须过 —— 而且现在是靠
-// "残差 vs 实测噪声"过的, 不再靠"iso 撞上一条随残差放松的门限"。
+// "残差 vs 姿态间复现性"过的, 不再靠"iso 撞上一条随残差放松的门限", 也不再靠姿态内噪声。
 // 用参考 A 的形状 + 与实机同量级的噪声造数据。
 static void test_realistic_spread_accepted_with_measured_noise() {
     TEST(realistic_spread_accepted_with_measured_noise);
@@ -973,20 +1031,21 @@ static void test_realistic_spread_accepted_with_measured_noise() {
     const double bF[3] = {-18.55, -2.44, 0.82};
     const double cs[3] = {0.0006, -0.0005, 0.0545};
     const double bM[3] = {-0.16, 0.57, -0.02};
-    double F[NP][3], M[NP][3];
-    synthRaw(ref, bF, cs, bM, g_poses, NP, F, M);
+    double poses[NQ][6], F[NQ][3], M[NQ][3];
+    buildRepeatPoses(poses);
+    synthRaw(ref, bF, cs, bM, poses, NQ, F, M);
     unsigned seed = 1304u;
-    addRawNoise(F, M, NP, 0.15, 0.008, seed);
+    addRawNoise(F, M, NQ, 0.15, 0.008, seed);
 
-    PayloadCalibration::PoseNoise nz[NP];
-    declareNoise(NP, 0.15, 0.008, nz);
+    PayloadCalibration::PoseNoise nz[NQ];
+    declareNoise(NQ, 0.15, 0.008, nz);
 
     PayloadCalibration::RawFit fit;
-    CHECK(PayloadCalibration::fitRaw(g_poses, F, M, NP, fit, nz));   // 必须放行
+    CHECK(PayloadCalibration::fitRaw(poses, F, M, NQ, fit, nz, &REP_PAIR));   // 必须放行
     CHECK(fit.modelFormChecked);
-    printf("[iso=%.4f (报告), rmsF=%.4f N, 噪声=%.4f N, χ²/dof=%.2f, 力矩失拟=%.2f,"
+    printf("[iso=%.4f (报告), rmsF=%.4f N, 尺子=%.4f N, χ²rep/dof=%.2f, 力矩失拟=%.2f,"
            " m=%.4f kg, parity=%+.0f] ",
-           fit.isotropyRatio, fit.rmsForceN, fit.noiseForceN, fit.chi2ForceRatio,
+           fit.isotropyRatio, fit.rmsForceN, yardFromFit(fit), fit.chi2RepForceRatio,
            fit.lackOfFitMomentRatio, fit.massScale, fit.parity);
     CHECK(fit.isotropyRatio > 1.02);               // 确实带着实机那种量级的展布 (不是碰巧正交)
     CHECK(fabs(fit.parity - (-1.0)) < 1e-12);      // 参考 A 的手系是负的
@@ -994,36 +1053,128 @@ static void test_realistic_spread_accepted_with_measured_noise() {
     PASS();
 }
 
-// 没有噪声估计 = 【不做】模型形式检验, 而不是"通过": 同一个反例数据, 不传 noise 时
-// 线性层与自检都放行 —— 这个"洞"必须【看得见】 (modelFormChecked = false), 而不是被当成绿灯。
-// 同时钉住: 生产路径不传 noise 就等于关掉了模型形式检验 —— 所以生产路径必须传。
-static void test_modelform_not_checked_without_noise() {
-    TEST(modelform_not_checked_without_noise);
+// ★ 本轮修复的第二条契约 (brief 点名): 【模型形式没被检验过, 就不给参数】。
+// 上一版的行为是"没验过也照给, 只把 modelFormChecked 置成 false" —— 调用方只要忘了读那个
+// 标志, 参数就落在一个【从未被检验过形式】的模型上, 而模型形式错正是本项目栽得最惨的那一件
+// 事 (安静地解错)。现在改成: 尺子不齐 -> 返回 false。想要参数只能逐字写出那个刺眼的令牌。
+// 同时钉住两种"尺子不齐"是【分开报】的: 缺噪声 / 缺重复对 / 通道冻住。
+static void test_modelform_unverified_refused_not_accepted() {
+    TEST(modelform_unverified_refused_not_accepted);
     double A[9];
     buildA(0.42, -1.0, 30.0, 0.0, ARB_U, ARB_V, A);
     const double bF[3] = {0.0, 0.0, 0.0};
     const double cs[3] = {0.0, 0.0, 0.08};
     const double bM[3] = {0.0, 0.0, 0.0};
-    double F[NP][3], M[NP][3];
-    synthRawWith(gravityTransposedAt, 0.0, A, bF, cs, bM, g_poses, NP, F, M);
+    double poses[NQ][6], F[NQ][3], M[NQ][3];
+    buildRepeatPoses(poses);
+    synthRawWith(gravityTransposedAt, 0.0, A, bF, cs, bM, poses, NQ, F, M);
     unsigned seed = 20260919u;
-    addRawNoise(F, M, NP, 0.02, 0.001, seed);
+    addRawNoise(F, M, NQ, 0.02, 0.001, seed);
 
     PayloadCalibration::RawFit fit;
-    CHECK(PayloadCalibration::fitRaw(g_poses, F, M, NP, fit));    // 5 参数旧形式
-    CHECK(!fit.modelFormChecked);                                // 明说"没验过"
-    CHECK(fit.chi2ForceRatio == 0.0 && fit.chi2DofForce == 0);   // 检验用的字段全空
+    PayloadCalibration::PoseNoise nz[NQ];
+    declareNoise(NQ, 0.02, 0.001, nz);
 
-    // 不可用的噪声估计 (方差为 0 = 通道冻住 / 没采到) 同样【不做】检验, 而不是"通过"。
-    PayloadCalibration::PoseNoise nz[NP];
-    declareNoise(NP, 0.02, 0.001, nz);
-    nz[2].varF[1] = 0.0;
-    CHECK(PayloadCalibration::fitRawLinear(g_poses, F, M, NP, fit, nz));
+    // (a) 什么都没给 (旧的 5 参形式): 线性层照解, 但【拒绝给参数】。
+    CHECK(PayloadCalibration::fitRawLinear(poses, F, M, NQ, fit));
+    CHECK(fit.modelFormStatus == PayloadCalibration::MODEL_FORM_NO_NOISE);
     CHECK(!fit.modelFormChecked);
-    // 与"没给"完全同路: 不做检验, 也【不】因此拒绝 (拒绝必须由某条判据给出理由, 不是"缺数据
-    // 就毙掉")。调用方要区分这两种情形, 读的就是 modelFormChecked。
-    CHECK(PayloadCalibration::fitRaw(g_poses, F, M, NP, fit, nz));
+    CHECK(!PayloadCalibration::fitRaw(poses, F, M, NQ, fit));
+    CHECK(fit.poseResidualCount == NQ);            // 逐姿态残差照算照报 (false 之后仍可诊断)
+
+    // (b) 有噪声但【没有重复姿态对】—— 与 (a) 是不同的原因, 必须分开报。
+    CHECK(!PayloadCalibration::fitRaw(poses, F, M, NQ, fit, nz));
+    CHECK(fit.modelFormStatus == PayloadCalibration::MODEL_FORM_NO_REPEAT);
+    CHECK(fit.chi2RepForceRatio == 0.0 && fit.repeatFirst < 0);
+
+    // (b2) 【个别一笔】方差为 0 (只有 pose 3 的 y 通道) —— 通道没死, 是那一笔没采到。
+    //      这与 (c) 的"整条通道死了"是两回事, 必须分开报。
+    PayloadCalibration::PoseNoise hole[NQ];
+    declareNoise(NQ, 0.02, 0.001, hole);
+    hole[2].varF[1] = 0.0;
+    CHECK(!PayloadCalibration::fitRaw(poses, F, M, NQ, fit, hole, &REP_PAIR));
+    CHECK(fit.modelFormStatus == PayloadCalibration::MODEL_FORM_NOISE_HOLES);
+    CHECK(fit.chi2ForceRatio == 0.0);     // 尺子不完整 -> 那个统计量【不算】(0 做分母会出 inf/NaN)
+
+    // (c) 力通道【整批冻住】(方差恒为 0) 而力矩通道是活的 —— 本机的真实故障模式, 又是另一类。
+    PayloadCalibration::PoseNoise dead[NQ];
+    declareNoise(NQ, 0.02, 0.001, dead);
+    for (int i = 0; i < NQ; i++) dead[i].varF[2] = 0.0;      // z 通道冻住
+    CHECK(!PayloadCalibration::fitRaw(poses, F, M, NQ, fit, dead, &REP_PAIR));
+    CHECK(fit.modelFormStatus == PayloadCalibration::MODEL_FORM_DEAD_CHANNEL);
+
+    // (d) 只有逐字写出那个令牌, 才拿得到参数 —— 而且 modelFormChecked 仍然是 false,
+    //     【不会】被伪装成"验过了"。
+    CHECK(PayloadCalibration::fitRaw(poses, F, M, NQ, fit, dead, &REP_PAIR,
+                                     PayloadCalibration::I_ACCEPT_UNVERIFIED_MODEL_FORM));
     CHECK(!fit.modelFormChecked);
+    CHECK(fit.modelFormStatus == PayloadCalibration::MODEL_FORM_DEAD_CHANNEL);
+    printf("[无尺子一律拒给参数: 无噪声/无重复对/个别笔没采到/通道冻住 四类分开报; "
+           "只有显式令牌才给, 且 modelFormChecked 仍为 false] ");
+    PASS();
+}
+
+// 逐姿态残差 (spec §3 表格第 4 行): 坏了【哪一个】姿态要指得出来 —— 这是"一个坏姿态"与
+// "整体形式错"唯一的区分手段, 而两者的处置完全不同。
+//
+// 【为什么这条用 9 个姿态 + 重复访问, 而不是上面那 6 个】: 每通道的力模型是 4 个参数
+// (1, gx, gy, gz), 7 行时杠杆 h ≈ 4/7 = 0.57 —— 单个坏姿态的偏差只有 43% 留在它自己身上,
+// 其余被最小二乘摊到别的姿态上, 最差姿态会指到【别人】身上 (实测: 坏的是第 4 个, 指出来的是
+// 第 6 个)。这是最小二乘的性质, 不是实现的错; 姿态一多 (9 个) 杠杆降到 0.44, 指向就准了。
+// 生产路径采 6~8 个姿态, 所以这条限制要照实写在这里, 别让表看起来比它实际能做到的更可靠。
+static void test_pose_residuals_mark_the_worst_pose() {
+    TEST(pose_residuals_mark_the_worst_pose);
+    static const int NR = 9;
+    static const int NBAD = 3;
+    const double posesR[NR][6] = {
+        {300, 100, 40,    0,   0,   0},
+        {300, 100, 40,   40,   0,   0},
+        {300, 100, 40,  -35,  15,   0},
+        {300, 100, 40,    0,  60,  25},
+        {300, 100, 40,   25, -50, -30},
+        {300, 100, 40,  -20,  35,  55},
+        {300, 100, 40,   70,   0, 120},
+        {300, 100, 40,  -60,  45, -75},
+        {300, 100, 40,   35, -70, 160}
+    };
+    const int N = NR + 1;
+    double poses[NR + 1][6], F[NR + 1][3], M[NR + 1][3];
+    for (int i = 0; i < NR; i++)
+        for (int a = 0; a < 6; a++) poses[i][a] = posesR[i][a];
+    for (int a = 0; a < 6; a++) poses[NR][a] = posesR[0][a];      // 重复访问
+
+    double A[9];
+    buildA(0.42, -1.0, 30.0, 0.0, ARB_U, ARB_V, A);
+    const double bF[3] = {1.0, -0.5, 0.2};
+    const double cs[3] = {0.005, -0.008, 0.061};
+    const double bM[3] = {0.01, -0.01, 0.005};
+    synthRaw(A, bF, cs, bM, poses, N, F, M);
+    unsigned seed = 20260919u;
+    addRawNoise(F, M, N, 0.02, 0.001, seed);
+    // 只把第 NBAD 个姿态弄坏 (三个力分量一起偏) —— 其余姿态与两次重复访问都干净
+    for (int a = 0; a < 3; a++) F[NBAD][a] += 0.60;
+    const PayloadCalibration::RepeatPair rep = {0, NR};
+
+    PayloadCalibration::PoseNoise nz[NR + 1];
+    declareNoise(N, 0.02, 0.001, nz);
+
+    PayloadCalibration::RawFit fit;
+    CHECK(PayloadCalibration::fitRawLinear(poses, F, M, N, fit, nz, &rep));
+    double restMax = 0.0;
+    for (int i = 0; i < fit.poseResidualCount; i++)
+        if (i != fit.worstPoseF && fit.poseResidualF[i] > restMax) restMax = fit.poseResidualF[i];
+    printf("[%d 个姿态, 第 %d 个坏: 最差 = pose %d (残差 %.4f N = 尺子的 %.2f 倍);"
+           " 其余姿态最大 %.4f N] ",
+           N, NBAD + 1, fit.worstPoseF + 1, fit.poseResidualF[fit.worstPoseF],
+           fit.poseResidualRatioF[fit.worstPoseF], restMax);
+    CHECK(fit.worstPoseF == NBAD);                    // 指得出是哪一个
+    CHECK(fit.poseResidualCount == N);
+    // 与其余姿态拉开量级。门限取 1.8 是【照着实测写的】, 不是"应该有多大": 单个坏姿态的偏差
+    // 有一部分被最小二乘摊到别的姿态上 (杠杆 h = 参数数/方程数), 所以分离度只有 2 倍上下,
+    // 姿态越少越糊 (7 行时最差会指错人, 见上面那段说明)。把它当"最突出的那个"用, 别当铁证。
+    CHECK(fit.poseResidualF[NBAD] > 1.8 * restMax);
+    // 一个坏姿态足以让整体判决拒 —— 表里能看到"只有它高", 这就是可行动的信息。
+    CHECK(!PayloadCalibration::fitRaw(poses, F, M, N, fit, nz, &rep));
     PASS();
 }
 
@@ -1157,12 +1308,13 @@ int main() {
     test_rawfit_uses_no_psi();
     // 各向同性比: 【报告量】, 不进判决 (它由力通道的 A 自由性决定, 非正交是物理属性)
     test_isotropy_ratio_is_reported_not_gated();
-    // 模型形式检验: 残差 vs 【实测】噪声 (χ² 式)。判据的尺度全来自数据。
+    // 模型形式检验: 残差 vs 【姿态间复现性】(重复姿态对测出来的尺子)。判据的尺度全来自数据。
     test_modelform_rejects_transposed_convention();   // ★ 评审的反例 (旧门限放它过去)
     test_modelform_accepts_correct_fit_with_noise();
-    test_modelform_gate_tracks_measured_noise();
+    test_modelform_gate_tracks_repeat_reproducibility();   // ★ 判决跟着尺子走, 不跟姿态内噪声走
     test_moment_lack_of_fit_rejects_non_cross_product();
-    test_modelform_not_checked_without_noise();
+    test_modelform_unverified_refused_not_accepted();      // ★ 没验过 -> 不给参数
+    test_pose_residuals_mark_the_worst_pose();             // spec §3 表格第 4 行
     test_realistic_spread_accepted_with_measured_noise();
     test_rawfit_rejects_too_few_poses();
     test_rawfit_rejects_degenerate_poses();
