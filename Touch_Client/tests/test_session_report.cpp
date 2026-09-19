@@ -399,6 +399,84 @@ static void test_solve_path_prints_only_through_the_sink() {
     PASS();
 }
 
+// 【去掉行注释】: 注释里【可以】出现旧措辞 (缺陷说明非把原话抄出来不可, 不然对不上账),
+// 被钉死的是【打给人看的字符串】, 不是"谁提过这件事"。所以先剥掉 //...到行尾再断言。
+// 带引号感知: 字符串/字符字面量里的 "//" 不算注释头, \" 与 \' 转义也认。
+static std::string stripLineComments(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    bool inStr = false, inChr = false;
+    for (size_t i = 0; i < s.size(); i++) {
+        const char c = s[i];
+        if (inStr || inChr) {
+            out += c;
+            if (c == '\\' && i + 1 < s.size()) { out += s[++i]; continue; }
+            if (inStr && c == '"')  inStr = false;
+            if (inChr && c == '\'') inChr = false;
+            continue;
+        }
+        if (c == '"')  { inStr = true; out += c; continue; }
+        if (c == '\'') { inChr = true; out += c; continue; }
+        if (c == '/' && i + 1 < s.size() && s[i + 1] == '/') {
+            while (i < s.size() && s[i] != '\n') i++;   // 吃掉注释, 换行留给下一轮
+            if (i < s.size()) out += s[i];
+            continue;
+        }
+        out += c;
+    }
+    return out;
+}
+
+// 【同源闸门 (二): 不许替库复述判据 —— 屏幕上那句"拒因"曾经断言了一个它没判过的东西】
+// 那一屏末尾的 "→ 拒因: ..." 从前【无条件地】写着 "力通道 χ²/dof = X 超过门限 Y"。而它所在
+// 的那个 else 分支, 力通道【完全可以是过了的】: 实机 2026-09-19 18:49:55 那次力 0.6508
+// < 门限 2.869 (它过了), 拒绝来自力矩通道 (27.23 > 4.909)。库在同一屏的 stderr 上说对了
+// ([Payload] 自检拒绝(模型形式): 力矩通道失拟 ... 超过门限 ...), 而屏幕上那句本地话把操作员
+// 支去查一个【没坏】的力通道 —— 同一块里两句话互相打架, 比少一句更坏。
+// 判据只有在库里有一份才不会各说各话 (同一函数里 MODEL_FORM_NO_DOF 那个分支自己写下了这条
+// 规矩), 所以这里把它做成闸门。
+// 【这条闸门的局限, 说在前面】: 它读的是 main.cpp 的【源文本】, 所以钉死的是"那句话怎么写",
+// 不是"solveAndApply 跑起来会印出什么" —— 后者要实机数据才走得到, 本测试到不了那一步。
+// 另外几处 find 的串都取得短 (不与换行/缩进较劲), 但改那几行时若把串拆到两个字面量里,
+// 这里会红 —— 那是【故意的】: 它逼改动者回来读一遍这段话。
+static void test_reject_line_does_not_restate_the_library_verdict() {
+    TEST(reject_line_does_not_restate_the_library_verdict);
+    const std::string src = readWholeFile("../main.cpp");
+    CHECK(!src.empty());
+
+    const size_t fn = src.find("static void solveAndApply() {");
+    CHECK(fn != std::string::npos);
+    const size_t stop = src.find("#if 0  // ===", fn);
+    CHECK(stop != std::string::npos);
+    const std::string body = src.substr(fn, stop - fn);
+    CHECK(body.size() > 15000);
+
+    const std::string code = stripLineComments(body);
+    CHECK(code.size() < body.size());          // 剥掉过东西 -> helper 真的在干活
+
+    // (1) 【核心】"超过门限"是【库】判定的措辞 (PayloadCalibration.cpp 的 [Payload] 行)。屏幕上
+    //     再出现一次 = 判据被抄了第二份, 而抄的这一份是无条件的 —— 力通道没超时它照样这么说。
+    CHECK(code.find("超过门限") == std::string::npos);
+
+    // (2) 正面要求 (否命题谁都能满足): 还得把人指向权威的那一行, 而且【三种情形】都要有对症的话,
+    //     数字也要还在 (钉子只钉"断言", 不钉"报数")。
+    CHECK(code.find("以上面 stderr 的 [Payload]") != std::string::npos);  // 指向 stderr 的 [Payload] 行
+    CHECK(code.find("力通道被拒") != std::string::npos);                  // 情形一: 力通道过线
+    CHECK(code.find("力矩通道失拟被拒") != std::string::npos);            // 情形二: 力矩通道过线
+    CHECK(code.find("【没有】模型形式的自检拒绝行") != std::string::npos); // 情形三: 都不是它
+    CHECK(code.find("同样见 [Payload] 行") != std::string::npos);
+    CHECK(code.find("chi2RepForceRatio") != std::string::npos);           // 两个判据数照旧摆出来
+    CHECK(code.find("lackOfFitMomentRatio") != std::string::npos);
+    CHECK(code.find("尺子 %.4g N") != std::string::npos);                 // 连同尺子一起
+
+    // (3) 同一屏上另一个对不上账的数: 姿态级尺子必须【先平方, 再平均, 最后开方】—— repeatSigmaF[]
+    //     装的是 σ (N), 不是 σ² (装方差的那个字段叫 repeatSysF[])。从前漏了平方, 于是同一屏上
+    //     库打 0.0208 N 而本地打 0.1349 N (sqrt(Σσ/3), 差 6.5 倍), 两个数顶着一个名字。
+    CHECK(code.find("fit.repeatSigmaF[0] * fit.repeatSigmaF[0]") != std::string::npos);
+    CHECK(code.find("fit.repeatSigmaM[0] * fit.repeatSigmaM[0]") != std::string::npos);
+    PASS();
+}
+
 // ===== stderr 捕获窗口 =====
 
 static void test_stderr_capture_roundtrip_and_restore() {
@@ -659,6 +737,7 @@ int main() {
     test_append_creates_missing_file();
     test_append_on_unreadable_file_reports_failure_without_truncating();
     test_solve_path_prints_only_through_the_sink();
+    test_reject_line_does_not_restate_the_library_verdict();
     test_stderr_capture_roundtrip_and_restore();
     test_stderr_capture_begin_failure_leaves_stderr_alone();
     test_stderr_capture_end_read_failure_keeps_the_bytes();

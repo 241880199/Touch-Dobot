@@ -1348,10 +1348,20 @@ namespace BiasCheck {
         }
         // 姿态级尺子 (与 fitRaw 内部同一个口径: 三通道 σ_rep² 的均值再开方) —— 判决的宽窄
         // 正比于它, 所以它必须与判决一起打印, 否则"离门限多远"无从判读。
+        // ⚠ 【先平方再平均, 最后开方】—— repeatSigmaF[] 里装的是 σ (N), 不是 σ² (同一个
+        // RawFit 里装方差的字段叫 repeatSysF[], 看 fitRaw 打印那两行就分得清)。这里从前漏了
+        // 平方, 于是屏幕上这个"尺子"与同一屏库打的那一行对不上: 实机 2026-09-19 18:49:55 那次
+        // 库说 0.0208 N, 这里说 0.1349 N (sqrt(Σσ/3) 而不是 sqrt(Σσ²/3), 差 6.5 倍) —— 同一个
+        // 名字、同一屏、两个数。库的 poseLevelYardstick 就是带平方的那个口径, 照抄它。
+        // 【这只是显示量的算法, 不参与任何判决】: 它只出现在下面两处 diagEmitf 里。
         const double yardF = (fit.repeatPairCount > 0)
-            ? sqrt((fit.repeatSigmaF[0] + fit.repeatSigmaF[1] + fit.repeatSigmaF[2]) / 3.0) : 0.0;
+            ? sqrt((fit.repeatSigmaF[0] * fit.repeatSigmaF[0]
+                  + fit.repeatSigmaF[1] * fit.repeatSigmaF[1]
+                  + fit.repeatSigmaF[2] * fit.repeatSigmaF[2]) / 3.0) : 0.0;
         const double yardM = (fit.repeatPairCount > 0)
-            ? sqrt((fit.repeatSigmaM[0] + fit.repeatSigmaM[1] + fit.repeatSigmaM[2]) / 3.0) : 0.0;
+            ? sqrt((fit.repeatSigmaM[0] * fit.repeatSigmaM[0]
+                  + fit.repeatSigmaM[1] * fit.repeatSigmaM[1]
+                  + fit.repeatSigmaM[2] * fit.repeatSigmaM[2]) / 3.0) : 0.0;
 
         diagOut() << "------------------------------------------------------" << std::endl;
         diagEmitf("  模型形式检验 (fitRaw 的判决): %s\n", fitOk ? "通过" : "【拒绝】");
@@ -1392,16 +1402,35 @@ namespace BiasCheck {
                 diagOut() << "        自由度不足 -> 多摆几个姿态 (力通道 12 个未知, 3n−12 要 > 0)。"
                           << std::endl;
             } else {
-                diagEmitf("      → 拒因: 尺子齐备, 但力通道 χ²/dof = %.4g 超过门限 %.4g"
-                          " (残差 %.4g N / 尺子 %.4g N)\n",
-                          fit.chi2RepForceRatio, fit.chi2RepForceLimit, fit.rmsForceN, yardF);
-                diagEmitf("        力矩通道失拟 = %.4g 对门限 %.4g (尺子 %.4g N·m)\n",
-                          fit.lackOfFitMomentRatio, fit.lackOfFitMomentLimit, yardM);
-                diagOut() << "        先看上面 stderr 的逐姿态残差表: 【只有一两个姿态高】-> 重采那几个;"
-                          << " 个个都高 -> 模型形式错。" << std::endl;
-                diagOut() << "        (若这两条的差值也不大, 那拒绝来自 fitRaw 的其它自检 ——"
-                          << " 质量尺度越界 / cond 过大 / 设计矩阵秩亏, 具体见上面的 [Payload] 行。)"
+                // ⚠ 【本分支不复述判据】—— 这条规矩是同一函数里上面那个分支 (MODEL_FORM_NO_DOF)
+                // 自己写下的: 判据只有在库里有一份才不会各说各话, 这里只把人指向那一行。
+                // 从前这一行违反了它, 而且【无条件地】断言 "力通道 χ²/dof = X 超过门限 Y":
+                // 力通道真超线时它是对的, 而拒的是力矩那一半时它就是【假的】—— 实机
+                // 2026-09-19 18:49:55 那次力通道 0.6508 < 门限 2.869 (它【过了】), 拒因是力矩
+                // (27.23 > 4.909); 库在同一屏的 stderr 上说对了, 而这一行把操作员支去查一个
+                // 【没坏】的通道。同一块里两句话互相打架, 比少一句更坏。
+                diagEmitf("      → 拒因: 尺子齐备 (modelFormStatus = %s) —— 拒绝【不是尺子不齐"
+                          "造成的】; 但是哪一道自检卡住的,【以上面 stderr 的 [Payload] 自检"
+                          "拒绝行为准】。\n",
+                          modelFormStatusName(fit.modelFormStatus));
+                diagOut() << "        下面两行只是把判据里的两个数照抄在旁边 (写出来的是【门限】而不是"
+                          << "结论):" << std::endl;
+                diagEmitf("          力通道:   残差÷尺子 χ²/dof = %.4g  门限 %.4g   (dof=%d, 残差 %.4g N"
+                          " / 尺子 %.4g N)\n",
+                          fit.chi2RepForceRatio, fit.chi2RepForceLimit, fit.chi2DofForce,
+                          fit.rmsForceN, yardF);
+                diagEmitf("          力矩通道: 失拟             = %.4g  门限 %.4g   (dof=%d, 尺子 %.4g N·m)\n",
+                          fit.lackOfFitMomentRatio, fit.lackOfFitMomentLimit,
+                          fit.lackOfFitMomentDof, yardM);
+                diagOut() << "        本行不给【超过/通过】这个结论 —— 是哪一种, 按上面 [Payload] 行分:"
                           << std::endl;
+                diagOut() << "          · 力通道被拒 -> 先看上面 stderr 的逐姿态残差表: 【只有一两个"
+                          << "姿态高】-> 重采那几个; 个个都高 -> 模型形式错。" << std::endl;
+                diagOut() << "          · 力矩通道失拟被拒 -> c_s × (A·g) 这个叉乘结构不成立 (自由模型"
+                          << "显著解释得更好), 重采个别姿态救不回来。" << std::endl;
+                diagOut() << "          · 上面【没有】模型形式的自检拒绝行 (你自己把这两个数与门限比"
+                          << "一比, 都没越线) -> 拒绝来自 fitRaw 的其它自检: 质量尺度越界 / cond"
+                          << " 过大 / A 奇异(秩亏) —— 同样见 [Payload] 行。" << std::endl;
             }
         }
         if (!fitOk) {
