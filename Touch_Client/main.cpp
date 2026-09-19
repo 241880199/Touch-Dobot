@@ -116,9 +116,11 @@ namespace BiasCheck {
     // 求解改了负载/本地补偿 -> 已采数据作废 (拒绝 report 判定)。
     static bool dataUnderCurrentPayload = true;
 
-    // 连续多少次求解被判"不合理"。达到 Config::CALIB_MAX_CONSECUTIVE_FAILS 后锁住 's'。
+    // 连续多少次求解被拒。【只计数并照实报出来, 不再当闸门】: 从前到了
+    // Config::CALIB_MAX_CONSECUTIVE_FAILS 就把 's' 锁死 (整屏诊断被一行顶掉),
+    // 而这条路现在只打印、不应用 —— 藏掉输出没有任何东西被保护到。见 solveAndApply 顶上。
     static int  consecutiveFails = 0;
-    static bool solveLocked = false;
+    static bool solveLocked = false;   // 已连续被拒到这个次数 (状态标记; 不决定跑不跑)
 
     static void reset() {
         dataUnderCurrentPayload = true;
@@ -288,7 +290,8 @@ namespace BiasCheck {
             // 放宽到几乎不判, 而这一对【什么都不像】却在同一时刻被登记成了尺子。程序侧不去
             // 替操作员判"这是不是同一个姿态" (那既是预设, 又正好是这里要量的事情), 但把这两个
             // 数摆在他眼前是免费的 —— 一个 0.5 N 的尺子在正常读数 (0.01~0.05 N) 旁边一眼就认得出来。
-            // 用 @1304 原始读数算, 与求解侧同一口径 (求解侧对 z 做的镜像不改变 |d| 与方差)。
+            // 用 @1304 原始读数算, 与求解侧同一口径 (求解侧喂的就是这份【未镜像】的原始值 ——
+            // 镜像那一步已经不在新模型里了, 见 solveAndApply 上面的说明)。
             double v0 = 0.0;
             for (int a = 0; a < 3; a++) {
                 const double d = biasSix[count][a] - biasSix[0][a];
@@ -435,6 +438,10 @@ namespace BiasCheck {
                   << (PayloadCalibration::enabled ? "  [实机标定值]" : "  [种子值, 未标定]")
                   << "  CZ符号=" << (PayloadCalibration::comSignZ > 0 ? "+1" : "-1")
                   << " (信息性: 数据定不了符号, 不影响补偿)" << std::endl;
+        // 说清这一行是哪来的: 它是【旧模型 + 当前生效配置】的量, 与 's' 那一屏 (原始通道的
+        // 线性解、传感器测量原点以下) 不是一回事 —— 别拿这里的 load/center 去读那一屏的结果。
+        std::cout << "  ↑ 这是【当前生效配置/旧模型】的量, 不是 's' 解出的东西 (两回事)。"
+                  << std::endl;
         std::cout << "======================================================" << std::endl;
         printf("  跨姿态极差(力):   Fx=%.3f  Fy=%.3f  Fz=%.3f   |ΔF|=%.3f N\n",
                sF[0], sF[1], sF[2], spanF);
@@ -525,8 +532,12 @@ namespace BiasCheck {
     //   maxSigA   = A 的 9 个分量里最大的 1σ (kg)。18 个 sigma 全写会把行撑得没法读, 而 A
     //               是物理上最要紧的那一组; 要全量请用 calib_poses.txt 离线重放。
     //
-    // fit 可为 nullptr: 求解【之前】就返回的出口 (已上锁 / 姿态数不足 / 正在采样) 没有结果,
-    // 此时各数值列记 "-"。poses 由调用方单独传 (被拒时 RawFit 里的计数不作数)。
+    // 追加列说明行的固定开头 —— 写出与扫描【只此一处定义】, 见 logCalibAttempt 里的用法。
+    static const char* const COL_EXT_MARK = "# columns extended ";
+
+    // fit 可为 nullptr: 求解【之前】就返回的出口 (姿态数不足 / 正在采样) 没有结果,
+    // 此时【数值列】记 "-"。poses 由调用方单独传: 它是"这次手上有几个姿态", 与求解成没成
+    // 无关, 所以【照记】, 不因为 fit 是 nullptr 就退化成 "-"。
     static void logCalibAttempt(const char* outcome, const PayloadCalibration::RawFit* fit,
                                 int poses)
     {
@@ -541,14 +552,37 @@ namespace BiasCheck {
         if (!f) return;
         bool needHeader = true;
         if (fseek(f, 0, SEEK_END) == 0) needHeader = (ftell(f) == 0);
+
+        // 【老文件没有列名的补救】: 表头只在文件为空时才写, 而机器上现存的 calib_log.txt
+        // 是 2026-09-19 之前的 9 列表头 —— 那道口子会让【13 个新列永远没有列名】, 恰好在
+        // 需要解释它们的那一刻没有说明。所以: 扫描整个文件找说明行的标记, 没有就补一句,
+        // 【只补一次, 且一个已有行都不动】(追加在第一次写新格式行之前)。
+        // 扫描而非进程内 static 标志: 标志每次启动都是 false, 会在每次启动各补一句;
+        // 而"这个文件到底被解释过没有"是文件的属性, 不是这次进程的属性。
+        bool needColNote = !needHeader;
+        if (needColNote && fseek(f, 0, SEEK_SET) == 0) {
+            char line[512];
+            while (fgets(line, sizeof(line), f)) {
+                if (strncmp(line, COL_EXT_MARK, strlen(COL_EXT_MARK)) == 0) {
+                    needColNote = false;
+                    break;
+                }
+            }
+        }
         if (needHeader) {
             fprintf(f, "# 负载标定尝试记录 (每次按 's' 一行)\n");
-            // 前 9 列 = 历史格式 (列号未动); 第 10 列起是 2026-09-19 追加的原始通道列。
-            // 每列的含义见本函数上面的长注释 —— 尤其: "-" 是"这个模型里没有这个量", 不是 0。
+            // 前 9 列 = 历史格式 (列号未动); 第 10 列起是追加的原始通道列 (下一行的说明)。
             fprintf(f, "# time | poses | rmsF_N | rmsM_Nm | psi_deg | dm_kg | mass_kg"
-                       " | comZ_mm | outcome");
-            fprintf(f, " | solver | m_kg | sv1 | sv2 | sv3 | iso | parity"
-                       " | cs_x_mm | cs_y_mm | cs_z_mm | cond | maxSigA | modelform\n");
+                       " | comZ_mm | outcome\n");
+        }
+        if (needHeader || needColNote) {
+            // 同一句话, 两种场合: 新文件的表头里就带; 老文件在第一次写新格式行之前补上。
+            // 两种文件里都是【同一行标记】—— 所以上面扫得到, 也就只会补一次。
+            // 每列的含义见本函数上面的长注释 —— 尤其: "-" 是"这个模型里没有这个量", 不是 0。
+            fprintf(f, "%s2026-09-19: 第 10 列起为原始通道解新增 ——"
+                       " solver | m_kg | sv1 | sv2 | sv3 | iso | parity"
+                       " | cs_x_mm | cs_y_mm | cs_z_mm | cond | maxSigA | modelform"
+                       " (\"-\" = 该模型里没有这个量, 不是 0)\n", COL_EXT_MARK);
         }
         char ts[24];
         const std::time_t now = std::time(nullptr);
@@ -561,7 +595,8 @@ namespace BiasCheck {
         // 之后还查得到", 悄悄少一列比不写更坏。fprintf 自己按内容增长。
         // 第 5..8 列 (psi_deg / dm_kg / mass_kg / comZ_mm) 【恒为 "-"】: 新模型里没有这四个量。
         if (!fit) {
-            fprintf(f, "%s | - | - | - | - | - | - | - | %s", ts, outcome);
+            // poses 照记 —— 它说的是"这次手上有几个姿态", 与求解走没走到无关。
+            fprintf(f, "%s | %d | - | - | - | - | - | - | %s", ts, poses, outcome);
             fprintf(f, " | - | - | - | - | - | - | - | - | - | - | - | - | -\n");
             fclose(f);
             return;
@@ -583,8 +618,16 @@ namespace BiasCheck {
         } else {
             fprintf(f, " | - | - | - | - | - | -");
         }
-        fprintf(f, " | %.3f | %.3f | %.3f | %.4g | %.6g | %s\n",
-                fit->cS[0] * 1000.0, fit->cS[1] * 1000.0, fit->cS[2] * 1000.0,
+        // c_s 与 m / 奇异值 / parity / Q 同属【线性层解出来了才有】的量: 线性层没解出来时
+        // c_s 也是全 0, 而 "0.000" 在这一行里会被读成"质心就在测量原点" —— 一个看着像
+        // 测量结果、其实表示"没有这个量"的 0。与上面那 6 列同一条件 (haveD), 记 "-"。
+        if (haveD) {
+            fprintf(f, " | %.3f | %.3f | %.3f",
+                    fit->cS[0] * 1000.0, fit->cS[1] * 1000.0, fit->cS[2] * 1000.0);
+        } else {
+            fprintf(f, " | - | - | -");
+        }
+        fprintf(f, " | %.4g | %.6g | %s\n",
                 fit->cond, maxSigA, modelFormStatusName(fit->modelFormStatus));
         fclose(f);
     }
@@ -672,14 +715,20 @@ namespace BiasCheck {
     // 于是本次的产出只有两样: 控制台上那一屏 (够判"这次标定到底成不成") 和
     // calib\calib_log.txt 里的一行 (够在控制台滚掉之后回看)。
     static void solveAndApply() {
+        // ===== 连续失败计数: 【警告, 不是闸门】 =====
+        // 从前这里是一个 return: 第 3 次拒绝起, 整屏诊断被一行 "REJECTED locked_out" 顶掉,
+        // 而且【没有任何别的办法把它再弄出来】(logCalibAttempt 只落 22 个窄列, 没有 A / Q /
+        // c_s / σ)。在"只打印、不应用"的今天, 那个 return 的【唯一效果】就是藏掉输出 ——
+        // 而首次实机跑本来就以被拒为常态 (还没有 'r' 重复对 / 覆盖不足), 操作员反复按 's'
+        // 看输出是最自然的用法, 一按就退化成一行。所以: 计数照记、照报 (它本身有信息量),
+        // 但【不再中止这条路】—— 下面的诊断体一律照跑照打。
+        // solveLocked 因此不再决定"跑不跑"; 它只被 reset()/这里写, 读它的地方是这一行,
+        // 意思是"已经连续被拒这么多次了"。真正的上锁语义属于【被停用的应用路径】(Task 11 处理)。
         if (solveLocked) {
-            std::cout << "\n[BIAS] !! 已连续 " << consecutiveFails << " 次判定结果不合理, 已停止求解。\n"
-                      << "       [BIAS] !! 判据: 模型形式检验 (残差 vs 姿态间复现性) / 质量尺度"
-                      << " / 条件数。查装夹是否松动 / 传感器是否受挤压 / 姿态覆盖是否够"
-                      << " / 采集收尾有没有按 'r'。\n"
-                      << "       [BIAS] !! 处理后按 'm' 重新采集 (计数会清零)。" << std::endl;
-            logCalibAttempt("REJECTED locked_out", nullptr, count);
-            return;
+            std::cout << "\n[BIAS] 提示: 已连续 " << consecutiveFails << " 次被拒 ——"
+                      << " 仍照常求解并打印全部诊断 (本模式【不写任何东西】, 不存在"
+                      << " \"写坏\" 的风险)。\n"
+                      << "       反复按 's' 不会变好; 按 'm' 重新采集会把计数清零。" << std::endl;
         }
         if (count < 4) {
             std::cout << "[BIAS] 求解至少需要 4 个姿态 (当前 " << count
@@ -920,6 +969,13 @@ namespace BiasCheck {
         } else {
             // 拒绝时必须说清【是哪一种】—— "没验过"与"验了没过"是两回事, 处置也完全不同。
             if (fit.modelFormStatus != PayloadCalibration::MODEL_FORM_OK) {
+                // ⚠ 这一行解释的是 modelFormStatus, 而它【不一定是最先卡住的那一步】:
+                // fitRaw 因【非】模型形式的原因被拒时 (A 奇异 / cond 过大 / 质量尺度越界) 会在
+                // 动 modelFormStatus 之前就返回, 于是这里读到的仍是默认值 NO_DOF —— 而真因
+                // 已经由库打到 stderr 的 [Payload] 那一行上。这里【不复述库里的常量】(复制一份
+                // 判据就会与库各说各话), 只把人指向那一行。
+                std::cout << "      (若上面有 [Payload] 自检拒绝行, 【以那一行为准】—— 本行解释的"
+                          << "只是 modelFormStatus。)" << std::endl;
                 printf("      → 拒因: 【尺子不齐】(%s) —— 模型形式【没有被检验】, 所以不给参数。",
                        modelFormStatusName(fit.modelFormStatus));
                 std::cout << std::endl;
@@ -970,18 +1026,25 @@ namespace BiasCheck {
 
         // 这批数据【仍然有效】, 所以【不】动 dataUnderCurrentPayload: 从前把它置 false 是因为
         // 求解会改本地补偿, 同一份数据在新补偿下不再可比; 现在没有任何东西被改, 复验照旧可用。
-        std::cout << "  → 复验: 直接按 'm' 即可 (本次没有改动任何生效值, 已采数据不作废)"
-                  << std::endl;
+        // 复验按哪个 'm' 要说清: 【在 'm' 模式里】再按一次 = 退出模式并重出报告 (数据不丢);
+        // 从模式外按 'm' = 重新开始采集 (走 reset(), 这批数据丢弃)。两者是同一个键、相反的结果。
+        std::cout << "  → 复验: 【就在 'm' 模式里】再按一次 'm' 即退出并重出报告 (已采数据不作废,"
+                  << " 本次没有改动任何生效值);\n"
+                  << "     从模式外按 'm' 是【重开采集】—— 那会丢弃这批数据。\n"
+                  << "     注意: 那份报告 (report) 报的是【旧模型/当前生效配置】的量"
+                  << " (当前负载 / CZ符号), 不是上面这一屏解出的东西。" << std::endl;
         std::cout << std::endl;
 
-        // 连续失败计数与上锁照旧: 拒绝的理由 (形式不匹配 / 尺子不齐 / 激发不足) 每一条都是
-        // "回去重采", 反复按 's' 不会变好; 按 'm' 重新采集会清零 (见 reset)。
+        // 连续失败计数照记、照报 (它本身有信息量: "这台设备此刻解不出可用的东西"), 但
+        // 【不】再据此中止任何东西 —— 见 solveAndApply 顶上。solveLocked 只作为这个状态的
+        // 标记被写下来 (真正的上锁语义属于已停用的应用路径), 读它的地方只有顶上那一句提示。
         if (!fitOk) {
             consecutiveFails++;
             if (consecutiveFails >= Config::CALIB_MAX_CONSECUTIVE_FAILS) {
                 solveLocked = true;
-                std::cout << "  [BIAS] !! 已连续 " << consecutiveFails << " 次拒绝, 停止求解。"
-                          << " 按 'm' 重新采集 (计数清零)。" << std::endl << std::endl;
+                std::cout << "  [BIAS] 已连续 " << consecutiveFails << " 次被拒 (>= "
+                          << Config::CALIB_MAX_CONSECUTIVE_FAILS << ") —— 按 'm' 重新采集"
+                          << " (计数清零)。本次诊断不因它少打一行。" << std::endl << std::endl;
             }
         } else {
             consecutiveFails = 0;
@@ -1659,7 +1722,8 @@ void keyboard(unsigned char key, int, int) {
                       << " 每到一个姿态按 SPACE (采样 1s)\n"
                       << "       'd' 拖拽模式开关 (摆姿态用; 摆好一定要关掉再采样) /"
                       << " 'm' 退出并输出报告\n"
-                      << "       's' 求解负载参数 → 写入本地补偿 (合理性由拟合残差判定)\n"
+                      << "       's' 用这批数据【求解原始通道】, 只打印、不改动任何东西"
+                      << " (不写补偿 / 不写 json / 不下发机械臂)\n"
                       << "       ★ 收尾: 摆完所有姿态后回到【第 1 个姿态】—— 位置和姿态都回到"
                       << "第一次那个位姿 —— 按 'r' 采一次;\n"
                       << "         【多按几次更好】(每次中间都要真的动一下再回来): 再按 'r' 是"
