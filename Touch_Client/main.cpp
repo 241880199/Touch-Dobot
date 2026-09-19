@@ -637,15 +637,21 @@ static void runZeroDriftCheck(bool hasStoredZero) {
 // 读代码判不了这件事, 得看实机静止时的噪声量级。两个可疑点, 都不是"单位写错了":
 //   · vel/acc 实际就是 m/s 与 m/s² —— MotionEstimator::update 里已 mm→m 换算
 //     (position * 0.001), 所以 0.002 / 0.005 的量纲命名是对的。
+//     下面的单位标签是 2026-09-19 才从 mm/s 改正过来的: 旧标签把物理速度说小 1000 倍,
+//     操作者照着读会算错量级。阈值常量本来就是这个量纲 (Config.h:123-124)。
 //   · 真正可疑的是 dt 与实际采样间隔不符: update() 固定用 dt=1/125s, 而 step() 的唯一
 //     调用方 pollForce() 自我节流到 33ms、且它读的 robotActualPose 只由 queryPose()
 //     每 100ms 刷新一次 (RelayCore.cpp:1599, main.cpp poseQueryTimer)。即每 3 帧里约 2 帧
 //     位姿没变 (vel 恰为 0), 第 3 帧却把 100ms 的位移除以 8ms ⇒ 速度高估 ~12 倍,
 //     加速度经 1/dt² 放大更多。这会把 isStill() 往"永远为假"推。
-// 所以这里启动后打 5 行实测量, 用实测 vel/acc 量级来判定, 而不是靠读代码猜。
-// 【阈值问题有结论后本段连同 ForceCompensation::motionState 一起删除。】
+// 所以这里启动后打 30 行实测量, 【一个力帧一行】(见下), 好让上面这个 10Hz 位姿 / 125Hz dt
+// 的错配直接出现在输出里 —— 连续几帧 pos 一模一样、vel 恰为 0.000000, 然后一帧大跳 ——
+// 而不是靠读代码去推断。原先每 1s 打一行, 30 帧里只采到 1 帧, 那个节奏根本看不出阶梯。
+// 【这是临时诊断: 等 dt/采样节奏与阈值这两件事有了结论并修好, 本段连同
+//   ForceCompensation::motionState 一起删除。】
 static bool g_motionProbeDone = false;
 static DWORD g_motionProbeStartMs = 0;
+static DWORD g_motionProbeLastUpdateMs = 0;   // 去重用, 与 BiasCheck::sample 同一套办法
 static int g_motionProbeCount = 0;
 
 static void runMotionProbe() {
@@ -661,23 +667,37 @@ static void runMotionProbe() {
     fd = appState.forceData;
     LeaveCriticalSection(&appState.forceDataMutex);
 
-    // 与零偏漂移检查同理: 启动后前 2s 等读数稳住再开始, 免得第一行量的是启动瞬态。
+    // 与零偏漂移检查同理: 启动后前 2s 等读数稳住再开始, 免得前几行量的是启动瞬态。
     if (fd.isStale || now - g_motionProbeStartMs < 2000) return;
 
-    // 之后每秒一行, 共 5 行, 打完永久停。
-    if (now - g_motionProbeStartMs < static_cast<DWORD>(2000 + g_motionProbeCount * 1000)) return;
+    // 【一个力帧一行】: 这里必须靠 lastUpdateMs 去重, 不能每个 idle 帧都打。idle() 跑得比
+    // 力数据快得多, 而 pollForce() 自我节流到 33ms —— 去重之后本探针的节奏才等于 step()
+    // 真正看到的那个节奏 (~30Hz), 也才有可能看出位姿的 10Hz 阶梯; 同一份数据反复打印只会
+    // 把阶梯淹掉。(办法与 BiasCheck::sample 一致, 见那里的同名注释。)
+    if (fd.lastUpdateMs == g_motionProbeLastUpdateMs) return;
+    g_motionProbeLastUpdateMs = fd.lastUpdateMs;
+
+    // 原始位姿 (mm), 与 pollForce 同法在锁内读取 (RelayCore.cpp:1605-1612)。
+    double px, py, pz;
+    EnterCriticalSection(&appState.robotPoseMutex);
+    px = appState.robotActualPose.x;
+    py = appState.robotActualPose.y;
+    pz = appState.robotActualPose.z;
+    LeaveCriticalSection(&appState.robotPoseMutex);
 
     double vel[3], acc[3];
     int still = ForceCompensation::motionState(vel, acc) ? 1 : 0;
-    printf("[Force] 运动检测: vel=%.4f mm/s (阈值 %.4f)  acc=%.4f mm/s² (阈值 %.4f)  isStill=%d\n",
+    printf("[Force] 运动检测 #%02d: pos=(%.3f,%.3f,%.3f)mm  vel=%.6f m/s (阈值 %.4f)  acc=%.6f m/s² (阈值 %.4f)  isStill=%d\n",
+           g_motionProbeCount + 1,
+           px, py, pz,
            sqrt(vel[0]*vel[0] + vel[1]*vel[1] + vel[2]*vel[2]),
            Config::FORCE_MOTION_VEL_THRESH_MS,
            sqrt(acc[0]*acc[0] + acc[1]*acc[1] + acc[2]*acc[2]),
            Config::FORCE_MOTION_ACC_THRESH_MSS,
            still);
 
-    g_motionProbeCount++;
-    if (g_motionProbeCount >= 5) g_motionProbeDone = true;
+    // 30 行后永久停: 够看出阶梯节奏, 又不至于一直刷屏。
+    if (++g_motionProbeCount >= 30) g_motionProbeDone = true;
 }
 
 // ===== 采集类模式互斥 =====
@@ -726,7 +746,7 @@ void idle() {
             // 启动零偏漂移检查 (一次性, 只查零偏, 不阻断)
             runZeroDriftCheck(g_hasStoredZeroCalib);
 
-            // 启动运动检测器诊断 (一次性 5 行, 只为量 isStill 的阈值问题 — 见定义处注释)
+            // 启动运动检测器诊断 (一次性 30 行, 一个力帧一行 — 见定义处注释)
             runMotionProbe();
 
             // 多姿态零偏检查采样 (负载参数验证)
