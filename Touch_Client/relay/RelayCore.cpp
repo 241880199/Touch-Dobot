@@ -152,15 +152,59 @@ static DWORD WINAPI forceReaderThread(LPVOID) {
 // 负载设置不准 → 30004 力值随姿态漂移 / 碰撞检测误触发 / 拖拽失控。
 // 负载值优先取实机标定结果 (PayloadCalibration / payload_calib.json),
 // 未标定时回退 Config.h 的种子值。
+//
+// 连接时真正下发的那份负载 —— 机械臂在【整个会话】里用的就是这一份做重力/惯性补偿。
+// 运行中的重新使能 (脱困 / 报警恢复) 必须原样回放它, 【不能】再去读 effective():
+// 标定求解 (main.cpp 的 's') 会把内存生效值改成新值 (PayloadCalibration::applyResult),
+// 而运行中改负载恰恰是能让机械臂猛地动起来的操作 (2026-09-19 实机证实: 改成 1.5 kg
+// 后重启, 机械臂快速撞向关节限位)。它同时会让本地残余补偿多减一份, 即同一个误差减两次。
+static bool s_sentPayloadValid = false;
+static double s_sentPayloadMassKg = 0.0;
+static double s_sentPayloadComMm[3] = {0.0, 0.0, 0.0};
+
+// 参数化的发送器: 负载是入参, 不在这里隐式读全局生效值。
+// note 仅供日志标注 (可为 nullptr), 不影响下发内容。
+static bool sendEnableRobotWithPayload(double massKg, const double com[3],
+                                       const char* note = nullptr) {
+    char cmd[96];
+    snprintf(cmd, sizeof(cmd), "EnableRobot(%.3f,%.1f,%.1f,%.1f)", massKg, com[0], com[1], com[2]);
+    std::cout << "[Relay] 使能 " << cmd;
+    if (note) std::cout << "  (" << note << ")";
+    std::cout << std::endl;
+    return robotSendEnable(cmd);
+}
+
+// 【只允许连接时序 (init) 调用】—— 它下发当前生效值, 并把下发成功的那份记成快照。
+// 若在运行中调用, 快照就会被"新解出的"负载覆写, 那正是本文件要避免的事。
 static bool enableRobotWithPayload() {
     double m, c[3];
     PayloadCalibration::effective(m, c);
-    char cmd[96];
-    snprintf(cmd, sizeof(cmd), "EnableRobot(%.3f,%.1f,%.1f,%.1f)", m, c[0], c[1], c[2]);
-    std::cout << "[Relay] 使能 " << cmd
-              << (PayloadCalibration::enabled ? "  (实机标定值)" : "  (种子值, 未标定)")
-              << std::endl;
-    return robotSendEnable(cmd);
+    bool ok = sendEnableRobotWithPayload(
+        m, c, PayloadCalibration::enabled ? "实机标定值" : "种子值, 未标定");
+    if (ok) {
+        // 成功之后才记: 直到进程重启, 机械臂用的就是这一份, 运行中的重新使能只回放它。
+        s_sentPayloadMassKg = m;
+        s_sentPayloadComMm[0] = c[0];
+        s_sentPayloadComMm[1] = c[1];
+        s_sentPayloadComMm[2] = c[2];
+        s_sentPayloadValid = true;
+    }
+    return ok;
+}
+
+// 运行中的重新使能 (脱困 / 报警恢复) 专用: 回放连接时真正下发的那份负载。
+static bool reenableRobotWithConnectPayload() {
+    if (!s_sentPayloadValid) {
+        // 连接时的使能没成功过, 快照不可用, 只能回退到当前生效值 —— 而它【未必】是机械臂
+        // 此刻实际在用的负载, 所以这条路径必须把话说明白。
+        double m, c[3];
+        PayloadCalibration::effective(m, c);
+        std::cout << "[Relay] 警告: 无连接时的负载快照 (使能未成功过), 回退到当前生效值 — "
+                  << "它未必是机械臂此刻实际在用的负载" << std::endl;
+        return sendEnableRobotWithPayload(m, c, "回退: 非连接时下发值, 未必是机械臂在用的负载");
+    }
+    return sendEnableRobotWithPayload(s_sentPayloadMassKg, s_sentPayloadComMm,
+                                      "回放连接时的负载");
 }
 
 RelayCore& RelayCore::instance() {
@@ -360,7 +404,10 @@ static bool escapeSingularity() {
 
     // Step 6: ClearError 不够, 需要 EnableRobot
     std::cout << "[脱困] 尝试 EnableRobot..." << std::endl;
-    enableRobotWithPayload();
+    // 【必须】回放连接时下发的那份负载, 不能用 effective(): 内存生效值可能已被本会话的
+    // 标定求解改掉 (main.cpp 's' → PayloadCalibration::applyResult), 而带着新负载重新
+    // 使能正是能让机械臂猛地动起来的操作 —— 脱困时操作员的手可能就在设备上。
+    reenableRobotWithConnectPayload();
     Sleep(300);
     robotDrainEnable();
 
@@ -1289,9 +1336,11 @@ void RelayCore::checkAlarm() {
             std::cout << "[Relay] 报警已清除 (mode=" << mode << ")，尝试恢复..." << std::endl;
             app.isRobotInAlarm = false;
             // Re-enable robot since FATAL callback disabled it
+            // 【必须】回放连接时下发的那份负载, 不能用 effective(): 内存生效值可能已被本
+            // 会话的标定求解改掉, 而运行中改负载会让机械臂动 (理由同 escapeSingularity)。
             robotSendEnable("ClearError()");
             Sleep(200);
-            if (!enableRobotWithPayload()) {
+            if (!reenableRobotWithConnectPayload()) {
                 // 使能失败却照样 onRecovery() 会让上层以为手臂已可用 (实际还在下使能状态)
                 std::cerr << "[Relay] 恢复失败: EnableRobot 未成功, 保持报警状态" << std::endl;
                 app.isRobotInAlarm = true;
