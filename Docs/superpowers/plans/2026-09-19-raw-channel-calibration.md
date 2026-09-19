@@ -287,13 +287,48 @@ d = cz_robot − c_s = 68.7 − 54.55 = 14.15 mm
 
 ---
 
-### Task 11: 清理旧机制
+### Task 11: 清理旧机制 —— **⚠ 范围实测后重估; 且【排在 Task 6 之后】**
+
+**实测波及面（2026-09-19，`grep` 计数）** —— 这一节原来只写了 5 行，**低估了**：
+
+| 符号 | 测试引用 | 生产引用 | 备注 |
+|---|---|---|---|
+| `solve(` | **20** | 13 | 删它要拆掉大半个测试套件（现全绿） |
+| `comSignZ` | 4 | 13 | |
+| `cTrueZ` | 3 | 7 | |
+| `setSensorYawDeg` | 5 | 12 | |
+| `sensorYawDeg` | 13 | **18** | **其中含活路径** |
+| `SENSOR_MOUNT_YAW_DEG` | 2 | 9 | |
+
+另：`main.cpp:1214~1478` 有 **264 行 `#if 0`** 装着整个旧模型。
+
+**⚠⚠ 两条【不许现在做】的理由**
+
+1. **`sensorYawDeg` 有活路径**：`ForceCompensation.cpp:261` 走 `TcpCalibration::gravitySensorFrame`，
+   用的是模块态 ψ。而 **Task 6 本来就要改这里** —— 新模型的 `A` 吸收了安装旋转，
+   本地补偿该用 `A`，不该再用 `Rz(-ψ)`。**先删 ψ 再改 Task 6 = 同一处做两遍，
+   而且中间那一段时间里补偿与求解的约定不一致。**
+2. **拆 `solve()` 要连测试一起拆**（20 处、多个整用例），而那是当前的回归网。
+
+**⇒ 次序：Task 6 → Task 11。** 在 Task 6 落地、补偿改用 `A` 之后，ψ 才真正成为无引用物。
+
+**Task 6 之后要做的事（范围不变，但那时是安全的）**
 
 - [ ] 删 ψ 扫描（`PSI_MIN/MAX/STEP/N_SCAN`、扫描循环、`sensorYawDeg` 的持久化）
+- [ ] 删 `PayloadCalibration::solve()` 与其辅助（`gravityTool` 的 ψ 参数、`buildRows`）——
+      **连同引用它的那些 ψ 时代用例一起删**（是删，不是改写：那些用例断言的是旧模型的行为）
 - [ ] 删 `comSignZ` / `cTrueZ[2]` / `com_sign_z`
-- [ ] 删 `main.cpp` 里的 z 符号手工对齐（`f624b7e`）
-- [ ] 删 `@1168` 回声作**求解基线**（保留作**验证**）
+- [ ] 删 `main.cpp` 里的 z 符号手工对齐（`f624b7e`）与那段 264 行 `#if 0`
 - [ ] 删 `payload_calib.json` 的绝对质心驱动（改由 `EnableRobot` 直接发；文件只留记录）
+
+**⚠ 明确【保留】** —— 与上面几行相反，这几样**不是**旧机制，删了会把今天的结论一起删掉：
+
+- **`TcpCalibration::gravitySensorFrameAtYaw`**：新模型就是在用它（`psi` 传 0）。**留着。**
+- **`TcpCalibration::gravitySensorFrame`**：`ForceCompensation` 在用。**留到 Task 6 一并处理。**
+- **`@1168` 回声**：原计划写"保留作验证"，**现在要加一条更重的用途** ——
+  它是 **Task 9 里定 `d` 的唯一外部参照**（机械臂自报的 `center` 就在它自己的法兰系）。
+  **删它等于删掉原点问题的解。** 保留作：原点参照 + 闭环对账。
+- **`Config::SENSOR_MOUNT_YAW_DEG`**：在 Task 6 之前仍是 `ForceCompensation` 的输入。
 - [ ] 修正所有"改不动"的伪证文案（`PayloadCalibration.h:5,10,32,86-90`、`ForceCompensation.h:40`、
   `main.cpp:400-402`、`PayloadCalibration.cpp:190-192,263-267`）
 - [ ] `run_tests.bat` 补 6 个漏掉的套件
