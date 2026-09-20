@@ -2007,6 +2007,9 @@ namespace PayloadCalibration {
         // 实机上 |cz_robot| > 31.5 时它【不可能】为真 (推导见头文件) —— 但代码不依赖
         // "这台机器恰好数值大"。
         d.czSignFlipped = (cand.comMm[2] * echoCenterMm[2] < 0.0);
+        // 候选【发不发得出去】—— 判据与 'p' 那一支【同一个】(main.cpp: s_sendCandidate.verdict
+        // != SEND_OK 即拒)。结论行要先看它: 一个过不了闸的候选没有"改动"可言 (二次复审 Minor 1)。
+        d.sendable = (cand.gate.verdict == SEND_OK);
         return d;
     }
 
@@ -2024,11 +2027,23 @@ namespace PayloadCalibration {
     void formatSendCandidateDiffConclusion(const SendCandidateDiff& d, char* out, int len) {
         if (d.czSignFlipped) {
             // §3.5 第 2 条: 翻号【必须】标高危, 而且不许再说"只改 m"。
+            // 【这一支仍排在最前】: 标高危是 §3.5 的硬要求, 不许被下面的"发不出去"顶掉
+            // (过不了闸的候选同样可能翻了号, 那时两句话都该说 —— 闸的结论行就在下一行)。
             snprintf(out, len,
                      "c 已变（【含翻号】）—— ⚠【高危】本次 cz 由 %+.1f 翻为 %+.1f mm: 量与机械臂"
                      "当前值相同、号相反, 量级上是一次【巨大】的负载改动, 不是最小改动。"
                      "按 §1 的安全规程处置后再决定发不发",
                      d.echoCenterMm[2], d.candCenterMm[2]);
+        } else if (!d.sendable) {
+            // ★ 二次复审 Minor 1: 【过不了闸的候选没有"改动"可言】。走到这里意味着 c 逐位未变
+            //   (翻号那一支已经在上面走掉了), 而老措辞会打"c 未变 —— 本次【只改 m】" —— 操作员
+            //   读到的是一次"最小改动", 事实却是判决不是 SEND_OK, 按 'p' 会被拒、一个字节都发
+            //   不出去。数字照打 (上面那几行), 但不许把它说成一次会发生的取舍。
+            //   措辞与 formatSendGateConclusion 的"候选不可发送：..."用同一个词 —— 两处说的是
+            //   同一个状态, 换个说法就会读成两件事。
+            snprintf(out, len,
+                     "【候选不可发送】(判决不是 SEND_OK, 理由见下面闸的结论行) —— 上面的差只是"
+                     "【数值】比较, 不构成一次会发生的改动; 先按闸的结论行处置");
         } else if (d.cUnchanged) {
             snprintf(out, len,
                      "c 未变 —— 本次【只改 m】(c 的三个分量与机械臂当前值逐位相同; "

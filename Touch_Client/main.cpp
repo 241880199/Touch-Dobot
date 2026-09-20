@@ -1660,7 +1660,12 @@ namespace BiasCheck {
             //     (【不许】退回本客户端自己下发的值: 那条路带着 centerZ 折叠歧义, 约差 125 mm)
             // ⚠ 照实说: 走到这个 else 时 fitOk 已为真, 而 fitRaw 自己就调 decompose ⇒ decompOk
             //   【必然】为真, 所以"没有实测质量尺度"这一支在生产路径上【当前不可达】。它留着是
-            //   防御性的 (把"退回种子值"这条路在类型/判决两层都堵死), 不是"现在会发生的事"。
+            //   防御性的 (把"退回种子值"这条路在【调用点 + 判决层】两层堵死), 不是"现在会发生
+            //   的事"。
+            // ⚠ 【不许说成"类型层"】(二次复审 Minor 2): measuredMassKg 是 const double*, 它
+            //   【不携带来源】—— 任何调用方传个 double* 进来, buildSendCandidate 都会把来源
+            //   硬写成 MASS_SOURCE_MEASURED。所以守这条不变式的是两处: 下面这个调用点
+            //   (decompOk ? &d.m : nullptr) 与 evaluateSendGate 里那道判决。
             //   真正可达的"无候选"是下面 echoOk == false 那一支。
             const PayloadCalibration::SendCandidate cand = PayloadCalibration::buildSendCandidate(
                 decompOk ? &d.m : nullptr, decompOk ? &csZmm : nullptr,
@@ -1695,9 +1700,16 @@ namespace BiasCheck {
                 }
                 // 候选的 c 打的是【闸1 定过号之后】的那一份 —— 也就是 'p' 真会发出去的那一份。
                 // (8a 复审 Minor 7: 从前这里打的是闸前的 com, 屏幕上可能与发出去的不是一个东西。)
+                // ⚠ 但"定过号"只在闸1 【真的定下了号】(convention != 0) 时才成立: SEND_SIGN_AMBIGUOUS /
+                //   SEND_SIGN_NONE_IN_RANGE 在 convention / czSign / comMm[2] 赋值【之前】就返回了,
+                //   那时 comMm[2] 还是机械臂自报的原样 (这一支在有候选 present == true 时【可达】)。
+                //   标签若写死"已按闸1 的号定", 屏幕上就同时出现"闸1 无法判定"与"号已定"两句
+                //   互相打架的话 (二次复审 Minor 1)。所以标签跟着判决走, 两种情形各说各的。
                 diagEmitf("  候选 (cx, cy, cz)       = (%.1f, %.1f, %.1f) mm"
-                          "   [机械臂自报 @1176 的 CenterX/Y/Z, cz 已按闸1 的号定]\n",
-                          cand.comMm[0], cand.comMm[1], cand.comMm[2]);
+                          "   [机械臂自报 @1176 的 CenterX/Y/Z, %s]\n",
+                          cand.comMm[0], cand.comMm[1], cand.comMm[2],
+                          cand.gate.convention != 0 ? "cz 已按闸1 定的号"
+                                                    : "闸1 未定号, cz 即自报原样");
                 diagEmitf("  候选 |c|                = %.1f mm\n", candMag);
                 // 闸 1: 两支 d 与判读。⛔ 这里【只报数, 不给勾/叉】(与块尾那一节同一条规矩) ——
                 // "恰好一支在内"才是放行, 给单一勾会让人以为"这一支通过了"。
@@ -2686,7 +2698,12 @@ void keyboard(unsigned char key, int, int) {
     //       #if 0 块内" —— 【那是错的】: 它【在活路径上】, 只是不在这条路径上。真正的调用点是
     //       main() 的启动序列里、紧接 PayloadCalibration::load 之后那一处 (在 `else` of
     //       `if (g_noRobot)` 内, 连机械臂之前; 与 's' 无关, 也不由任何按键触发)。写这条注释
-    //       时逐处核过全文件: 那两处之外没有第三个调用, solveAndApply 里【一处都没有】。
+    //       时逐处核过全文件: 那两处之外没有第三个调用, solveAndApply 的【活路径】里一处都没有。
+    //       ⚠ 措辞是"活路径"不是"里" —— 严格读"solveAndApply 里"是【假的】: 那个 #if 0 块
+    //       (本函数末尾那一大段"旧模型") 就嵌在 solveAndApply 的花括号【内】, 而它里面确实有一处
+    //       setSensorYawDeg。上一句对 applyResult / save 用的就是"【本条路径】"这个限定,
+    //       这里与它对齐 (二次复审 Minor 3)。
+    //       (这里【故意不写行号】: 本注释自己一动行号就漂 —— 本项目已多次栽在照抄行号上。)
     //   · 【不】下发机械臂 —— 活路径里没有任何 robotSendEnable / sendPayloadToRobot 调用;
     //     下发是另一个键 'p' 的事 (Task 8a), 而且要先过两道闸。
     //   ⚠ 但它【不是】"什么都不写": 本次诊断会落三份文件 —— calib_log.txt 一行 (logCalibAttempt)、

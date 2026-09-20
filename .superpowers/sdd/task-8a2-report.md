@@ -441,8 +441,15 @@ Minor 4 写"`czSign == -1` 是 the only sign-flipping code path"。按 §4.2 的
 而 `evaluateSendGate` 在来源不是 `MASS_SOURCE_MEASURED` 时给 `SEND_NOT_MEASURED`。
 **照实说明:** 走活路径时 `fitOk` 为真 ⇒ `fitRaw` 自己就调过 `decompose` ⇒ `decompOk` 必然为真
 ⇒ **`CAND_NO_MEASURED_MASS` 这一支在生产路径上当前不可达**。它留着是把"退回种子值"这条路在
-**类型层与判决层各堵一次** (防御性), 不是"现在会发生的事" —— 这句话已逐字写在
-`main.cpp:1662-1665` 的注释里。真正可达的"无候选"是 `echoOk == false` 那一支。
+**调用点与判决层各堵一次** (防御性), 不是"现在会发生的事" —— 这句话已逐字写在
+`main.cpp` 的注释里 (那次编辑前的 `:1662-1665`)。真正可达的"无候选"是 `echoOk == false` 那一支。
+
+> ⚠ **2026-09-20 二次复审 Minor 2 更正 (本报告原文有误)**: 上面这段初版写的是"**类型层**与判决层
+> 各堵一次", **说强了**。`buildSendCandidate` 的 `measuredMassKg` 是 `const double*`, **它不携带
+> 来源** —— 任何调用方传一个 `double*` 进来, 里面都把来源硬写成 `MASS_SOURCE_MEASURED`, 类型上
+> 拦不住任何东西。真正守着这条不变式的只有两处: `main.cpp` 的调用点 (`decompOk ? &d.m : nullptr`)
+> 与 `evaluateSendGate` 里那道判决。**唯一"类型"性质的东西只是 `massSource` 参数没有默认值、
+> 漏写编不过** —— 那不是"堵死", 因为候选路径上那个值是写死的。
 
 ---
 
@@ -503,3 +510,108 @@ $ git show --numstat --format="%h %s" HEAD
    (`'m'` 在 `--no-robot` 下被拒, `'s'` 要 ≥4 个实机姿态, 全程序没有离线驱动入口 ——
    与 8a §4.3 同一情形)。我能给的最强证据是 §3.5 的 9 条纯函数用例, 覆盖了那个块的
    **全部算术与全部措辞**; 没有被跑过的是**排版**。
+
+---
+
+# 附录 A —— 二次复审遗留 Minor 修复波 (2026-09-20, 在 `a4036b3` 之上)
+
+**范围**: 二次复审给 **Approved / 无 Critical 无 Important**, 遗留 6 条 Minor。本波只改**文字与
+一处判据的承载**, 未动任何判决、阈值、比较符、算术。⑷ 复审自己标了"仅报告", **按派单不做**。
+
+## A.1 逐条
+
+| # | 位置 (改后行号) | 改了什么 |
+|---|---|---|
+| 1 | `main.cpp:1711` | 候选 c 那一行的标签由**写死**"cz 已按闸1 的号定"改成**跟判决走**: `cand.gate.convention != 0 ? "cz 已按闸1 定的号" : "闸1 未定号, cz 即自报原样"` |
+| 1 | `PayloadCalibration.h:570` (+`:583-590`) / `PayloadCalibration.cpp:2012`, `:2037` | `SendCandidateDiff` 加 `bool sendable` (= `cand.gate.verdict == SEND_OK`, 在 `diffSendCandidate` 里填); `formatSendCandidateDiffConclusion` 多一支: `!sendable` 时**不再**打"c 未变 —— 本次【只改 m】", 改打"【候选不可发送】…" |
+| 2 | `main.cpp:1663` | "在**类型/判决**两层都堵死" → "在**【调用点 + 判决层】**两层堵死", 并补一段说明为什么不能叫"类型层" |
+| 2 | 本报告 §6.6 | 同上更正: 原句**就地改**为"调用点与判决层各堵一次", 并在下面加一个引用原措辞的更正块 —— 旧说法留在引用里, 不静默消失 |
+| 3 | `main.cpp:2701` | "solveAndApply 里【一处都没有】" → "solveAndApply 的**【活路径】**里一处都没有" |
+| 5 | `tests/test_payload_calibration.cpp:3472` | 注释 "499.999 **含**" → "499.999 **放行**" (断言本来就对) |
+| 6 | `tests/test_payload_calibration.cpp:3537-3539` | `test_send_gate_refuses_unmeasured_mass_and_says_so` 加断言: `dSameDir/dFlipDir == 0.0`、`!dSameIn && !dFlipIn`、`convention == 0 && czSign == 0.0` |
+
+**新增用例**: `test_send_candidate_diff_conclusion_never_says_only_m_when_unsendable`
+(`tests/test_payload_calibration.cpp:3725`, 注册在 `:3875`) —— 两个半边: ① 闸1 定不了号 ⇒ 断言
+**有**"候选不可发送"、**无**"只改 m"、无"高危"; ② **翻号 + 发不出去** (m = 2.0 超闸2) ⇒ 断言
+**有**"高危"、无"只改 m"。
+
+### A.1.1 分支次序: 为什么"翻号/高危"排在"发不出去"**前面**
+
+初版把 `!sendable` 放在最前, 读起来更顺 ("先说不发得出去")。**改掉了**: §3.5 第 2 条要求"翻号
+**【必须】**标高危", 而 `czSignFlipped` 与 `!sendable` **可以同时为真** (cz 号已定且被翻, 但 m 或
+|c| 超闸) —— 那时若 `!sendable` 先命中, **高危就被顶掉了**, 等于在没被要求的地方削掉一条硬要求。
+现在的次序: 翻号 ⇒ 高危 (不受 `sendable` 影响) / `!sendable` ⇒ 候选不可发送 / 其余照旧。
+两个半边都在用例里钉住。
+
+## A.2 覆盖用的命令与原始输出
+
+```
+$ ./tests/build_payload_calibration_test.bat        # 工作目录 = Touch_Client/tests
+BUILD_EXIT=0                                        # 无 error, 无 warning
+
+$ ./test_payload_calibration.exe
+  send_gate_refuses_unmeasured_mass_and_says_so... PASS
+  ...
+  send_candidate_diff_conclusion_never_says_only_m_when_unsendable... PASS
+69 passed, 0 failed                                  # 基线 68 -> 69 (新增 1 条)
+```
+
+**反向对照 (证明新用例真的钉住了)**: 把 `else if (!d.sendable)` 临时改成 `else if (false && ...)`,
+重编重跑 ——
+
+```
+  send_candidate_diff_conclusion_never_says_only_m_when_unsendable... FAIL: t.find("候选不可发送") != std::string::npos
+68 passed, 1 failed
+```
+
+然后逐字改回 (`grep TEMP-NEGCTRL` 无输出), 重编重跑 ⇒ `69 passed, 0 failed`。
+**没有这一条对照, "用例钉住了"就只是我说的话。**
+
+**全量**: `./tests/run_tests.bat` ⇒ **12/12 `[OK]`, 0 `[FAIL]`, exit 0** (与 `a4036b3` 基线同)。
+
+**App 侧**: `./build.bat` ⇒ `Build OK`。唯一一条警告是
+`minwindef.h CALLBACK 宏重定义 (glut.h)` —— **与本次改动无关** (本次一行都没碰包含关系),
+`a4036b3` 上就在。
+
+## A.3 ★ 复审的行号与主张与代码对不上的地方
+
+派单说了"别信行号, 自己回源头核"。核的结果如下 —— **六条主张的实质全部成立**, 行号错 3 处:
+
+| 复审说的 | 实际 | 判定 |
+|---|---|---|
+| ① 标签在 `main.cpp:1698-1700` | `diagEmitf` 正在 `:1698-1700` | ✅ 准确 |
+| ② `main.cpp:1663-1665` | 主张那半句**只在 `:1663`**;`:1664-1665` 是"真正可达的那一支"与 `buildSendCandidate(...)` 调用, **不是**这句话 | ⚠️ 范围虚胖 (报告 §6.6 里写的 `:1662-1665` 同样) |
+| ③ `main.cpp:2690` | 那句在 **`:2689`** | ⚠️ **差 1 行** |
+| ⑤ `test_payload_calibration.cpp:3472` | 正是 `// 499.999 含` | ✅ 准确 |
+| ⑥ `main.cpp:1715-1720` | `:1715-1716` 正是那道 `if (decompOk && echoOk && verdict != SEND_NOT_MEASURED)`, `:1717-1722` 是两支 d 的打印 | ✅ 准确 |
+| ① "`SEND_SIGN_AMBIGUOUS` / `SEND_SIGN_NONE_IN_RANGE` 在 `czSign`/`comMm[2]` 赋值前返回" | `:1931` 返回, 赋值在 `:1946-1947` | ✅ 准确 |
+
+**另外三条回源头核出来的、派单里没有的**:
+
+1. **可达的"有候选但发不出去"不止那两支**。复审只举了 `AMBIGUOUS` / `NONE_IN_RANGE`;实际上
+   `SEND_MASS_OUT_OF_RANGE` / `SEND_COM_OUT_OF_RANGE` 也**返回在 `czSign` 赋值之后**
+   (`:1949-1950`) —— 那两支**号是定了的**, 所以标签那一行本来就没错, **错的只有结论行**。
+   这两支正是"`sendable` 与 `convention != 0` 不能混用"的原因: 标签用 `convention != 0`,
+   结论行用 `verdict == SEND_OK`, **两个判据各管各的**。
+   反过来, `SEND_NO_CS` / `SEND_NO_CZ_ROBOT` / `SEND_NOT_MEASURED` 经 `buildSendCandidate`
+   **不可达**: 没有实测质量尺度 ⇒ 先返回"无候选"; `czRobotMm` 传的是 `&echoCenterMm[2]`,
+   **永远非空**。所以"present == true 且发不出去"的可达集**恰好是那四支**。
+2. **`#if 0` 块确实嵌在 `solveAndApply` 的花括号内**: 块 `1838-2102` (改动前编号),
+   `solveAndApply` 起于 `1145`、闭于 `2103` —— 所以 `:2007` 那处 `setSensorYawDeg` 严格讲
+   **在 `solveAndApply` 里**。复审 Minor 3 的判断对, 且"活路径"这个限定是**必要**的, 不是修辞。
+   该块内三处调用: `setSensorYawDeg:2007` / `applyResult:2023` / `save:2077`。
+   全文件另外**只有一处**在活路径上: `main()` 启动序列 `else of if (g_noRobot)` 里、紧接
+   `PayloadCalibration::load` 之后 —— 与注释里写的那个位置一致。**没有第三个**。
+   ⇒ 新注释**故意不写行号** (本注释一动行号就漂, 本项目已多次栽在照抄行号上)。
+3. **`else` 那一支 ("c 已变 —— 逐分量见上") 经真实路径不可达**: `dc[0]=dc[1]` 恒为 0 (cx/cy 照抄自报值),
+   `dc[2] = ±echo.cz − echo.cz` ⇒ `cUnchanged ⟺ !czSignFlipped`。所以"走到 `else`"要求
+   既要 `!flipped` 又要 `!cUnchanged` —— 不可能。**本次没删它** (超范围), 只记在这里。
+
+## A.4 没做到的 / 需要人接手的
+
+1. **`main.cpp:1711` 那一行标签没有单测**。它在 `diagEmitf` 的打印端 (写 stdout), 而
+   `diagEmitf` 不在本用例的可链接范围内 —— 与 8b §4.3"候选块跑不出来"是同一个原因。
+   能做到的是: 它的**判据** (`convention == 0` / `!= 0`) 在库层两条用例里各钉了一次
+   (`test_send_gate_two_conventions_in_range_is_ambiguous` / `..._convention_one_wins_and_signs_cz`)。
+   **这一行的措辞本身要 8b 上机时用眼睛核。**
+2. 本波**没有**跑出候选块的真实屏幕 —— 同上, 需要接机械臂 (`--no-robot` 下 `'m'` 被拒)。

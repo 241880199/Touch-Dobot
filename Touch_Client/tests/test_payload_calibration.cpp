@@ -3469,7 +3469,7 @@ static void test_send_gate_com_magnitude_bound_is_exclusive_at_500() {
     PayloadCalibration::SendGate gJustUnder =
         PayloadCalibration::evaluateSendGate(0.42, justUnder, &csZ, &SG_CZ_ROB,
                                             PayloadCalibration::MASS_SOURCE_MEASURED);
-    CHECK(gJustUnder.verdict == PayloadCalibration::SEND_OK);             // 499.999 含
+    CHECK(gJustUnder.verdict == PayloadCalibration::SEND_OK);             // 499.999 放行
     CHECK(gJustUnder.comOk);
     const double at501[3] = {501.0, 0.0, 0.0};
     PayloadCalibration::SendGate gBad =
@@ -3530,6 +3530,13 @@ static void test_send_gate_refuses_unmeasured_mass_and_says_so() {
     CHECK(g.verdict != PayloadCalibration::SEND_MASS_OUT_OF_RANGE);   // 不许并进量级闸
     CHECK(g.massOk);                                                  // 量级确实是过的
     CHECK(g.verdict != PayloadCalibration::SEND_OK);                  // 更不许放行
+    // ★ 这一支返回时闸1 的两个 d 与 convention 还是结构体的初值 0 —— 0 在这里是【没有算过】,
+    //   不是"d = 0"、"没选中约定"。打印端 (main.cpp 的候选块) 正是靠这条约定决定"要不要把
+    //   这两个数打出去": 拿 0 当 d 打印, 屏幕上就会出现一个从"没有数据"算出来的、看着像真数
+    //   的东西。这条约定从前只写在头文件里, 没有用例 (二次复审 Minor 6) ⇒ 在这里钉住它。
+    CHECK(g.dSameDir == 0.0 && g.dFlipDir == 0.0);
+    CHECK(!g.dSameIn && !g.dFlipIn);
+    CHECK(g.convention == 0 && g.czSign == 0.0);
     PASS();
 }
 
@@ -3669,6 +3676,8 @@ static void test_send_candidate_diff_reports_unchanged_c_on_the_real_machine_cas
         PayloadCalibration::diffSendCandidate(c, 0.404, echoCenter);
     CHECK(df.cUnchanged);                       // c 未变
     CHECK(!df.czSignFlipped);                   // 没翻号 -> 不是高危
+    CHECK(df.sendable);                         // 过闸了 -> "只改 m"这句是【能发出去】的候选才配说的
+
     CHECK(nearRefAbs(df.dc[0], 0.0) && nearRefAbs(df.dc[1], 0.0) && nearRefAbs(df.dc[2], 0.0));
     CHECK(nearRefAbs(df.dm, measuredM - 0.404));  // 只改 m
     char buf[512];
@@ -3703,6 +3712,59 @@ static void test_send_candidate_diff_flags_flipped_cz_as_high_risk() {
     CHECK(t.find("c 已变") != std::string::npos);
     // ★ 翻号时【不许】再打"只改 m"这类措辞 (§3.5 第 2 条)
     CHECK(t.find("只改 m") == std::string::npos);
+    PASS();
+}
+
+// ★ 二次复审 Minor 1: 【发不出去的候选没有"改动"可言】。
+//   闸1 定不了号 (SEND_SIGN_AMBIGUOUS) 时 convention / czSign / comMm[2] 都还没赋值, 候选的 cz
+//   就是机械臂自报的原样 ⇒ 逐位比较必然"c 未变"。老措辞于是打出"c 未变 —— 本次只改 m",
+//   而操作员读到的是"按 'p' 会做一次最小改动" —— 事实是按 'p' 会被拒、一个字节都发不出去。
+//   这一条把"发不出去的候选不许打 只改 m"钉住 (判据与 'p' 那一支同一个: verdict == SEND_OK)。
+//   构造与 test_send_gate_two_conventions_in_range_is_ambiguous 同一组: cz_robot = 15.75,
+//   c_s_z = 1.0 -> d同向 = 14.75 / d反向 = 16.75, 两支都在 (0, 31.5) 内。
+static void test_send_candidate_diff_conclusion_never_says_only_m_when_unsendable() {
+    TEST(send_candidate_diff_conclusion_never_says_only_m_when_unsendable);
+    const double measuredM = 0.420847;
+    const double csZ = 1.0;
+    const double echoCenter[3] = {0.3, -0.1, 15.75};
+    PayloadCalibration::SendCandidate c =
+        PayloadCalibration::buildSendCandidate(&measuredM, &csZ, echoCenter);
+    CHECK(c.present);                                            // 候选【有】...
+    CHECK(c.gate.verdict == PayloadCalibration::SEND_SIGN_AMBIGUOUS);   // ...但发不出去
+    CHECK(c.gate.convention == 0);                               // 号没定下来
+    CHECK(nearRefAbs(c.comMm[2], 15.75));                        // ⇒ cz 就是自报原样 (没定号)
+    PayloadCalibration::SendCandidateDiff df =
+        PayloadCalibration::diffSendCandidate(c, 0.404, echoCenter);
+    CHECK(!df.sendable);                                         // 判据与 'p' 那一支同一个
+    CHECK(df.cUnchanged);            // 数值上确实没变 —— 但这【不】等于"本次只改 m"
+    char buf[512];
+    PayloadCalibration::formatSendCandidateDiffConclusion(df, buf, sizeof(buf));
+    const std::string t(buf);
+    CHECK(t.find("候选不可发送") != std::string::npos);           // ★ 照实说发不出去 (与闸的结论行同词)
+    CHECK(t.find("只改 m") == std::string::npos);                 // ★ 不许说成一次最小改动
+    CHECK(t.find("高危") == std::string::npos);                   // 也没翻号, 不喊高危
+
+    // ★ 另一半: 【翻号 + 发不出去】时"高危"照样要喊 (§3.5 第 2 条是硬要求, 不许被"发不出去"顶掉)。
+    //   构造同 test_send_gate_small_positive_cz_robot_flips_the_sign (cz_robot = +10, c_s_z = −10
+    //   -> 约定一胜出 -> cz 由 +10 翻成 −10), 但 m = 2.0 超出闸2 的 [0.2, 1.5] ⇒ 发不出去。
+    //   ⇒ 两句话都该出现: 闸的结论行说"不可发送", 结论行说"高危"。
+    const double heavyM = 2.0;
+    const double csZNeg = -10.0;
+    const double czRobPos[3] = {0.3, -0.1, 10.0};
+    PayloadCalibration::SendCandidate cf =
+        PayloadCalibration::buildSendCandidate(&heavyM, &csZNeg, czRobPos);
+    CHECK(cf.present);
+    CHECK(cf.gate.verdict == PayloadCalibration::SEND_MASS_OUT_OF_RANGE);   // 发不出去 ...
+    CHECK(cf.gate.czSign == -1.0);                               // ... 但号【定了】, 且是翻的
+    CHECK(nearRefAbs(cf.comMm[2], -10.0));
+    PayloadCalibration::SendCandidateDiff dff =
+        PayloadCalibration::diffSendCandidate(cf, 0.404, czRobPos);
+    CHECK(!dff.sendable);
+    CHECK(dff.czSignFlipped);                                    // ★ 号被翻
+    PayloadCalibration::formatSendCandidateDiffConclusion(dff, buf, sizeof(buf));
+    const std::string tf(buf);
+    CHECK(tf.find("高危") != std::string::npos);                  // ★ 翻号必须标高危 — 优先于"发不出去"
+    CHECK(tf.find("只改 m") == std::string::npos);
     PASS();
 }
 
@@ -3810,6 +3872,7 @@ int main() {
     test_send_candidate_mass_label_matches_brief_wording();
     test_send_candidate_diff_reports_unchanged_c_on_the_real_machine_case();
     test_send_candidate_diff_flags_flipped_cz_as_high_risk();
+    test_send_candidate_diff_conclusion_never_says_only_m_when_unsendable();
 
     std::cout << "\n" << g_passed << " passed, " << g_failed << " failed" << std::endl;
     return g_failed ? 1 : 0;

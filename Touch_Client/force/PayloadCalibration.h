@@ -563,6 +563,11 @@ namespace PayloadCalibration {
         double echoCenterMm[3];      // 机械臂当前 @1176 CenterX/Y/Z (mm)
         bool   cUnchanged;           // c 的三个分量【逐个逐位】与当前值相同
         bool   czSignFlipped;        // 发出的 cz 与当前 CenterZ 【异号】= 号被闸1 翻了
+        // 这份候选【发不发得出去】= 它自己的判决 == SEND_OK ('p' 判的就是这一个, main.cpp)。
+        // ⚠ 结论行按它分岔 (二次复审 Minor 1): 过不了闸的候选没有"改动"可言 —— 把"c 未变"
+        //   说成一次"只改 m"的取舍, 就是让操作员以为按 'p' 会发生一件根本不会发生的事。
+        //   (翻号那一支仍排在最前: 标高危是 §3.5 的硬要求, 不被这一支顶掉。)
+        bool   sendable;             // false = 【发不出去】(只是数值比较, 不是一次会发生的改动)
     };
     // 逐位比较 (不是"近似"): 候选的 cx/cy 是照抄自报值、cz = sign·|当前值|, 都不经过任何
     // 重算 —— 所以"相同"就该是逐位相同。给容差等于把"其实动了"读成"没动"。
@@ -580,5 +585,9 @@ namespace PayloadCalibration {
 
     // §3.5 的结论行: c 未变 -> "本次只改 m"; c 已变 -> 逐分量见上; 【翻号 -> 标高危】,
     // 而且那时【不许】再说"只改 m"(量级上它是一次巨大的负载改动, 不是最小改动)。
+    // ⚠ 但第一句是【发得出去】的候选才配说的 (二次复审 Minor 1): verdict != SEND_OK 的候选
+    //   ('p' 会拒掉的那一支) 落到"候选不可发送"那句 —— 差值的数照打, 但不许把"c 未变"读成
+    //   一次"只改 m"的改动。判据是 SendCandidateDiff::sendable, 由 diffSendCandidate 照
+    //   cand.gate 填; 翻号那一支【不受它影响】(§3.5 要求翻号一律标高危)。
     void formatSendCandidateDiffConclusion(const SendCandidateDiff& diff, char* out, int len);
 }
