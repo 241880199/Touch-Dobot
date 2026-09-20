@@ -18,6 +18,20 @@ static double g_biasForce[3] = {0};
 static double g_biasTorque[3] = {0};
 static MotionEstimator g_motion;
 
+// 【本帧的姿态】—— 只为闸门那段打印服务 (2026-09-20 加)。
+// 闸门报的那六个数是"残差对姿态的依赖"的读数, 而【没有姿态就没法解释它们】: 现场抄数的人
+// 不把姿态一起抄下来, 事后就分不开"随姿态变"与"固定偏置", 也拟合不了 M = 残差/g 的各向同性
+// (判 H1 还是 H2)。出处: Docs/superpowers/specs/2026-09-20-raw-channel-calibration-run-004.md §4.3。
+// ⚠ 用【帧里那一份】姿态 (与算这六个数用的是同一次 30004 帧), 不在这里再问一次 GetPose ——
+//   后者会在机械臂动过之后与那六个数对不上, 而"对不上"正是本项目最忌的那种安静地错。
+// ⚠ 只在 step() 里写、只在 setGuardState() 里读 —— 两者同线程 (setGuardState 由 step 调),
+//   所以不需要锁。
+static double g_lastPose[6] = {0};   // {X_mm, Y_mm, Z_mm, Rx_deg, Ry_deg, Rz_deg}
+// ⚠ 【有没有"本帧"】。setGuardState 不只在 step() 里被调 —— setCalibration 的拒收路径也调它,
+//   而那时根本没有"本帧姿态"。没有这个标志就会打出一行全零, 而它会被读成"机械臂在原点姿态"
+//   —— 那是凭空造了一个数。没有就照实说没有。
+static bool g_lastPoseValid = false;
+
 // ===== 运行时一致性闸门的状态 (2026-09-19) =====
 // 全部由 ForceReader/pollForce 线程访问 (step() 是唯一入口), 与 g_A 那些用 g_calibMutex
 // 保护的量不同 —— 这里不加锁, 与 g_motion 同理: 只有一个写者。
@@ -261,6 +275,21 @@ static void setGuardState(ForceCompensation::GuardState st) {
             "[Force] !!    与 compensated 无关 —— 安全边界的推手还在, 只是不再有传感器力。)\n",
             uncal ? "【没有可用模型】本地补偿未启用 —— 不是\"标定与机械臂不符\""
                   : "【有模型, 但与机械臂对不上】两边估计的不是同一个外力");
+    // 【把本帧姿态一起打出来】(2026-09-20)。理由见 g_lastPose 的说明: 下面那六个数只能
+    //   【连着姿态】才有意义 —— 现场抄数必须一起抄, 否则事后分不开"随姿态变"与"固定偏置",
+    //   也拟合不了 M = 残差/g 的各向同性 (判 H1/H2)。出处 run-004 §4.3 的判别判据。
+    // ⚠ 只在【拒绝】这一支打 (本函数走到这里的都非 OK): 放行是常态, 每次都给行姿态同样是噪音。
+    if (g_lastPoseValid) {
+        fprintf(stderr,
+                "[Force] !! 本帧姿态: X=%+.3f Y=%+.3f Z=%+.3f  Rx=%+.3f Ry=%+.3f Rz=%+.3f"
+                "  (mm / deg) —— 读下面那六个数要连着它一起抄\n",
+                g_lastPose[0], g_lastPose[1], g_lastPose[2],
+                g_lastPose[3], g_lastPose[4], g_lastPose[5]);
+    } else {
+        // 【不许打一行 0】: 没有"本帧"时打 0 会被读成"机械臂在原点姿态" —— 凭空造一个数。
+        fprintf(stderr, "[Force] !! 本帧姿态: 【没有】—— 这一段不是由某一帧触发的"
+                        " (例如装载/拒收路径), 所以没有姿态可报。\n");
+    }
     static const char* NM[6] = { "Fx(N)", "Fy(N)", "Fz(N)", "Mx(Nm)", "My(Nm)", "Mz(Nm)" };
     if (uncal) {
         // 没有模型时【不打逐通道表】: 那时 compensated 恒为 0, 印出来会是"六个通道全在限内",
@@ -514,6 +543,11 @@ double currentMassKg() {
 
 void step(AppState::ForceData& fd, const double poseRxyz[6]) {
     // poseRxyz = {X_mm, Y_mm, Z_mm, Rx_deg, Ry_deg, Rz_deg}
+
+    // 【记下本帧姿态】—— 闸门拒绝时那段打印要用它 (见 g_lastPose 的说明)。与算那六个数用的是
+    // 同一次 30004 帧, 所以数与姿态天然对齐。
+    for (int i = 0; i < 6; i++) g_lastPose[i] = poseRxyz[i];
+    g_lastPoseValid = true;
 
     // 1. Update motion estimator
     double dt = 1.0 / static_cast<double>(Config::FORCE_EFFECTIVE_SAMPLE_RATE);
