@@ -416,4 +416,66 @@ namespace PayloadCalibration {
 
     bool load(const char* filepath);
     bool save(const char* filepath);
+
+    // ===== 下发前的两道闸 (Task 8a; 判据与出处见 on-machine-checklist.md §6) =====
+    //
+    // 【两道闸都在下发之前跑, 都不需要额外测量】。它们是纯逻辑 —— 没有 socket、没有全局状态、
+    // 不读时钟 —— 所以能在这里单测; 而它们是【唯一】会在真正把负载发给机械臂之前拒绝的防线
+    // (发送键 'p' 直接消费本函数的判决)。
+    //
+    // 闸 1 (符号约定): d = cz_robot − c_s_z 必须落在 (0, 31.5) mm (测量原点必须落在传感器体内)。
+    //   c_s 沿工具轴的符号【不由数据决定】—— 模型在 g → −g, A → −A, c_s → −c_s 下逐字不变
+    //   (A 是自由 3×3, 反射由 parity 报出) —— 所以两种约定【各算一次】:
+    //     恰好一支落在内 -> 那就是正确的符号约定, 按它给 cz 定号, 放行;
+    //     两支都在内     -> 数据定不了符号, 不许二选一猜, 不放行;
+    //     两支都在外     -> 哪里错了, 不放行。
+    //   cz_robot 取 @1176 CenterZ (机械臂自报)。取不到就报"不可用"并不放行 —— 【不许退回
+    //   自己下发的值】当参照: 那条路带着 centerZ 折叠歧义 (见 main.cpp 里那段警告)。
+    //   两支 d 的算法【只有一份】: 调 SessionReport::payloadDValues (文档块那一节用的是同一个)。
+    //
+    // 闸 2 (量级): m ∈ [0.2, 1.5] kg 且 |c| ≤ 500 mm —— 两端都含 (见下面三个常量的说明)。
+    //
+    // ⚠ 这三个数【公开在这里】是给打印端引用的: 提示文字里再抄一遍 0.2 / 1.5 / 500, 就是三个
+    //   会在改判据时撒谎的第二来源 (本项目反复栽在"同一个量两个实现/两处文字"上)。
+    //   两端都【含】是照 brief §3 的验收用例表定的 (用例 6: m 在 0.2 / 1.5 两个边界上要放行;
+    //   用例 8: |c| = 500 要放行、501 才不放行)。操作单 §6 闸 2 的原文写的是 "`|c| < 500 mm`"
+    //   —— 两者只在【恰好 500.0】这一个点上不同, 这里以 brief 的验收用例为准并记下这个口径差。
+    //
+    // 判决次序 = 上面这个次序 (先"c_s 有没有"、再"cz_robot 有没有"、再符号、再量级):
+    // "没数据"与"数据在但定不了号"是完全不同的两件事, 处置也不同, 所以不可用的两种情形
+    // 各有自己的判决值, 不会被并进"符号不对"。
+    // 【无论判决如何, 两道闸的数都会算出来填进 out】—— 打印端要把两道的判读结果都摆出来,
+    // 不能因为前一道没过就不打后一道。
+    static const double SEND_GATE_MASS_MIN_KG = 0.2;
+    static const double SEND_GATE_MASS_MAX_KG = 1.5;
+    static const double SEND_GATE_COM_MAX_MM  = 500.0;
+
+    enum SendGateVerdict {
+        SEND_OK = 0,                 // 两道闸都过 -> 候选可发送
+        SEND_NO_CS,                  // 本次没解出 c_s -> 闸 1 无从判定
+        SEND_NO_CZ_ROBOT,            // 取不到 cz_robot (@1176) -> 闸 1 无从判定
+        SEND_SIGN_AMBIGUOUS,         // 两种符号约定【都】落在 (0, 31.5) mm
+        SEND_SIGN_NONE_IN_RANGE,     // 两种符号约定【都】不在 (0, 31.5) mm
+        SEND_MASS_OUT_OF_RANGE,      // 闸 2: m 不在 [0.2, 1.5] kg
+        SEND_COM_OUT_OF_RANGE        // 闸 2: |c| 超过 500 mm
+    };
+
+    struct SendGate {
+        SendGateVerdict verdict;
+        // --- 闸 1 ---
+        double dSameDir, dFlipDir;   // 两支 d (mm)
+        bool   dSameIn, dFlipIn;     // 各自是否落在开区间 (0, 31.5) mm
+        int    convention;           // 1 / 2 = 胜出的那支符号约定; 0 = 未判定
+        double czSign;               // +1 / −1 = 给 cz 定的号; 0 = 未判定
+        // --- 闸 2 ---
+        double massKg, comMagMm;
+        bool   massOk, comOk;
+        // --- 候选 (cz 已定号) —— 仅 verdict == SEND_OK 时才有意义 ---
+        double comMm[3];
+    };
+
+    // csZmm     = 本次解出的 c_s 沿工具轴分量 (mm); nullptr = 本次没解出 c_s
+    // czRobotMm = 机械臂自报的 CenterZ (mm, @1176); nullptr = 取不到 (还没回读到负载)
+    SendGate evaluateSendGate(double massKg, const double comMm[3],
+                              const double* csZmm, const double* czRobotMm);
 }

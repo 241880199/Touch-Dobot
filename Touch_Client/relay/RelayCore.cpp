@@ -223,6 +223,72 @@ static bool reenableRobotWithConnectPayload() {
                                       "回放连接时的负载");
 }
 
+// ===== 运行时显式下发负载 (Task 8a) —— 【只由用户显式触发, 不进连接时序】 =====
+//
+// 发两条, 就两条 (用户 2026-09-20 裁定; 计划文档里那份"三条一起发"写在拆分之前, 已被取代):
+//   EnableRobot(m, cx, cy, cz)   质量 + 质心 (【唯一】能传质心的通道; centerX/Y/Z 单位 mm)
+//   LoadSwitch(1)                负载设置开关 (0=关闭 / 1=开启)
+// 出处 (逐条回源头核过; brief 里给的 "256-261" 只覆盖 LoadSwitch 那一条, 不是两条都在那里):
+//   EnableRobot  Docs/机械臂资料/TCP_IP远程控制接口文档.md:116-125
+//                (原型在 :117; centerX/Y/Z 单位 mm、范围 ±500 在 :121-123)
+//   LoadSwitch   Docs/机械臂资料/TCP_IP远程控制接口文档.md:256-261
+//                ("开启后可提高碰撞检测灵敏度" 在 :258; status 1 = 开启 在 :259)
+//   两条一起列在 设计 §6b (Docs/superpowers/specs/2026-09-19-raw-channel-calibration-design.md:131-147)。
+// ⚠ 顺序 (先 EnableRobot, 后 LoadSwitch(1)) **取自设计 §6b 的清单 (:144-146), 文档未说明其
+//   必要性** —— 不替它编理由。
+// ⚠ 【不发 PayLoad(m, I)】: 惯量要等惯量辨识 (Task 3) 出来, 补发归 8c。
+//
+// 【约束, 写死在这里, 改代码前先读这一条】
+//  · 【不得】被 init() 或任何"重新使能"路径调用 —— enableRobotWithPayload /
+//    reenableRobotWithConnectPayload 一行都不许碰它、也不许调它。它只由用户显式触发
+//    (main.cpp 的发送键 'p')。理由与上面那条快照注释同源: 运行中改负载会让机械臂动。
+//  · 【不】碰连接时序里那条 LoadSwitch(0) (init 里那三行"主动关掉灵敏度") —— 那是【独立
+//    决定】(防误触发), 归 8b 之后的评估; 本函数只是在运行时再把负载设置打开。
+//
+// 两条都走【使能口】并【逐条读回执】, 照本文件 escapeSingularity 里既有的写法
+// (drain → send → Sleep → recv)。控制台必须分得清三件事: 命令文本 / 机械臂回执 / 【哪一条失败】。
+//
+// 回执的判读: robotRecvEnable 只说明"收到了一行", 不说明机械臂【采纳了】—— Dobot 的返回以
+// 首字符 '0' 表示 ErrorID == 0 (见 FeedbackParser::isSuccess)。所以成功 = 收到 且 ErrorID == 0,
+// 否则把原始回执行照实打出来 (被拒的那一条, 回执里带着错误码)。
+static bool sendPayloadCommands(double massKg, const double comMm[3]) {
+    char cmd[96];
+    char fb[256];
+
+    // 格式串与 sendEnableRobotWithPayload 的【逐字一致】—— 同一个命令不该有两个拼法。
+    snprintf(cmd, sizeof(cmd), "EnableRobot(%.3f,%.1f,%.1f,%.1f)",
+             massKg, comMm[0], comMm[1], comMm[2]);
+    std::cout << "[Relay] 负载下发 1/2: " << cmd << std::endl;
+    robotDrainEnable();
+    robotSendEnable(cmd);
+    Sleep(100);
+    fb[0] = '\0';
+    const bool gotEnable = robotRecvEnable(fb, sizeof(fb));
+    const bool okEnable  = gotEnable && FeedbackParser::isSuccess(fb);
+    std::cout << "[Relay]   回执: " << (gotEnable ? fb : "(无回执, 超时)")
+              << (gotEnable && !okEnable ? "  ← 机械臂拒绝 (ErrorID != 0)" : "") << std::endl;
+
+    std::cout << "[Relay] 负载下发 2/2: LoadSwitch(1)" << std::endl;
+    robotDrainEnable();
+    robotSendEnable("LoadSwitch(1)");
+    Sleep(100);
+    fb[0] = '\0';
+    const bool gotLoadSwitch = robotRecvEnable(fb, sizeof(fb));
+    const bool okLoadSwitch  = gotLoadSwitch && FeedbackParser::isSuccess(fb);
+    std::cout << "[Relay]   回执: " << (gotLoadSwitch ? fb : "(无回执, 超时)")
+              << (gotLoadSwitch && !okLoadSwitch ? "  ← 机械臂拒绝 (ErrorID != 0)" : "") << std::endl;
+
+    if (okEnable && okLoadSwitch) {
+        std::cout << "[Relay] 负载已下发: EnableRobot + LoadSwitch(1) 两条都有成功回执" << std::endl;
+    } else {
+        std::cout << "[Relay] !! 负载下发【未完成】: 失败的条目 =";
+        if (!okEnable)     std::cout << " EnableRobot";
+        if (!okLoadSwitch) std::cout << " LoadSwitch(1)";
+        std::cout << " —— 两条只成了一部分, 机械臂此刻的负载参数【不要】当作已更新" << std::endl;
+    }
+    return okEnable && okLoadSwitch;
+}
+
 RelayCore& RelayCore::instance() {
     static RelayCore inst;
     return inst;
@@ -1626,6 +1692,22 @@ bool RelayCore::setDragMode(bool enable) {
 // Drag mode callback for ForceCalibration
 static void calibDragMode(bool enable) {
     RelayCore::instance().setDragMode(enable);
+}
+
+// ===== 把负载参数显式下发给机械臂 (Task 8a) =====
+// 两条命令与它们的出处、以及"只由用户显式触发"这条约束, 都写在上面 sendPayloadCommands 顶上。
+// 这里只做转发, 与 triggerEscape() / setDragMode() 同风格。
+//
+// 【为什么这里要 touchHeartbeat()】这两条命令是【逐条等回执】的 (每条: Sleep(100) + 最多
+// 200ms 的 socket 接收超时 —— 使能口的 SO_RCVTIMEO 见 robot/RobotConnection.cpp), 两条加
+// 起来的阻塞时间可以超过 Config::HEARTBEAT_TIMEOUT_MS (500ms)。而本函数跑在 GLUT 主线程上,
+// 心跳检查在 pollFeedback() 里、也跑在同一个线程 —— 阻塞期间它根本不会跑, 恢复后第一帧就会
+// 撞见过期的心跳, 误报 ERR_HEARTBEAT_LOST (FATAL, 会下使能)。touchHeartbeat() 正是为
+// "故意阻塞主线程"的操作准备的 (见 RelayCore.h 里它的说明): 阻塞结束后声明自己还活着。
+bool RelayCore::sendPayloadToRobot(double massKg, const double comMm[3]) {
+    const bool ok = sendPayloadCommands(massKg, comMm);
+    touchHeartbeat();
+    return ok;
 }
 
 bool RelayCore::initForceReader() {

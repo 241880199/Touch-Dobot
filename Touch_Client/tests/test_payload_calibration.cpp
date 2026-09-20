@@ -3321,6 +3321,179 @@ static void test_runtime_consistency_guard_replay() {
     PASS();
 }
 
+// =====================================================================================
+// ★ Task 8a: 下发前的两道闸 (上机操作单 §6) —— 纯逻辑, 无 socket, 所以在这里测。
+//
+// 用例的输入数字取自实机那一对真值 (上机操作单 §6 闸1):
+//   |c_s_z| = 55.556 mm (2026-09-19 四次采集 c_s 模长 54.55~56.06 之一)
+//   cz_robot = 68.700 mm (@1176 CenterZ 上次读到的值)
+// 约定一 = c_s_z 与工具轴同向, 约定二 = 反向; 两支差 2·c_s_z。
+// =====================================================================================
+// 本节的数都是【定义出来的小量】, 不是解出来的 —— 比的就是那几步算术, 所以容差取机器精度级。
+static bool nearRefAbs(double got, double ref, double tol = 1e-9) {
+    return fabs(got - ref) < tol;
+}
+
+static const double SG_CS_Z   = 55.556;    // 本次解出的 |c_s_z| (mm), 沿工具轴
+static const double SG_CZ_ROB = 68.700;    // 机械臂自报 CenterZ (mm)
+// 候选负载: 用机械臂自报的那三个数当量级合理的候选 (CenterX/Y/Z = 0.3, -0.1, 68.7)
+static const double SG_COM[3] = {0.3, -0.1, 68.7};
+
+static void test_send_gate_convention_one_wins_and_signs_cz() {
+    TEST(send_gate_convention_one_wins_and_signs_cz);
+    // c_s_z = +55.556 -> d同向 = 68.700 − 55.556 =  13.144 (在范围内)
+    //                     d反向 = 68.700 + 55.556 = 124.256 (在范围外) -> 约定一胜出
+    const double csZ = +SG_CS_Z;
+    PayloadCalibration::SendGate g =
+        PayloadCalibration::evaluateSendGate(0.42, SG_COM, &csZ, &SG_CZ_ROB);
+    CHECK(g.verdict == PayloadCalibration::SEND_OK);
+    CHECK(g.convention == 1);
+    // 选中的 cz 符号 = 选中的那支 c_s_z 的符号 = +1
+    CHECK(g.czSign == +1.0);
+    CHECK(g.dSameIn && !g.dFlipIn);
+    // 候选的 cz 按选中的符号定号 —— 输入故意给负的 cz, 输出必须是正的 |cz|
+    const double comNeg[3] = {0.3, -0.1, -68.7};
+    PayloadCalibration::SendGate g2 =
+        PayloadCalibration::evaluateSendGate(0.42, comNeg, &csZ, &SG_CZ_ROB);
+    CHECK(g2.verdict == PayloadCalibration::SEND_OK);
+    CHECK(nearRefAbs(g2.comMm[2], +68.7));
+    CHECK(nearRefAbs(g2.comMm[0], +0.3));   // 横向分量【不动】—— 只有 cz 定号
+    CHECK(nearRefAbs(g2.comMm[1], -0.1));
+    PASS();
+}
+
+static void test_send_gate_convention_two_wins_and_signs_cz() {
+    TEST(send_gate_convention_two_wins_and_signs_cz);
+    // 解出的 c_s_z 若是【负的】, 两支的大小关系跟着翻 (约定二 = 约定一 + 2·c_s_z):
+    //   d同向 = 68.700 − (−55.556) = 124.256 (在范围外)
+    //   d反向 = 68.700 + (−55.556) =  13.144 (在范围内)  -> 约定二胜出
+    // 而两支的【物理含义】不变: 选中的那支 c_s_z 仍是 +55.556, 所以 cz 仍是正的。
+    const double csZ = -SG_CS_Z;
+    PayloadCalibration::SendGate g =
+        PayloadCalibration::evaluateSendGate(0.42, SG_COM, &csZ, &SG_CZ_ROB);
+    CHECK(g.verdict == PayloadCalibration::SEND_OK);
+    CHECK(g.convention == 2);
+    CHECK(g.czSign == +1.0);
+    CHECK(!g.dSameIn && g.dFlipIn);
+    CHECK(nearRefAbs(g.comMm[2], +68.7));
+    PASS();
+}
+
+static void test_send_gate_two_conventions_in_range_is_ambiguous() {
+    TEST(send_gate_two_conventions_in_range_is_ambiguous);
+    // 两支都落在 (0, 31.5): cz_robot = 15.75, c_s_z = 1.0
+    //   d同向 = 14.75 (在内) / d反向 = 16.75 (在内) —— 数据定不了符号, 不许二选一猜。
+    const double csZ = 1.0;
+    const double czRob = 15.75;
+    PayloadCalibration::SendGate g =
+        PayloadCalibration::evaluateSendGate(0.42, SG_COM, &csZ, &czRob);
+    CHECK(g.verdict == PayloadCalibration::SEND_SIGN_AMBIGUOUS);
+    CHECK(g.dSameIn && g.dFlipIn);
+    CHECK(g.convention == 0);   // 没定下约定 -> 也就没定下 cz 的号
+    CHECK(g.czSign == 0.0);
+    PASS();
+}
+
+static void test_send_gate_no_convention_in_range_is_refused() {
+    TEST(send_gate_no_convention_in_range_is_refused);
+    // 两支都在范围外: cz_robot = 200 mm -> d同向 = 144.444 / d反向 = 255.556
+    const double csZ = +SG_CS_Z;
+    const double czRob = 200.0;
+    PayloadCalibration::SendGate g =
+        PayloadCalibration::evaluateSendGate(0.42, SG_COM, &csZ, &czRob);
+    CHECK(g.verdict == PayloadCalibration::SEND_SIGN_NONE_IN_RANGE);
+    CHECK(!g.dSameIn && !g.dFlipIn);
+    CHECK(g.convention == 0);
+    CHECK(g.czSign == 0.0);
+    PASS();
+}
+
+static void test_send_gate_interval_is_open_at_both_ends() {
+    TEST(send_gate_interval_is_open_at_both_ends);
+    const double csZ = +SG_CS_Z;
+    // d 恰好 = 0: cz_robot = c_s_z = 55.556 -> d同向 = 0 (不在开区间内), d反向 = 111.112 (也在外)
+    const double czAtZero = 55.556;
+    PayloadCalibration::SendGate g0 =
+        PayloadCalibration::evaluateSendGate(0.42, SG_COM, &csZ, &czAtZero);
+    CHECK(g0.verdict == PayloadCalibration::SEND_SIGN_NONE_IN_RANGE);
+    CHECK(nearRefAbs(g0.dSameDir, 0.0));
+    // d 恰好 = 31.5: cz_robot = 55.556 + 31.5 = 87.056 -> d同向 = 31.5 (不在开区间内)
+    const double czAtEdge = 87.056;
+    PayloadCalibration::SendGate g1 =
+        PayloadCalibration::evaluateSendGate(0.42, SG_COM, &csZ, &czAtEdge);
+    CHECK(g1.verdict == PayloadCalibration::SEND_SIGN_NONE_IN_RANGE);
+    CHECK(nearRefAbs(g1.dSameDir, 31.5));
+    PASS();
+}
+
+static void test_send_gate_mass_bounds_are_inclusive() {
+    TEST(send_gate_mass_bounds_are_inclusive);
+    const double csZ = +SG_CS_Z;
+    const double m[2] = {0.2, 1.5};       // 闸2 的量级判据: m ∈ [0.2, 1.5] kg, 两端【含】
+    for (int i = 0; i < 2; i++) {
+        PayloadCalibration::SendGate g =
+            PayloadCalibration::evaluateSendGate(m[i], SG_COM, &csZ, &SG_CZ_ROB);
+        CHECK(g.verdict == PayloadCalibration::SEND_OK);
+        CHECK(g.massOk);
+    }
+    PASS();
+}
+
+static void test_send_gate_mass_outside_bounds_is_refused() {
+    TEST(send_gate_mass_outside_bounds_is_refused);
+    const double csZ = +SG_CS_Z;
+    const double m[2] = {0.19, 1.51};
+    for (int i = 0; i < 2; i++) {
+        PayloadCalibration::SendGate g =
+            PayloadCalibration::evaluateSendGate(m[i], SG_COM, &csZ, &SG_CZ_ROB);
+        CHECK(g.verdict == PayloadCalibration::SEND_MASS_OUT_OF_RANGE);
+        CHECK(!g.massOk);
+    }
+    PASS();
+}
+
+static void test_send_gate_com_magnitude_bound_is_inclusive_at_500() {
+    TEST(send_gate_com_magnitude_bound_is_inclusive_at_500);
+    const double csZ = +SG_CS_Z;
+    const double at500[3] = {500.0, 0.0, 0.0};
+    PayloadCalibration::SendGate gOk =
+        PayloadCalibration::evaluateSendGate(0.42, at500, &csZ, &SG_CZ_ROB);
+    CHECK(gOk.verdict == PayloadCalibration::SEND_OK);   // |c| = 500 含
+    CHECK(gOk.comOk);
+    const double at501[3] = {501.0, 0.0, 0.0};
+    PayloadCalibration::SendGate gBad =
+        PayloadCalibration::evaluateSendGate(0.42, at501, &csZ, &SG_CZ_ROB);
+    CHECK(gBad.verdict == PayloadCalibration::SEND_COM_OUT_OF_RANGE);
+    CHECK(!gBad.comOk);
+    PASS();
+}
+
+static void test_send_gate_refuses_without_cs_and_says_so() {
+    TEST(send_gate_refuses_without_cs_and_says_so);
+    // c_s 不可用 (本次线性层就没解出来) -> 拒因必须是【没有 c_s】, 不是【符号不对】:
+    // 前者说"这次没数据", 后者说"数据在但定不了号", 处置完全不同。
+    const double czRob = SG_CZ_ROB;
+    PayloadCalibration::SendGate g =
+        PayloadCalibration::evaluateSendGate(0.42, SG_COM, nullptr, &czRob);
+    CHECK(g.verdict == PayloadCalibration::SEND_NO_CS);
+    CHECK(g.verdict != PayloadCalibration::SEND_SIGN_NONE_IN_RANGE);
+    CHECK(g.verdict != PayloadCalibration::SEND_SIGN_AMBIGUOUS);
+    PASS();
+}
+
+static void test_send_gate_refuses_without_cz_robot_and_says_so() {
+    TEST(send_gate_refuses_without_cz_robot_and_says_so);
+    // cz_robot (@1176) 不可用 -> 【不许退回自己下发的值】当参照 (那条路带着 centerZ 折叠歧义),
+    // 只能照实报"不可用"并不放行。拒因必须是【没有 cz_robot】, 不是别的。
+    const double csZ = +SG_CS_Z;
+    PayloadCalibration::SendGate g =
+        PayloadCalibration::evaluateSendGate(0.42, SG_COM, &csZ, nullptr);
+    CHECK(g.verdict == PayloadCalibration::SEND_NO_CZ_ROBOT);
+    CHECK(g.verdict != PayloadCalibration::SEND_SIGN_NONE_IN_RANGE);
+    CHECK(g.convention == 0);
+    PASS();
+}
+
 int main() {
     std::cout << "=== PayloadCalibration Tests ===" << std::endl;
     test_recovers_true_payload();
@@ -3398,6 +3571,20 @@ int main() {
     // ★★ 运行时一致性闸门 (2026-09-19, 用户指令 1/2) 在同样四份夹具上的离线重放。
     std::cout << "--- runtime consistency guard (replay on the four captures) ---" << std::endl;
     test_runtime_consistency_guard_replay();
+
+    // ★★★ Task 8a: 下发负载前的两道闸 (上机操作单 §6)。纯逻辑、无 socket —— 所以能在这里钉住,
+    //   而它是【唯一】会在真正下发之前拒绝的防线 (发送键 'p' 直接消费它的判决)。
+    std::cout << "--- Task 8a: pre-send gates (sign convention + magnitude) ---" << std::endl;
+    test_send_gate_convention_one_wins_and_signs_cz();
+    test_send_gate_convention_two_wins_and_signs_cz();
+    test_send_gate_two_conventions_in_range_is_ambiguous();
+    test_send_gate_no_convention_in_range_is_refused();
+    test_send_gate_interval_is_open_at_both_ends();
+    test_send_gate_mass_bounds_are_inclusive();
+    test_send_gate_mass_outside_bounds_is_refused();
+    test_send_gate_com_magnitude_bound_is_inclusive_at_500();
+    test_send_gate_refuses_without_cs_and_says_so();
+    test_send_gate_refuses_without_cz_robot_and_says_so();
 
     std::cout << "\n" << g_passed << " passed, " << g_failed << " failed" << std::endl;
     return g_failed ? 1 : 0;

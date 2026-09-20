@@ -1,6 +1,9 @@
 #include "PayloadCalibration.h"
 #include "../calibration/TcpCalibration.h"
 #include "../config/Config.h"
+// d 的两支 (闸 1 用的那两个数) 与文档块那一节【共用同一个实现】—— 见 evaluateSendGate 底下
+// 那段说明。这个头是纯 inline 的 (没有对应的 .cpp), 所以不引入任何链接依赖。
+#include "../core/SessionReport.h"
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -1870,6 +1873,63 @@ namespace PayloadCalibration {
         for (int i = 0; i < 3; i++) comMm[i] = c[i];
         enabled = true;
         return true;
+    }
+
+    // ===== 下发前的两道闸 (Task 8a) —— 见头文件里那段说明 =====
+    // 闸 2 的三个阈值常量与它们的口径说明在头文件里 (打印端要引用它们, 所以必须公开)。
+    // 闸 1 的区间 (PAYLOAD_D_MIN_MM, PAYLOAD_D_MAX_MM) 与它"开区间"的读法不在这里写第二遍 ——
+    // 在 SessionReport::payloadDValues 里, 那是全项目唯一一份实现。
+    SendGate evaluateSendGate(double massKgIn, const double comMmIn[3],
+                              const double* csZmm, const double* czRobotMm) {
+        SendGate g;
+        g.verdict = SEND_OK;
+        g.dSameDir = 0.0; g.dFlipDir = 0.0;
+        g.dSameIn = false; g.dFlipIn = false;
+        g.convention = 0;
+        g.czSign = 0.0;
+        g.massKg = massKgIn;
+        g.comMagMm = sqrt(comMmIn[0] * comMmIn[0] + comMmIn[1] * comMmIn[1]
+                        + comMmIn[2] * comMmIn[2]);
+        for (int i = 0; i < 3; i++) g.comMm[i] = comMmIn[i];
+
+        // ===== 闸 2 先算, 不提前返回 =====
+        // 它与闸 1 无关, 而打印端要把【两道】的判读结果都摆出来 —— 不能因为闸 1 没过,
+        // 屏幕上就看不到闸 2 到底是多少 (那样操作员无从判断"改哪个数才有用")。
+        g.massOk = (massKgIn >= SEND_GATE_MASS_MIN_KG && massKgIn <= SEND_GATE_MASS_MAX_KG);
+        g.comOk  = (g.comMagMm <= SEND_GATE_COM_MAX_MM);
+
+        // ===== 闸 1 =====
+        // "没有 c_s" 与 "没有 cz_robot" 是两个【不同的】不可用, 各有各的判决值: 前者说
+        // "这次没解出来", 后者说 "30004 帧里还没回读到负载"。并进"符号不对"会把人支去
+        // 查一个没坏的地方 (本项目记过这种假失败)。
+        if (csZmm == nullptr) {
+            g.verdict = SEND_NO_CS;
+            return g;
+        }
+        if (czRobotMm == nullptr) {
+            g.verdict = SEND_NO_CZ_ROBOT;
+            return g;
+        }
+        const SessionReport::PayloadDValues dv = SessionReport::payloadDValues(*czRobotMm, *csZmm);
+        g.dSameDir = dv.sameDir; g.dFlipDir = dv.flipDir;
+        g.dSameIn  = dv.sameIn;  g.dFlipIn  = dv.flipIn;
+        // 两支的判读【相同】时两支都不可用: 都在内 = 定不了符号 (不许猜), 都在外 = 哪里错了。
+        if (g.dSameIn == g.dFlipIn) {
+            g.verdict = g.dSameIn ? SEND_SIGN_AMBIGUOUS : SEND_SIGN_NONE_IN_RANGE;
+            return g;
+        }
+        g.convention = g.dSameIn ? 1 : 2;
+        // 选中的那支 c_s_z: 约定一取 c_s_z 本身, 约定二取它的反向。cz 的号 = 选中那支的号 ——
+        // 因为 cz_robot 与 c_s 沿的是【同一根工具轴】, 两者同向时符号必然一致 (这正是闸 1
+        // 用 cz_robot 当外部锚点能定出符号的道理)。
+        const double csZSelected = (g.convention == 1) ? *csZmm : -*csZmm;
+        g.czSign = (csZSelected >= 0.0) ? +1.0 : -1.0;
+        g.comMm[2] = g.czSign * fabs(comMmIn[2]);   // 只给 cz 定号, 横向两个分量不动
+
+        if (!g.massOk) { g.verdict = SEND_MASS_OUT_OF_RANGE; return g; }
+        if (!g.comOk)  { g.verdict = SEND_COM_OUT_OF_RANGE;  return g; }
+        g.verdict = SEND_OK;
+        return g;
     }
 
 } // namespace PayloadCalibration

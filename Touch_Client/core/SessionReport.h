@@ -92,12 +92,45 @@ namespace SessionReport {
     // ⚠ 这一节【只是信息】: 不参与任何接受/拒绝, 也不改变 fitRaw 的判决 (brief 硬要求 6)。
     //   两个约定的【成对读法】属于上机操作单 §6 闸1 (它管的是"要不要下发 cz", 不是本次
     //   拟合成不成) —— 这里只把两个数摆出来, 不替读者裁定。
+    // ===== d 的两支 (约定一 / 约定二) —— 全项目【只此一份】实现 =====
+    //
+    // 定义与判据 (0, 31.5) mm 见上面那一段; 这里只把两个数抽出来, 供【两个】调用方共用:
+    //   · 文档块那一节 (payloadDSection);
+    //   · 下发前的【闸 1】(PayloadCalibration::evaluateSendGate, Task 8a)。
+    // 两处各算一遍就是"同一个量两个实现" —— 本项目栽过的正是这种 (漂移之后两边各说各话,
+    // 而且都在自己的上下文里看起来是对的)。
+    //
+    // 判据是【开】区间: d 恰好等于 0 或 31.5 都算不在内 (测量原点【在】传感器体内, 不是压在
+    // 两端上)。
+    // 判据的两端 (mm) —— 【开】区间。操作单 §6 闸1 写的是 "0 < d < 31.5" (31.5 = 传感器总高:
+    // 测量原点必须落在传感器体内)。公开成常量是为了让打印端能【引用】它, 而不是在提示文字里
+    // 再抄一遍 31.5 —— 抄一遍就是一个会在改判据时撒谎的第二来源。
+    static const double PAYLOAD_D_MIN_MM = 0.0;
+    static const double PAYLOAD_D_MAX_MM = 31.5;
+
+    struct PayloadDValues {
+        double sameDir;   // 约定一 (c_s_z 与工具轴同向): d = cz_robot − c_s_z  (mm)
+        double flipDir;   // 约定二 (反向):               d = cz_robot + c_s_z  (mm)
+        bool   sameIn;    // sameDir 落在 (PAYLOAD_D_MIN_MM, PAYLOAD_D_MAX_MM)
+        bool   flipIn;    // flipDir 同上
+    };
+    inline PayloadDValues payloadDValues(double czRobotMm, double csZmm) {
+        PayloadDValues v;
+        v.sameDir = czRobotMm - csZmm;
+        v.flipDir = czRobotMm + csZmm;
+        v.sameIn  = (v.sameDir > PAYLOAD_D_MIN_MM && v.sameDir < PAYLOAD_D_MAX_MM);
+        v.flipIn  = (v.flipDir > PAYLOAD_D_MIN_MM && v.flipDir < PAYLOAD_D_MAX_MM);
+        return v;
+    }
+
     inline std::string payloadDSection(double czRobotMm, double csZmm, bool fitOk) {
         // 约定一 = c_s_z 与工具轴【同向】 (改动前的实现取的就是这一支); 约定二 = 反向。
-        const double dSameDir = czRobotMm - csZmm;
-        const double dFlipDir = czRobotMm + csZmm;
-        const bool sameIn  = (dSameDir > 0.0 && dSameDir < 31.5);
-        const bool flipIn  = (dFlipDir > 0.0 && dFlipDir < 31.5);
+        // 两支的算术与判据不在这里写第二遍 —— 取上面那一份共用的实现。
+        const PayloadDValues dv = payloadDValues(czRobotMm, csZmm);
+        const double dSameDir = dv.sameDir;
+        const double dFlipDir = dv.flipDir;
+        const bool sameIn  = dv.sameIn;
+        const bool flipIn  = dv.flipIn;
 
         std::string s;
         char buf[512];
