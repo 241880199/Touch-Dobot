@@ -583,6 +583,16 @@ namespace PayloadCalibration {
     //   ③ 禁止出现"标定结果 / 绝对负载 / 整条链质量" —— 它们会把这个量读成已经换好帧的。
     void formatSendCandidateMassText(double massKg, char* out, int len);
 
+    // 候选块里 c 那一行的【方括号标签】—— 与 m 那一段同一个理由: 操作员读到的那句话
+    // 只许有一个出处 (打印端不许自己写第二遍), 而它是那一屏里唯一没有测试钉住的串。
+    // 两句话, 按闸1【真的定下了号没有】分岔:
+    //   convention != 0   -> "cz 已按闸1 定的号"        (发出去的就是这一份 cz)
+    //   convention == 0   -> "闸1 未定号, cz 即自报原样" (SEND_SIGN_* 在赋值之前就返回了,
+    //                        comMm[2] 还是机械臂自报的原样。标签若写死"号已定", 屏幕上就会
+    //                        同时出现"闸1 无法判定"与"号已定"两句互相打架的话。)
+    // ⚠ 只给标签, 【不给】那行的其余文字 (分量名与 @1176 的出处留在打印端)。
+    void formatSendCandidateCenterLabel(const SendGate& gate, char* out, int len);
+
     // §3.5 的结论行: c 未变 -> "本次只改 m"; c 已变 -> 逐分量见上; 【翻号 -> 标高危】,
     // 而且那时【不许】再说"只改 m"(量级上它是一次巨大的负载改动, 不是最小改动)。
     // ⚠ 但第一句是【发得出去】的候选才配说的 (二次复审 Minor 1): verdict != SEND_OK 的候选

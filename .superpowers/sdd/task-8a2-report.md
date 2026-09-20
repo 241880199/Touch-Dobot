@@ -615,3 +615,203 @@ $ ./test_payload_calibration.exe
    (`test_send_gate_two_conventions_in_range_is_ambiguous` / `..._convention_one_wins_and_signs_cz`)。
    **这一行的措辞本身要 8b 上机时用眼睛核。**
 2. 本波**没有**跑出候选块的真实屏幕 —— 同上, 需要接机械臂 (`--no-robot` 下 `'m'` 被拒)。
+
+---
+
+# 附录 B — 全分支终审修复波 (2026-09-20, base `68828bd`)
+
+范围: 2 条 Important (I1/I2) + 6 条 Minor (M1..M6) + 2 处**用户批准的行为改变** (I1 活刷新、I3 确认键)。
+全部落地。构建: `MSBuild -p:Configuration=Release -p:Platform=x64` -> `Touch_Client.exe` (无 error,
+只有既有的 C4005 CALLBACK 宏重定义警告)。构建前 `tasklist //FI "IMAGENAME eq Touch_Client.exe"`
+-> `No tasks are running`。
+
+## B.0 测试结果 (原始)
+
+```
+# 聚焦 (test_payload_calibration, 不在 run_tests.bat 里)
+BUILD_EXIT=0
+70 passed, 0 failed
+
+# 全量 (tests/run_tests.bat)
+grep -E "passed, 0 failed" | wc -l  ->  12        (12 个用例程序全部 0 failed)
+grep -E "failed" | grep -v "0 failed"  ->  (空)
+```
+
+## B.1 逐条修复 (行号是**这次的**工作树, 不是 brief 给的; 本项目不许在注释里写行号)
+
+### I1 — `@1168`/`@1176` 回读改成**活刷新** (行为改变, 用户批准)
+
+`Touch_Client/relay/RelayCore.cpp` 实时读取线程内那一段 (`loadEchoDiagPrinted` 在 :87/:104;
+写字段在 :93-100 前后)。
+
+- 从前: `static bool loadEchoReported` 在 **sanity 之前**置位, **只在首帧读一次**, 之后整个会话不再刷新。
+- 现在: 每收到一帧**合规**的帧就刷新那四个字段 (与下面那批力数据同一把 `forceDataMutex`,
+  不需要限流); **诊断行只在第一帧合规帧打印一次** (开关改名为 `loadEchoDiagPrinted`,
+  **只在 sanity 通过时置位**)。
+- **冻结 bug 修掉**: sanity 不过的帧既不写字段、也不置"已打过"的位 —— 所以首帧坏掉不会
+  把整个会话变成"没有回读", 下一次好帧会正常落数据。
+- 契约不变: 字段仍只在 `forceDataMutex` 内写, 读方 (main.cpp 的求解基线与候选块) 仍持
+  同一把锁读。`core/AppState.h` 上那三个字段的注释已同步 (写明"这三个字段是活的")。
+- `RelayCore.cpp` 连接时序里的 `LoadSwitch(0)` **一个字节没动** (见 B.4 证据)。
+
+### I2 — 闸 1 那条安全注释里的**假前提** (comment-only)
+
+`Touch_Client/force/PayloadCalibration.cpp:1937`。
+
+- 原文: "这一步只在 `|选中的 c_s_z| > 31.5` 时成立" -> 改为 `|cz_robot| > 31.5`,
+  并把 brief 给的反例 (`cz_robot = +40, c_s_z = +30` => `d = 10` 在 `(0,31.5)` 内 => 约定一 =>
+  `c_s_z = +30`, 不大于 31.5 且号没翻) 写进去。
+- 全文件搜过 `选中的 c_s`: 只有这一处是错的; 头文件 (`PayloadCalibration.h`) 与用例注释
+  本来就写的是 `|cz_robot| > 31.5` 的正确形式。**零行为改变**。
+
+### I3 — `'p'` 加确认键 (行为改变, 用户批准)
+
+`Touch_Client/main.cpp`。确认键定为 **`'y'`** (唯一一处定义: `SEND_CONFIRM_KEY` 在 :2172;
+判键与提示文字都取它)。
+
+- `'p'` -> `BiasCheck::sendCandidate()` (:2160 起的那个函数) 现在只做三件: 打安全规程 +
+  **逐字打出这一次真正要发的命令** (`EnableRobot(%.3f,%.1f,%.1f,%.1f)` 加 `LoadSwitch(1)`) +
+  把候选**照抄**进 `s_confirmCandidate` 并置 `s_awaitingSendConfirm`。**本条分支不发任何字节。**
+- 按键处理里**先于所有按键**的拦截 (`main.cpp:2598`, 就在退出键 `'q'`/ESC 那一支之后):
+  挂着确认时, 确认键 -> `confirmSendCandidate()` (:2223); **其他任何键 -> `cancelSendConfirm()`
+  (:2240) 并出声** ("已取消 —— 本次【什么都没有发出去】")。
+- **拒发仍在 `'p'` 那一刻**: 没有候选 / 闸不过 (`verdict != SEND_OK`) 都在设置确认状态之前
+  `return`, 所以确认提示不会落到一件本来不会发生的事上。
+- **确认发的是屏幕上那一份**: `s_confirmCandidate` 是按下 `'p'` 时的**拷贝**, 不是重新读
+  `s_sendCandidate`。
+- 清理: `reset()` 与被抢占的 `cancel()` 都会撤销挂着的确认; `'m'` 关模式那一支也加了防御性撤销。
+- 提示文字: `'m'` 模式的屏幕说明里加了 `'p'` 那一行 (含确认键); 上机操作单 §6 加了一条注
+  (`Docs/superpowers/specs/2026-09-19-on-machine-checklist.md`, 并顺手把那句"三条一起发"
+  标成"设计 §6b 的原始清单", 免得与现行两条例程打架 —— 这一句是加了注之后必须补的, 否则
+  同一节里两句话互相矛盾)。
+
+### M1 — 不可达分支加注释 (不删)
+
+`Touch_Client/force/PayloadCalibration.cpp:2077` 起 (那个 `else` = "c 已变 —— 逐分量见上")。
+注释写明: 在今天唯一的调用点上不可达, 理由是 `dc[0] == dc[1] == 0` 恒成立 (cx/cy 是同一个
+echo 数组的逐位拷贝), 而 `dc[2] != 0` 只可能来自翻号 (已被 `czSignFlipped` 走掉)。
+**核过**: `evaluateSendGate` 开头是 `for i: g.comMm[i] = comMmIn[i]`, `buildSendCandidate` 末尾
+是 `c.comMm[i] = c.gate.comMm[i]`, 而 `diffSendCandidate` 拿的是同一个 `echoCenter` 数组。成立。
+
+### M2 — 候选块 c 那一行的标签抽进库里 + 补测
+
+- 新增 `PayloadCalibration::formatSendCandidateCenterLabel(const SendGate&, char*, int)`
+  (声明 `PayloadCalibration.h:594`, 实现 `PayloadCalibration.cpp:2030`), 措辞**逐字沿用**
+  原有的两句 ("cz 已按闸1 定的号" / "闸1 未定号, cz 即自报原样"), 打印端 (`main.cpp:1748`) 改成调它。
+- 新用例 `test_send_candidate_center_label_follows_the_verdict` 两种情形各钉一次 (逐字相等)。
+
+### M3 — 两个操作员可见的 `snprintf` 缓冲加余量
+
+**用格式串本身量过** (不是估的):
+
+- `formatSendGateConclusion` 最长一支 (`SEND_NOT_MEASURED`) = **219 字节** -> `char reason[256]` 的
+  两处**都**改成 `[512]` (`main.cpp:1841` 候选块那一屏、`main.cpp:2186` `'p'` 被拒那一支)。
+- `formatSendCandidateMassText` = **465 字节** -> `char massLine[512]` 改成 `[1024]` (`main.cpp:1734`)。
+- 见 B.3 第 1 条: brief 说 "467 into 512", 实测 465, 而那个 512 缓冲是 `massLine`, **不是**
+  `concl[512]` (后者当时最长只有 250 字节)。
+
+### M4 — 发送侧返回值不再丢弃
+
+`Touch_Client/relay/RelayCore.cpp:283` / `:299` (两条命令各一处)。
+
+- `robotSendEnable` 的返回值存进 `sentEnable` / `sentLoadSwitch`; 发送失败时**不再去 recv**
+  (不会把一条从没发出去的命令的回执算进来), 回执行打 **`(发送失败 — 命令没能写进 socket)`**,
+  与 "`(无回执, 超时)`"、与 "`机械臂拒绝 (ErrorID != 0)`" 三者互斥、各说各的。
+- 汇总行也补一句: 失败条目里有发送侧的失败时明写"命令没写进 socket, 不是机械臂拒绝"
+  (两者处置不同: 前者查链路, 后者查命令)。
+- 这一条比 finding 的字面多了一点: 发送失败时**跳过 Sleep+recv**。理由与判据同源
+  (不能把没发出去的命令说成"超时"), 但它确实是行为改变, 记在这里。
+
+### M5 — 归因改 `switch`
+
+`Touch_Client/main.cpp:1701` 起。`absentWhy` 用 `switch (cand.absent)`, 两个已知归因各一支,
+`CAND_PRESENT`/`default` 合起来给"归因未知 (不该发生)"。加第三种归因时**不会**被静默标成
+"没有回读到负载"。措辞逐字不变。
+
+### M6 — 高危结论行的"要不要发"按**发得出去**分岔
+
+`Touch_Client/force/PayloadCalibration.cpp:2048` 起。翻号那一支拆成两个 `snprintf`:
+
+- `d.sendable` -> 保留原来的 "按 §1 的安全规程处置后**再决定发不发**";
+- `!d.sendable` (翻号 + 闸不过, **可达**) -> "【候选不可发送】—— 按 'p' 会被拒 (理由见下面闸的
+  结论行), 所以这里没有'发不发'可决定; 按 §1 的安全规程处置"。
+
+两句话都带"高危"与"c 已变" (§3.5 的硬要求不被"发不出去"顶掉)。用例两侧各加 CHECK。
+
+## B.2 两条反向对照 (原始输出)
+
+### 对照 1 — 临时交换 `formatSendCandidateDiffConclusion` 的两支 (`czSignFlipped` 与 `!sendable` 换序)
+
+```
+BUILD_EXIT=0
+  send_candidate_diff_conclusion_never_says_only_m_when_unsendable... FAIL: tf.find("高危") != std::string::npos
+
+69 passed, 1 failed
+```
+
+**判读**: 失败的正是该用例的**后半段** (翻号 + 发不出去那一组, 用 `tf`), 前半段 (发不出去但没翻号,
+用 `t`) 仍然过 —— 也就是说"翻号必须优先标高危"这条**次序**性质是被次序专属的那一半抓住的,
+**没有**被另一半顺带抓住。另外 69 条 (含翻号且发得出去那条 `flipped_cz_as_high_risk`) 全过。
+之后已还原, 重跑 `70 passed, 0 failed`。
+
+### 对照 2 — 临时把中心标签退回"写死号已定"的旧谓词 (忽略 `gate.convention`)
+
+```
+BUILD_EXIT=0
+  send_candidate_center_label_follows_the_verdict... FAIL: t == "闸1 未定号, cz 即自报原样"
+
+69 passed, 1 failed
+```
+
+**直说**: **新的 M2 用例确实抓住了它** —— 失败点正是下半段 (闸 1 没定号那一组) 的逐字比较。
+所以这条标签从此不再是"没有测试钉住的操作员可见字符串" (旧报告 §A.4 第 1 条记的正是这个缺口)。
+之后已还原, 重跑 `70 passed, 0 failed`。
+
+## B.3 这些发现的**行号/说法与实际代码对不上的地方**
+
+1. **M3 的 "467 into 512" 数对、缓冲说错了**: 实测 465 字节、那个 512 缓冲是
+   `formatSendCandidateMassText` 的 `char massLine[512]`, **不是** `concl[512]`
+   (`formatSendCandidateDiffConclusion`, 当时最长 250 字节)。两个 "512" 在同一屏里, 光按数字
+   找会改错那一个。另外那个 256 缓冲 (`char reason[256]`) 在文件里**出现两次**
+   (候选块那一屏 + `'p'` 被拒那一支), brief 说"两个缓冲"实际是"两种、三处"。
+2. **M6 之后 `concl[512]` 的余量从 250/512 涨到 352/512**: 翻号 + 发不出去那一支变长了。
+   仍在 30% 余量以上, 且它不在 M3 点名的两个缓冲里, 所以**这次没动**; 记在这里供下次改措辞时参考。
+3. **M1 的"不可达"与本报告 §A.3 是同一件事** —— A.3 当时已经把它记下来 (结论一致, 理由也一致),
+   本次只是把结论落成代码注释 (M1 要的正是这个)。**没有冲突**。
+4. **I2 的错误前提确实是"评审里来的"**: brief 说的"源自第一次任务评审 Minor 5、被逐字写进代码"
+   与实际相符 —— 注释里那半句与头文件/用例里的正确形式**互相矛盾**, 而代码本身按正确的那个跑
+   (`g.czSign = (csZSelected >= 0.0) ? +1.0 : -1.0` 只看选中的 c_s_z 的号, 与 `|cz_robot|` 无关)。
+   即: **错误只在注释里, 判据本身一直是对的**。
+5. **I1 的两个附带事实都核过**: (a) `static bool loadEchoReported` 是**函数级 static**, 而那个函数
+   就是线程体, 所以它跨 `robotCloseRealtime()` / 重连**都不重置** —— brief 说"连重连也不重置", 对;
+   (b) 全零 `@1168` 确实过得了那条 sanity (`echo[0] >= 0.0 && <= 5.0`, 其余 `fabs <= 500`), 所以
+   "首帧坏掉就冻结整个会话"成立。四个字段的写者也确实全项目只有这一处 (grep 过)。
+6. **一处 brief 没提、但同型的陈旧行号**: 上机操作单 §0 写着连接时序的 `LoadSwitch(0)` 在
+   `RelayCore.cpp:473` —— 在 base `68828bd` 上它已经是 **539**, 本次改动后是 **577**。
+   属"注释里的行号会漂"这个老毛病 (brief 自己也点了这一条)。**本次没改** (超出点名的范围,
+   且 §6 只许加一条最小改动), 记在这里当作待办。
+
+## B.4 约束核对 (逐条)
+
+- 两条命令、顺序 `EnableRobot` -> `LoadSwitch(1)`、**不发 `PayLoad`**: 未动 (`RelayCore.cpp`
+  的 `sendPayloadCommands` 一个字没改命令文本与顺序)。
+- `'p'` (+ 确认) 仍是**唯一**会发东西给机械臂的路径; `'s'` 路径不发任何东西: 未动。
+- **连接时序的 `LoadSwitch(0)` 逐字节不变**: `git diff -U0 Touch_Client/relay/RelayCore.cpp | grep
+  "LoadSwitch(0)"` -> **无输出** (即该行既不在增行也不在删行里); 该行文本与 `git show HEAD` 里
+  的那一行逐字相同 (行号 539 -> 577 只是位移)。
+- 没有任何东西写 `payload_calib.json`: 未动。
+- 没碰 `#if 0` 块 / 求解器 / 模型形式 / 门限公式 / `A` 仍是 `A_F` / `calib_log.txt` 与
+  `calib_poses.txt` 的列格式 / 证据文件 / `tests/run_tests.bat`。
+- `|c| < 500` 仍严格小于; 质量带 `[0.2, 1.5]` kg 仍闭区间: 未动。
+- 除本波点名的三处缓冲大小、M4 的发送失败分支、I3 的按键流、以及 I1 的活刷新之外,
+  **没有改任何判决、比较或算术**。
+- 所有新注释里的前提/出处/数字都对着**存在的文件**核过 (30004 偏移 @1168/@1176 见
+  `Docs/superpowers/evidence/robot-baseline-report.md` 与 `.../task-session-report.md`;
+  缓冲字节数见 B.3)。**注释里一律没有写行号。**
+
+## B.5 需上机用眼睛核的
+
+1. `'p'` -> `'y'` 的真实屏幕 (含"这一次真正要发的命令"那一行) 只有在 `'m'` 模式里、接上机械臂
+   之后才看得到 —— 本波离线跑不出来, 与 8b §4.3 同因。
+2. I1 的活刷新在**真机**上的样子: 发一条 `'p'` 之后, 下一次 `'s'` 的"与机械臂【当前值】相比"
+   应当**跟着变** (地址对齐了才对齐) —— 这正是 Task 10 闭环要用的那条性质。离线无法证。

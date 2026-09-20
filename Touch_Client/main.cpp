@@ -174,6 +174,18 @@ namespace BiasCheck {
     static bool s_sendCandidateValid = false;
     static PayloadCalibration::SendGate s_sendCandidate;
 
+    // ===== Task 8a: 发送前的二次确认 (全文复审 I3, 用户 2026-09-20 批准) =====
+    // 'p' 从前是"打印安全规程 + 同一次按键里就发出去", 而这是一个会让实体机械臂动的动作 ——
+    // 一次误触没有任何东西挡得住。改成两段: 'p' 只【摆出来】(安全规程 + 这一次到底发什么),
+    // 再由一个明确的确认键真正发。拒发 (没有候选 / 过不了闸) 仍旧发生在 'p' 那一刻, 在那之前
+    // 不会出现确认提示 —— 否则"确认"会落到一件本来就不会发生的事上。
+    //
+    // ⚠ 确认发的是 s_confirmCandidate (按下 'p' 那一刻【照抄】下来的那一份), 【不是】重新读
+    //   s_sendCandidate: "屏幕上摆出来的"与"发出去的"必须是同一个东西 (与候选本身不许重算是
+    //   同一条规矩)。照抄之后即使别处的候选被改写作废, 发出去的仍是屏幕上那一份。
+    static bool s_awaitingSendConfirm = false;
+    static PayloadCalibration::SendGate s_confirmCandidate;
+
     static void reset() {
         dataUnderCurrentPayload = true;
         consecutiveFails = 0;
@@ -187,6 +199,8 @@ namespace BiasCheck {
         // 采集重开 = 这批数据丢弃, 所以上一次求解留下的发送候选一并作废 —— 它正是从这批
         // 【已经被丢弃的】数据解出来的。留着它, 'p' 会在"我刚重开采集"之后发出一份旧值。
         s_sendCandidateValid = false;
+        // 挂着的发送确认一并撤销 (与候选作废同源: 它确认的是上一批数据解出来的那一份)。
+        s_awaitingSendConfirm = false;
         for (int i = 0; i < 6; i++) {
             accum[i] = 0.0; accumTcp[i] = 0.0; accumSix[i] = 0.0;
             accumSq[i] = 0.0; accumTcpSq[i] = 0.0; accumSixSq[i] = 0.0;
@@ -198,6 +212,13 @@ namespace BiasCheck {
         if (!mode) return;
         mode = false;
         sampling = false;
+        // 被其他采集模式抢占 (本函数只从这里被调) -> 挂着的发送确认也撤销: 它是这一次采集的
+        // 产物, 而这次采集整个被丢弃了; 留着一个跨模式的待确认状态是操作员想不到的。
+        if (s_awaitingSendConfirm) {
+            s_awaitingSendConfirm = false;
+            std::cout << "[下发] ✗ 发送确认已随 'm' 模式被抢占一起取消 —— 本次【什么都没有发出去】。"
+                      << std::endl;
+        }
         // 退出时一定要关拖拽: 柔顺状态漏出去, 机械臂会一直软着
         RelayCore::instance().setDragMode(false);
         std::cout << "[BIAS] Mode OFF (" << count << " poses discarded)" << std::endl;
@@ -1673,12 +1694,26 @@ namespace BiasCheck {
 
             if (!cand.present) {
                 s_sendCandidateValid = false;
-                diagOut() << "\n[下发候选] 本次【没有候选】: "
-                          << (cand.absent == PayloadCalibration::CAND_NO_MEASURED_MASS
-                                  ? "没有【本次实测】的质量尺度 —— 只有实测出来的 m 才能当候选,"
-                                    " 种子值 / 上次落盘值一律不发 (那正是连接时序已经在发的那个)"
-                                  : "没有回读到机械臂自报的负载 (@1168 Load / @1176 CenterX/Y/Z)"
-                                    " —— 不退回本客户端自己下发的值当参照")
+                // 归因走 switch, 【不是】二选一的 ?: —— 从前那是 "== CAND_NO_MEASURED_MASS
+                // ? 这句 : 那句", 今天只有两种归因所以是对的, 但加第三种时它会被【静默】
+                // 标成"没有回读到负载", 而这两件事的处置完全不同 (去查标定为什么没跑 vs
+                // 去查 30004 回读)。default 明写"未知", 不落进任何一支的措辞。
+                const char* absentWhy = nullptr;
+                switch (cand.absent) {
+                case PayloadCalibration::CAND_NO_MEASURED_MASS:
+                    absentWhy = "没有【本次实测】的质量尺度 —— 只有实测出来的 m 才能当候选,"
+                                " 种子值 / 上次落盘值一律不发 (那正是连接时序已经在发的那个)";
+                    break;
+                case PayloadCalibration::CAND_NO_PAYLOAD_ECHO:
+                    absentWhy = "没有回读到机械臂自报的负载 (@1168 Load / @1176 CenterX/Y/Z)"
+                                " —— 不退回本客户端自己下发的值当参照";
+                    break;
+                case PayloadCalibration::CAND_PRESENT:
+                default:
+                    absentWhy = "归因未知 (不该发生: present == false 时 absent 必是上面两种之一)";
+                    break;
+                }
+                diagOut() << "\n[下发候选] 本次【没有候选】: " << absentWhy
                           << "。按 'p' 会被拒。" << std::endl;
                 diagOut() << std::endl;
             } else {
@@ -1693,7 +1728,10 @@ namespace BiasCheck {
                 // m 那一行【连同换帧说明】由库里那一个函数给出 —— 措辞只此一份, 这里不重写
                 // (它的三条硬要求见 PayloadCalibration.h 的 formatSendCandidateMassText)。
                 {
-                    char massLine[512];
+                    // 1024 而非 512: 这段文本实测约 465 字节 (格式串本身量出来的), 而
+                    // snprintf 【静默截断】—— 512 只剩 ~47 字节的余量, 改一次措辞就会砍在
+                    // 句子中间 (砍掉的正是"量未定"那句解释, 而不是判决)。
+                    char massLine[1024];
                     PayloadCalibration::formatSendCandidateMassText(cand.massKg, massLine,
                                                                     sizeof(massLine));
                     diagOut() << massLine;
@@ -1705,11 +1743,15 @@ namespace BiasCheck {
                 //   那时 comMm[2] 还是机械臂自报的原样 (这一支在有候选 present == true 时【可达】)。
                 //   标签若写死"已按闸1 的号定", 屏幕上就同时出现"闸1 无法判定"与"号已定"两句
                 //   互相打架的话 (二次复审 Minor 1)。所以标签跟着判决走, 两种情形各说各的。
-                diagEmitf("  候选 (cx, cy, cz)       = (%.1f, %.1f, %.1f) mm"
-                          "   [机械臂自报 @1176 的 CenterX/Y/Z, %s]\n",
-                          cand.comMm[0], cand.comMm[1], cand.comMm[2],
-                          cand.gate.convention != 0 ? "cz 已按闸1 定的号"
-                                                    : "闸1 未定号, cz 即自报原样");
+                //   那句话本身【不在这里写第二遍】—— 由库里唯一的一份给出 (单测钉住措辞)。
+                {
+                    char centerLabel[64];
+                    PayloadCalibration::formatSendCandidateCenterLabel(cand.gate, centerLabel,
+                                                                       sizeof(centerLabel));
+                    diagEmitf("  候选 (cx, cy, cz)       = (%.1f, %.1f, %.1f) mm"
+                              "   [机械臂自报 @1176 的 CenterX/Y/Z, %s]\n",
+                              cand.comMm[0], cand.comMm[1], cand.comMm[2], centerLabel);
+                }
                 diagEmitf("  候选 |c|                = %.1f mm\n", candMag);
                 // 闸 1: 两支 d 与判读。⛔ 这里【只报数, 不给勾/叉】(与块尾那一节同一条规矩) ——
                 // "恰好一支在内"才是放行, 给单一勾会让人以为"这一支通过了"。
@@ -1793,7 +1835,10 @@ namespace BiasCheck {
                 // 结论行: 放行 / 【是哪一闸、为什么】。每一支各说各的 —— 合并成一句"不合格"就
                 // 等于把"没数据"、"来路不对"、"数据在但定不了号"混成一个, 而这几件事的处置
                 // 完全不同。语句本身与 'p' 被拒时说的那一句【同源】(formatSendGateConclusion)。
-                char reason[256];
+                // 512 而非 256: 这段文本最长的一支 (SEND_NOT_MEASURED) 实测约 219 字节,
+                // 而 snprintf 【静默截断】—— 256 的余量只有 ~37 字节, 改一次措辞就会砍在
+                // 句子中间 (砍掉的是"为什么"那句解释, 而判决本身在别处)。
+                char reason[512];
                 formatSendGateConclusion(cand.gate, reason, sizeof(reason));
                 diagEmitf("  结论: %s\n", reason);
                 diagOut() << "  ⚠ 此刻【什么都没有发出去】—— 上面只是候选与闸的判读;"
@@ -2121,6 +2166,11 @@ namespace BiasCheck {
     //
     // 【不重算】: 用的是 's' 求解成功时留下的那一份候选 (s_sendCandidate)。重算就会隔着两次
     // 按键与两次实时读数 —— 屏幕上说 A 而发出去 B, 正是本项目最忌讳的"安静地不一致"。
+    //
+    // 【'p' 自己不发送】(I3): 'p' 只摆出安全规程 + 本次到底发什么, 然后等确认键。
+    // 见 s_awaitingSendConfirm 那一段的说明。
+    static const char SEND_CONFIRM_KEY = 'y';   // 确认键 —— 提示文字里也用它 (只此一处定)
+
     static void sendCandidate() {
         // ① 没有任何候选 (还没按过 's', 或求解未通过 / 采集已重开把候选作废了)。
         if (!s_sendCandidateValid) {
@@ -2130,16 +2180,17 @@ namespace BiasCheck {
             return;
         }
         // ② 候选存在但过不了闸 —— 说清是哪一闸、为什么 (与 's' 那一屏上那一行同源),
-        //    并【什么都不发】。
+        //    并【什么都不发】。⚠ 拒发必须在【确认提示之前】: 提示一旦出现, 确认键就会落到
+        //    一件本来就不会发生的事上。
         if (s_sendCandidate.verdict != PayloadCalibration::SEND_OK) {
-            char reason[256];
+            char reason[512];
             formatSendGateConclusion(s_sendCandidate, reason, sizeof(reason));
             std::cout << "[下发] " << reason << std::endl;
             std::cout << "[下发] 本次【什么都没有发出去】。" << std::endl;
             return;
         }
-        // ③ 可发送 —— 【先打安全规程, 再发】。顺序不能反: 这几行是给站在机械臂旁边的人看的,
-        //    而发送一旦开始就不再受这里控制。
+        // ③ 可发送 —— 【先打安全规程与这一次要发的数, 再等确认】。顺序不能反: 这几行是给站在
+        //    机械臂旁边的人看的, 而发送一旦开始就不再受这里控制。
         std::cout << "[下发] ⚠ 即将向机械臂下发负载参数：" << std::endl;
         std::cout << "[下发]    · 机械臂在安全姿态" << std::endl;
         std::cout << "[下发]    · 手离开工作空间" << std::endl;
@@ -2149,9 +2200,32 @@ namespace BiasCheck {
                   << "（1.5 kg 那次撞向关节限位）" << std::endl;
         std::cout << "[下发] 本次下发: EnableRobot(m, cx, cy, cz) + LoadSwitch(1) —— "
                   << "顺序取自设计 §6b 的清单, 文档未说明其必要性" << std::endl;
+        // 把这一次要发的东西【逐字】摆出来 (与 sendPayloadCommands 里拼命令用的是同一组数;
+        // 精度也取同一档) —— 确认键确认的就是这一行。
+        {
+            char willSend[192];
+            snprintf(willSend, sizeof(willSend),
+                     "EnableRobot(%.3f,%.1f,%.1f,%.1f)",
+                     s_sendCandidate.massKg, s_sendCandidate.comMm[0],
+                     s_sendCandidate.comMm[1], s_sendCandidate.comMm[2]);
+            std::cout << "[下发] 这一次真正要发的命令: " << willSend
+                      << "  +  LoadSwitch(1)" << std::endl;
+        }
+        // 照抄下来, 确认时发的就是这一份 (见 s_confirmCandidate 的说明)。
+        s_confirmCandidate = s_sendCandidate;
+        s_awaitingSendConfirm = true;
+        std::cout << "[下发] ⏸ 【尚未发送】—— 确认请按 '" << SEND_CONFIRM_KEY
+                  << "' , 按【任何其他键】取消 (取消不会发出任何字节)。" << std::endl;
+        std::cout << "[下发]    确认与取消都要在【机械臂旁边的人】就位之后再按。" << std::endl;
+    }
+
+    // 确认键按下 -> 真正发送 (发的是按下 'p' 时照抄的那一份候选)。
+    static void confirmSendCandidate() {
+        if (!s_awaitingSendConfirm) return;
+        s_awaitingSendConfirm = false;   // 先清状态: 发送过程里它不该再是真
         // 两条命令与逐条回执在 RelayCore::sendPayloadToRobot 里打 (它能分辨哪一条失败)。
         const bool ok = RelayCore::instance().sendPayloadToRobot(
-            s_sendCandidate.massKg, s_sendCandidate.comMm);
+            s_confirmCandidate.massKg, s_confirmCandidate.comMm);
         if (ok) {
             std::cout << "[下发] ✓ 完成。" << std::endl;
         } else {
@@ -2161,6 +2235,23 @@ namespace BiasCheck {
                       << "已更新; 按 §1 的安全规程处置, 再决定是否重发。" << std::endl;
         }
     }
+
+    // 非确认键 (或任何其他键) -> 取消。必须出声: 静默地什么都不做, 操作员会以为发出去了。
+    static void cancelSendConfirm() {
+        if (!s_awaitingSendConfirm) return;
+        s_awaitingSendConfirm = false;
+        std::cout << "[下发] ✗ 已取消 —— 本次【什么都没有发出去】(要发就重新按 'p', 再按 '"
+                  << SEND_CONFIRM_KEY << "')。" << std::endl;
+    }
+
+    static bool awaitingSendConfirm() { return s_awaitingSendConfirm; }
+    // 确认键给按键处理用 (它在命名空间外) —— 键值只此一处定义, 提示文字与判键都取它。
+    static char sendConfirmKey() { return SEND_CONFIRM_KEY; }
+    static bool isSendConfirmKey(unsigned char key) {
+        return key == (unsigned char)SEND_CONFIRM_KEY
+            || key == (unsigned char)(SEND_CONFIRM_KEY - 'a' + 'A');
+    }
+
 }
 
 // ===== 启动零偏漂移检查 =====
@@ -2499,6 +2590,21 @@ void keyboard(unsigned char key, int, int) {
         if (!g_noTouch) cleanupHapticDevice();
         exit(0);
     }
+    // ===== Task 8a: 发送确认的拦截 (I3) =====
+    // 【必须在所有其他按键之前】(退出键 'q'/ESC 除外, 它在上面已经处理并 exit 了):
+    // 确认提示挂着的时候, 除确认键以外的【任何】键都是取消 —— 包括 'm' / 's' / SPACE。
+    // 拦截整段按键 (而不是只认一下 'y') 是【故意的】: 一个挂着的"要不要向机械臂下发"提示
+    // 不该在操作员按下别的键时悄悄留在那儿, 更不该让那个键顺带做别的事。取消一定出声。
+    if (BiasCheck::awaitingSendConfirm()) {
+        if (BiasCheck::isSendConfirmKey(key)) {
+            BiasCheck::confirmSendCandidate();
+        } else {
+            std::cout << "[下发] 收到非确认键 ('" << key << "') -> 取消本次下发。" << std::endl;
+            BiasCheck::cancelSendConfirm();
+        }
+        return;
+    }
+
     if (key == 'e' || key == 'E') {
         if (!g_noRobot) {
             std::cout << "\n[Main] 手动触发脱困..." << std::endl;
@@ -2611,6 +2717,9 @@ void keyboard(unsigned char key, int, int) {
                       << " 'm' 退出并输出报告\n"
                       << "       's' 用这批数据【求解原始通道】, 只打印、不改动任何东西"
                       << " (不写补偿 / 不写 json / 不下发机械臂)\n"
+                      << "       'p' 【唯一】会把负载参数发给机械臂的键 —— 它只摆出安全规程与"
+                      << " 这一次要发的命令,【要再按 '" << BiasCheck::sendConfirmKey()
+                      << "' 才真正发出】; 按任何其他键取消。\n"
                       << "       ★ 重复对 (模型形式检验的尺子): 摆姿态 → SPACE 采样;\n"
                       << "         ★ 保持不动 → 按 'r' → 再按 SPACE 采一次（同一姿态）。\n"
                       << "         两次采样之间机械臂【不许移动】—— 'r' 配的是【上一次采样】,"
@@ -2631,6 +2740,12 @@ void keyboard(unsigned char key, int, int) {
                       << std::endl;
         } else {
             BiasCheck::mode = false;
+            // 挂着的发送确认一并撤销。⚠ 顶上的拦截已经保证"确认提示挂着时按 'm' 走的是取消
+            // 那一支", 所以这一行今天【到不了】; 留着是因为"待确认状态活过模式切换"这件事
+            // 一旦发生, 后果是操作员在一个他以为已经退出的模式里按了确认键。
+            if (BiasCheck::awaitingSendConfirm()) {
+                BiasCheck::cancelSendConfirm();
+            }
             // 别把柔顺状态带出模式
             RelayCore::instance().setDragMode(false);
             BiasCheck::report();   // 数据属旧负载时会自行拒绝判定
@@ -2738,6 +2853,8 @@ void keyboard(unsigned char key, int, int) {
         return;
     }
     if ((key == 'p' || key == 'P') && BiasCheck::mode) {
+        // 只摆出来 + 挂上待确认 (I3)。真正发送在 confirmSendCandidate, 由上面那段
+        // 【先于所有按键】的拦截在确认键按下时调用 —— 所以本条分支【不发送任何字节】。
         BiasCheck::sendCandidate();
         return;
     }

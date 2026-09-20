@@ -64,40 +64,35 @@ static DWORD WINAPI forceReaderThread(LPVOID) {
                 break;  // reconnect loop
             }
 
-            // 一次性回读: 机械臂实际上在用哪份负载参数 (下发成功 ≠ 机械臂采纳;
-            // EnableRobot 的返回码只能说明语法对了)。
+            // ===== 机械臂自报的负载 (30004 @1168 Load / @1176~1199 CenterX/Y/Z) =====
+            // 【这四个字段持续跟着最新一帧走】: 它们说的是"机械臂【此刻】在用哪份负载参数",
+            //   而机械臂的负载会因为我们下发 ('p' 的 EnableRobot/LoadSwitch) 而变。只读一次
+            //   就等于把发送【前】的值一直挂在快照里 —— 发送成功之后, 快照仍说旧值, 下一次
+            //   's' 就会把一次【已经生效】的改动打印成"待发的改动", 并说出"只改 m"这类与
+            //   事实相反的话 (本项目最忌讳的"安静地不一致"); 而 Task 10 的闭环正是反复比对
+            //   发送前/后的仪器, 那种错在那里必然发生。所以: 每帧刷新 (与下面那批力数据同一
+            //   把锁、同一个节拍, 不需要限流)。
+            // 【诊断行仍旧只打一次】: 下面那段与客户端生效值的一致性比较是给人看的一次性提示,
+            //   125 Hz 逐帧刷屏会把别的输出冲掉。刷新与打印是两件事, 这里分开。
+            // ⚠ 【两个不许】(从前那个 bug 的根源): sanity 不过的帧【不许】写字段 (一帧坏数据
+            //   会污染快照), 也【不许】把"已经打过诊断行"记下来 —— 从前的写法在 sanity 之前
+            //   就 latch, 于是首帧不合理的会话里这四个字段【整个会话都是空的】。
             // 30004 布局: Load @1168 (1×double), CenterX/Y/Z @1176~1199 (3×double)。
             // ⚠ 现在只报不判: 与本客户端的值对不上【不】当故障 —— 负载确实是生效的
             //   (连接时序里随 EnableRobot 下发, 2026-09-19 实机证实运行中改负载会让机械臂动),
             //   但早先的探针里 ActualTCPForce @576 没跟着 0.25 kg 的配置变化走, 为什么还不清楚。
             //   本回读仅供诊断, 不影响标定 —— 真正生效的是本地补偿。
-            static bool loadEchoReported = false;
-            if (!loadEchoReported) {
-                loadEchoReported = true;
+            {
+                // 诊断行只打一次的开关。【只在 sanity 通过的那一帧置位】。
+                static bool loadEchoDiagPrinted = false;
                 const double* echo = reinterpret_cast<const double*>(buf + 1168);
-                bool sane = echo[0] >= 0.0 && echo[0] <= 5.0
-                         && fabs(echo[1]) <= 500.0 && fabs(echo[2]) <= 500.0
-                         && fabs(echo[3]) <= 500.0;
+                const bool sane = echo[0] >= 0.0 && echo[0] <= 5.0
+                               && fabs(echo[1]) <= 500.0 && fabs(echo[2]) <= 500.0
+                               && fabs(echo[3]) <= 500.0;
                 if (sane) {
-                    double mWant, cWant[3];
-                    PayloadCalibration::effective(mWant, cWant);
-                    char msg[192];
-                    snprintf(msg, sizeof(msg),
-                             "[Relay] 机械臂实际负载: load=%.3f kg  center=(%.1f, %.1f, %.1f) mm",
-                             echo[0], echo[1], echo[2], echo[3]);
-                    if (fabs(echo[0] - mWant) > 0.01 || fabs(echo[3] - cWant[2]) > 1.0) {
-                        std::cout << msg << "\n[Relay] · 与客户端的 "
-                                  << mWant << " kg / (" << cWant[0] << "," << cWant[1] << ","
-                                  << cWant[2] << ") mm 不一致 — 负载只在连接时下发, 运行中"
-                                  << "【不】改 (改负载会让机械臂动), 所以对不上是常见情形"
-                                  << std::endl;
-                        std::cout << "[Relay]   重力/惯性补偿由 ForceCompensation 在本地做"
-                                  << " (差值来源尚未查清, 见上方注释)" << std::endl;
-                    } else {
-                        std::cout << msg << std::endl;
-                    }
-                    // 落进 ForceData: 求解负载时的【基线】用 (main.cpp 的 solveAndApply)。
-                    // 存机械臂自报的值而非我们下发的值 —— 要的是"它实际在用哪个"。
+                    // 落进 ForceData: 求解负载时的【基线】用 (main.cpp 的 solveAndApply 与
+                    // 下发候选那一屏)。存机械臂自报的值而非我们下发的值 —— 要的是"它实际在用
+                    // 哪个"。读方持 forceDataMutex 读 (契约不变)。
                     EnterCriticalSection(&app.forceDataMutex);
                     app.forceData.payloadEchoLoadKg = echo[0];
                     for (int i = 0; i < 3; i++) {
@@ -105,6 +100,27 @@ static DWORD WINAPI forceReaderThread(LPVOID) {
                     }
                     app.forceData.payloadEchoValid = true;
                     LeaveCriticalSection(&app.forceDataMutex);
+
+                    if (!loadEchoDiagPrinted) {
+                        loadEchoDiagPrinted = true;
+                        double mWant, cWant[3];
+                        PayloadCalibration::effective(mWant, cWant);
+                        char msg[192];
+                        snprintf(msg, sizeof(msg),
+                                 "[Relay] 机械臂实际负载: load=%.3f kg  center=(%.1f, %.1f, %.1f) mm",
+                                 echo[0], echo[1], echo[2], echo[3]);
+                        if (fabs(echo[0] - mWant) > 0.01 || fabs(echo[3] - cWant[2]) > 1.0) {
+                            std::cout << msg << "\n[Relay] · 与客户端的 "
+                                      << mWant << " kg / (" << cWant[0] << "," << cWant[1] << ","
+                                      << cWant[2] << ") mm 不一致 — 负载只在连接时下发, 运行中"
+                                      << "【不】改 (改负载会让机械臂动), 所以对不上是常见情形"
+                                      << std::endl;
+                            std::cout << "[Relay]   重力/惯性补偿由 ForceCompensation 在本地做"
+                                      << " (差值来源尚未查清, 见上方注释)" << std::endl;
+                        } else {
+                            std::cout << msg << std::endl;
+                        }
+                    }
                 }
             }
 
@@ -260,23 +276,40 @@ static bool sendPayloadCommands(double massKg, const double comMm[3]) {
              massKg, comMm[0], comMm[1], comMm[2]);
     std::cout << "[Relay] 负载下发 1/2: " << cmd << std::endl;
     robotDrainEnable();
-    robotSendEnable(cmd);
-    Sleep(100);
+    // ⚠ 【发送侧】的返回值也要看 (全文复审 Minor 4): robotSendEnable 返回 false = 这条命令
+    //   根本没写进 socket, 与"发出去了但机械臂没回执"是两件事, 而本函数的验收判据就是
+    //   控制台必须【分得清哪一条失败】以及失败在哪一步。从前这里丢弃返回值, 于是发送侧
+    //   的失败被报成"无回执, 超时" —— 那句话把人支去查机械臂, 而问题在链路。
+    const bool sentEnable = robotSendEnable(cmd);
+    bool gotEnable = false;
     fb[0] = '\0';
-    const bool gotEnable = robotRecvEnable(fb, sizeof(fb));
-    const bool okEnable  = gotEnable && FeedbackParser::isSuccess(fb);
-    std::cout << "[Relay]   回执: " << (gotEnable ? fb : "(无回执, 超时)")
-              << (gotEnable && !okEnable ? "  ← 机械臂拒绝 (ErrorID != 0)" : "") << std::endl;
+    if (sentEnable) {
+        Sleep(100);
+        gotEnable = robotRecvEnable(fb, sizeof(fb));
+    }
+    const bool okEnable = gotEnable && FeedbackParser::isSuccess(fb);
+    std::cout << "[Relay]   回执: "
+              << (!sentEnable ? "(发送失败 — 命令没能写进 socket)"
+                              : (gotEnable ? fb : "(无回执, 超时)"))
+              << (sentEnable && gotEnable && !okEnable ? "  ← 机械臂拒绝 (ErrorID != 0)" : "")
+              << std::endl;
 
     std::cout << "[Relay] 负载下发 2/2: LoadSwitch(1)" << std::endl;
     robotDrainEnable();
-    robotSendEnable("LoadSwitch(1)");
-    Sleep(100);
+    const bool sentLoadSwitch = robotSendEnable("LoadSwitch(1)");
+    bool gotLoadSwitch = false;
     fb[0] = '\0';
-    const bool gotLoadSwitch = robotRecvEnable(fb, sizeof(fb));
-    const bool okLoadSwitch  = gotLoadSwitch && FeedbackParser::isSuccess(fb);
-    std::cout << "[Relay]   回执: " << (gotLoadSwitch ? fb : "(无回执, 超时)")
-              << (gotLoadSwitch && !okLoadSwitch ? "  ← 机械臂拒绝 (ErrorID != 0)" : "") << std::endl;
+    if (sentLoadSwitch) {
+        Sleep(100);
+        gotLoadSwitch = robotRecvEnable(fb, sizeof(fb));
+    }
+    const bool okLoadSwitch = gotLoadSwitch && FeedbackParser::isSuccess(fb);
+    std::cout << "[Relay]   回执: "
+              << (!sentLoadSwitch ? "(发送失败 — 命令没能写进 socket)"
+                                  : (gotLoadSwitch ? fb : "(无回执, 超时)"))
+              << (sentLoadSwitch && gotLoadSwitch && !okLoadSwitch
+                      ? "  ← 机械臂拒绝 (ErrorID != 0)" : "")
+              << std::endl;
 
     if (okEnable && okLoadSwitch) {
         std::cout << "[Relay] 负载已下发: EnableRobot + LoadSwitch(1) 两条都有成功回执" << std::endl;
@@ -284,7 +317,12 @@ static bool sendPayloadCommands(double massKg, const double comMm[3]) {
         std::cout << "[Relay] !! 负载下发【未完成】: 失败的条目 =";
         if (!okEnable)     std::cout << " EnableRobot";
         if (!okLoadSwitch) std::cout << " LoadSwitch(1)";
-        std::cout << " —— 两条只成了一部分, 机械臂此刻的负载参数【不要】当作已更新" << std::endl;
+        std::cout << " —— 两条只成了一部分, 机械臂此刻的负载参数【不要】当作已更新";
+        // 再点一句【失败在哪一步】: 上面逐条的回执行已经说了, 这里汇总一句免得滚掉之后
+        // 只剩"未完成"三个字 (发送侧的失败与机械臂拒绝的处置不同: 前者查链路, 后者查命令)。
+        if (!sentEnable || !sentLoadSwitch) std::cout << " (其中有【发送失败】的条目: 命令没写进"
+                                                         " socket, 不是机械臂拒绝)";
+        std::cout << std::endl;
     }
     return okEnable && okLoadSwitch;
 }

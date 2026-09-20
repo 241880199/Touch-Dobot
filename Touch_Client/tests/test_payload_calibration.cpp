@@ -3660,6 +3660,44 @@ static void test_send_candidate_mass_label_matches_brief_wording() {
     PASS();
 }
 
+// ---- 候选块里 c 那一行的方括号标签 (M2): 措辞只此一份, 两种情形各说各的 ----
+// 它是那一屏里唯一没有任何测试钉住的操作员可见字符串 (其余措辞都有)。判据是闸1【真的】
+// 定下了号没有: SEND_SIGN_AMBIGUOUS / SEND_SIGN_NONE_IN_RANGE 在赋值之前就返回, 那时候选的
+// cz 就是机械臂自报的原样 —— 标签若说"号已定", 屏幕上就同时出现"闸1 无法判定"与"号已定"
+// 两句互相打架的话。
+static void test_send_candidate_center_label_follows_the_verdict() {
+    TEST(send_candidate_center_label_follows_the_verdict);
+    // ① 号被定下来了 (实机那组: cz_robot = 68.7, c_s_z = +55.556 -> 约定一, 不翻号)
+    {
+        const double measuredM = 0.420847;
+        const double csZ = +55.556;
+        const double echoCenter[3] = {0.3, -0.1, 68.700};
+        PayloadCalibration::SendCandidate c = PayloadCalibration::buildSendCandidate(
+            &measuredM, &csZ, echoCenter);
+        CHECK(c.gate.convention == 1);
+        char buf[64];
+        PayloadCalibration::formatSendCandidateCenterLabel(c.gate, buf, sizeof(buf));
+        const std::string t(buf);
+        CHECK(t == "cz 已按闸1 定的号");                     // ★ 逐字钉住
+        CHECK(t.find("未定号") == std::string::npos);
+    }
+    // ② 号【没】定下来 (两种约定都落在 (0, 31.5) 内 = SEND_SIGN_AMBIGUOUS)
+    {
+        const double measuredM = 0.420847;
+        const double csZ = 1.0;
+        const double echoCenter[3] = {0.3, -0.1, 15.75};
+        PayloadCalibration::SendCandidate c = PayloadCalibration::buildSendCandidate(
+            &measuredM, &csZ, echoCenter);
+        CHECK(c.gate.convention == 0);
+        char buf[64];
+        PayloadCalibration::formatSendCandidateCenterLabel(c.gate, buf, sizeof(buf));
+        const std::string t(buf);
+        CHECK(t == "闸1 未定号, cz 即自报原样");             // ★ 逐字钉住
+        CHECK(t.find("已按闸1 定的号") == std::string::npos);   // 不许出现"号已定"
+    }
+    PASS();
+}
+
 // ---- 与机械臂【当前值】的逐分量比对 (§3.5): 这一次到底改了什么 ----
 // 用 buildSendCandidate 造候选 (这样 diff 拿到的是【真会发出去的那一份】, 含 cz 的号)。
 static void test_send_candidate_diff_reports_unchanged_c_on_the_real_machine_case() {
@@ -3712,6 +3750,9 @@ static void test_send_candidate_diff_flags_flipped_cz_as_high_risk() {
     CHECK(t.find("c 已变") != std::string::npos);
     // ★ 翻号时【不许】再打"只改 m"这类措辞 (§3.5 第 2 条)
     CHECK(t.find("只改 m") == std::string::npos);
+    // ★ M6: 这一支【发得出去】⇒ "再决定发不发"是真存在的选项, 该说。
+    CHECK(df.sendable);
+    CHECK(t.find("决定发不发") != std::string::npos);
     PASS();
 }
 
@@ -3765,6 +3806,10 @@ static void test_send_candidate_diff_conclusion_never_says_only_m_when_unsendabl
     const std::string tf(buf);
     CHECK(tf.find("高危") != std::string::npos);                  // ★ 翻号必须标高危 — 优先于"发不出去"
     CHECK(tf.find("只改 m") == std::string::npos);
+    // ★ M6: 【翻号 + 发不出去】时"要不要发"这个选项【不存在】—— 按 'p' 会被确定性地拒掉,
+    //   所以那句话不许出现; 该说的是"没有发不发可决定"。
+    CHECK(tf.find("决定发不发") == std::string::npos);
+    CHECK(tf.find("候选不可发送") != std::string::npos);
     PASS();
 }
 
@@ -3870,6 +3915,7 @@ int main() {
     test_build_send_candidate_without_measured_mass_has_none();
     test_build_send_candidate_without_echo_has_none();
     test_send_candidate_mass_label_matches_brief_wording();
+    test_send_candidate_center_label_follows_the_verdict();
     test_send_candidate_diff_reports_unchanged_c_on_the_real_machine_case();
     test_send_candidate_diff_flags_flipped_cz_as_high_risk();
     test_send_candidate_diff_conclusion_never_says_only_m_when_unsendable();

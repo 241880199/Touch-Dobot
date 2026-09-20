@@ -1934,8 +1934,11 @@ namespace PayloadCalibration {
         // 选中的那支 c_s_z: 约定一取 c_s_z 本身, 约定二取它的反向。cz 的号 = 选中那支的号 ——
         // 因为 cz_robot 与 c_s 沿的是【同一根工具轴】(这正是闸 1 用 cz_robot 当外部锚点能定出
         // 符号的道理)。
-        // ⚠ 【前提】: "cz_robot 与选中的 c_s_z 同向"这一步只在 |选中的 c_s_z| > 31.5 mm 时成立
-        //   (即 d 的容差段比质心量级小)。推导: 胜出那支的 d 满足 选中的 c_s_z = cz_robot − d
+        // ⚠ 【前提】: "cz_robot 与选中的 c_s_z 同向"这一步只在 |cz_robot| > 31.5 mm 时成立
+        //   (即 d 的容差段比质心量级小)。【不是】|选中的 c_s_z| > 31.5 —— 反例:
+        //   cz_robot = +40, c_s_z = +30 ⇒ d = 10 ∈ (0, 31.5) ⇒ 约定一 ⇒ 选中的 c_s_z = +30,
+        //   并没有大于 31.5, 而号也确实没翻。前提里的那个量是 cz_robot, 与下面两行同源。
+        //   推导: 胜出那支的 d 满足 选中的 c_s_z = cz_robot − d
         //   且 d ∈ (0, 31.5) —— 所以 |cz_robot| > 31.5 时 cz_robot − d 与 cz_robot 【必然同号】,
         //   于是这里的 czSign 恰好等于 cz_robot 的号、cz 的【值不变】。反过来, |cz_robot| ≤ 31.5
         //   时号可能被翻 (例: cz_robot = +10, c_s_z = −10 -> d同向 = 20 在内 -> 选中 −10
@@ -2024,16 +2027,38 @@ namespace PayloadCalibration {
                  massKg);
     }
 
+    void formatSendCandidateCenterLabel(const SendGate& gate, char* out, int len) {
+        // 判据是【闸1 真的定下了号】。SEND_SIGN_AMBIGUOUS / SEND_SIGN_NONE_IN_RANGE
+        // (以及更早的那几支) 都在 convention / czSign / comMm[2] 赋值【之前】返回 ——
+        // 那时候选的 cz 就是机械臂自报的原样, 标签【不许】说"号已定"。
+        snprintf(out, len, "%s",
+                 gate.convention != 0 ? "cz 已按闸1 定的号" : "闸1 未定号, cz 即自报原样");
+    }
+
     void formatSendCandidateDiffConclusion(const SendCandidateDiff& d, char* out, int len) {
         if (d.czSignFlipped) {
             // §3.5 第 2 条: 翻号【必须】标高危, 而且不许再说"只改 m"。
             // 【这一支仍排在最前】: 标高危是 §3.5 的硬要求, 不许被下面的"发不出去"顶掉
             // (过不了闸的候选同样可能翻了号, 那时两句话都该说 —— 闸的结论行就在下一行)。
-            snprintf(out, len,
-                     "c 已变（【含翻号】）—— ⚠【高危】本次 cz 由 %+.1f 翻为 %+.1f mm: 量与机械臂"
-                     "当前值相同、号相反, 量级上是一次【巨大】的负载改动, 不是最小改动。"
-                     "按 §1 的安全规程处置后再决定发不发",
-                     d.echoCenterMm[2], d.candCenterMm[2]);
+            //
+            // ⚠ 末尾那句"要不要发"【只配给发得出去的候选】(全文复审 Minor 6): 判决不是
+            //   SEND_OK 时按 'p' 会被【确定性地】拒掉, "决定发不发"这个选项根本不存在 ——
+            //   留着它就是让操作员去找一个不存在的动作 (本项目记过这种"说过头")。
+            //   两句话都带"高危"与"c 已变", 差别只在最后那半句。
+            if (d.sendable) {
+                snprintf(out, len,
+                         "c 已变（【含翻号】）—— ⚠【高危】本次 cz 由 %+.1f 翻为 %+.1f mm: 量与机械臂"
+                         "当前值相同、号相反, 量级上是一次【巨大】的负载改动, 不是最小改动。"
+                         "按 §1 的安全规程处置后再决定发不发",
+                         d.echoCenterMm[2], d.candCenterMm[2]);
+            } else {
+                snprintf(out, len,
+                         "c 已变（【含翻号】）—— ⚠【高危】本次 cz 由 %+.1f 翻为 %+.1f mm: 量与机械臂"
+                         "当前值相同、号相反, 量级上是一次【巨大】的负载改动, 不是最小改动。"
+                         "【候选不可发送】—— 按 'p' 会被拒 (理由见下面闸的结论行), 所以这里"
+                         "没有\"发不发\"可决定; 按 §1 的安全规程处置",
+                         d.echoCenterMm[2], d.candCenterMm[2]);
+            }
         } else if (!d.sendable) {
             // ★ 二次复审 Minor 1: 【过不了闸的候选没有"改动"可言】。走到这里意味着 c 逐位未变
             //   (翻号那一支已经在上面走掉了), 而老措辞会打"c 未变 —— 本次【只改 m】" —— 操作员
@@ -2049,6 +2074,12 @@ namespace PayloadCalibration {
                      "c 未变 —— 本次【只改 m】(c 的三个分量与机械臂当前值逐位相同; "
                      "m 与整条链的换帧关系见上)");
         } else {
+            // ⚠ 【这一支在今天唯一的调用点上不可达】(全文复审 Minor 1, 留着不删):
+            //   走到这里要求 c 逐位【变了】却没翻号 —— 而候选的 cx/cy 是机械臂自报那个
+            //   echo 数组【逐位的拷贝】(diffSendCandidate 比的就是同一个数组), cz 则是
+            //   sign(选中的 c_s_z)·|当前值|。所以 dc[0] == dc[1] == 0 恒成立, 而 dc[2] != 0
+            //   只可能来自号反了 ⇒ 那一支已经被 czSignFlipped 走掉。
+            //   ⇒ 【不是】什么"c 变了但没翻号"的处理分支; 别照着它去理解发生了什么。
             snprintf(out, len,
                      "c 已变 —— 逐分量见上 (与机械臂当前值不同; 不是最小改动)");
         }

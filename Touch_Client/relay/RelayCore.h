@@ -58,7 +58,8 @@ public:
     // 【只由用户显式触发】—— 绝不能被 init() 或任何"重新使能"路径调用 (约束与出处见 .cpp 里
     // sendPayloadCommands 顶上那段)。返回两条都成功才为 true。
     // ⚠ 运行中改负载会让机械臂动 (2026-09-19 实机证实: 1.5 kg 那次撞向关节限位) ——
-    //   调用方必须先过两道闸并打安全规程提示 (main.cpp 的发送键 'p')。
+    //   调用方必须先过两道闸、打安全规程提示, 并【取到操作员的明确确认】(main.cpp 的发送键
+    //   'p' 摆出提示之后还要再按确认键才调到这里)。本函数只负责"发"。
     bool sendPayloadToRobot(double massKg, const double comMm[3]);
 
     // 扩展
