@@ -2940,18 +2940,32 @@ void keyboard(unsigned char key, int, int) {
             //   判断"到位了没有"的自然时机。不对就再按 'd' 松开重拖 ⇒ 闭环收敛。
             // 读法: 与 record() 同一个来源、同一把锁 (robotPoseMutex), 所以打出来的数与采样会记的
             //   那个位姿【同源】—— 不是另问一次 GetPose。
-            double px, py, pz, prx, pry, prz;
+            double px, py, pz, prx, pry, prz, jj[6];
             EnterCriticalSection(&appState.robotPoseMutex);
             px  = appState.robotActualPose.x;   py  = appState.robotActualPose.y;
             pz  = appState.robotActualPose.z;
             prx = appState.robotActualPose.rx;  pry = appState.robotActualPose.ry;
             prz = appState.robotActualPose.rz;
+            jj[0] = appState.robotActualPose.j1; jj[1] = appState.robotActualPose.j2;
+            jj[2] = appState.robotActualPose.j3; jj[3] = appState.robotActualPose.j4;
+            jj[4] = appState.robotActualPose.j5; jj[5] = appState.robotActualPose.j6;
             LeaveCriticalSection(&appState.robotPoseMutex);
             std::cout << "       位姿已锁定, 可以按 SPACE 采样了" << std::endl;
             std::cout << "       当前姿态: Rx=" << prx << " Ry=" << pry << " Rz=" << prz
                       << "   (X=" << px << " Y=" << py << " Z=" << pz << ")" << std::endl;
-            std::cout << "       ↑ 对着它凑; 不对就【再按 'd' 松开重拖】—— 别按 SPACE, 按了就采了。"
-                      << std::endl;
+            // 【关节角也打】(2026-09-20)。为什么需要:
+            //   · Rx/Ry/Rz 【完全决定】法兰(以及刚性装在上面的传感器)在基座系里的朝向 ——
+            //     其余关节的贡献已经含在这三个角里了。所以对 g_法兰(进而对我们的 compensated
+            //     与 @576)来说, 配 Rx/Ry/Rz 就够。
+            //   · ⚠ 但 **@720 是"通过关节电流计算"的** —— 它跟的是【关节构型】, 而同一个笛卡尔
+            //     姿态可以由【不同的关节解】达到(肘上/肘下、腕翻转)。若两轮构型不同, @720 的
+            //     对比就不干净。手拖是连续移动、通常落在同一个解上, 但那是【假定】。
+            //   ⇒ 打出来就能【核】: 两轮的 j1..j6 一致 ⇒ 构型相同; 不一致 ⇒ 那一笔要单独判。
+            //   (顺带: 以后若要"轨迹复现/开回同一姿态", 关节角正是 JointMovJ 要的那六个量。)
+            std::cout << "       关节角: J1=" << jj[0] << " J2=" << jj[1] << " J3=" << jj[2]
+                      << " J4=" << jj[3] << " J5=" << jj[4] << " J6=" << jj[5] << std::endl;
+            std::cout << "       ↑ 对着 Rx/Ry/Rz 凑(差几度以内即可); 不对就【再按 'd' 松开重拖】"
+                      << " —— 别按 SPACE, 按了就采了。" << std::endl;
         }
         return;
     }
