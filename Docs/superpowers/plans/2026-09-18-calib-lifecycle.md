@@ -1593,7 +1593,24 @@ git commit -m "feat(force): break the CZ sign tie with an external anchor and a 
 - Modify: `Touch_Client/force/ForceCalibration.cpp`
 - Modify: `Touch_Client/tests/test_calib_store.cpp`
 - Modify: `Touch_Client/tests/test_payload_calibration.cpp`
-- Delete: `Touch_Client/tests/build_calib_store_test.bat` 若无测试可留（见 Step 6）
+- ~~Delete: `Touch_Client/tests/build_calib_store_test.bat`~~ —— **不删**。Step 5 保留三个 `deriveDir` 用例，
+  Step 6 还要用它跑那三个（条件不成立）。
+
+> **⚠ 2026-09-19 控制器 pre-flight 更正（四处，均为事实性）。** 本节写于 ψ 自动求解之前，
+> 有四处与今天的代码对不上：
+> 1. **Step 4 里"删掉 main.cpp 里两处 `saved_at_unix` 相关的注释/提示"是空指令** ——
+>    `grep -n "有效期\|过期\|expired\|AGE_SEC\|saved_at_unix" Touch_Client/main.cpp` **零命中**。
+>    那些提示已在 Task 5 重写输出时一并消失，没有东西可删。
+> 2. **Step 5/6 的 payload 用例数是过时的**：那是 15−1=14，而今天是 **21**（ψ 的扫描/一致性/
+>    转置回归等用例在 Task 10 之后加的）。删掉 `test_save_includes_timestamp()` 后是 **20**。
+>    `test_calib_store` 的 5−2=3 仍然正确。
+> 3. **`PayloadCalibration.cpp:299-300` 有指向被删机制的注释**（"调用方必须先过
+>    `CalibStore::resolve()`…由它挡掉缺 `saved_at_unix` 或已过期的文件"）。删了 `resolve` 之后
+>    这两行就是悬空引用，必须一并改写（该文件已在 Files 清单里）。
+> 4. **`version` 回退是惰性的**：`grep -n version` 在 `PayloadCalibration.cpp` / `ForceCalibration.cpp`
+>    里只命中各自的 `save()` 那一行 —— **没有任何读取端校验 version**。所以回到 1/2 不会破坏兼容，
+>    不必去找有没有别处依赖它。（`test_save_includes_timestamp` 是唯一断言 `"version": 2` 的地方，
+>    而它正在被删除。）
 
 - [ ] **Step 1: 删掉 CalibStore 的有效期部分**
 
@@ -1631,14 +1648,19 @@ git commit -m "feat(force): break the CZ sign tie with an external anchor and a 
 - `main.cpp`：三处 `CalibStore::resolve("xxx.json")` 改为 `CalibStore::fileFor("xxx.json")`，
   并把 `if (p && Xxx::load(p))` 改回 `if (Xxx::load(CalibStore::fileFor("xxx.json")))`
   （各解析器自己处理"文件不存在"）
-- 删掉 main.cpp 里两处 `saved_at_unix` 相关的注释/提示
+- 删掉 `force/PayloadCalibration.cpp:299-300` 那两行指向 `resolve()` / `saved_at_unix` 的注释
+  （见上方 pre-flight 第 3 条）
 
 > 注意 `fileFor()` 返回 static 缓冲：**每个文件立即用完**，不要跨调用持有。
+> 三处调用点今天都是 `const char* xxxPath = ...` 局部量（`main.cpp:1222` payload、
+> `:1262` force、`:1289` tcp）。改成 `fileFor` 后**不要把指针单独存下来** —— 直接写进
+> `if` 条件里一次用完。（`tcpPath` 尤其要小心：它今天活到 main 顶层、直到 GLUT 循环，
+> 属既有隐患, 见终审 Minor #24。）
 
 - [ ] **Step 5: 测试清理**
 
 `tests/test_payload_calibration.cpp`：删除 `test_save_includes_timestamp()` 及其 `main()` 调用。
-用例数回到 **14**（15 − 1）。
+用例数回到 **20**（21 − 1；**不是原文写的 14**）。
 
 `tests/test_calib_store.cpp`：删除 `test_is_fresh_boundaries()`、`test_resolve_policy()`、
 `writeFixture()`、`fixtureExists()` 及各自的 `main()` 调用；保留 `deriveDir` 三个用例。
@@ -1647,7 +1669,7 @@ git commit -m "feat(force): break the CZ sign tie with an external anchor and a 
 - [ ] **Step 6: 跑测试 + 完整构建**
 
 Run: `build_calib_store_test.bat` → exe → Expected `3 passed, 0 failed`
-Run: `build_payload_calibration_test.bat` → exe → Expected `14 passed, 0 failed`
+Run: `build_payload_calibration_test.bat` → exe → Expected `20 passed, 0 failed`
 Run: `cmd.exe //c "D:\Projects\Touch\Touch_Client\build.bat"` → Expected `Build OK.`
 
 - [ ] **Step 7: 清理现场**
@@ -1661,10 +1683,21 @@ rm -f Touch_Client/calib/*.expired
 
 - [ ] **Step 8: 提交**
 
+> **⚠ 2026-09-19 控制器更正: 不要用 `git add -A Touch_Client/`。** 工作区里有多份**未跟踪的
+> 运行期产物**会被它一并扫进去 —— 已实地核对 `git status --porcelain`：
+> `Touch_Client/alarms.log`、`Touch_Client/force_demo_log.csv`、`Touch_Client/robot_diagnostics.log`、
+> `Touch_Client/calib/`（目录）、`Touch_Client/tests/_build_sa.bat` / `_build_sa.log` /
+> `_hello.cpp` / `_rebuild_and_test.bat`。显式列出本任务改过的文件：
+
 ```bash
-git add -A Touch_Client/
+git add Touch_Client/core/CalibStore.h Touch_Client/core/CalibStore.cpp \
+        Touch_Client/config/Config.h Touch_Client/main.cpp \
+        Touch_Client/force/PayloadCalibration.cpp Touch_Client/force/ForceCalibration.cpp \
+        Touch_Client/tests/test_calib_store.cpp Touch_Client/tests/test_payload_calibration.cpp
 git commit -m "refactor(calib): drop the 24h expiry gate; CalibStore only owns location"
 ```
+
+提交后 `git show --stat HEAD` 应恰好是这 8 个文件。
 
 ---
 
@@ -1690,6 +1723,21 @@ git commit -m "refactor(calib): drop the 24h expiry gate; CalibStore only owns l
 **Files:**
 - Modify: `Touch_Client/main.cpp`
 - Modify: `Touch_Client/config/Config.h`
+
+> **⚠ 2026-09-19 控制器 pre-flight 更正（三条，均已核实）。**
+>
+> 1. **Step 4 的构建路径是坏的字节，已修。** 原文 `"D:\Projects\Touch\Touch_Clientuild.bat"`
+>    里那个 `\b` 被某个工具当转义符吃成了**字面的 0x08 退格字节**（`cat -A` 可见 `^H`）。
+>    已改写回 `Touch_Client\build.bat`，并全文扫过：整份计划**只有这一处**控制字节。
+>    注意这正是本计划 Global Constraints 里警告过的反斜杠吞字类问题。
+> 2. **`filtered` 的语义核过了，本节假设成立。** `force/ForcePipeline.cpp:86` 是
+>    `fd.filtered[i] = g_filters[i].step(fd.compensated[i])` —— 即"补偿后 → 低通"，
+>    所以"任意静止姿态读 `filtered` 就是零偏漂移量"的论证有效。
+>    （`AppState.h:117` 的注释只写"Butterworth 低通滤波输出"，没说清楚它是**补偿后**的 ——
+>    别被那行注释误导。）
+> 3. **`g_hasStoredZeroCalib` 的置位点**：`main.cpp` 加载 `force_calib.json` 的成功分支，
+>    今天是 **`main.cpp:1261`** 的 `if (ForceCalibration::loadFromFile(CalibStore::fileFor("force_calib.json"), ...))`。
+>    注意 Task 8 刚把这里从 `resolve()` 改成了 `fileFor()`，别的行号都会漂。
 
 **Interfaces:**
 - Consumes: `ForceCompensation` 已算好的 `appState.forceData.filtered`（补偿后读数）、`ForceCalibration::loadFromFile` 存入的零偏
@@ -1749,8 +1797,7 @@ static void runZeroDriftCheck(bool hasStoredZero) {
             (g_zeroCheckAccum[2] / g_zeroCheckCount) * (g_zeroCheckAccum[2] / g_zeroCheckCount));
 
         if (drift > Config::FORCE_ZERO_DRIFT_WARN_N) {
-            std::cout << "
-[Force] ⚠ 零偏漂移检查: 补偿后读数 " << drift
+            std::cout << "\n[Force] ⚠ 零偏漂移检查: 补偿后读数 " << drift
                       << " N, 超过阈值 " << Config::FORCE_ZERO_DRIFT_WARN_N << " N" << std::endl;
             std::cout << "[Force]   两种可能:" << std::endl;
             std::cout << "[Force]     · 零偏漂了 (温度/时间)  -> 按 'z' 重新调零" << std::endl;
@@ -1786,7 +1833,7 @@ static void runZeroDriftCheck(bool hasStoredZero) {
 
 - [ ] **Step 4: 完整构建**
 
-Run: `cmd.exe //c "D:\Projects\Touch\Touch_Clientuild.bat"`
+Run: `cmd.exe //c "D:\Projects\Touch\Touch_Client\build.bat"`
 Expected: `Build OK.`
 
 - [ ] **Step 5: 实机验证（交用户，不在本任务内执行）**
@@ -2072,71 +2119,105 @@ git commit -m "feat(force): decide the CZ sign by measuring both candidates on t
 
 > **用户提出（2026-09-18 首次实机测试后）。** 他测完想回看结果，**控制台已经滚掉了**。
 >
-> 这暴露了一个真实的缺口：整个标定流程**只往控制台打，什么都不留**——探针的两个残余、
-> 比值、定案符号、拟合残差，全都没有持久记录。这既是操作者的日常问题（想追溯只能靠回忆），
-> 也卡住了本项目自己：探针常数 `SIGN_PROBE_*` 明确需要实机数据来标定，
-> 而程序**不提供把数据带回来的办法**。
+> 这暴露了一个真实的缺口：整个标定流程**只往控制台打，什么都不留**。这既是操作者的
+> 日常问题（想追溯只能靠回忆），也让"这次标定到底做了什么"在事后无从查证。
 >
 > 这与本分支的主题直接相关：**"让操作者看见标定到底做了什么"**。
+
+> **⚠ 2026-09-19 控制器修订（用户确认）。** 本节原文写于 Task 10 之前，要求落盘
+> `probe_plus1_Nm | probe_minus1_Nm | ratio | sign | comZ_sent_mm`。CZ 符号探针已在
+> `4751382` 被**整体删除** —— `PayloadCalibration::Result` 里没有 `probe`、没有 `signZ`、
+> 没有 `comCand`，`SIGN_PROBE_*` 也不存在了。原文 Step 5 那句"用来标定 `SIGN_PROBE_*`
+> 常数"随之作废（该常数已删）。已按**当前模型**改写：列为模型参数全量，出口为**全部出口**。
 
 **Files:**
 - Modify: `Touch_Client/main.cpp`
 
 **Interfaces:**
-- Consumes: `CalibStore::fileFor()`（位置职责，Task 8 保留）、`Result`、探针结果
+- Consumes: `CalibStore::fileFor()`、`PayloadCalibration::Result`
 - Produces: 无对外接口；新增数据文件 `Touch_Client\calib\calib_log.txt`
 
 - [ ] **Step 1: 落盘助手**
 
-在 `main.cpp` 的 `BiasCheck` 命名空间里加：
+在 `main.cpp` 的 `BiasCheck` 命名空间里加（放在 `solveAndApply()` 之前）：
 
 ```cpp
     // 每次负载求解尝试都落一行 —— 控制台会滚掉, 而"这次标定到底做了什么"必须能追溯。
-    // 一行一次尝试, 便于 grep 与表格工具直接读; 表头只在文件首次创建时写。
-    static void logCalibAttempt(const PayloadCalibration::Result& r,
-                                const double probe[2], int chosen,
-                                const char* outcome)
+    // 一行一次尝试, 便于 grep 与表格工具直接读。
+    //
+    // 表头只在【文件不存在或为空】时写。不要用进程内 static 标志位: 那个标志每次启动都是
+    // false, 会让 fopen 用 "w" 把历次记录整个截断 —— 与"可追溯"的立意在字面上相反。
+    //
+    // r 可为 nullptr: 求解【之前】就返回的出口 (已上锁 / 姿态数不足 / 正在采样) 没有 Result,
+    // 此时各数值列记 "-"。
+    static void logCalibAttempt(const char* outcome, const PayloadCalibration::Result* r)
     {
-        static bool headerDone = false;
-        FILE* f = fopen(CalibStore::fileFor("calib_log.txt"), headerDone ? "a" : "w");
-        if (!f) return;
-        if (!headerDone) {
-            headerDone = true;
-            fprintf(f, "# 负载标定尝试记录 (每次按 's' 一行)\n");
-            fprintf(f, "# time | poses | rmsF_N | probe_plus1_Nm | probe_minus1_Nm"
-                       " | ratio | sign | mass_kg | comZ_sent_mm | outcome\n");
-        }
-        const double a = probe[0], b = probe[1];
-        const double hi = (a >= b) ? a : b;
-        const double lo = (a >= b) ? b : a;
-        const double ratio = (lo > 0.0) ? (hi / lo) : 0.0;
-        const int idx = (chosen < 0) ? 0 : chosen;   // 拒绝时记候选0, 仅作参考
+        // fileFor 返回 static 缓冲, 调用方必须立即拷贝 (头文件已注明)。
+        char path[512];
+        snprintf(path, sizeof(path), "%s", CalibStore::fileFor("calib_log.txt"));
 
-        SYSTEMTIME st;
-        GetLocalTime(&st);
-        fprintf(f, "%04d-%02d-%02d %02d:%02d:%02d | %d | %.4f | %.4f | %.4f | %.2f | %s"
-                   " | %.4f | %+.1f | %s\n",
-                st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond,
-                r.poses, r.rmsForceN, a, b, ratio,
-                (chosen == 0) ? "+1" : (chosen == 1) ? "-1" : "?",
-                r.massKg, r.comCand[idx][2], outcome);
+        // 【只用 "a+" 打开, 永不截断。】不要先试 "r" 再决定 "w"/"a": "读不了"(被占用/权限)
+        // 与"不存在"会被混为一谈, 而前者会走 "w" 把历次记录整个删掉 —— 毁的正是这个文件
+        // 存在的理由。(Task 11 复审 Minor #50)
+        FILE* f = fopen(path, "a+");
+        if (!f) return;
+        bool needHeader = true;
+        if (fseek(f, 0, SEEK_END) == 0) needHeader = (ftell(f) == 0);
+        if (needHeader) {
+            fprintf(f, "# 负载标定尝试记录 (每次按 's' 一行)\n");
+            fprintf(f, "# time | poses | rmsF_N | rmsM_Nm | psi_deg | dm_kg | mass_kg"
+                       " | comZ_mm | outcome\n");
+        }
+        char sPoses[16], sRmsF[16], sRmsM[16], sPsi[16], sDm[16], sMass[16], sComZ[16];
+        if (r) {
+            snprintf(sPoses, sizeof(sPoses), "%d",    r->poses);
+            snprintf(sRmsF,  sizeof(sRmsF),  "%.4f",  r->rmsForceN);
+            snprintf(sRmsM,  sizeof(sRmsM),  "%.4f",  r->rmsMomentNm);
+            snprintf(sPsi,   sizeof(sPsi),   "%+.1f", r->sensorYawDeg);
+            snprintf(sDm,    sizeof(sDm),    "%+.4f", r->dm);
+            snprintf(sMass,  sizeof(sMass),  "%.4f",  r->massKg);
+            snprintf(sComZ,  sizeof(sComZ),  "%+.1f", r->comMm[2]);
+        } else {
+            char* cols[7] = {sPoses, sRmsF, sRmsM, sPsi, sDm, sMass, sComZ};
+            for (int i = 0; i < 7; i++) strcpy(cols[i], "-");
+        }
+        char ts[24];
+        const std::time_t now = std::time(nullptr);
+        std::tm tmInfo;
+        localtime_s(&tmInfo, &now);          // 与 RobotDiagnostics.cpp / SafetyPredictor.cpp 同一写法
+        strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", &tmInfo);
+
+        fprintf(f, "%s | %s | %s | %s | %s | %s | %s | %s | %s\n",
+                ts, sPoses, sRmsF, sRmsM, sPsi, sDm, sMass, sComZ, outcome);
         fclose(f);
     }
 ```
 
-- [ ] **Step 2: 在 `solveAndApply()` 的每条出口调用它**
+时间戳用 `<ctime>` 的 `std::time` / `localtime_s` / `strftime`，**不要**用 `windows.h` 的
+`SYSTEMTIME` / `GetLocalTime` —— 本仓库目前没有任何一处用它们（已 grep 确认），
+为一行时间戳新增一个平台头不划算。`localtime_s` 同属 `<ctime>`，且是仓库既有写法
+（`safety/RobotDiagnostics.cpp:28`、`safety/SafetyPredictor.cpp:438`）。`main.cpp` 已有
+`<cstdio>`；需补 `#include <ctime>` 与 `#include <cstring>`。
 
-| 出口 | `outcome` 文本 |
-|---|---|
-| 姿态倾角不足 | `REJECTED tilt sin_theta=%.2f` |
-| 探针失败（拿不到数据 / 机械臂未连接） | `REJECTED probe_failed` |
-| 实测分不开 | `REJECTED probe_cannot_separate` |
-| 拟合残差超阈 | `REJECTED rmsF=%.4f` |
-| 物理质心 Z 非正 | `REJECTED comZ_not_positive` |
-| 接受并下发 | `DISPATCHED` |
+- [ ] **Step 2: 在 `solveAndApply()` 的【每条】出口调用它**
 
+| # | 出口 | 调用 | `outcome` |
+|---|---|---|---|
+| 1 | 已上锁（连续失败 ≥ `Config::CALIB_MAX_CONSECUTIVE_FAILS`） | `logCalibAttempt(outcome, nullptr)` | `REJECTED locked_out` |
+| 2 | 姿态数 < 4 | `logCalibAttempt(outcome, nullptr)` | `REJECTED too_few_poses (count=%d)` |
+| 3 | 正在采样 | `logCalibAttempt(outcome, nullptr)` | `REJECTED sampling_in_progress` |
+| 4 | `solve()` 返回 false | `logCalibAttempt(outcome, nullptr)` | `REJECTED degenerate_or_nonphysical (count=%d)` |
+| 5 | 拟合残差 ≥ 0.30 N（拒绝保存） | `logCalibAttempt(outcome, &r)` | `REJECTED rmsF=%.4f`（用 `r.rmsForceN`） |
+| 6 | 成功 | `logCalibAttempt(outcome, &r)` | `DISPATCHED`；若 `force_calib.json` 或 `payload_calib.json` 落盘失败 → `DISPATCHED write_failed` |
+
+> 出口 1~4 在求解之前/求解失败，没有可用的 `Result` → 传 `nullptr`，数值列记 `-`，
+> 具体信息（如 `count`）写进 `outcome` 文本。
+>
+> 出口 6 的 `DISPATCHED write_failed`：如果落盘失败却只记 `DISPATCHED`，那"下次启动标定
+> 没了"在日志里看起来像没发生过 —— 日志若不能反映这件事，追溯就是假的。该出口的调用点
+> 因此要在**两处写入尝试之后**（用一个初值为 true 的 bool 累计两个 `save` 的结果）。
+>
 > 每条出口都要调用 —— 否则"为什么这批数据没被采纳"又一次只能靠回忆。
-> 拒绝路径上 `chosen` 可能是 −1，助手已按候选 0 处理。
 
 - [ ] **Step 3: 验证路径正确**
 
@@ -2150,10 +2231,12 @@ git commit -m "feat(force): decide the CZ sign by measuring both candidates on t
 Run: `cmd.exe //c "D:\Projects\Touch\Touch_Client\build.bat"`
 Expected: `Build OK.`
 
+（Task 1 的教训：独立测试构建的编译环境与完整构建**不同**，"测试通过"不能替代"项目能编"。）
+
 - [ ] **Step 5: 实机验证（交用户）**
 
-按一次 `'s'`，确认 `Touch_Client\calib\calib_log.txt` 出现，且最后一行含两个候选的
-残余力矩与定案结果。**把那一行发回来即可用来标定 `SIGN_PROBE_*` 常数。**
+按一次 `'s'`，确认 `Touch_Client\calib\calib_log.txt` 出现，且最后一行含
+残差 / ψ / `dm` / 定案结果。
 
 - [ ] **Step 6: 提交**
 
@@ -2165,6 +2248,29 @@ git commit -m "feat(calib): persist every payload-solve attempt to calib\\calib_
 ---
 
 ### Task 6: 文档修正与现场清理
+
+> # ⛔ 2026-09-19 控制器警告：本节 Step 1 / Step 3 的**方向是反的**，不要照做。
+>
+> 本节写于**第二轮设计修订之前**，描述的是一个后来被推翻两次、又整体删除的世界。
+> 执行前必须逐条重新定稿（由控制器在派单前完成，不由实施者自行判断）：
+>
+> - **Step 3 要"补 24h 有效期" —— 而 Task 8 刚刚把 24h 闸门删掉了。**
+>   它附带的那整段文案（"有效期 24 小时…文件改名为 `<名字>.expired`…
+>   没有 `saved_at_unix` 时间戳的文件一律视为过期"）**现在是假的**。
+>   本节要做的不是**加**它，而是**把它从文档里删掉/改写**。
+>   —— 这正是 Task 8 复审的 Minor #60：`Docs/调零与负载标定流程.md:46,48` 今天仍在宣称
+>   这条已不存在的机制。**Task 8 复审者查过计划，认为"无任务认领"；实际是本节认领了，
+>   但方向写反了。**
+> - **Step 1 要重写 §3.5 去讲"物理质心 Z 必须为正"的符号判据 —— 该判据已不存在。**
+>   它被 Task 7（种子锚点 + 余量）取代，再被 Task 10（两次下发实测）取代，
+>   最后连**整个 CZ 符号探针**一起删除（`4751382`）。今天 `signZ` 是**纯显示/持久化约定**：
+>   数据定不了它，**没有任何判据依赖它**，求解输出只把两个候选打出来"仅供复核，不影响结果"。
+>   重写后的 §3.5 必须反映**这个**状态。
+> - **Step 2（删键位表 `'i'` 行）大概率仍然正确** —— Task 5 确实删了人工符号覆盖。仍需对着
+>   今天的文档核一遍（文档可能已被 Task 5/7/10 期间的改动修改过）。
+> - **Step 4 起**（"结果不合理会怎样"等）也要重新核对：判据今天**只剩拟合残差一条**。
+>
+> **执行本节前，先跑一遍 `Docs/调零与负载标定流程.md` 与当前 `main.cpp` 实际输出的逐行对照。**
 
 **Files:**
 - Modify: `Docs/调零与负载标定流程.md`
@@ -2279,3 +2385,45 @@ git commit -m "docs: document the calibration file lifecycle and the result-reas
 - 实机流程第 3 步（紧接着 `'s'` 后按 `'m'`）出现"旧负载"拒绝提示，第 5 步残差显著下降
 - 代码里**不再存在** `'i'` 键、`forcedSignZ`、`flipComSignZ()`、`clearForcedSignZ()`、`massJump`
 - 三条合理性判据任一不满足 → 拒绝保存和下发；连续 3 次 → 红字错误并锁住 `'s'`
+
+---
+
+## 追加提案（2026-09-19，控制器提出，**待用户定夺后才执行**）
+
+### Task 12（提案）: `applyPayloadToRobot()` 改为「只写文件、下次启动再发机械臂」
+
+> **来源：用户 2026-09-19 的实机观察。** 用户报告：昨天把负载设成 1.5 kg 时
+> **"会导致机械臂迅速运动报错"**。也就是说，**改负载这个动作本身能让机械臂突动**。
+
+**现状的风险点：**
+
+`solveAndApply()` 成功路径的末尾会调用 `RelayCore::instance().applyPayloadToRobot()`
+→ `enableRobotWithPayload()` → 下发 `EnableRobot(m, cx, cy, cz)`。
+这是**运行中**改机械臂的负载，发生的时机是**操作者刚按完 `'s'`、手可能还在设备附近**。
+
+讽刺的是**启动时那条路径反而有防护**（`relay/RelayCore.cpp:411-428`）：
+使能前先 `SetCollisionLevel(0)` / `SetSafeSkin(0)` / `LoadSwitch(0)` 全关掉。
+运行中这一发**什么防护都没有**。
+
+**为什么它其实不必承担这个风险：**
+代码里自己的注释已经写明它**不参与标定生效** ——
+"这一发【不是】标定的必要步骤, 也【不是】标定结果生效的途径: 真正生效的是 [本地补偿]…
+留着它只是让机械臂侧的显示值与我们对齐"（`relay/RelayCore.cpp:157-161`）。
+**为了一个纯显示目的承担突动风险，不划算。**
+
+**提案内容（待定稿）：**
+1. `applyPayloadToRobot()` 不再在运行中调用 —— 只保留写盘（`payload_calib.json` 已经写了），
+   机械臂侧的值由**下次启动**的 `RelayCore` 连接序列用新值使能时带上。
+2. 求解输出里那句 `[参考] 已同步机械臂侧负载显示…` 相应改为
+   `[参考] 机械臂侧负载将于下次启动更新`（**不要**再说"已同步"）。
+3. 若用户仍想保留运行中同步的能力，则至少要在下发前明确提示操作者松手，
+   并考虑复刻启动路径的 `SetCollisionLevel(0)` 等防护。
+
+> **⚠ 与 [[2026-09-18-zeroing-and-payload]] 的结论的关系：** 用户 2026-09-19 重新提出了
+> "能不能用 TCP 口 `Payload` 指令设定负载"这个问题 —— 那条结论当时下得偏强
+> （把"手工试一次的 `Payload`"与"代码每次使能都发、带回读的 `EnableRobot`"并列成了
+> "全无响应"；而 `git log -S'"Payload('` 显示 `Payload(weight,inertia)` **从未在代码里出现过**）。
+> 而"1.5 kg 会导致机械臂突动"这条观察，**方向与"改不动"相反** ——
+> 一个没被采纳的设定不可能让机械臂动。
+> 用户已明确 **1.5 kg 太危险、不要再试**。若将来重开这条线，**必须用零运动测试**：
+> 只回读 30004 @1168 Load / @1176 center，不看力、不让机械臂动，且步进要小（如 0.402 → 0.50）。
