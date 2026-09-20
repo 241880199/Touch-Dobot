@@ -2927,9 +2927,32 @@ void keyboard(unsigned char key, int, int) {
             std::cout << "[BIAS] 拖拽模式切换失败 (机械臂未连接?)" << std::endl;
             return;
         }
-        std::cout << (want ? "       现在可以手动拖动机械臂摆姿态; 摆好后按 'd' 锁定位姿再 SPACE 采样"
-                           : "       位姿已锁定, 可以按 SPACE 采样了")
-                  << std::endl;
+        if (want) {
+            std::cout << "       现在可以手动拖动机械臂摆姿态; 摆好后按 'd' 锁定位姿再 SPACE 采样"
+                      << std::endl;
+        } else {
+            // 【锁定那一刻把当前位姿打出来】(2026-09-20)。
+            // 为什么: 在这之前操作员【只有按了 SPACE 才知道当时的角度】—— 而按 SPACE 就已经采样了。
+            //   于是"把机械臂摆回上一次那个姿态"这件事【根本没法做】: 没有实时角度就没法"先看再调",
+            //   而配对实验 (发送前/后同一姿态) 完全靠它。这个死结在 2026-09-20 的现场讨论里卡住了
+            //   整个诊断 —— 补这一行把它解开。
+            // 为什么打在这一刻: 拖拽【已经停了】—— 拖拽中读会读到还在动的位姿; 而"锁定"正是操作员
+            //   判断"到位了没有"的自然时机。不对就再按 'd' 松开重拖 ⇒ 闭环收敛。
+            // 读法: 与 record() 同一个来源、同一把锁 (robotPoseMutex), 所以打出来的数与采样会记的
+            //   那个位姿【同源】—— 不是另问一次 GetPose。
+            double px, py, pz, prx, pry, prz;
+            EnterCriticalSection(&appState.robotPoseMutex);
+            px  = appState.robotActualPose.x;   py  = appState.robotActualPose.y;
+            pz  = appState.robotActualPose.z;
+            prx = appState.robotActualPose.rx;  pry = appState.robotActualPose.ry;
+            prz = appState.robotActualPose.rz;
+            LeaveCriticalSection(&appState.robotPoseMutex);
+            std::cout << "       位姿已锁定, 可以按 SPACE 采样了" << std::endl;
+            std::cout << "       当前姿态: Rx=" << prx << " Ry=" << pry << " Rz=" << prz
+                      << "   (X=" << px << " Y=" << py << " Z=" << pz << ")" << std::endl;
+            std::cout << "       ↑ 对着它凑; 不对就【再按 'd' 松开重拖】—— 别按 SPACE, 按了就采了。"
+                      << std::endl;
+        }
         return;
     }
 
