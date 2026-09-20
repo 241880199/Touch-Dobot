@@ -84,6 +84,32 @@ exit /b 1
 
 :run
 rem Step 3: Run
+rem ---------------------------------------------------------------
+rem NO redirection here, on purpose. Read this before adding any.
+rem
+rem 2026-09-20: this step briefly ran
+rem     Touch_Client.exe > send_transcript.txt 2>&1
+rem with a second window tailing the file. That was wrong twice over:
+rem
+rem   1. cmd has no tee. Sending stdout to a file takes it OFF the
+rem      screen, so the operator ends up typing in one window and
+rem      reading another. The client reads keys through the console
+rem      (_kbhit/_getch), so the window that ACCEPTS input is the one
+rem      showing NOTHING - the opposite of what anyone reaches for.
+rem
+rem   2. stdout attached to a file or a pipe is FULL-buffered by the
+rem      CRT. The per-pair settle line is printed with printf and is
+rem      never flushed, so it would sit in the buffer instead of
+rem      appearing where the operator is looking for it. On the
+rem      console stdout is line-buffered and everything is live.
+rem
+rem Capturing the send text this way is not merely awkward, it is
+rem impossible: sendPayloadCommands writes with std::cout, so it is
+rem on stdout, and stdout is exactly the stream that cannot be both
+rem shown on screen and filed to disk. The fix belongs inside the
+rem program (log the send step to a file of its own), not here -
+rem see the on-machine checklist, section 9.
+rem ---------------------------------------------------------------
 echo [3/3] Starting...
 echo.
 echo ============================================
@@ -93,6 +119,10 @@ if not exist "%OUTDIR%\Touch_Client.exe" (
     pause
     exit /b 1
 )
+
+echo Keys go into THIS window, and everything to read is here too.
+echo.
+
 "%OUTDIR%\Touch_Client.exe"
 echo.
 echo ============================================
