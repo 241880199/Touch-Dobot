@@ -1880,7 +1880,8 @@ namespace PayloadCalibration {
     // 闸 1 的区间 (PAYLOAD_D_MIN_MM, PAYLOAD_D_MAX_MM) 与它"开区间"的读法不在这里写第二遍 ——
     // 在 SessionReport::payloadDValues 里, 那是全项目唯一一份实现。
     SendGate evaluateSendGate(double massKgIn, const double comMmIn[3],
-                              const double* csZmm, const double* czRobotMm) {
+                              const double* csZmm, const double* czRobotMm,
+                              SendMassSource massSource) {
         SendGate g;
         g.verdict = SEND_OK;
         g.dSameDir = 0.0; g.dFlipDir = 0.0;
@@ -1896,7 +1897,18 @@ namespace PayloadCalibration {
         // 它与闸 1 无关, 而打印端要把【两道】的判读结果都摆出来 —— 不能因为闸 1 没过,
         // 屏幕上就看不到闸 2 到底是多少 (那样操作员无从判断"改哪个数才有用")。
         g.massOk = (massKgIn >= SEND_GATE_MASS_MIN_KG && massKgIn <= SEND_GATE_MASS_MAX_KG);
-        g.comOk  = (g.comMagMm <= SEND_GATE_COM_MAX_MM);
+        // |c| < 500 (【不含】500) —— 以操作单 §6 闸2 的原文为准, 用户 2026-09-20 裁定。
+        g.comOk  = (g.comMagMm < SEND_GATE_COM_MAX_MM);
+
+        // ===== 【来源】判据 (Task 8a-2), 排在量级与符号之前 =====
+        // 它问的不是"这个数合理吗", 而是"这个数是从哪来的"。顺序放在最前面, 因为它是
+        // 【整个候选的合法性】: 一个没经过实测的质量尺度, 无论大小多合理、符号多自洽,
+        // 都不是本次标定的结果, 发出去等于把"机械臂现在就有"的那一份重发一遍 (8a 的断链)。
+        // 与 SEND_MASS_OUT_OF_RANGE 分开是【刻意的】: 处置不同 (去查标定为什么没跑 vs 去查装夹)。
+        if (massSource != MASS_SOURCE_MEASURED) {
+            g.verdict = SEND_NOT_MEASURED;
+            return g;
+        }
 
         // ===== 闸 1 =====
         // "没有 c_s" 与 "没有 cz_robot" 是两个【不同的】不可用, 各有各的判决值: 前者说
@@ -1920,8 +1932,16 @@ namespace PayloadCalibration {
         }
         g.convention = g.dSameIn ? 1 : 2;
         // 选中的那支 c_s_z: 约定一取 c_s_z 本身, 约定二取它的反向。cz 的号 = 选中那支的号 ——
-        // 因为 cz_robot 与 c_s 沿的是【同一根工具轴】, 两者同向时符号必然一致 (这正是闸 1
-        // 用 cz_robot 当外部锚点能定出符号的道理)。
+        // 因为 cz_robot 与 c_s 沿的是【同一根工具轴】(这正是闸 1 用 cz_robot 当外部锚点能定出
+        // 符号的道理)。
+        // ⚠ 【前提】: "cz_robot 与选中的 c_s_z 同向"这一步只在 |选中的 c_s_z| > 31.5 mm 时成立
+        //   (即 d 的容差段比质心量级小)。推导: 胜出那支的 d 满足 选中的 c_s_z = cz_robot − d
+        //   且 d ∈ (0, 31.5) —— 所以 |cz_robot| > 31.5 时 cz_robot − d 与 cz_robot 【必然同号】,
+        //   于是这里的 czSign 恰好等于 cz_robot 的号、cz 的【值不变】。反过来, |cz_robot| ≤ 31.5
+        //   时号可能被翻 (例: cz_robot = +10, c_s_z = −10 -> d同向 = 20 在内 -> 选中 −10
+        //   -> czSign = −1 -> 候选 cz 由 +10 变成 −10)。那不是错, 是这条路【唯一会改 c】的形态,
+        //   所以 diffSendCandidate 把它标成高危。
+        //   本机实测 |c_s_z| = 55.556 > 31.5, cz_robot = 68.700 > 31.5 ⇒ 号不变。
         const double csZSelected = (g.convention == 1) ? *csZmm : -*csZmm;
         g.czSign = (csZSelected >= 0.0) ? +1.0 : -1.0;
         g.comMm[2] = g.czSign * fabs(comMmIn[2]);   // 只给 cz 定号, 横向两个分量不动
@@ -1930,6 +1950,93 @@ namespace PayloadCalibration {
         if (!g.comOk)  { g.verdict = SEND_COM_OUT_OF_RANGE;  return g; }
         g.verdict = SEND_OK;
         return g;
+    }
+
+    // ===== Task 8a-2: 候选构造 (纯逻辑, 见头文件里那一段说明) =====
+    SendCandidate buildSendCandidate(const double* measuredMassKg, const double* csZmm,
+                                     const double* echoCenterMm) {
+        SendCandidate c;
+        c.present = false;
+        c.absent = CAND_PRESENT;
+        c.massKg = 0.0;
+        for (int i = 0; i < 3; i++) c.comMm[i] = 0.0;
+
+        // ① 有没有【本次实测的】质量尺度。没有 ⇒ 【没有候选】—— 不是"候选 = 0", 也不许回退。
+        //    这一条就是 8a 那个断链的封口: 从前这里取的是 PayloadCalibration::effective()
+        //    (已标定 = payload_calib.json 的旧值, 否则 Config 种子), 而那两份都不是本次解出来的。
+        if (measuredMassKg == nullptr) {
+            c.absent = CAND_NO_MEASURED_MASS;
+            return c;
+        }
+        // ② 有没有机械臂【自报】的 @1176 CenterX/Y/Z。没有 ⇒ 【没有候选】——
+        //    【不许】拿本客户端自己下发的值顶上: 那条路带着 centerZ 折叠歧义 (约差 125 mm)。
+        if (echoCenterMm == nullptr) {
+            c.absent = CAND_NO_PAYLOAD_ECHO;
+            return c;
+        }
+
+        c.present = true;
+        c.massKg = *measuredMassKg;
+        for (int i = 0; i < 3; i++) c.comMm[i] = echoCenterMm[i];
+        // 判决 (两道闸 + 来源判据) 与候选【一次算出来】: 打印端与 'p' 消费的是同一份。
+        // massSource 明写 MASS_SOURCE_MEASURED —— 走到这里的 m 只有 Decomp::m 这一条来路
+        // (上面那道 nullptr 检查就是它的守卫), 而来源参数【没有默认值】, 漏写就编不过。
+        c.gate = evaluateSendGate(c.massKg, c.comMm, csZmm, &echoCenterMm[2],
+                                  MASS_SOURCE_MEASURED);
+        // 闸1 定的号【落在候选上】—— 这一行保证"打印的候选"与"发出去的候选"是同一个东西
+        // (8a 复审 Minor 7: 从前打印用的是闸前的 com, 于是屏幕可能说 +68.7 而发出去 −68.7)。
+        for (int i = 0; i < 3; i++) c.comMm[i] = c.gate.comMm[i];
+        return c;
+    }
+
+    SendCandidateDiff diffSendCandidate(const SendCandidate& cand, double echoLoadKg,
+                                        const double echoCenterMm[3]) {
+        SendCandidateDiff d;
+        d.candMassKg = cand.massKg;
+        d.echoLoadKg = echoLoadKg;
+        d.dm = cand.massKg - echoLoadKg;
+        for (int i = 0; i < 3; i++) {
+            d.candCenterMm[i] = cand.comMm[i];
+            d.echoCenterMm[i] = echoCenterMm[i];
+            d.dc[i] = cand.comMm[i] - echoCenterMm[i];
+        }
+        // 逐位比较 (不是"近似"): 候选的 cx/cy 是照抄自报值、cz 是 sign·|当前值| —— 都不返工重算,
+        // 所以"相同"就该是【逐位】相同。给容差等于把"其实动了"读成"没动"。
+        d.cUnchanged = (d.dc[0] == 0.0 && d.dc[1] == 0.0 && d.dc[2] == 0.0);
+        // "号被翻" = 发出的 cz 与机械臂当前 CenterZ 【异号】(量级相同是构造保证的)。
+        // 实机上 |cz_robot| > 31.5 时它【不可能】为真 (推导见头文件) —— 但代码不依赖
+        // "这台机器恰好数值大"。
+        d.czSignFlipped = (cand.comMm[2] * echoCenterMm[2] < 0.0);
+        return d;
+    }
+
+    // ---- 措辞的唯一一份实现 (打印端不许自己写第二遍) ----
+    void formatSendCandidateMassText(double massKg, char* out, int len) {
+        snprintf(out, len,
+                 "  候选 m                  = %.4f kg  【本次实测的质量尺度 · 传感器测量原点以下】\n"
+                 "                            ⚠ 它与 EnableRobot 要的【法兰上整条链】差了传感器\n"
+                 "                              机器人侧那一段 —— 【量未定】: 本条路径是把一个\n"
+                 "                              \"测量原点以下\"的量, 代入\"整条链\"的槽位。\n"
+                 "                              Task 10 的闭环才是迭代它的仪器。\n",
+                 massKg);
+    }
+
+    void formatSendCandidateDiffConclusion(const SendCandidateDiff& d, char* out, int len) {
+        if (d.czSignFlipped) {
+            // §3.5 第 2 条: 翻号【必须】标高危, 而且不许再说"只改 m"。
+            snprintf(out, len,
+                     "c 已变（【含翻号】）—— ⚠【高危】本次 cz 由 %+.1f 翻为 %+.1f mm: 量与机械臂"
+                     "当前值相同、号相反, 量级上是一次【巨大】的负载改动, 不是最小改动。"
+                     "按 §1 的安全规程处置后再决定发不发",
+                     d.echoCenterMm[2], d.candCenterMm[2]);
+        } else if (d.cUnchanged) {
+            snprintf(out, len,
+                     "c 未变 —— 本次【只改 m】(c 的三个分量与机械臂当前值逐位相同; "
+                     "m 与整条链的换帧关系见上)");
+        } else {
+            snprintf(out, len,
+                     "c 已变 —— 逐分量见上 (与机械臂当前值不同; 不是最小改动)");
+        }
     }
 
 } // namespace PayloadCalibration

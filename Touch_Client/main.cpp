@@ -1050,8 +1050,13 @@ namespace BiasCheck {
             // fitOk 只决定要不要在结论后面跟一句"该结论不成立" (被拒的那一次), 不参与判决。
             s += SessionReport::payloadDSection(ctr[2], cz, fitOk);
         } else {
-            s += "- d = cz_robot − c_s_z = 【不可用】: 缺 cz_robot (@1176 CenterZ)\n"
-                 "  ⇒ 判据 0 < d < 31.5 mm 【无法判定】\n";
+            // 判据的两个端点【不许】在这里写第二遍 (从前这行写死的是 "0 < d < 31.5") —— 阈值
+            // 只有一份实现: SessionReport::PAYLOAD_D_MIN_MM / _MAX_MM (闸1 用的也是它们)。
+            snprintf(buf, sizeof(buf),
+                     "- d = cz_robot − c_s_z = 【不可用】: 缺 cz_robot (@1176 CenterZ)\n"
+                     "  ⇒ 判据 %.1f < d < %.1f mm 【无法判定】\n",
+                     SessionReport::PAYLOAD_D_MIN_MM, SessionReport::PAYLOAD_D_MAX_MM);
+            s += buf;
         }
         if (!s_diagWarn.empty()) s += s_diagWarn;
         s += "- ⚠ 本节只是信息: 不参与任何接受/拒绝, 也不改变 fitRaw 的判决。\n";
@@ -1089,6 +1094,14 @@ namespace BiasCheck {
                      "(cx, cy, cz) = (%.1f, %.1f, %.1f) mm",
                      g.massKg, g.comMm[0], g.comMm[1], g.comMm[2]);
             break;
+        case PayloadCalibration::SEND_NOT_MEASURED:
+            // 与量级闸【分开】的理由见 PayloadCalibration.h 的 SendMassSource 说明:
+            // "数看着合理但来路不对"要去查"标定为什么没跑", 不是去查装夹。
+            snprintf(out, len,
+                     "候选不可发送：这个质量尺度【不是本次实测的】(种子值 / 上次落盘值) —— "
+                     "只有 Decomp::m (本次解出的) 才能当候选; 发旧值等于把机械臂现在就有"
+                     "的那一份重发一遍");
+            break;
         case PayloadCalibration::SEND_NO_CS:
             snprintf(out, len,
                      "候选不可发送：闸1 无法判定 —— 【没有 c_s】(本次没解出, 不是符号不对)");
@@ -1117,8 +1130,10 @@ namespace BiasCheck {
                      PayloadCalibration::SEND_GATE_MASS_MAX_KG);
             break;
         case PayloadCalibration::SEND_COM_OUT_OF_RANGE:
+            // 判据是【严格小于】500 (操作单 §6 闸2 原文, 用户 2026-09-20 裁定) ⇒ 被拒的那一
+            // 侧是 >= 500, 所以措辞是"不小于"而不是"超过" (恰好 500 时"超过"会说谎)。
             snprintf(out, len,
-                     "候选不可发送：闸2 不放行 —— |c| = %.1f mm 超过 %.0f mm",
+                     "候选不可发送：闸2 不放行 —— |c| = %.1f mm 不小于 %.0f mm",
                      g.comMagMm, PayloadCalibration::SEND_GATE_COM_MAX_MM);
             break;
         default:
@@ -1603,93 +1618,177 @@ namespace BiasCheck {
                       << "也一并清掉, 不保留存货)。按 'p' 会被拒: 没有候选。" << std::endl;
             diagOut() << std::endl;
         } else {
-            // 候选 = 【当前应当下发给机械臂的那一份负载】(PayloadCalibration::effective):
-            // 已标定则是 payload_calib.json 里的值, 否则回退 Config 的种子值 —— 与连接时序
-            // (RelayCore 的 enableRobotWithPayload) 下发的是同一个来源, 所以"候选"与"真会
-            // 发出去的东西"同源。
-            // ⚠ 【它不是本次解出来的绝对值】: 让 effective() 跟着本次结果变的
-            //   PayloadCalibration::applyResult 在【下面那个 #if 0 块里】(不写行号: 插一行就
-            //   会漂 —— 那份计划里写的 1748 已经对不上了),
-            //   不属于活路径 —— 活路径这一整段明文禁止再把它接回来 (原点未定, 见上面 ★)。
-            //   所以下面必须按 effective() 的【真实来源】打标签, 不许写成"本次解出的值"。
-            double candM = 0.0;
-            double candC[3] = {0.0, 0.0, 0.0};
-            PayloadCalibration::effective(candM, candC);
-
-            // cz_robot 取 @1176 CenterZ (机械臂自报)。取不到就传 nullptr 让闸 1 报"不可用"
-            // 并不放行 —— 【不许】退回本客户端自己下发的值当参照: 那条路带着 centerZ 折叠
-            // 歧义 (两种解释约差 125 mm, 见上面 #if 0 块里那段警告)。
+            // ===== Task 8a-2: 候选 = 【活路径本次实测出来的那一份】 =====
+            //
+            // 8a 这里取的是 PayloadCalibration::effective() —— 而那是【断的】: 让 effective()
+            // 跟着本次求解结果变的 applyResult / save / setMassCom 三个调用【只存在于下面那个
+            // #if 0 块里】(已停用的旧 ψ 模型), 所以活路径按 's' 求解成功后 effective() 仍是
+            // payload_calib.json 的旧值 (= 机械臂【现在就有】的那一份, 发出等于没改) 或
+            // Config 的种子值 (CAD 猜的, 本项目已判定不可用)。两条都不是"把标定结果发出去"。
+            // ⇒ 8a-2 把它换成活路径手里【真正有的】那两个量, 且【不留回退】(留回退就是留一条
+            //   发种子值的路, 而堵它正是本任务的目的)。
+            //
+            //   m = PayloadCalibration::Decomp::m   本次实测的质量尺度
+            //   c = 机械臂【自报】的 @1176 CenterX/Y/Z (不是算出来的)
+            //
+            // ⚠ 换帧的事实 (brief §2, 措辞不许美化): 上面那个 m 是【传感器测量原点以下】那一截
+            //   的质量, 而 EnableRobot 的 load 槽位要的是【挂在法兰上的整条链】。两者差了传感器
+            //   机器人侧那一段, 而【量未定】(Task 9 只为 Z 分量解决了换帧), 所以本次是把一个
+            //   "测量原点以下"的量代入"整条链"的槽位。措辞由 formatSendCandidateMassText 统一
+            //   给出 (只此一份), 这里不自己写一遍。
+            //
+            // ⚠ 为什么 cz 取自机械臂自报而不是算出来的: 用户 2026-09-20 选的是【最小改动的
+            //   第一步】—— 本次【只改 m, c 不动】。代价用户已知并接受: cz 那一支本次【没有被
+            //   纠正】; 若残余主要来自方向, 8b 可能看不出变化。不许把这一步说成"cz 已标定"。
             bool echoOk = false;
-            double czRobotMm = 0.0;
+            double echoLoadKg = 0.0;
+            double echoCenter[3] = {0.0, 0.0, 0.0};
             EnterCriticalSection(&appState.forceDataMutex);
             echoOk = appState.forceData.payloadEchoValid;
-            czRobotMm = appState.forceData.payloadEchoCenterMm[2];
+            echoLoadKg = appState.forceData.payloadEchoLoadKg;
+            for (int i = 0; i < 3; i++) echoCenter[i] = appState.forceData.payloadEchoCenterMm[i];
             LeaveCriticalSection(&appState.forceDataMutex);
 
             // c_s 可不可用的口径与块尾那一节【同一个】: decompOk —— 线性层就没解出来时
             // fit.cS 是全 0, 不携带信息 (全 0 会被读成"质心就在测量原点", 那是另一个意思)。
             const double csZmm = fit.cS[2] * 1000.0;
 
-            s_sendCandidate = PayloadCalibration::evaluateSendGate(
-                candM, candC, decompOk ? &csZmm : nullptr, echoOk ? &czRobotMm : nullptr);
-            s_sendCandidateValid = true;
+            // 候选的构造与判决都在纯函数里 (单测覆盖): "有没有候选" (来源/回读) 与
+            // "候选能不能发" (来源判据 + 两道闸) 是两层, 各有各的判决值。
+            //   · decompOk == false -> 没有实测质量尺度 -> 【无候选】(不是"候选 = 0")
+            //   · echoOk   == false -> 没回读到 @1168/@1176 -> 【无候选】
+            //     (【不许】退回本客户端自己下发的值: 那条路带着 centerZ 折叠歧义, 约差 125 mm)
+            // ⚠ 照实说: 走到这个 else 时 fitOk 已为真, 而 fitRaw 自己就调 decompose ⇒ decompOk
+            //   【必然】为真, 所以"没有实测质量尺度"这一支在生产路径上【当前不可达】。它留着是
+            //   防御性的 (把"退回种子值"这条路在类型/判决两层都堵死), 不是"现在会发生的事"。
+            //   真正可达的"无候选"是下面 echoOk == false 那一支。
+            const PayloadCalibration::SendCandidate cand = PayloadCalibration::buildSendCandidate(
+                decompOk ? &d.m : nullptr, decompOk ? &csZmm : nullptr,
+                echoOk ? echoCenter : nullptr);
 
-            const double candMag = s_sendCandidate.comMagMm;
-            diagOut() << "\n======================================================" << std::endl;
-            diagOut() << "  下发候选 (【尚未发送】—— 按 'p' 才发, 且必须先过下面两道闸)"
-                      << std::endl;
-            diagOut() << "======================================================" << std::endl;
-            // 候选与它的来源: 标签取自 PayloadCalibration::enabled (值与连接时序同源,
-            // 用词与 RelayCore 的 sendEnableRobotWithPayload 一致)。
-            diagEmitf("  候选 m                  = %.4f kg   [%s]\n", candM,
-                      PayloadCalibration::enabled ? "实机标定值 [payload_calib.json]"
-                                                  : "种子值, 未标定 [Config 的 ROBOT_PAYLOAD_SEED]");
-            diagEmitf("  候选 (cx, cy, cz)       = (%.1f, %.1f, %.1f) mm\n",
-                      candC[0], candC[1], candC[2]);
-            diagEmitf("  候选 |c|                = %.1f mm\n", candMag);
-            // 闸 1: 两支 d 与判读。⛔ 这里【只报数, 不给勾/叉】(与块尾那一节同一条规矩) ——
-            // "恰好一支在内"才是放行, 给单一勾会让人以为"这一支通过了"。
-            diagEmitf("  闸1 符号约定 (d = cz_robot − c_s_z, 判据 %.1f < d < %.1f mm):\n",
-                      SessionReport::PAYLOAD_D_MIN_MM, SessionReport::PAYLOAD_D_MAX_MM);
-            if (decompOk && echoOk) {
-                diagEmitf("      约定一 c_s_z = %+.3f mm: d = %.3f mm  %s\n",
-                          csZmm, s_sendCandidate.dSameDir,
-                          s_sendCandidate.dSameIn ? "【在范围内】" : "【在范围外】");
-                diagEmitf("      约定二 c_s_z = %+.3f mm: d = %.3f mm  %s\n",
-                          -csZmm, s_sendCandidate.dFlipDir,
-                          s_sendCandidate.dFlipIn ? "【在范围内】" : "【在范围外】");
-                if (s_sendCandidate.convention != 0) {
-                    diagEmitf("      → 选中的符号约定 = 约定%d, cz 定为 %+.1f mm"
-                              " (候选的 x/y 不动)\n",
-                              s_sendCandidate.convention, s_sendCandidate.comMm[2]);
-                }
+            if (!cand.present) {
+                s_sendCandidateValid = false;
+                diagOut() << "\n[下发候选] 本次【没有候选】: "
+                          << (cand.absent == PayloadCalibration::CAND_NO_MEASURED_MASS
+                                  ? "没有【本次实测】的质量尺度 —— 只有实测出来的 m 才能当候选,"
+                                    " 种子值 / 上次落盘值一律不发 (那正是连接时序已经在发的那个)"
+                                  : "没有回读到机械臂自报的负载 (@1168 Load / @1176 CenterX/Y/Z)"
+                                    " —— 不退回本客户端自己下发的值当参照")
+                          << "。按 'p' 会被拒。" << std::endl;
+                diagOut() << std::endl;
             } else {
-                // 【不许拿 0 顶上】: c_s 没解出来时 fit.cS 是全 0, 照着打会印出 "d = 68.700" ——
-                // 一个从"没有数据"算出来的、看着像真数的东西。这里的口径与块尾那一节一致:
-                // 缺数据就说"不可用", 这是【没有】, 不是 0。
-                diagEmitf("      【无法判定】: %s%s —— 两支 d 都无从给出 (不是 0, 是【没有】)\n",
-                          decompOk ? "" : "没有 c_s (本次没解出); ",
-                          echoOk ? "" : "没有 cz_robot (@1176 还没回读到负载)");
+                s_sendCandidate = cand.gate;
+                s_sendCandidateValid = true;
+
+                const double candMag = cand.gate.comMagMm;
+                diagOut() << "\n======================================================" << std::endl;
+                diagOut() << "  下发候选 (【尚未发送】—— 按 'p' 才发, 且必须先过下面两道闸)"
+                          << std::endl;
+                diagOut() << "======================================================" << std::endl;
+                // m 那一行【连同换帧说明】由库里那一个函数给出 —— 措辞只此一份, 这里不重写
+                // (它的三条硬要求见 PayloadCalibration.h 的 formatSendCandidateMassText)。
+                {
+                    char massLine[512];
+                    PayloadCalibration::formatSendCandidateMassText(cand.massKg, massLine,
+                                                                    sizeof(massLine));
+                    diagOut() << massLine;
+                }
+                // 候选的 c 打的是【闸1 定过号之后】的那一份 —— 也就是 'p' 真会发出去的那一份。
+                // (8a 复审 Minor 7: 从前这里打的是闸前的 com, 屏幕上可能与发出去的不是一个东西。)
+                diagEmitf("  候选 (cx, cy, cz)       = (%.1f, %.1f, %.1f) mm"
+                          "   [机械臂自报 @1176 的 CenterX/Y/Z, cz 已按闸1 的号定]\n",
+                          cand.comMm[0], cand.comMm[1], cand.comMm[2]);
+                diagEmitf("  候选 |c|                = %.1f mm\n", candMag);
+                // 闸 1: 两支 d 与判读。⛔ 这里【只报数, 不给勾/叉】(与块尾那一节同一条规矩) ——
+                // "恰好一支在内"才是放行, 给单一勾会让人以为"这一支通过了"。
+                //
+                // ⚠【本次配置下闸1 的局限, 不许读成"cz 是对的"】(brief §3.3): 本次的 cz 就是
+                //   取自 cz_robot 本身, 所以 d = cz_robot − c_s_z 这条闸此时【只能】做两件事:
+                //   (a) 给 cz 定符号约定; (b) 挡住明显不自洽的 c_s。它【抓不出 68.7 本身是错的】——
+                //   那正是 Task 9 记下的"那是一次一致性检验, 不是证明"。
+                diagEmitf("  闸1 符号约定 (d = cz_robot − c_s_z, 判据 %.1f < d < %.1f mm):\n",
+                          SessionReport::PAYLOAD_D_MIN_MM, SessionReport::PAYLOAD_D_MAX_MM);
+                // 条件 = "上面那两支 d 真的算过" (见 evaluateSendGate 头文件里那张次序表):
+                // 数据齐 (decompOk && echoOk) 【且】判决没有停在闸1 之前。SEND_NOT_MEASURED 那
+                // 一支在生产路径上不可达 (见上), 但这里照写 —— 结构体里的 0 是【没有算过】,
+                // 拿它当 d 打出去正是本项目反复记过的"假数字"。
+                if (decompOk && echoOk
+                    && cand.gate.verdict != PayloadCalibration::SEND_NOT_MEASURED) {
+                    diagEmitf("      约定一 c_s_z = %+.3f mm: d = %.3f mm  %s\n",
+                              csZmm, cand.gate.dSameDir,
+                              cand.gate.dSameIn ? "【在范围内】" : "【在范围外】");
+                    diagEmitf("      约定二 c_s_z = %+.3f mm: d = %.3f mm  %s\n",
+                              -csZmm, cand.gate.dFlipDir,
+                              cand.gate.dFlipIn ? "【在范围内】" : "【在范围外】");
+                    if (cand.gate.convention != 0) {
+                        diagEmitf("      → 选中的符号约定 = 约定%d, cz 定为 %+.1f mm"
+                                  " (候选的 x/y 不动)\n",
+                                  cand.gate.convention, cand.comMm[2]);
+                    }
+                    diagOut() << "      ⚠ 本次的 cz 【就是】机械臂自报的那个 cz_robot (@1176"
+                                 " CenterZ, 见下面【与机械臂当前值相比】那一段), 所以这条闸\n"
+                              << "        给不出关于它本身对错的任何信息 —— 它能定的只是【符号约定】,"
+                                 " 挡的是【明显不自洽的 c_s】。\n"
+                              << "        别把【闸1 过了】读成【cz 是对的】。"
+                              << std::endl;
+                } else if (!decompOk || !echoOk) {
+                    // 【不许拿 0 顶上】: c_s 没解出来时 fit.cS 是全 0, 照着打会印出 "d = 68.700" ——
+                    // 一个从"没有数据"算出来的、看着像真数的东西。这里的口径与块尾那一节一致:
+                    // 缺数据就说"不可用", 这是【没有】, 不是 0。
+                    diagEmitf("      【无法判定】: %s%s —— 两支 d 都无从给出 (不是 0, 是【没有】)\n",
+                              decompOk ? "" : "没有 c_s (本次没解出); ",
+                              echoOk ? "" : "没有 cz_robot (@1176 还没回读到负载)");
+                } else {
+                    // 数据齐但判决停在闸1 之前 (只剩"来源不是实测"那一支; 生产路径上不可达,
+                    // 见上面的说明) —— 同样【不是 0, 是【没有】】。
+                    diagEmitf("      【无法判定】: 候选无效 (质量尺度不是本次实测的) ——"
+                              " 两支 d 都无从给出 (不是 0, 是【没有】)\n");
+                }
+                // 闸 2: 两个量与判读。阈值一律取库里那两个常量, 不在这里写第二遍。
+                // |c| 是【严格小于】500 (操作单 §6 闸2 的原文, 用户 2026-09-20 裁定)。
+                diagEmitf("  闸2 量级 (m ∈ [%.1f, %.1f] kg, |c| < %.0f mm):\n",
+                          PayloadCalibration::SEND_GATE_MASS_MIN_KG,
+                          PayloadCalibration::SEND_GATE_MASS_MAX_KG,
+                          PayloadCalibration::SEND_GATE_COM_MAX_MM);
+                diagEmitf("      m = %.4f kg  %s\n", cand.gate.massKg,
+                          cand.gate.massOk ? "【在范围内】" : "【超出范围】");
+                diagEmitf("      |c| = %.1f mm  %s\n", candMag,
+                          cand.gate.comOk ? "【在范围内】" : "【超出范围】");
+
+                // ===== §3.5: 与机械臂【当前值】相比, 这一次到底改了什么 =====
+                // 这一段【必须在按 'p' 之前】看得到 —— 它就是给操作员看的那一眼。
+                const PayloadCalibration::SendCandidateDiff df =
+                    PayloadCalibration::diffSendCandidate(cand, echoLoadKg, echoCenter);
+                // 数值走 diagEmitf 的显式格式 (不用 ostream 的默认 6 位有效数字): 这一段是
+                // 操作员据以决定"按不按 'p'"的那一眼, 精度不能靠默认值。
+                diagEmitf("  与机械臂【当前值】相比 (@1168 Load = %.4f kg, @1176 CenterX/Y/Z = "
+                          "(%.1f, %.1f, %.1f) mm):\n",
+                          df.echoLoadKg, df.echoCenterMm[0], df.echoCenterMm[1], df.echoCenterMm[2]);
+                diagEmitf("      m : %.4f → %.4f kg   (差 %+.4f)\n",
+                          df.echoLoadKg, df.candMassKg, df.dm);
+                for (int i = 0; i < 3; i++) {
+                    const char* axis = (i == 0) ? "cx" : (i == 1) ? "cy" : "cz";
+                    diagEmitf("      %s: %+.1f → %+.1f mm   (差 %+.1f)\n",
+                              axis, df.echoCenterMm[i], df.candCenterMm[i], df.dc[i]);
+                }
+                {
+                    char concl[512];
+                    PayloadCalibration::formatSendCandidateDiffConclusion(df, concl,
+                                                                         sizeof(concl));
+                    diagEmitf("      结论: %s\n", concl);
+                }
+
+                // 结论行: 放行 / 【是哪一闸、为什么】。每一支各说各的 —— 合并成一句"不合格"就
+                // 等于把"没数据"、"来路不对"、"数据在但定不了号"混成一个, 而这几件事的处置
+                // 完全不同。语句本身与 'p' 被拒时说的那一句【同源】(formatSendGateConclusion)。
+                char reason[256];
+                formatSendGateConclusion(cand.gate, reason, sizeof(reason));
+                diagEmitf("  结论: %s\n", reason);
+                diagOut() << "  ⚠ 此刻【什么都没有发出去】—— 上面只是候选与闸的判读;"
+                          << " 真发送是另一个动作 (按 'p'), 且 'p' 用的是这一份候选, 不重算。"
+                          << std::endl;
+                diagOut() << std::endl;
             }
-            // 闸 2: 两个量与判读。阈值一律取库里那两个常量, 不在这里写第二遍。
-            diagEmitf("  闸2 量级 (m ∈ [%.1f, %.1f] kg, |c| <= %.0f mm):\n",
-                      PayloadCalibration::SEND_GATE_MASS_MIN_KG,
-                      PayloadCalibration::SEND_GATE_MASS_MAX_KG,
-                      PayloadCalibration::SEND_GATE_COM_MAX_MM);
-            diagEmitf("      m = %.4f kg  %s\n", s_sendCandidate.massKg,
-                      s_sendCandidate.massOk ? "【在范围内】" : "【超出范围】");
-            diagEmitf("      |c| = %.1f mm  %s\n", candMag,
-                      s_sendCandidate.comOk ? "【在范围内】" : "【超出范围】");
-            // 结论行: 放行 / 【是哪一闸、为什么】。每一支各说各的 —— 合并成一句"不合格"就等于
-            // 把"没数据"与"数据在但定不了号"混成一个, 而这两件事的处置完全不同。
-            // 语句本身与 'p' 被拒时说的那一句【同源】(formatSendGateConclusion)。
-            char reason[256];
-            formatSendGateConclusion(s_sendCandidate, reason, sizeof(reason));
-            diagEmitf("  结论: %s\n", reason);
-            diagOut() << "  ⚠ 此刻【什么都没有发出去】—— 上面只是候选与闸的判读;"
-                      << " 真发送是另一个动作 (按 'p'), 且 'p' 用的是这一份候选, 不重算。"
-                      << std::endl;
-            diagOut() << std::endl;
         }
 
         // 这批数据【仍然有效】, 所以【不】动 dataUnderCurrentPayload: 从前把它置 false 是因为
@@ -2579,9 +2678,15 @@ void keyboard(unsigned char key, int, int) {
     //     一并【删除】, 本项目已无此函数; 对它唯一残留的引用在下面的 #if 0 块里, 拆那层时
     //     才会编不过 —— 见 Docs\superpowers\specs\2026-09-19-remaining-workflow.md §2 的
     //     第 11 步)。
-    //   · 【不】写生效配置 —— PayloadCalibration::applyResult / PayloadCalibration::save /
-    //     TcpCalibration::setSensorYawDeg 三个调用只出现在 #if 0 块内 (旧模型那一层),
-    //     不在活路径上: payload_calib.json 与 force_calib.json 都不会被这条路径改动。
+    //   · 【不】写生效配置 ——【本条路径】(solveAndApply) 里没有任何
+    //     PayloadCalibration::applyResult / PayloadCalibration::save 调用 (调它们的是下面的
+    //     #if 0 块, 旧模型那一层), 所以 payload_calib.json 与 force_calib.json 都不会被这条
+    //     路径改动。
+    //     ⚠ 这一条从前把 TcpCalibration::setSensorYawDeg 也算进来了, 说"三个调用只出现在
+    //       #if 0 块内" —— 【那是错的】: 它【在活路径上】, 只是不在这条路径上。真正的调用点是
+    //       main() 的启动序列里、紧接 PayloadCalibration::load 之后那一处 (在 `else` of
+    //       `if (g_noRobot)` 内, 连机械臂之前; 与 's' 无关, 也不由任何按键触发)。写这条注释
+    //       时逐处核过全文件: 那两处之外没有第三个调用, solveAndApply 里【一处都没有】。
     //   · 【不】下发机械臂 —— 活路径里没有任何 robotSendEnable / sendPayloadToRobot 调用;
     //     下发是另一个键 'p' 的事 (Task 8a), 而且要先过两道闸。
     //   ⚠ 但它【不是】"什么都不写": 本次诊断会落三份文件 —— calib_log.txt 一行 (logCalibAttempt)、
@@ -2595,6 +2700,26 @@ void keyboard(unsigned char key, int, int) {
 
     // 'p': 【唯一】会把负载参数发给机械臂的键 (Task 8a)。在 'm' 模式里才有意义 ——
     // 候选正是 'm' 采集 + 's' 求解的产出, 而且这条路只此一处, 别的地方没有第二个入口。
+    //
+    // ⚠ 【这个闸会挡住一个真的有效的候选, 所以它【必须】出声】(8a 复审 Minor 3):
+    //   在 'm' 模式里再按一次 'm' = 退出模式并重出报告 (见上面 'm' 那个分支: mode = false +
+    //   report()), 它【不调 reset()】⇒ 候选还活着, 而 mode 已经是 false。那时按 'p' 从前
+    //   一行都不打 —— 一个静默无反应的发送键比一个大声拒绝的坏得多 (操作员会以为发出去了)。
+    //   ⚠ 提示里【不许】写"再按 'm' 回去按 'p'": 重进 'm' 模式走的是 reset(), 而 reset()
+    //     会作废候选 (见 s_sendCandidateValid 的说明)。能下发的窗口就是【这一次采集里】:
+    //     按 's' 求解之后、【退出模式之前】。
+    if ((key == 'p' || key == 'P') && !BiasCheck::mode) {
+        std::cout << "[下发] 'p' 只在 'm' 模式里有效 —— 此刻不在模式里, 所以【什么都没有发出去】。"
+                  << std::endl;
+        if (BiasCheck::s_sendCandidateValid) {
+            std::cout << "[下发] ⚠ 手上【还有】一份过闸的候选 (最近一次 's' 解出来的), 但它的"
+                      << "下发窗口随退出 'm' 模式一起关了 ——" << std::endl;
+            std::cout << "[下发]    重进 'm' 模式是【重开采集】(会作废这份候选), 所以可下发的"
+                      << "时机是: 在这次采集里按 's' 求解之后、【退出模式之前】。"
+                      << std::endl;
+        }
+        return;
+    }
     if ((key == 'p' || key == 'P') && BiasCheck::mode) {
         BiasCheck::sendCandidate();
         return;

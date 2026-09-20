@@ -11,6 +11,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <ctime>
+#include <string>        // Task 8a-2: 措辞用例要按子串断言 (标签 / 结论行)
 #ifdef _WIN32
 #include <io.h>          // _dup / _dup2 / _close —— 蒙特卡洛要把 stderr 静音
 #include <fcntl.h>       // _O_WRONLY
@@ -3345,7 +3346,7 @@ static void test_send_gate_convention_one_wins_and_signs_cz() {
     //                     d反向 = 68.700 + 55.556 = 124.256 (在范围外) -> 约定一胜出
     const double csZ = +SG_CS_Z;
     PayloadCalibration::SendGate g =
-        PayloadCalibration::evaluateSendGate(0.42, SG_COM, &csZ, &SG_CZ_ROB);
+        PayloadCalibration::evaluateSendGate(0.42, SG_COM, &csZ, &SG_CZ_ROB, PayloadCalibration::MASS_SOURCE_MEASURED);
     CHECK(g.verdict == PayloadCalibration::SEND_OK);
     CHECK(g.convention == 1);
     // 选中的 cz 符号 = 选中的那支 c_s_z 的符号 = +1
@@ -3354,7 +3355,7 @@ static void test_send_gate_convention_one_wins_and_signs_cz() {
     // 候选的 cz 按选中的符号定号 —— 输入故意给负的 cz, 输出必须是正的 |cz|
     const double comNeg[3] = {0.3, -0.1, -68.7};
     PayloadCalibration::SendGate g2 =
-        PayloadCalibration::evaluateSendGate(0.42, comNeg, &csZ, &SG_CZ_ROB);
+        PayloadCalibration::evaluateSendGate(0.42, comNeg, &csZ, &SG_CZ_ROB, PayloadCalibration::MASS_SOURCE_MEASURED);
     CHECK(g2.verdict == PayloadCalibration::SEND_OK);
     CHECK(nearRefAbs(g2.comMm[2], +68.7));
     CHECK(nearRefAbs(g2.comMm[0], +0.3));   // 横向分量【不动】—— 只有 cz 定号
@@ -3370,7 +3371,7 @@ static void test_send_gate_convention_two_wins_and_signs_cz() {
     // 而两支的【物理含义】不变: 选中的那支 c_s_z 仍是 +55.556, 所以 cz 仍是正的。
     const double csZ = -SG_CS_Z;
     PayloadCalibration::SendGate g =
-        PayloadCalibration::evaluateSendGate(0.42, SG_COM, &csZ, &SG_CZ_ROB);
+        PayloadCalibration::evaluateSendGate(0.42, SG_COM, &csZ, &SG_CZ_ROB, PayloadCalibration::MASS_SOURCE_MEASURED);
     CHECK(g.verdict == PayloadCalibration::SEND_OK);
     CHECK(g.convention == 2);
     CHECK(g.czSign == +1.0);
@@ -3386,7 +3387,7 @@ static void test_send_gate_two_conventions_in_range_is_ambiguous() {
     const double csZ = 1.0;
     const double czRob = 15.75;
     PayloadCalibration::SendGate g =
-        PayloadCalibration::evaluateSendGate(0.42, SG_COM, &csZ, &czRob);
+        PayloadCalibration::evaluateSendGate(0.42, SG_COM, &csZ, &czRob, PayloadCalibration::MASS_SOURCE_MEASURED);
     CHECK(g.verdict == PayloadCalibration::SEND_SIGN_AMBIGUOUS);
     CHECK(g.dSameIn && g.dFlipIn);
     CHECK(g.convention == 0);   // 没定下约定 -> 也就没定下 cz 的号
@@ -3400,7 +3401,7 @@ static void test_send_gate_no_convention_in_range_is_refused() {
     const double csZ = +SG_CS_Z;
     const double czRob = 200.0;
     PayloadCalibration::SendGate g =
-        PayloadCalibration::evaluateSendGate(0.42, SG_COM, &csZ, &czRob);
+        PayloadCalibration::evaluateSendGate(0.42, SG_COM, &csZ, &czRob, PayloadCalibration::MASS_SOURCE_MEASURED);
     CHECK(g.verdict == PayloadCalibration::SEND_SIGN_NONE_IN_RANGE);
     CHECK(!g.dSameIn && !g.dFlipIn);
     CHECK(g.convention == 0);
@@ -3414,13 +3415,13 @@ static void test_send_gate_interval_is_open_at_both_ends() {
     // d 恰好 = 0: cz_robot = c_s_z = 55.556 -> d同向 = 0 (不在开区间内), d反向 = 111.112 (也在外)
     const double czAtZero = 55.556;
     PayloadCalibration::SendGate g0 =
-        PayloadCalibration::evaluateSendGate(0.42, SG_COM, &csZ, &czAtZero);
+        PayloadCalibration::evaluateSendGate(0.42, SG_COM, &csZ, &czAtZero, PayloadCalibration::MASS_SOURCE_MEASURED);
     CHECK(g0.verdict == PayloadCalibration::SEND_SIGN_NONE_IN_RANGE);
     CHECK(nearRefAbs(g0.dSameDir, 0.0));
     // d 恰好 = 31.5: cz_robot = 55.556 + 31.5 = 87.056 -> d同向 = 31.5 (不在开区间内)
     const double czAtEdge = 87.056;
     PayloadCalibration::SendGate g1 =
-        PayloadCalibration::evaluateSendGate(0.42, SG_COM, &csZ, &czAtEdge);
+        PayloadCalibration::evaluateSendGate(0.42, SG_COM, &csZ, &czAtEdge, PayloadCalibration::MASS_SOURCE_MEASURED);
     CHECK(g1.verdict == PayloadCalibration::SEND_SIGN_NONE_IN_RANGE);
     CHECK(nearRefAbs(g1.dSameDir, 31.5));
     PASS();
@@ -3432,7 +3433,7 @@ static void test_send_gate_mass_bounds_are_inclusive() {
     const double m[2] = {0.2, 1.5};       // 闸2 的量级判据: m ∈ [0.2, 1.5] kg, 两端【含】
     for (int i = 0; i < 2; i++) {
         PayloadCalibration::SendGate g =
-            PayloadCalibration::evaluateSendGate(m[i], SG_COM, &csZ, &SG_CZ_ROB);
+            PayloadCalibration::evaluateSendGate(m[i], SG_COM, &csZ, &SG_CZ_ROB, PayloadCalibration::MASS_SOURCE_MEASURED);
         CHECK(g.verdict == PayloadCalibration::SEND_OK);
         CHECK(g.massOk);
     }
@@ -3445,24 +3446,35 @@ static void test_send_gate_mass_outside_bounds_is_refused() {
     const double m[2] = {0.19, 1.51};
     for (int i = 0; i < 2; i++) {
         PayloadCalibration::SendGate g =
-            PayloadCalibration::evaluateSendGate(m[i], SG_COM, &csZ, &SG_CZ_ROB);
+            PayloadCalibration::evaluateSendGate(m[i], SG_COM, &csZ, &SG_CZ_ROB, PayloadCalibration::MASS_SOURCE_MEASURED);
         CHECK(g.verdict == PayloadCalibration::SEND_MASS_OUT_OF_RANGE);
         CHECK(!g.massOk);
     }
     PASS();
 }
 
-static void test_send_gate_com_magnitude_bound_is_inclusive_at_500() {
-    TEST(send_gate_com_magnitude_bound_is_inclusive_at_500);
+static void test_send_gate_com_magnitude_bound_is_exclusive_at_500() {
+    TEST(send_gate_com_magnitude_bound_is_exclusive_at_500);
+    // 【口径以规格为准 (用户 2026-09-20 裁定)】: on-machine-checklist.md §6 闸2 的原文是
+    // "|c| < 500 mm" —— 【不含】500。从前这条用例断言的是"含"(照 8a 简报的用例表),
+    // 裁定后改成严格小于: 500 必须拒, 而 499.999 必须放行 (否则就是整条闸被关掉了)。
     const double csZ = +SG_CS_Z;
     const double at500[3] = {500.0, 0.0, 0.0};
-    PayloadCalibration::SendGate gOk =
-        PayloadCalibration::evaluateSendGate(0.42, at500, &csZ, &SG_CZ_ROB);
-    CHECK(gOk.verdict == PayloadCalibration::SEND_OK);   // |c| = 500 含
-    CHECK(gOk.comOk);
+    PayloadCalibration::SendGate gAt500 =
+        PayloadCalibration::evaluateSendGate(0.42, at500, &csZ, &SG_CZ_ROB,
+                                            PayloadCalibration::MASS_SOURCE_MEASURED);
+    CHECK(gAt500.verdict == PayloadCalibration::SEND_COM_OUT_OF_RANGE);   // |c| = 500 不含
+    CHECK(!gAt500.comOk);
+    const double justUnder[3] = {499.999, 0.0, 0.0};
+    PayloadCalibration::SendGate gJustUnder =
+        PayloadCalibration::evaluateSendGate(0.42, justUnder, &csZ, &SG_CZ_ROB,
+                                            PayloadCalibration::MASS_SOURCE_MEASURED);
+    CHECK(gJustUnder.verdict == PayloadCalibration::SEND_OK);             // 499.999 含
+    CHECK(gJustUnder.comOk);
     const double at501[3] = {501.0, 0.0, 0.0};
     PayloadCalibration::SendGate gBad =
-        PayloadCalibration::evaluateSendGate(0.42, at501, &csZ, &SG_CZ_ROB);
+        PayloadCalibration::evaluateSendGate(0.42, at501, &csZ, &SG_CZ_ROB,
+                                            PayloadCalibration::MASS_SOURCE_MEASURED);
     CHECK(gBad.verdict == PayloadCalibration::SEND_COM_OUT_OF_RANGE);
     CHECK(!gBad.comOk);
     PASS();
@@ -3474,7 +3486,8 @@ static void test_send_gate_refuses_without_cs_and_says_so() {
     // 前者说"这次没数据", 后者说"数据在但定不了号", 处置完全不同。
     const double czRob = SG_CZ_ROB;
     PayloadCalibration::SendGate g =
-        PayloadCalibration::evaluateSendGate(0.42, SG_COM, nullptr, &czRob);
+        PayloadCalibration::evaluateSendGate(0.42, SG_COM, nullptr, &czRob,
+                                            PayloadCalibration::MASS_SOURCE_MEASURED);
     CHECK(g.verdict == PayloadCalibration::SEND_NO_CS);
     CHECK(g.verdict != PayloadCalibration::SEND_SIGN_NONE_IN_RANGE);
     CHECK(g.verdict != PayloadCalibration::SEND_SIGN_AMBIGUOUS);
@@ -3487,10 +3500,209 @@ static void test_send_gate_refuses_without_cz_robot_and_says_so() {
     // 只能照实报"不可用"并不放行。拒因必须是【没有 cz_robot】, 不是别的。
     const double csZ = +SG_CS_Z;
     PayloadCalibration::SendGate g =
-        PayloadCalibration::evaluateSendGate(0.42, SG_COM, &csZ, nullptr);
+        PayloadCalibration::evaluateSendGate(0.42, SG_COM, &csZ, nullptr,
+                                            PayloadCalibration::MASS_SOURCE_MEASURED);
     CHECK(g.verdict == PayloadCalibration::SEND_NO_CZ_ROBOT);
     CHECK(g.verdict != PayloadCalibration::SEND_SIGN_NONE_IN_RANGE);
     CHECK(g.convention == 0);
+    PASS();
+}
+
+// =====================================================================================
+// ★ Task 8a-2: 候选构造 + "未实测 ⇒ 拒发" + 换帧措辞 + 与机械臂当前值的逐分量比对。
+//
+// 为什么这三件事也要在这里钉住: 它们是【纯逻辑】(没有 socket、不读全局状态), 而 8a 交付时
+// 它们一个都不存在 —— 'p' 发的是 effective() (= 上次落盘值/种子), 发不出本次标定的结果。
+// 本节的用例把"候选只能来自本次实测"这条规矩变成可执行的断言, 而不是注释里的承诺。
+// =====================================================================================
+
+// 【未实测 ⇒ 拒发】—— 判据必须【独立于】量级闸: "数看着合理但来路不对"与"数不合理"是
+// 两件事, 处置也不同 (前者去查标定为什么没跑, 后者去查装夹)。
+static void test_send_gate_refuses_unmeasured_mass_and_says_so() {
+    TEST(send_gate_refuses_unmeasured_mass_and_says_so);
+    const double csZ = +SG_CS_Z;
+    // 0.66 kg 正是 Config 的种子值 (CAD 猜的, 本项目已判定不可用)。它【量级上过闸2】——
+    // 下面那一条断言就是钉住这一点: 拒的理由只能是【来源】, 不许是量级。
+    PayloadCalibration::SendGate g =
+        PayloadCalibration::evaluateSendGate(0.66, SG_COM, &csZ, &SG_CZ_ROB,
+                                            PayloadCalibration::MASS_SOURCE_SEED);
+    CHECK(g.verdict == PayloadCalibration::SEND_NOT_MEASURED);
+    CHECK(g.verdict != PayloadCalibration::SEND_MASS_OUT_OF_RANGE);   // 不许并进量级闸
+    CHECK(g.massOk);                                                  // 量级确实是过的
+    CHECK(g.verdict != PayloadCalibration::SEND_OK);                  // 更不许放行
+    PASS();
+}
+
+// 【约定二 + cz_robot 为负】—— 这条路径以前【没有用例走过】(两支都在内的模糊用例与
+// 都在外的用例都停在 convention = 0, 从不选约定二且 czSign = −1)。
+//   c_s_z = +55.556 (正), cz_robot = −40 (负):
+//     d同向 = −40 − 55.556 = −95.556 (在范围外)
+//     d反向 = −40 + 55.556 = +15.556 (在范围内)  -> 约定二胜出
+//   选中的那支 c_s_z = −55.556 -> czSign = −1 -> 候选的 cz 【是负的】。
+static void test_send_gate_convention_two_wins_with_negative_cz_robot() {
+    TEST(send_gate_convention_two_wins_with_negative_cz_robot);
+    const double csZ = +SG_CS_Z;
+    const double czRobNeg = -40.0;
+    const double comNegZ[3] = {0.3, -0.1, -40.0};    // 与 cz_robot 一致 (生产路径就是这么传的)
+    PayloadCalibration::SendGate g =
+        PayloadCalibration::evaluateSendGate(0.42, comNegZ, &csZ, &czRobNeg,
+                                            PayloadCalibration::MASS_SOURCE_MEASURED);
+    CHECK(g.verdict == PayloadCalibration::SEND_OK);
+    CHECK(g.convention == 2);
+    CHECK(g.czSign == -1.0);
+    CHECK(!g.dSameIn && g.dFlipIn);
+    CHECK(g.comMm[2] < 0.0);                          // cz 是负的
+    CHECK(nearRefAbs(g.comMm[2], -40.0));
+    CHECK(nearRefAbs(g.comMm[0], +0.3));              // 横向分量仍【不动】
+    CHECK(nearRefAbs(g.comMm[1], -0.1));
+    PASS();
+}
+
+// ★ 【全项目唯一会改 c 的那条路】: |cz_robot| < 31.5 时, cz 的号会被闸1翻过来。
+//   推导: 胜出的那支 d 满足 selected_c_s_z = cz_robot − d (d ∈ (0, 31.5)), 而候选的
+//   cz = sign(选中的 c_s_z)·|cz_robot|。所以 |cz_robot| > 31.5 时号【必然不变】;
+//   要翻号, 必须有 cz_robot ∈ (0, 31.5) 且胜出的 d > cz_robot。
+//   例: cz_robot = +10, c_s_z = −10 -> d同向 = 20 (在内) / d反向 = 0 (开区间, 不在内)
+//       -> 约定一胜出, 选中的 c_s_z = −10 -> czSign = −1 -> 候选 cz 由 +10 翻成 −10。
+static void test_send_gate_small_positive_cz_robot_flips_the_sign() {
+    TEST(send_gate_small_positive_cz_robot_flips_the_sign);
+    const double csZ = -10.0;
+    const double czRob = 10.0;
+    const double comPosZ[3] = {0.3, -0.1, 10.0};
+    PayloadCalibration::SendGate g =
+        PayloadCalibration::evaluateSendGate(0.42, comPosZ, &csZ, &czRob,
+                                            PayloadCalibration::MASS_SOURCE_MEASURED);
+    CHECK(g.verdict == PayloadCalibration::SEND_OK);
+    CHECK(g.convention == 1);
+    CHECK(g.czSign == -1.0);
+    CHECK(g.dSameIn && !g.dFlipIn);
+    CHECK(nearRefAbs(g.dSameDir, 20.0));
+    CHECK(nearRefAbs(g.comMm[2], -10.0));    // ★ 翻号: 机械臂当前是 +10, 发出的是 −10
+    CHECK(g.comMm[2] * czRob < 0.0);         // 与当前值异号 = 号被翻了
+    PASS();
+}
+
+// ---- 候选构造 (buildSendCandidate): "有没有候选"与"候选能不能发"是两层 ----
+
+static void test_build_send_candidate_normal_path() {
+    TEST(build_send_candidate_normal_path);
+    // 实机真值: 质量尺度取 2026-09-19 四次采集的 |c_s| 之一 (55.556 mm),
+    // 机械臂自报 (CenterX/Y/Z) = (0.3, −0.1, 68.700) -> d = 13.144 ∈ (0, 31.5) ✓
+    const double measuredM = 0.420847;   // Decomp::m (实机解出的质量尺度)
+    const double csZ = +55.556;
+    const double echoCenter[3] = {0.3, -0.1, 68.700};
+    PayloadCalibration::SendCandidate c = PayloadCalibration::buildSendCandidate(
+        &measuredM, &csZ, echoCenter);
+    CHECK(c.present);
+    CHECK(c.absent == PayloadCalibration::CAND_PRESENT);
+    CHECK(nearRefAbs(c.massKg, measuredM));              // m 就是【本次实测的】那一个
+    CHECK(c.gate.verdict == PayloadCalibration::SEND_OK);
+    CHECK(c.gate.convention == 1);
+    // c 三个分量都取自机械臂自报, 且 cz 按闸1 定的号 (这里 = 不翻)
+    CHECK(nearRefAbs(c.comMm[0], +0.3));
+    CHECK(nearRefAbs(c.comMm[1], -0.1));
+    CHECK(nearRefAbs(c.comMm[2], +68.700));
+    PASS();
+}
+
+static void test_build_send_candidate_without_measured_mass_has_none() {
+    TEST(build_send_candidate_without_measured_mass_has_none);
+    // 本次没解出质量尺度 (Decomp::m 不可用) -> 【没有候选】, 不是"候选 = 0"、更不是回退种子。
+    // ★ 这一条就是 8a 那个洞的封口: 从前这里会退回 effective() (= 种子值)。
+    const double csZ = +55.556;
+    const double echoCenter[3] = {0.3, -0.1, 68.700};
+    PayloadCalibration::SendCandidate c =
+        PayloadCalibration::buildSendCandidate(nullptr, &csZ, echoCenter);
+    CHECK(!c.present);
+    CHECK(c.absent == PayloadCalibration::CAND_NO_MEASURED_MASS);
+    CHECK(c.absent != PayloadCalibration::CAND_NO_PAYLOAD_ECHO);   // 归因不许糊
+    PASS();
+}
+
+static void test_build_send_candidate_without_echo_has_none() {
+    TEST(build_send_candidate_without_echo_has_none);
+    // 没回读到机械臂自报的 @1168/@1176 -> 【没有候选】。
+    // 【不许】退回本客户端自己下发的值当参照: 那条路带着 centerZ 折叠歧义。
+    const double measuredM = 0.420847;
+    const double csZ = +55.556;
+    PayloadCalibration::SendCandidate c =
+        PayloadCalibration::buildSendCandidate(&measuredM, &csZ, nullptr);
+    CHECK(!c.present);
+    CHECK(c.absent == PayloadCalibration::CAND_NO_PAYLOAD_ECHO);
+    CHECK(c.absent != PayloadCalibration::CAND_NO_MEASURED_MASS);
+    PASS();
+}
+
+// ---- 措辞 (§2): m 的标签【必须】说明它是"测量原点以下"的量, 且【紧接着】写明换帧差 ----
+static void test_send_candidate_mass_label_matches_brief_wording() {
+    TEST(send_candidate_mass_label_matches_brief_wording);
+    char buf[512];
+    PayloadCalibration::formatSendCandidateMassText(0.4208, buf, sizeof(buf));
+    const std::string t(buf);
+    // ① 标签逐字: "本次实测的质量尺度" + "传感器测量原点以下"
+    CHECK(t.find("本次实测的质量尺度") != std::string::npos);
+    CHECK(t.find("传感器测量原点以下") != std::string::npos);
+    // ② 【紧接着】要写明它与 EnableRobot 要的整条链【差了传感器机器人侧那一段, 量未定】
+    CHECK(t.find("整条链") != std::string::npos);
+    CHECK(t.find("量未定") != std::string::npos);
+    CHECK(t.find("0.4208") != std::string::npos);        // 数是填进去的, 不是写死的
+    // ③ 禁止措辞 (§2 明文): 它们会把这个量读成【已经换好帧】的
+    CHECK(t.find("标定结果") == std::string::npos);
+    CHECK(t.find("绝对负载") == std::string::npos);
+    CHECK(t.find("整条链质量") == std::string::npos);
+    PASS();
+}
+
+// ---- 与机械臂【当前值】的逐分量比对 (§3.5): 这一次到底改了什么 ----
+// 用 buildSendCandidate 造候选 (这样 diff 拿到的是【真会发出去的那一份】, 含 cz 的号)。
+static void test_send_candidate_diff_reports_unchanged_c_on_the_real_machine_case() {
+    TEST(send_candidate_diff_reports_unchanged_c_on_the_real_machine_case);
+    // 实机配置: 机械臂当前 @1168 Load = 0.404 kg, @1176 = (0.3, −0.1, 68.7), cz_robot = 68.7。
+    // |cz_robot| = 68.7 > 31.5 ⇒ 号翻不了 ⇒ 发出值与当前值【逐位相同】, 只改 m。
+    const double measuredM = 0.420847;
+    const double csZ = +55.556;
+    const double echoCenter[3] = {0.3, -0.1, 68.700};
+    PayloadCalibration::SendCandidate c =
+        PayloadCalibration::buildSendCandidate(&measuredM, &csZ, echoCenter);
+    CHECK(c.present);
+    PayloadCalibration::SendCandidateDiff df =
+        PayloadCalibration::diffSendCandidate(c, 0.404, echoCenter);
+    CHECK(df.cUnchanged);                       // c 未变
+    CHECK(!df.czSignFlipped);                   // 没翻号 -> 不是高危
+    CHECK(nearRefAbs(df.dc[0], 0.0) && nearRefAbs(df.dc[1], 0.0) && nearRefAbs(df.dc[2], 0.0));
+    CHECK(nearRefAbs(df.dm, measuredM - 0.404));  // 只改 m
+    char buf[512];
+    PayloadCalibration::formatSendCandidateDiffConclusion(df, buf, sizeof(buf));
+    const std::string t(buf);
+    CHECK(t.find("c 未变") != std::string::npos);
+    CHECK(t.find("高危") == std::string::npos);   // 没翻号就不许喊高危
+    PASS();
+}
+
+static void test_send_candidate_diff_flags_flipped_cz_as_high_risk() {
+    TEST(send_candidate_diff_flags_flipped_cz_as_high_risk);
+    // 翻号那一支 (见上面 test_send_gate_small_positive_cz_robot_flips_the_sign 的构造):
+    // 机械臂当前 CenterZ = +10, 闸1 把发出去的 cz 翻成 −10。量级上这是一次【巨大】的改动,
+    // 不是"只改 m", 所以结论行必须标【高危】。
+    const double measuredM = 0.420847;
+    const double csZ = -10.0;
+    const double echoCenter[3] = {0.3, -0.1, 10.0};
+    PayloadCalibration::SendCandidate c =
+        PayloadCalibration::buildSendCandidate(&measuredM, &csZ, echoCenter);
+    CHECK(c.present);
+    CHECK(nearRefAbs(c.comMm[2], -10.0));       // 发出的是 −10 (当前是 +10)
+    PayloadCalibration::SendCandidateDiff df =
+        PayloadCalibration::diffSendCandidate(c, 0.404, echoCenter);
+    CHECK(df.czSignFlipped);                    // ★ 号被翻
+    CHECK(!df.cUnchanged);                      // c 已变
+    CHECK(nearRefAbs(df.dc[2], -20.0));         // 逐分量差 = −10 − (+10)
+    char buf[512];
+    PayloadCalibration::formatSendCandidateDiffConclusion(df, buf, sizeof(buf));
+    const std::string t(buf);
+    CHECK(t.find("高危") != std::string::npos);
+    CHECK(t.find("c 已变") != std::string::npos);
+    // ★ 翻号时【不许】再打"只改 m"这类措辞 (§3.5 第 2 条)
+    CHECK(t.find("只改 m") == std::string::npos);
     PASS();
 }
 
@@ -3582,9 +3794,22 @@ int main() {
     test_send_gate_interval_is_open_at_both_ends();
     test_send_gate_mass_bounds_are_inclusive();
     test_send_gate_mass_outside_bounds_is_refused();
-    test_send_gate_com_magnitude_bound_is_inclusive_at_500();
+    test_send_gate_com_magnitude_bound_is_exclusive_at_500();
     test_send_gate_refuses_without_cs_and_says_so();
     test_send_gate_refuses_without_cz_robot_and_says_so();
+
+    // ★★ Task 8a-2: 候选构造 / 来源判据 / 措辞 / 与当前值的比对。8a 交付时 'p' 发的是
+    //   effective() (= 上次落盘值或种子), 发不出本次标定的结果 —— 这一节就是那条断路。
+    std::cout << "--- Task 8a-2: candidate construction + provenance + wording ---" << std::endl;
+    test_send_gate_refuses_unmeasured_mass_and_says_so();
+    test_send_gate_convention_two_wins_with_negative_cz_robot();
+    test_send_gate_small_positive_cz_robot_flips_the_sign();
+    test_build_send_candidate_normal_path();
+    test_build_send_candidate_without_measured_mass_has_none();
+    test_build_send_candidate_without_echo_has_none();
+    test_send_candidate_mass_label_matches_brief_wording();
+    test_send_candidate_diff_reports_unchanged_c_on_the_real_machine_case();
+    test_send_candidate_diff_flags_flipped_cz_as_high_risk();
 
     std::cout << "\n" << g_passed << " passed, " << g_failed << " failed" << std::endl;
     return g_failed ? 1 : 0;

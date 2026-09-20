@@ -432,32 +432,55 @@ namespace PayloadCalibration {
     //   cz_robot 取 @1176 CenterZ (机械臂自报)。取不到就报"不可用"并不放行 —— 【不许退回
     //   自己下发的值】当参照: 那条路带着 centerZ 折叠歧义 (见 main.cpp 里那段警告)。
     //   两支 d 的算法【只有一份】: 调 SessionReport::payloadDValues (文档块那一节用的是同一个)。
+    //   ⚠【本次配置下它验证不了 cz 本身】(brief §3.3): 本次发给机械臂的 cz 就取自 cz_robot,
+    //     所以这条闸此时只能做两件事 —— (a) 给 cz 定符号约定, (b) 挡住明显不自洽的 c_s。
+    //     它【抓不出 cz_robot 本身是错的】—— 那正是 Task 9 记下的"那是一次一致性检验, 不是
+    //     证明"。⇒ 闸1 过了 ≠ cz 是对的。
     //
-    // 闸 2 (量级): m ∈ [0.2, 1.5] kg 且 |c| ≤ 500 mm —— 两端都含 (见下面三个常量的说明)。
+    // 闸 2 (量级): m ∈ [0.2, 1.5] kg (两端【含】) 且 |c| < 500 mm (【不含】500)。
     //
     // ⚠ 这三个数【公开在这里】是给打印端引用的: 提示文字里再抄一遍 0.2 / 1.5 / 500, 就是三个
     //   会在改判据时撒谎的第二来源 (本项目反复栽在"同一个量两个实现/两处文字"上)。
-    //   两端都【含】是照 brief §3 的验收用例表定的 (用例 6: m 在 0.2 / 1.5 两个边界上要放行;
-    //   用例 8: |c| = 500 要放行、501 才不放行)。操作单 §6 闸 2 的原文写的是 "`|c| < 500 mm`"
-    //   —— 两者只在【恰好 500.0】这一个点上不同, 这里以 brief 的验收用例为准并记下这个口径差。
+    //   · m 的两端【含】: 操作单 §6 闸2 的原文是 "m 在 0.2~1.5 kg" (区间记法, 没写不等号),
+    //     全仓库没有第二处与它冲突 ⇒ 保持含 (用例 test_send_gate_mass_bounds_are_inclusive)。
+    //   · |c| 的 500 【不含】—— 【以操作单原文为准】: 它逐字写的是 "|c| < 500 mm", 而用户
+    //     2026-09-20 裁定了这条口径分歧: 规格优先, 取严格小于。8a 当时按 brief 的验收用例表
+    //     实现成了含 (<=), 那【一个点】已按裁定改掉
+    //     (用例 test_send_gate_com_magnitude_bound_is_exclusive_at_500: 500 拒、499.999 放)。
     //
-    // 判决次序 = 上面这个次序 (先"c_s 有没有"、再"cz_robot 有没有"、再符号、再量级):
-    // "没数据"与"数据在但定不了号"是完全不同的两件事, 处置也不同, 所以不可用的两种情形
-    // 各有自己的判决值, 不会被并进"符号不对"。
-    // 【无论判决如何, 两道闸的数都会算出来填进 out】—— 打印端要把两道的判读结果都摆出来,
-    // 不能因为前一道没过就不打后一道。
+    // 判决次序 (8a-2 在闸1 前面插了"来源"这一条, 完整次序见下面那张表):
+    // "来路不对" / "没数据" / "数据在但定不了号" 是三件完全不同的事, 处置也不同, 所以各有
+    // 自己的判决值, 谁都不会被并进别人那一支。
+    // 【判决的次序, 以及由此而来的"哪些数字填了"】—— 打印端【必须】按这个次序读:
+    //   ① 来源判据 (SEND_NOT_MEASURED) 最先, ② 闸 1 的数据可用性 (SEND_NO_CS /
+    //   SEND_NO_CZ_ROBOT), ③ 闸 1 的符号约定, ④ 闸 2 的量级。
+    //   ⇒ 闸 2 的两个数 (mass, comMagMm) 在【任何】判决下都填好了;
+    //     闸 1 的两个 d 与 convention / czSign 只在走到 ③ 之后才填 —— ①② 返回时它们【还是
+    //     结构体的初值 0】。0 在这里是【没有算过】, 不是"d = 0"、"没选中约定" (本项目的
+    //     logCalibAttempt 记 "-" 是同一个考虑): 要打这两支 d, 必须先自己判 verdict。
+    // 原始的那一条约束仍然成立: 【闸 1 没过不许把闸 2 的数藏起来】—— 所以闸 2 先算、后判。
     static const double SEND_GATE_MASS_MIN_KG = 0.2;
     static const double SEND_GATE_MASS_MAX_KG = 1.5;
     static const double SEND_GATE_COM_MAX_MM  = 500.0;
 
     enum SendGateVerdict {
         SEND_OK = 0,                 // 两道闸都过 -> 候选可发送
+        SEND_NOT_MEASURED,           // 质量尺度【不是本次实测的】(种子值 / 落盘旧值) -> 拒发
         SEND_NO_CS,                  // 本次没解出 c_s -> 闸 1 无从判定
         SEND_NO_CZ_ROBOT,            // 取不到 cz_robot (@1176) -> 闸 1 无从判定
         SEND_SIGN_AMBIGUOUS,         // 两种符号约定【都】落在 (0, 31.5) mm
         SEND_SIGN_NONE_IN_RANGE,     // 两种符号约定【都】不在 (0, 31.5) mm
         SEND_MASS_OUT_OF_RANGE,      // 闸 2: m 不在 [0.2, 1.5] kg
-        SEND_COM_OUT_OF_RANGE        // 闸 2: |c| 超过 500 mm
+        SEND_COM_OUT_OF_RANGE        // 闸 2: |c| >= 500 mm (严格小于才放行)
+    };
+
+    // 候选的质量尺度【从哪来】(Task 8a-2)。这个参数【没有默认值】, 调用方必须明写 ——
+    // 默认成"实测"就是一条"安静地发种子值"的路, 而本任务要堵的正是它。
+    // 为什么它必须是【判决值】而不是并进 SEND_MASS_OUT_OF_RANGE: "数看着合理但来路不对"
+    // (去查"标定为什么没跑") 与 "数不合理" (去查装夹/姿态) 是两件事, 处置完全不同。
+    enum SendMassSource {
+        MASS_SOURCE_SEED = 0,        // Config 的种子值 / payload_calib.json 的旧值 —— 未实测
+        MASS_SOURCE_MEASURED         // 本次实测的质量尺度 (Decomp::m) —— 唯一可发的来源
     };
 
     struct SendGate {
@@ -474,8 +497,88 @@ namespace PayloadCalibration {
         double comMm[3];
     };
 
-    // csZmm     = 本次解出的 c_s 沿工具轴分量 (mm); nullptr = 本次没解出 c_s
-    // czRobotMm = 机械臂自报的 CenterZ (mm, @1176); nullptr = 取不到 (还没回读到负载)
+    // csZmm      = 本次解出的 c_s 沿工具轴分量 (mm); nullptr = 本次没解出 c_s
+    // czRobotMm  = 机械臂自报的 CenterZ (mm, @1176); nullptr = 取不到 (还没回读到负载)
+    // massSource = 这个 massKg 是【从哪来的】—— 只有 MASS_SOURCE_MEASURED 才可能放行
+    //              (Task 8a-2; 见 SendMassSource 的说明)。这个参数【不许有默认值】。
     SendGate evaluateSendGate(double massKg, const double comMm[3],
-                              const double* csZmm, const double* czRobotMm);
+                              const double* csZmm, const double* czRobotMm,
+                              SendMassSource massSource);
+
+    // ===== Task 8a-2: 下发候选 = 【活路径本次实测出来的那一份】 =====
+    //
+    // 为什么要有这一层 (8a 交付时发现的断链): 8a 的候选取自 PayloadCalibration::effective(),
+    // 而让 effective() 跟着本次求解结果变的那几个调用 (applyResult / save / setMassCom)
+    // 【只存在于 #if 0 块里】(已停用的旧 ψ 模型)。所以活路径按 's' 求解成功后, effective()
+    // 仍是 payload_calib.json 的旧值或 Config 种子 —— 'p' 发出去的是【机械臂现在就有】的那
+    // 一份 (等于没改), 或者一份 CAD 猜的种子。两条都不是"把标定结果发出去"。
+    //
+    // 活路径手里其实有料, 只是没人拼成候选:
+    //   m    = PayloadCalibration::Decomp::m       (本次实测的质量尺度)
+    //   c    = 机械臂【自报】的 @1176 CenterX/Y/Z   (不是算出来的)
+    // 本结构就是那个拼装, 而且是【纯逻辑】(不读全局状态、不碰 socket) ⇒ 可以单测。
+    //
+    // ⚠ 换帧的事实【必须如实标注, 不许抹平】(brief §2): 上面那个 m 是【传感器测量原点
+    //   以下】那一截的质量, 而 EnableRobot 的 load 槽位要的是【挂在法兰上的整条链】。
+    //   两者差了传感器机器人侧那一段, 而【量未定】(Task 9 只为 Z 分量解决了换帧:
+    //   cz = d + c_s, d 吸收转接法兰 + 传感器内部偏移; 质量没有对应的 d)。
+    //   ⇒ 本次发出的 m 是"把一个测量原点以下的量代入整条链的槽位", 这是一次【已知、量未定】
+    //     的换帧代入, 而 Task 10 的闭环才是迭代它的仪器。措辞由 formatSendCandidateMassText
+    //     统一给出 (只此一份), 【禁止】出现"标定结果 / 绝对负载 / 整条链质量"。
+    enum SendCandidateAbsent {
+        CAND_PRESENT = 0,            // 有候选
+        CAND_NO_MEASURED_MASS,       // 本次没有实测的质量尺度 (Decomp::m 不可用) -> 无候选
+        CAND_NO_PAYLOAD_ECHO         // 没回读到机械臂自报负载 (@1168/@1176) -> 无候选
+    };
+
+    struct SendCandidate {
+        bool present;                // false = 【没有候选】(不是"候选 = 0", 也没有回退值)
+        SendCandidateAbsent absent;  // present == false 时: 为什么没有 (归因不许糊)
+        double massKg;               // = Decomp::m (本次实测)
+        double comMm[3];             // = 机械臂自报的 CenterX/Y/Z, 且 cz 已按闸1 定的号
+        SendGate gate;               // 两道闸 + 来源判据的判决
+    };
+
+    // measuredMassKg : Decomp::m 的地址; nullptr = 本次没有实测的质量尺度
+    // csZmm          : 本次解出的 c_s_z 的地址; nullptr = 没解出
+    // echoCenterMm   : 机械臂自报的 CenterX/Y/Z (mm) 的地址; nullptr = 没回读到
+    //                  ⚠ 【不许】传本客户端自己下发的值 —— 那条路带着 centerZ 折叠歧义。
+    SendCandidate buildSendCandidate(const double* measuredMassKg, const double* csZmm,
+                                     const double* echoCenterMm);
+
+    // 候选与机械臂【当前值】的逐分量比对 (brief §3.5): "这一次到底改了什么"必须能在按 'p'
+    // 之前看到。逐分量列出 发出值 − 当前值, 并给一句结论 (c 未变 / c 已变)。
+    //
+    // ⚠ 为什么要专门盯着 cz: 闸 1 的职责之一就是【给 cz 定符号】, 所以候选块是全项目唯一
+    //   会改 c 的地方。推导: 胜出那支的 d 满足 选中的 c_s_z = cz_robot − d (d ∈ (0, 31.5)),
+    //   而候选 cz = sign(选中的 c_s_z)·|cz_robot| —— 所以【|cz_robot| > 31.5 时号必然不变】,
+    //   要翻号必须有 cz_robot ∈ (0, 31.5) 且胜出的 d > cz_robot。
+    //   ⇒ 本机 cz_robot = 68.700 (> 31.5) 时翻不了号; 但代码不能依赖"这台机器恰好数值大"。
+    struct SendCandidateDiff {
+        double dm;                   // 发出 m − 机械臂当前 @1168 Load (kg)
+        double dc[3];                // 发出 c[i] − 机械臂当前 @1176 Center[i] (mm)
+        double candMassKg;           // 发出的 m (kg)
+        double candCenterMm[3];      // 发出的 c (mm, 【含】闸1 定的号)
+        double echoLoadKg;           // 机械臂当前 @1168 Load (kg)
+        double echoCenterMm[3];      // 机械臂当前 @1176 CenterX/Y/Z (mm)
+        bool   cUnchanged;           // c 的三个分量【逐个逐位】与当前值相同
+        bool   czSignFlipped;        // 发出的 cz 与当前 CenterZ 【异号】= 号被闸1 翻了
+    };
+    // 逐位比较 (不是"近似"): 候选的 cx/cy 是照抄自报值、cz = sign·|当前值|, 都不经过任何
+    // 重算 —— 所以"相同"就该是逐位相同。给容差等于把"其实动了"读成"没动"。
+    SendCandidateDiff diffSendCandidate(const SendCandidate& cand, double echoLoadKg,
+                                        const double echoCenterMm[3]);
+
+    // ---- 下面两个是【措辞的唯一一份实现】, 打印端不许自己写第二遍 ----
+    // (提示文字里抄一遍阈值/口径, 就是会在改判据时撒谎的第二来源 —— 本项目反复栽在这上面。)
+
+    // 候选 m 那一行的完整文本 (多行, 带换行符)。三条硬要求 (逐字):
+    //   ① 标签必须是"本次实测的质量尺度 (传感器测量原点以下)";
+    //   ② 【紧接着】写明它与 EnableRobot 要的【法兰上整条链】差了传感器机器人侧那一段, 量未定;
+    //   ③ 禁止出现"标定结果 / 绝对负载 / 整条链质量" —— 它们会把这个量读成已经换好帧的。
+    void formatSendCandidateMassText(double massKg, char* out, int len);
+
+    // §3.5 的结论行: c 未变 -> "本次只改 m"; c 已变 -> 逐分量见上; 【翻号 -> 标高危】,
+    // 而且那时【不许】再说"只改 m"(量级上它是一次巨大的负载改动, 不是最小改动)。
+    void formatSendCandidateDiffConclusion(const SendCandidateDiff& diff, char* out, int len);
 }
