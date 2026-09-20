@@ -261,6 +261,38 @@ static void setGuardState(ForceCompensation::GuardState st) {
     }
     g_guardReportMs = now;
 
+    // 【复报只打一行】(2026-09-20)。全表只在【状态跃迁】时打。
+    // 为什么: 拒绝是常态, 每 5 s 一次那 9 行解释 + 6 行表 + 姿态行会把控制台全冲掉 ——
+    //   而现场要读的恰恰是【别的】输出: 's' 的那一屏、'p' 的确认提示、'y' 的逐条回执。
+    //   实测代价 (2026-09-20 现场): 因为这条复报, 操作员【看不到 'p' 打了什么】, 于是
+    //   无法判定"发送被拒"与"按键根本没收到" —— 一套诊断被彻底淹没。
+    //   这与刚被取消的 UNCALIBRATED 复报是【同一个病】: 复报的内容与上次逐字相同。
+    // 复报仍然出声 (拒绝没变这件事还得让人看见), 只是不再重抄整块; 哪几个通道超限直接
+    //   写在那一行里 —— 那正是复报该带的唯一增量。
+    // (走到这里且 !changed 只可能是 INCONSISTENT: !changed && uncal 在上面已经 return 了。)
+    static const char* NM[6] = { "Fx(N)", "Fy(N)", "Fz(N)", "Mx(Nm)", "My(Nm)", "Mz(Nm)" };
+    if (!changed) {
+        char line[320];
+        int off = snprintf(line, sizeof(line), "[Force] !! (复报) 一致性闸门仍在拒绝:");
+        // ⚠ snprintf 可以返回负值; 若不管, 下面 sizeof(line) - (size_t)off 会回绕成一个
+        //   巨大 size_t —— 那是典型的缓冲区溢出写法。夹到 0。
+        if (off < 0) off = 0;
+        for (int i = 0; i < 6; i++) {
+            const bool ex = g_guardVote[i] && (g_guardTol[i] > 0.0)
+                         && (fabs(g_guardEma[i]) > g_guardTol[i]);
+            if (!ex) continue;
+            if ((size_t)off + 32 >= sizeof(line)) break;   // 余量不足就停, 不越界
+            const int w = snprintf(line + off, sizeof(line) - (size_t)off, " %s%+.3f>%.2f",
+                                   NM[i], g_guardEma[i], g_guardTol[i]);
+            if (w > 0) off += w;
+        }
+        if ((size_t)off < sizeof(line))
+            snprintf(line + off, sizeof(line) - (size_t)off, "   (全表只在状态变化时打)\n");
+        fprintf(stderr, "%s", line);
+        fflush(stderr);
+        return;
+    }
+
     // 输出一律走 stderr —— 与 ForceCalibration 的"响亮地说出来"同一条路; stdout 有缓冲,
     // 混着打会让这段在最需要它的时候缺半截。
     fprintf(stderr,
@@ -290,7 +322,6 @@ static void setGuardState(ForceCompensation::GuardState st) {
         fprintf(stderr, "[Force] !! 本帧姿态: 【没有】—— 这一段不是由某一帧触发的"
                         " (例如装载/拒收路径), 所以没有姿态可报。\n");
     }
-    static const char* NM[6] = { "Fx(N)", "Fy(N)", "Fz(N)", "Mx(Nm)", "My(Nm)", "Mz(Nm)" };
     if (uncal) {
         // 没有模型时【不打逐通道表】: 那时 compensated 恒为 0, 印出来会是"六个通道全在限内",
         // 而"在限内"在这里没有意义 —— 那是把"没比过"说成"比过了且没问题"。
