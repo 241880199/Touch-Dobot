@@ -90,9 +90,10 @@ static DWORD WINAPI forceReaderThread(LPVOID) {
                                && fabs(echo[1]) <= 500.0 && fabs(echo[2]) <= 500.0
                                && fabs(echo[3]) <= 500.0;
                 if (sane) {
-                    // 落进 ForceData: 求解负载时的【基线】用 (main.cpp 的 solveAndApply 与
-                    // 下发候选那一屏)。存机械臂自报的值而非我们下发的值 —— 要的是"它实际在用
-                    // 哪个"。读方持 forceDataMutex 读 (契约不变)。
+                    // 落进 ForceData: 【下发候选】用 —— main.cpp 的 solveAndApply 拿它当闸 1 的
+                    // 外部锚点 (cz_robot), 并与它做"这一次改了哪些"的逐分量比对; 标定报告块
+                    // (diagPayloadSection) 也读它。存机械臂自报的值而非我们下发的值 —— 要的是
+                    // "它实际在用哪个"。读方持 forceDataMutex 读 (契约不变)。
                     EnterCriticalSection(&app.forceDataMutex);
                     app.forceData.payloadEchoLoadKg = echo[0];
                     for (int i = 0; i < 3; i++) {
@@ -105,16 +106,24 @@ static DWORD WINAPI forceReaderThread(LPVOID) {
                         loadEchoDiagPrinted = true;
                         double mWant, cWant[3];
                         PayloadCalibration::effective(mWant, cWant);
+                        // ⚠ 【本行是首个合格帧的快照, 不是实时值】: 上面那个 static 开关只放行
+                        //   一帧, 之后不再重打; 而机械臂自报的负载会随 'p' 的下发变。报告块与候选
+                        //   屏取的是【每帧刷新】的那组字段, 所以发送成功之后两处的数会不同 ——
+                        //   那是"快照 vs 当前", 【不是】"发送没生效"。措辞里明写这一点。
                         char msg[192];
                         snprintf(msg, sizeof(msg),
-                                 "[Relay] 机械臂实际负载: load=%.3f kg  center=(%.1f, %.1f, %.1f) mm",
+                                 "[Relay] 机械臂实际负载 (【首个合格帧】的快照):"
+                                 " load=%.3f kg  center=(%.1f, %.1f, %.1f) mm",
                                  echo[0], echo[1], echo[2], echo[3]);
                         if (fabs(echo[0] - mWant) > 0.01 || fabs(echo[3] - cWant[2]) > 1.0) {
                             std::cout << msg << "\n[Relay] · 与客户端的 "
                                       << mWant << " kg / (" << cWant[0] << "," << cWant[1] << ","
-                                      << cWant[2] << ") mm 不一致 — 负载只在连接时下发, 运行中"
-                                      << "【不】改 (改负载会让机械臂动), 所以对不上是常见情形"
+                                      << cWant[2] << ") mm 不一致"
+                                      << " —— 本行只描述【那一帧】, 与此刻的差值无关:"
+                                      << " 机械臂在用的负载会被 'p' 的下发改掉, 而这一行不会再打。"
                                       << std::endl;
+                            std::cout << "[Relay]   要看【当前】的读数: 用每帧刷新的回读字段"
+                                      << " (标定报告块与下发候选那一屏取的就是它)" << std::endl;
                             std::cout << "[Relay]   重力/惯性补偿由 ForceCompensation 在本地做"
                                       << " (差值来源尚未查清, 见上方注释)" << std::endl;
                         } else {
@@ -194,12 +203,25 @@ static bool s_sentPayloadValid = false;
 static double s_sentPayloadMassKg = 0.0;
 static double s_sentPayloadComMm[3] = {0.0, 0.0, 0.0};
 
+// ===== 负载下发命令的文本: 全程序【唯一】的拼法 (Task 8a-3, 声明见 RelayCore.h) =====
+// 【发送侧与确认屏都调这里】。从前这条格式串在本文件里有两份、main.cpp 的确认预览里还有
+// 第三份 —— 三份逐字一致是【人工维持】的, 而"人确认的文本"与"发出去的字节"一旦分家,
+// 屏幕就会让人确认另一条命令。抽成一处之后, 确认屏摆出来的就是发送侧要写进 socket 的那一份。
+void RelayCore::formatPayloadEnableCommand(double massKg, const double comMm[3],
+                                           char* out, int n) {
+    snprintf(out, n, "EnableRobot(%.3f,%.1f,%.1f,%.1f)",
+             massKg, comMm[0], comMm[1], comMm[2]);
+}
+
+const char* RelayCore::payloadLoadSwitchCommand() { return "LoadSwitch(1)"; }
+
 // 参数化的发送器: 负载是入参, 不在这里隐式读全局生效值。
 // note 仅供日志标注 (可为 nullptr), 不影响下发内容。
 static bool sendEnableRobotWithPayload(double massKg, const double com[3],
                                        const char* note = nullptr) {
     char cmd[96];
-    snprintf(cmd, sizeof(cmd), "EnableRobot(%.3f,%.1f,%.1f,%.1f)", massKg, com[0], com[1], com[2]);
+    // 文本取自上面那个 formatter —— 连接时序与运行时下发拼的是同一条命令 (不再各拼一次)。
+    RelayCore::formatPayloadEnableCommand(massKg, com, cmd, sizeof(cmd));
     std::cout << "[Relay] 使能 " << cmd;
     if (note) std::cout << "  (" << note << ")";
     std::cout << std::endl;
@@ -271,15 +293,15 @@ static bool sendPayloadCommands(double massKg, const double comMm[3]) {
     char cmd[96];
     char fb[256];
 
-    // 格式串与 sendEnableRobotWithPayload 的【逐字一致】—— 同一个命令不该有两个拼法。
-    snprintf(cmd, sizeof(cmd), "EnableRobot(%.3f,%.1f,%.1f,%.1f)",
-             massKg, comMm[0], comMm[1], comMm[2]);
+    // 文本取自 RelayCore::formatPayloadEnableCommand —— 全程序【唯一】的拼法 (见它的说明)。
+    // 确认屏 (main.cpp 的发送键) 摆出来的也是它, 所以人确认的就是下面写进 socket 的这一份。
+    RelayCore::formatPayloadEnableCommand(massKg, comMm, cmd, sizeof(cmd));
     std::cout << "[Relay] 负载下发 1/2: " << cmd << std::endl;
     robotDrainEnable();
     // ⚠ 【发送侧】的返回值也要看 (全文复审 Minor 4): robotSendEnable 返回 false = 这条命令
-    //   根本没写进 socket, 与"发出去了但机械臂没回执"是两件事, 而本函数的验收判据就是
-    //   控制台必须【分得清哪一条失败】以及失败在哪一步。从前这里丢弃返回值, 于是发送侧
-    //   的失败被报成"无回执, 超时" —— 那句话把人支去查机械臂, 而问题在链路。
+    //   没能【完整】写进 socket (部分写也算 false), 与"发出去了但机械臂没回执"是两件事, 而
+    //   本函数的验收判据就是控制台必须【分得清哪一条失败】以及失败在哪一步。从前这里丢弃
+    //   返回值, 于是发送侧的失败被报成"无回执, 超时" —— 那句话把人支去查机械臂, 而问题在链路。
     const bool sentEnable = robotSendEnable(cmd);
     bool gotEnable = false;
     fb[0] = '\0';
@@ -289,14 +311,14 @@ static bool sendPayloadCommands(double massKg, const double comMm[3]) {
     }
     const bool okEnable = gotEnable && FeedbackParser::isSuccess(fb);
     std::cout << "[Relay]   回执: "
-              << (!sentEnable ? "(发送失败 — 命令没能写进 socket)"
+              << (!sentEnable ? "(发送失败 — 命令没能完整写进 socket)"
                               : (gotEnable ? fb : "(无回执, 超时)"))
               << (sentEnable && gotEnable && !okEnable ? "  ← 机械臂拒绝 (ErrorID != 0)" : "")
               << std::endl;
 
-    std::cout << "[Relay] 负载下发 2/2: LoadSwitch(1)" << std::endl;
+    std::cout << "[Relay] 负载下发 2/2: " << RelayCore::payloadLoadSwitchCommand() << std::endl;
     robotDrainEnable();
-    const bool sentLoadSwitch = robotSendEnable("LoadSwitch(1)");
+    const bool sentLoadSwitch = robotSendEnable(RelayCore::payloadLoadSwitchCommand());
     bool gotLoadSwitch = false;
     fb[0] = '\0';
     if (sentLoadSwitch) {
@@ -305,7 +327,7 @@ static bool sendPayloadCommands(double massKg, const double comMm[3]) {
     }
     const bool okLoadSwitch = gotLoadSwitch && FeedbackParser::isSuccess(fb);
     std::cout << "[Relay]   回执: "
-              << (!sentLoadSwitch ? "(发送失败 — 命令没能写进 socket)"
+              << (!sentLoadSwitch ? "(发送失败 — 命令没能完整写进 socket)"
                                   : (gotLoadSwitch ? fb : "(无回执, 超时)"))
               << (sentLoadSwitch && gotLoadSwitch && !okLoadSwitch
                       ? "  ← 机械臂拒绝 (ErrorID != 0)" : "")
@@ -316,12 +338,15 @@ static bool sendPayloadCommands(double massKg, const double comMm[3]) {
     } else {
         std::cout << "[Relay] !! 负载下发【未完成】: 失败的条目 =";
         if (!okEnable)     std::cout << " EnableRobot";
-        if (!okLoadSwitch) std::cout << " LoadSwitch(1)";
+        if (!okLoadSwitch) std::cout << " " << RelayCore::payloadLoadSwitchCommand();
         std::cout << " —— 两条只成了一部分, 机械臂此刻的负载参数【不要】当作已更新";
         // 再点一句【失败在哪一步】: 上面逐条的回执行已经说了, 这里汇总一句免得滚掉之后
         // 只剩"未完成"三个字 (发送侧的失败与机械臂拒绝的处置不同: 前者查链路, 后者查命令)。
-        if (!sentEnable || !sentLoadSwitch) std::cout << " (其中有【发送失败】的条目: 命令没写进"
-                                                         " socket, 不是机械臂拒绝)";
+        // ⚠ 措辞是"没能【完整】写进 socket": sendToSocket (robot/RobotConnection.cpp) 的
+        //   判据是"send 的返回值 == strlen", 所以【部分写】同样返回 false —— 而那一次 send
+        //   已经接受了前几个字节。说成"没写进"是说过头, 会把人支去按"什么都没发生"处置。
+        if (!sentEnable || !sentLoadSwitch) std::cout << " (其中有【发送失败】的条目: 命令没能"
+                                                         "完整写进 socket, 不是机械臂拒绝)";
         std::cout << std::endl;
     }
     return okEnable && okLoadSwitch;

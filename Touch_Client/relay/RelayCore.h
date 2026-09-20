@@ -62,6 +62,18 @@ public:
     //   'p' 摆出提示之后还要再按确认键才调到这里)。本函数只负责"发"。
     bool sendPayloadToRobot(double massKg, const double comMm[3]);
 
+    // ===== 负载下发的命令文本 (Task 8a-3): 全程序【唯一】的拼法 =====
+    // 发送侧 (RelayCore.cpp 的 sendPayloadCommands) 与【确认屏】(main.cpp 的发送键: 那一次
+    // 要发什么的预览) 都取自这里。屏幕上摆出来给人确认的两条文本, 就是发送侧要写进 socket
+    // 的那两条 —— "确认"确认的正是要发给真实机械臂的东西, 所以它不能是第二处拼法:
+    // 格式串或参数顺序一改, 屏幕就会让人确认另一条命令。
+    //   · 第 1 条 EnableRobot(m, cx, cy, cz) —— comMm 是质心 (mm, 法兰系)。
+    //   · 第 2 条 LoadSwitch(1) —— 无参数 (文本里唯一的变数是那个 0/1)。
+    // 出处与顺序见 RelayCore.cpp 里 sendPayloadCommands 顶上那段。
+    static void formatPayloadEnableCommand(double massKg, const double comMm[3],
+                                           char* out, int n);
+    static const char* payloadLoadSwitchCommand();
+
     // 扩展
     void registerExtension(IExtension* ext);
 

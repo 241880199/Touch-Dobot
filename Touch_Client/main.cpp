@@ -200,7 +200,15 @@ namespace BiasCheck {
         // 【已经被丢弃的】数据解出来的。留着它, 'p' 会在"我刚重开采集"之后发出一份旧值。
         s_sendCandidateValid = false;
         // 挂着的发送确认一并撤销 (与候选作废同源: 它确认的是上一批数据解出来的那一份)。
-        s_awaitingSendConfirm = false;
+        // ⚠ 【必须出声】, 与 cancelSendConfirm 是同一条规矩: 这是一份"正要向机械臂下发"的
+        //   状态, 静默抹掉它, 操作员按确认键会【什么都不发生】—— 那正是本项目最忌讳的
+        //   "安静地不一致"。今天走不到这里 (确认提示挂着时, 键盘处理在所有其他键之前就把它
+        //   取消掉了, 根本进不到会调 reset() 的那些键), 但可达性是会变的。
+        if (s_awaitingSendConfirm) {
+            s_awaitingSendConfirm = false;
+            std::cout << "[下发] ✗ 发送确认已随采集重开一起取消 —— 本次【什么都没有发出去】。"
+                      << std::endl;
+        }
         for (int i = 0; i < 6; i++) {
             accum[i] = 0.0; accumTcp[i] = 0.0; accumSix[i] = 0.0;
             accumSq[i] = 0.0; accumTcpSq[i] = 0.0; accumSixSq[i] = 0.0;
@@ -2200,16 +2208,16 @@ namespace BiasCheck {
                   << "（1.5 kg 那次撞向关节限位）" << std::endl;
         std::cout << "[下发] 本次下发: EnableRobot(m, cx, cy, cz) + LoadSwitch(1) —— "
                   << "顺序取自设计 §6b 的清单, 文档未说明其必要性" << std::endl;
-        // 把这一次要发的东西【逐字】摆出来 (与 sendPayloadCommands 里拼命令用的是同一组数;
-        // 精度也取同一档) —— 确认键确认的就是这一行。
+        // 把这一次要发的东西【逐字】摆出来 —— 两条文本都取自 RelayCore 的那两个 formatter
+        // (formatPayloadEnableCommand / payloadLoadSwitchCommand), 也就是 sendPayloadCommands
+        // 要写进 socket 的那两条。从前这里是第二处拼法 (格式串 + LoadSwitch(1) 各重写一遍),
+        // 发送侧一改, 屏幕就会让人确认【另一条】命令 —— 而确认的正是要发给实机的东西。
         {
             char willSend[192];
-            snprintf(willSend, sizeof(willSend),
-                     "EnableRobot(%.3f,%.1f,%.1f,%.1f)",
-                     s_sendCandidate.massKg, s_sendCandidate.comMm[0],
-                     s_sendCandidate.comMm[1], s_sendCandidate.comMm[2]);
+            RelayCore::formatPayloadEnableCommand(s_sendCandidate.massKg, s_sendCandidate.comMm,
+                                                  willSend, sizeof(willSend));
             std::cout << "[下发] 这一次真正要发的命令: " << willSend
-                      << "  +  LoadSwitch(1)" << std::endl;
+                      << "  +  " << RelayCore::payloadLoadSwitchCommand() << std::endl;
         }
         // 照抄下来, 确认时发的就是这一份 (见 s_confirmCandidate 的说明)。
         s_confirmCandidate = s_sendCandidate;

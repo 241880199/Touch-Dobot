@@ -815,3 +815,122 @@ BUILD_EXIT=0
    之后才看得到 —— 本波离线跑不出来, 与 8b §4.3 同因。
 2. I1 的活刷新在**真机**上的样子: 发一条 `'p'` 之后, 下一次 `'s'` 的"与机械臂【当前值】相比"
    应当**跟着变** (地址对齐了才对齐) —— 这正是 Task 10 闭环要用的那条性质。离线无法证。
+
+---
+
+# 附录 C —— 上机前收尾波 (8a-3): 8 条 Minor 的落地
+
+基线 `ff08161`。**行为只动了一处** (§C.1 第 3 条: 一条不可达分支从静默改成出声); 其余全是
+文本/精度/一次抽取。**判断、比较、算术一个字没动**。
+
+## C.1 逐条落地 (行号是**本波改动后**的一次性快照, 会随文件漂)
+
+| # | 改了什么 | file:line |
+|---|---|---|
+| 1 | 两条命令的文本抽成全程序**唯一**拼法: `RelayCore::formatPayloadEnableCommand()` + `RelayCore::payloadLoadSwitchCommand()`。**三处**调用点 (连接时序发送器 / 运行时发送器 / main.cpp 的确认屏) 都改成从它取 | `relay/RelayCore.h:73-75` (声明) · `relay/RelayCore.cpp:210-216` (定义) · 用点 `relay/RelayCore.cpp:224, 298, 319, 321, 341` · `main.cpp:2217, 2220` |
+| 2 | 一次性诊断行改成"**首个合格帧的快照**", 并**删掉** "负载只在连接时下发, 运行中【不】改 (改负载会让机械臂动), 所以对不上是常见情形" 那句理由 (本波之前它已经被运行时下发路径推翻); 另加一行指路"要看【当前】读数用每帧刷新的回读字段" | `relay/RelayCore.cpp:115` (msg 文本) · `:108-113` (快照说明) · `:118-131` (不一致分支) |
+| 3 | `reset()` 里那份挂着的发送确认**从静默改成出声** (与 `cancelSendConfirm` 同一句措辞) —— **本波唯一的行为改动** | `main.cpp:203-211` |
+| 4 | `ForceData` 三个回读字段的"用途"句: 从"负载求解的【基线】(solveAndApply)"改成**活路径上真正的三个消费者** (候选构造 / 逐分量比对 / 报告块), 并明写"【不是】基线" | `core/AppState.h:126-131` |
+| 5 | 上机操作单: (a) 删掉与上注打架的 `← 现行代码发的是 LoadSwitch(0)`; (b) 行号 `RelayCore.cpp:473` 换成 `RelayCore::init()` 指认 (**不写行号**); (c) 补"两次按键"那一条 | `Docs/superpowers/specs/2026-09-19-on-machine-checklist.md:29, 126-128, 135` |
+| 6 | 闸 1 注释里那句"本机实测": 剪掉被取代的 `|c_s_z| = 55.556 > 31.5`, 只留 `cz_robot = 68.700 > 31.5` | `force/PayloadCalibration.cpp:1947` |
+| 7 | " 没能写进 socket" -> " 没能**完整**写进 socket" | `relay/RelayCore.cpp:314, 330, 348-349` (三处) · 注释 `:301-304` |
+| 8 | 只记录: 在用例列表前加 TODO —— `tests/run_tests.bat` **不跑本文件**, "12 个用例程序 0 failed" **不覆盖** 8a/8a-2 的回归钉子。runner **未动** | `tests/test_payload_calibration.cpp:3894-3900` |
+
+**同型、brief 没点名、一并改的两处** (理由与 fix 6 同: 不许把错前提留在同一段里):
+- `relay/RelayCore.cpp:93-95` 的"落进 ForceData: **求解负载时的【基线】用**" —— 与 fix 4 同源
+  同错, 改成"【下发候选】用 (闸 1 的外部锚点 + 逐分量比对; 报告块也读它)"。
+- `relay/RelayCore.cpp:301-304` 的注释"返回 false = 这条命令**根本**没写进 socket" —— 与 fix 7
+  同型, 改成"没能【完整】写进 socket (部分写也算 false)"。
+
+## C.2 测试命令与原始输出
+
+```
+[构建] "D:/Program Files/Microsoft Visual Studio/2022/BuildTools/MSBuild/Current/Bin/MSBuild.exe"
+       "D:/Projects/Touch/Touch_Client/Touch_Client.vcxproj" -p:Configuration=Release -p:Platform=x64 -v:minimal
+  Touch_Client.vcxproj -> D:\Projects\Touch\Touch_Client\x64\Release\Touch_Client.exe
+  (只有既有的 warning C4005: "CALLBACK" 宏重定义 — 与本次改动无关; 无 error)
+
+[聚焦] cmd //c "D:/Projects/Touch/Touch_Client/tests/build_payload_calibration_test.bat"
+  BUILD_EXIT=0
+       ./test_payload_calibration.exe            (cwd = Touch_Client/tests)
+  send_candidate_diff_conclusion_never_says_only_m_when_unsendable... PASS
+  70 passed, 0 failed                          ← 与上一波同数 (70)
+
+[全量] cmd //c "D:/Projects/Touch/Touch_Client/tests/run_tests.bat"
+  12 个用例程序全部 "  [OK]", 0 个 "  [FAIL]"
+  逐程序: Results: 5/7/8/27/23 passed, 0 failed | 28/15/18/11/4/7/20 passed, 0 failed
+  (这就是那句"12 个用例程序 0 failed"的出处 —— 而它**不含** test_payload_calibration, 见 C.1#8)
+
+[约束: 连接时序 LoadSwitch(0) 逐字节]  od 比对 base 与工作区同一行:
+  两边都是:  robotSendEnable("LoadSwitch(0)");           // 关闭负载自适应
+  (od 输出逐字节相同, 行号 577 -> 602 只是位移)
+```
+
+## C.3 ★ 未对上的行号与主张 (本次最有价值的一节)
+
+1. **fix 1 说的"两处"其实是【三处】**。改动前那条 `EnableRobot` 格式串有**三份**: 本文件的
+   连接时序发送器 (`sendEnableRobotWithPayload`) 与运行时发送器 (`sendPayloadCommands`) 各一份,
+   `main.cpp` 的确认预览第三份。brief 只数了"预览 + sendPayloadCommands"。⇒ 抽取时**三份一起
+   换掉**; 否则留下的两份还要靠"格式串与 sendEnableRobotWithPayload 的逐字一致"这句**人工**
+   不变式维持 —— 而那句话本身正写在被删掉的那行注释里。
+2. **fix 1 建议的函数名/签名装不下"要发两条"**: `formatPayloadCommands(massKg, comMm, char*
+   out, int n)` 一个输出缓冲只够一条命令; 而发送侧是**两次 socket 写、两条各自读回执**。
+   落成**一对** (`formatPayloadEnableCommand` + `payloadLoadSwitchCommand()`) —— 仍是"唯一拼法",
+   且三个调用点都从它取 (确认屏拼出来的文本与发送侧逐字同源; 屏幕输出**一个字没变**)。
+3. **fix 3 的"reset() 只有一个调用点"不成立**: 有两个 —— 'm' 模式入口的 `BiasCheck::reset()`
+   与 `record()` 里 `if (!dataUnderCurrentPayload) reset();`。**但"今天不可达"这个结论仍然成立**:
+   两个调用点都在键盘处理里, 而确认提示挂着时 `keyboard()` 的拦截
+   (`if (BiasCheck::awaitingSendConfirm()) { ... return; }`) 挡在**一切其他键之前**。所以按
+   "不可达也必须出声"写。
+4. **fix 7 的"两条"实际同类有三条**: 两条回执行 (`:314`/`:330`) 是 brief 点名的那两条; 第三条
+   在**同函数的汇总行** (`:348-349`) 写的是"命令**没**写进 socket" —— 少一个"能", 因而落在
+   brief 的字面检索之外, 但同一段里说的是同一件事。三条一起改 (不然块里留一条说过头的)。
+5. **fix 2 的"连接时"本身也是旧叙事**: 这行不在连接时序里打, 它在 `forceReaderThread` 的 125 Hz
+   循环里, 由 `static bool loadEchoDiagPrinted` **只放行一帧** —— 即连接之后第一帧通过 sanity
+   的那一刻。所以"首个合格帧"写进文本本身 (与上一波 I1 的"活刷新"是同一件事的两面)。
+6. **fix 4 点名的函数"不在死块里, 但点名的用途在"**: `main.cpp` 的 `#if 0` 块是 `:1903-2167`,
+   而 `solveAndApply` 从 `:1166` 开始、**跨出**这个块。原句是"函数名对、用途错": 活路径上
+   `solveAndApply` 对这三个字段的用法**不是**求解基线, 而是
+   ① `buildSendCandidate(..., echoOk ? echoCenter : nullptr)` —— 回读拿不到 ⇒ 无候选
+   (`CAND_NO_PAYLOAD_ECHO`), 拿到 ⇒ 回读 cz 就是闸 1 的 `cz_robot`;
+   ② `diffSendCandidate(cand, echoLoadKg, echoCenter)` —— "这一次改了哪些"的比对基准;
+   ③ `diagPayloadSection` (`:1011-1022`) —— 报告块的"机械臂自报负载"一节。
+   **三处**逐处核过源码; 而"真值 − 基线"那套折算确实只在 `:1912-1924` (块内)。⇒ 注释按这三条写。
+7. **fix 5 要"补的确认步"其实已经在了**: 上一波 (`ff08161`) 加的那条注 (原 `:122-124`)
+   **本来就写着**"发送键 'p' …… 再按 'y' 才真正发出 (按任何其他键取消)"。所以**没有"缺一条"**,
+   缺的是它没说"**两次按键**这件事本身意味着什么" —— 补的是: 动机械臂的是第二下, 所以 §1 的
+   三条在按 `'y'` 时**也**要成立; 确认之后控制台**逐条**打两条命令的回执, 两条都成功才算发全。
+8. **fix 5(b) 的行号**: brief 说"it is past 570 now" —— 在 base `ff08161` 上连接时序的
+   `LoadSwitch(0)` 是 **577** (本波不碰文件上半段, 仍是 577; 本波之后同文件下半段位移到 602)。
+   按"注释/文档里不许写行号"的规矩, 改成 `RelayCore::init()` 指认, **行号整个删掉**。
+   上一波附录 B.3 第 6 条已把这条行号列成待办, 本波清掉。
+9. **fix 6 与源码逐字一致** (`|c_s_z| = 55.556 > 31.5, cz_robot = 68.700 > 31.5`), 无出入;
+   按 brief 只剪半句, 保留给出结论的那一半。
+10. **fix 8 复核过 runner 清单**: `run_tests.bat` = 7 个预构建 exe (`force_pipeline` /
+    `constraint_force` / `safety_core` / `feedback_parser` / `escalation` / `kinematics` /
+    `coord_safety`) + 5 个现构建 (`force_compensation` / `relay_command_parser` / `force_logger` /
+    `tcp_calibration` / `session_report`) = **12**, 里面**没有** `test_payload_calibration`
+    ⇒ 那句"12 个 0 failed"确实不覆盖本文件的回归钉子。runner 未动。
+
+## C.4 约束核对
+
+- 两条命令、顺序 (`EnableRobot` -> `LoadSwitch(1)`)、**不发 `PayLoad`**: 未动 (文本仍由同一格式产出)。
+- `'p'` (+ 确认键) 仍是**唯一**把东西发给机械臂的路径; `'s'` 路径不发任何东西: 未动。
+- **连接时序的 `LoadSwitch(0)` 逐字节不变**: od 比对通过 (见 C.2)。
+- **没有任何东西写 `payload_calib.json`**: 未动 (唯一写入点仍在 `main.cpp` 的 `#if 0` 块内)。
+- `|c| < 500` 仍严格小于; 质量带 `[0.2, 1.5]` kg 仍闭区间: 未动。
+- 未碰: `#if 0` 块 / 求解器 / 模型形式 / 门限公式 / `A` 仍是 `A_F` / 日志列格式 / 证据文件 /
+  `tests/run_tests.bat`。
+- 无判断、比较、算术改动: 除 C.1#3 那一处 (静默 -> 出声, 且今天不可达) 与那次 formatter 抽取,
+  没有触碰任何判据。
+- 新注释里的前提都对着**存在的文件**核过: `sendToSocket` 的判据 = `robot/RobotConnection.cpp`
+  的 `send == strlen`; "活的求解器不吃基线参数" = `force/PayloadCalibration.h` 的
+  `fitRaw` / `fitRawLinear` / `decompose` 签名里没有基线。**注释里一律不写行号。**
+
+## C.5 残留 (记录, 本波不做)
+
+1. 新抽出的 formatter **没有单测**: `test_payload_calibration` 不链接 `relay/RelayCore.cpp`,
+   要测它得动构建脚本 (`tests/build_payload_calibration_test.bat`) 与链接面 —— 超出本波范围。
+   "两处文本同源"这条不变式目前靠**结构**保证 (同一个函数), 不靠用例。
+2. 确认屏那两行的**真实屏幕**要上机才看得到 (`--no-robot` 进不了 'm' 模式), 与 B.5 同因。
+   离线能证的只是: 拼文本的函数是同一个 (grep 过, 三处调用点无第二份格式串)。

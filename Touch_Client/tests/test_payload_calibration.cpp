@@ -3891,6 +3891,13 @@ int main() {
     std::cout << "--- runtime consistency guard (replay on the four captures) ---" << std::endl;
     test_runtime_consistency_guard_replay();
 
+    // ⚠ TODO (Task 8a-3) —— 覆盖缺口, 只记录, 本次不动 runner:
+    //   tests\run_tests.bat 【不跑本文件】。它跑的是另外 12 个用例程序 (7 个预构建 exe +
+    //   force_compensation / relay_command_parser / force_logger / tcp_calibration /
+    //   session_report), 里面没有 test_payload_calibration。所以那句"12 个用例程序全 0 failed"
+    //   【不覆盖】下面 Task 8a / 8a-2 的回归钉子 —— 它们只有单独构建并运行本文件才会跑到
+    //   (tests\build_payload_calibration_test.bat)。runner 是受保护的, 不在这里改。
+
     // ★★★ Task 8a: 下发负载前的两道闸 (上机操作单 §6)。纯逻辑、无 socket —— 所以能在这里钉住,
     //   而它是【唯一】会在真正下发之前拒绝的防线 (发送键 'p' 直接消费它的判决)。
     std::cout << "--- Task 8a: pre-send gates (sign convention + magnitude) ---" << std::endl;

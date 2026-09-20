@@ -1944,7 +1944,7 @@ namespace PayloadCalibration {
         //   时号可能被翻 (例: cz_robot = +10, c_s_z = −10 -> d同向 = 20 在内 -> 选中 −10
         //   -> czSign = −1 -> 候选 cz 由 +10 变成 −10)。那不是错, 是这条路【唯一会改 c】的形态,
         //   所以 diffSendCandidate 把它标成高危。
-        //   本机实测 |c_s_z| = 55.556 > 31.5, cz_robot = 68.700 > 31.5 ⇒ 号不变。
+        //   本机实测 cz_robot = 68.700 > 31.5 ⇒ 号不变。
         const double csZSelected = (g.convention == 1) ? *csZmm : -*csZmm;
         g.czSign = (csZSelected >= 0.0) ? +1.0 : -1.0;
         g.comMm[2] = g.czSign * fabs(comMmIn[2]);   // 只给 cz 定号, 横向两个分量不动
