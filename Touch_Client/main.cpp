@@ -652,8 +652,13 @@ namespace BiasCheck {
     //     新模型 (原始通道的线性解) 里【根本不存在】这四个量 -> 一律记 "-"。
     //     "-" 不是"没算出来", 是"这个模型里没有这个量"; 别把它读成 0, 更别拿它去填别的数。
     //   · rmsF_N / rmsM_Nm 是【本次所用模型】的拟合残差 (两个模型都有这个量)。
-    //   · outcome 现在以 PRINTED_ONLY 开头 = "解出来了、只打印、【没有应用任何东西】"
-    //     (从前是 DISPATCHED —— 那时确实往本地补偿与两个 json 里写了; 现在一个字都没写)。
+    //   · outcome 的【前缀】如实说这一行代表什么被应用了 (列本身一个没动):
+    //       PRINTED_ONLY            求解未通过 ⇒ 确实什么都没装
+    //       INSTALLED               已装进本地补偿, 且 force_calib.json 已落盘
+    //       INSTALLED save_failed   装上了, 但 force_calib.json 没写成 (重启即丢)
+    //       INSTALL_REJECTED        判决通过但 setCalibration 拒收 (理论上不该出现)
+    //     (从前恒是 PRINTED_ONLY —— 那时确实一个字节都没写, 所以那是真话;
+    //      2026-09-20 起 's' 通过判决后会装本地补偿, 再无条件写 PRINTED_ONLY 就是假话了。)
     // 【新列一律【追加在末尾】】—— 上面那 9 列一个都没挪, 历史行与历史读者照旧。
     // 追加列 (13): solver | m_kg | sv1 | sv2 | sv3 | iso | parity
     //              | cs_x_mm | cs_y_mm | cs_z_mm | cond | maxSigA | modelform
@@ -1092,25 +1097,31 @@ namespace BiasCheck {
         return s;
     }
 
-    // 's': 用已采数据【拟合原始力通道】并把结果全部打印出来 —— 【随后什么也不做】。
+    // 's': 用已采数据【拟合原始力通道】, 全部打印出来, 并在判决通过时【装进本地补偿 + 落盘】。
     //
-    // ===== 2026-09-19 起这条路的性质变了 (Task 4) =====
-    // 从前的 's' 会: 求解残余量 → 写本地补偿的本会话值 → 写 force_calib.json 与
-    // payload_calib.json → (下次启动的连接时序里) 下发机械臂。现在【一个字都不写】。
-    // (那个"写本地补偿本会话值"的入口 setMassCom 已在 Task 6 随残余模型一并删除 ——
-    //  本地补偿现在是全量模型 compensated = sixForceRaw(@1304) − b_F − A·g, 它的参数由
-    //  force_calib.json 的 version 3 格式提供; 本条路径仍然一个字节都不写。)
-    // 理由不是"暂时关掉", 而是【两个量的原点根本不同】:
-    //   · 这里解出的 m / A / c_s 描述的是【传感器测量原点以下】那一段负载 (传感器内部
-    //     质量分布 + 笔夹 + 笔) —— 数据能定的也只有这一段, 因为传感器就装在中间;
-    //   · 机械臂的负载模型 (EnableRobot 的 load/center) 描述的是【挂在它法兰上的整条链】。
-    //   从"测量原点以下"换到"法兰系整条链"要走过 c_s 的原点到底在哪 + 法兰→测量系那一步,
-    //   而这一步【未定】(spec §6b 末: 标定给出的 c_s = 54.55 mm 与解析几何反推的 75.8 mm
-    //   对不上, 而传感器总高只有 31.5 mm)。把原点未定的量当法兰系负载写下去, 就是拿一个
-    //   没标定过的变换去改机械臂 —— 正是本项目被咬得最惨的那种"安静地错"。
-    //   下发路径的开通条件写在 plan Task 9; 在此之前【别好心把写入接回来】。
-    // 于是本次的产出只有两样: 控制台上那一屏 (够判"这次标定到底成不成") 和
-    // calib\calib_log.txt 里的一行 (够在控制台滚掉之后回看)。
+    // ===== 2026-09-20 起这条路重新"应用"东西了 —— 但只应用【本地】那一半 =====
+    // 2026-09-19 (Task 4) 曾把它改成"只打印、什么都不应用", 而当时那条链是断的:
+    //   求解出来的 (A, b_F, b_M, c_s) 没有任何一条路能进 ForceCompensation —— 唯一的安装
+    //   入口 setMassCom 在 Task 6 随残余模型一并删除, 而计划里唯一以"本地全量补偿"为标题的
+    //   Task 只定义了文件格式与补偿公式, 【没有安装点】。
+    //   ⇒ 本地补偿永远停在"没有模型", 一致性闸门在【做比较之前】就早退, 报的是
+    //     UNCALIBRATED ("没有可比的模型") 而不是 INCONSISTENT ("两边对不上")。
+    //   现场证据: 一整场会话里 force_calib.json 从未产生过, 而控制台每 5 s 报一次"未标定"。
+    // 现在按判决 (fitOk, 与发送候选同源) 走两步: setCalibration 装进本会话内存 +
+    // saveToFile 按 version 3 写 force_calib.json (下次启动自动装载)。
+    //
+    // 【应用的是本地补偿, 不是机械臂 —— 这两件事必须分开读】
+    //   · 本地补偿 compensated = sixForceRaw(@1304) − b_F − A·g 全程在【传感器系内闭环】,
+    //     A / b_F / c_s 都是这次从 @1304 直接解出来的 ⇒ 不需要任何法兰换算, 现在就能装;
+    //   · 机械臂的负载模型 (EnableRobot 的 load/center) 要的是【挂在它法兰上的整条链】,
+    //     从"测量原点以下"换过去要走过 c_s 的原点在哪 + 法兰→测量系那一步, 而这一步
+    //     【未定】(spec §6b 末: 标定 c_s = 54.55 mm 与解析几何反推的 75.8 mm 对不上,
+    //     而传感器总高只有 31.5 mm)。
+    //   ⇒ 下发路径的开通条件仍在 plan Task 9; 本条路径【一个字节都不发给机械臂】,
+    //     也【仍然不写 payload_calib.json】。别把这两件事一起接回来。
+    //
+    // 于是本次的产出有三样: 控制台上那一屏 + calib_log.txt 里的一行 (够在控制台滚掉之后
+    // 回看) + 本会话生效 (并已落盘) 的本地补偿模型。
     // ===== Task 8a: 两道闸的结论行 —— 只此一份 =====
     // 两个地方要说同一句话: 按 's' 时打的那一行结论, 与按 'p' 被拒时说"是哪一闸、为什么"。
     // 各写一遍就会出现"屏幕上的结论"与"拒发时的解释"互相打架 —— 本项目栽过这种同型。
@@ -1335,12 +1346,23 @@ namespace BiasCheck {
         snprintf(errTmp, sizeof(errTmp), "%s", CalibStore::fileFor("calib_stderr.tmp"));
         std::string errText;
         const bool errCapOk = SessionReport::stderrCaptureBegin(errTmp);
-        // MODEL_FORM_REQUIRED: 尺子不齐【就拒给参数】。生产路径不得传 I_ACCEPT_UNVERIFIED_
-        // MODEL_FORM 那个令牌 —— 这里手上就有采集现场 (逐姿态方差与重复对都是刚刚采的),
-        // 没有理由接受一个"从未被检验过形式"的模型。令牌只属于离线重放。
+        // MODEL_FORM_FORCE_ONLY (2026-09-20 起用这条): 尺子不齐【仍然拒给参数】; 力通道不通过
+        // 【仍然拒】; 变的只是【力矩通道的失拟不再拦整体判决】。
+        //
+        // 为什么改: 实机上力矩分支经常拒绝, 而 2026-09-19 已查明成因是 A_F ≠ A_m (力通道估出的
+        //   A 不是力矩通道想要的那个), 【不是这批数据脏】—— 2026-09-20 20:52 那次就是:
+        //   cond 17.49 (历次最好)、力通道 2.422 < 2.927、尺子 0.0251 N, 只因力矩 35.97 > 10.86
+        //   而整体被拒 —— 那份数据什么也装不上, 而下发候选也跟着作废。
+        //   判据本身一个字没动 (统计量/门限/打印全在库里), 动的只是"力矩没过时整体还拒不拒"。
+        //   ⚠ 力矩没过时 momentFormChecked 保持 false —— 所以下面那行判决【必须】读它, 不能
+        //   只看 fitOk, 否则屏幕上会印一个"通过"而力矩那一半其实没过。
+        //
+        // (不得传 I_ACCEPT_UNVERIFIED_MODEL_FORM: 那个令牌的意思是"模型形式【从未被检验过】
+        //  也给我参数"。这里手上就有采集现场 (逐姿态方差与重复对都是刚采的), 没有理由接受一个
+        //  没验过的模型。令牌只属于离线重放。)
         const bool fitOk = PayloadCalibration::fitRaw(sp, sf, sm, count, fit, nz, reps,
                                                       repeatCount,
-                                                      PayloadCalibration::MODEL_FORM_REQUIRED);
+                                                      PayloadCalibration::MODEL_FORM_FORCE_ONLY);
         if (errCapOk) {
             if (!SessionReport::stderrCaptureEnd(&errText)) {
                 // 【照实说, 而且要说出字节在哪儿】: 收不回来时临时文件【故意不删】(见
@@ -1474,7 +1496,19 @@ namespace BiasCheck {
                   + fit.repeatSigmaM[2] * fit.repeatSigmaM[2]) / 3.0) : 0.0;
 
         diagOut() << "------------------------------------------------------" << std::endl;
-        diagEmitf("  模型形式检验 (fitRaw 的判决): %s\n", fitOk ? "通过" : "【拒绝】");
+        // ⚠ 【这一行不许只看 fitOk】: 用了 MODEL_FORM_FORCE_ONLY 之后, fitOk 为真【不再意味着】
+        //   力矩那一半也过了 —— 力矩没过时库把 momentFormChecked 压在 false。所以"通过"必须分两种,
+        //   否则屏幕上会印一个不加限定的"通过", 而力矩那一半其实没过 (正是本项目最忌的那种
+        //   "安静地不一致")。判据仍只在库里有唯一一份实现 —— 这里只是【引用】它的标志, 与下面
+        //   那一支同一条规矩: 不复述判据, 只报状态。
+        const bool momentHalfNotPassed = fitOk && (fit.lackOfFitMomentDof > 0)
+                                              && !fit.momentFormChecked;
+        diagEmitf("  模型形式检验 (fitRaw 的判决): %s\n",
+                  !fitOk ? "【拒绝】"
+                         : (momentHalfNotPassed
+                                ? "通过 —— 但【仅力通道】: 力矩通道那一半没过"
+                                  " (见 stderr 的 [Payload] 行)"
+                                : "通过"));
         diagEmitf("      尺子状态 modelFormStatus = %s\n",
                   modelFormStatusName(fit.modelFormStatus));
         diagEmitf("      重复姿态对 (尺子的自由度, 每对须取不同姿态) = %d 对;  逐姿态噪声来自采集时的样本方差\n",
@@ -1490,18 +1524,39 @@ namespace BiasCheck {
             // [Payload] 行为准 (这条规矩的出处见下面 MODEL_FORM_NO_DOF 那个分支的注释)。
             diagEmitf("      力通道:   残差÷尺子 χ²/dof = %.4g  门限 %.4g   (dof=%d, 尺子 %.4g N)\n",
                       fit.chi2RepForceRatio, fit.chi2RepForceLimit, fit.chi2DofForce, yardF);
-            // 【按库的标志分两支, 而不是在本地重推库的规矩】: momentFormChecked 是库专为
-            // "力矩那一半到底验没验"设的标志 —— 它自己的注释说, 这两个标志存在的意义就是让
-            // "没验过"与"验过了"分得开 (PayloadCalibration.cpp:1288-1292)。本地若改用
-            // lackOfFitMomentDof > 0 去重推这条规矩, 库哪天改了 dof 的约定 (比如改用别的自由度
-            // 口径), 这一支就会【不声不响地按旧规矩分错】—— 正是本提交与 fd4eead 要消灭的
-            // 那种"库里的规矩在本地又抄了一份"。两支等价: 库在通过那一支先无条件置
-            // modelFormChecked = true, 紧接着置 momentFormChecked = (lackOfFitMomentDof > 0)
-            // (PayloadCalibration.cpp:1291-1292), 而本分支已经知道 modelFormChecked 为真。
+            // 【力矩那一半要问两个【不同】的问题, 所以这里是三分支 —— 别用一个标志把它们混了】
+            //   · "验过【且通过】了吗"     -> 读库的标志 fit.momentFormChecked
+            //   · "这个统计量【算出来了】吗" -> 读 fit.lackOfFitMomentDof (> 0)
+            //   · 只读 momentFormChecked 会把"【验了、没过】"误读成"【没做】" —— 那两种情形
+            //     在它上面都是 false。
+            // 这三分支是 2026-09-20 引入 MODEL_FORM_FORCE_ONLY 时才需要的: 在那之前"力矩没过"
+            //   会在库里直接 return false, 根本走不到本分支 —— 那时"两个标志在那个意义上同进同退"
+            //   是对的; 有了 FORCE_ONLY, "【算出来且没过】、但整体放行"成了一个**可达的组合**。
+            // ⚠ 库那边的 momentFormChecked 同一时刻也收紧了 (扣掉了 momentFailed), 所以它自己的
+            //   语义仍是"做了【且通过】" —— 与本行对它的用法一致, 没有各说各话。
+            // ⚠ 下游那个【被拒】分支 (本函数更下面那一处) 早就是按 lackOfFitMomentDof > 0 分的,
+            //   理由与本行同源; 两处现在同一条口径。
             if (fit.momentFormChecked) {
                 diagEmitf("      力矩通道: 失拟统计量     = %.4g  门限 %.4g   (dof=%d, 尺子 %.4g N·m)\n",
                           fit.lackOfFitMomentRatio, fit.lackOfFitMomentLimit,
                           fit.lackOfFitMomentDof, yardM);
+            } else if (fit.lackOfFitMomentDof > 0) {
+                // 【2026-09-20 新增的第三种情形 —— 在此之前它不存在】
+                // 力矩的失拟【算出来了, 而且没过】, 而整体判决仍然通过。只有 MODEL_FORM_FORCE_ONLY
+                // 才可能出现这个组合: 旧策略下"力矩没过"会在库里直接 return false, 根本走不到本分支。
+                // ⚠ 没有这一支, 下面那个 else 会把它印成【没有检验】(dof=0) —— 把"验了、没过"
+                //   说成"没做", 而这份报告是**永久记录**。实测 2026-09-20 21:02 就印错了一次:
+                //   stderr 上写着 dof=6、失拟 153.1, 而报告里写着 dof=0、【没有检验】。
+                //   这就是模型形式策略那条改动【自己带进来】的假话, 这一支是它的补丁。
+                // ⚠ 《不分两种印法》的理由: 判据在库里只有一份 —— 这一行只把【数】摆出来,
+                //   说说它是"做了没过"不是"没做"; 过没过以 stderr 的 [Payload] 行为准。
+                diagEmitf("      力矩通道: 失拟统计量     = %.4g  门限 %.4g   (dof=%d, 尺子 %.4g N·m)\n",
+                          fit.lackOfFitMomentRatio, fit.lackOfFitMomentLimit,
+                          fit.lackOfFitMomentDof, yardM);
+                diagEmitf("                判读: 这一半【做了, 但没过】—— 整体仍放行, 因为本次用的是"
+                          " MODEL_FORM_FORCE_ONLY (力通道过即可)。\n");
+                diagEmitf("                      别把它读成「没有检验」—— 那是另一件事; 库已在"
+                          " stderr 的 [Payload] 行上说明。\n");
             } else {
                 // dof = 0 是【这一次没验】, 不是"验了得 0"。这里【不许】印比较 —— 0 < 0 是假的,
                 // 而它会被读成"力矩通道也过了"。
@@ -1614,7 +1669,37 @@ namespace BiasCheck {
                       << std::endl;
         }
 
-        // ===== 到此为止: 本次【什么都不应用】 =====
+        // ===== 把这一份模型装进本地补偿, 并按 v3 落盘 =====
+        //
+        // 判决 (fitOk) 早在上面就定了; 到这里才动手, 是因为上面那一屏回答的是"解出来什么",
+        // 这一段才回答"拿它做什么"。
+        //
+        // 【门槛就是 fitOk】: 与发送候选同源。判据只许有一份实现 —— 另立第二套"安装门槛",
+        //   就得在别处解释它为什么与候选那道不一样, 而那正是本项目已经栽过的那种不一致。
+        //
+        // 【为什么先装后落】: setCalibration 会用 modelUsable 拒收不可用的 A (全零 / 退化 /
+        //   非有限)。若它拒了却仍落盘, 那份文件就是"自称是标定结果、装载时又会被拒一次"的
+        //   坏文件 —— 而 loadFromFile 的返回值【分不开】"文件不存在"与"模型不可用", 下次
+        //   启动只会看到一句含糊的失败。所以落盘门控在"确实装上了"之后, 文件永远可装载。
+        //
+        // 【这一步动的是本地补偿, 不是机械臂】: 它改的是"我们这边怎么理解传感器的读数",
+        //   不发 EnableRobot / PayLoad / LoadSwitch 里的任何一条, 机械臂不会因此动一下。
+        //   (与"下发给机械臂"是两件事: 后者要的是【法兰系】上整条链, 换算未定, 仍等 Task 9。)
+        //
+        // 【setCalibration 返回 void】: 它拒收时既不返回值也不抛异常, 只在 stderr 上说一句。
+        //   所以"装没装上"只能事后拿 isCalibrated() 问一次 —— 这是那个 API 的实际形态。
+        bool installed = false;
+        bool saved = false;
+        if (fitOk) {
+            ForceCompensation::setCalibration(fit.A, fit.bF, fit.bM, fit.cS);
+            installed = ForceCompensation::isCalibrated();
+            if (installed) {
+                saved = ForceCalibration::saveToFile(CalibStore::fileFor("force_calib.json"),
+                                                     fit.A, fit.bF, fit.bM, fit.cS);
+            }
+        }
+
+        // ===== 本次【对本地做了什么 / 没做什么】 =====
         diagOut() << "------------------------------------------------------" << std::endl;
         diagOut() << "  ★ 以上全部是【传感器测量原点以下】的量 —— 不是整条工具链。" << std::endl;
         diagOut() << "    m / A / c_s 描述的是传感器【测量原点向下】那一段负载 (传感器内部质量分布"
@@ -1625,12 +1710,32 @@ namespace BiasCheck {
                   << " 这一步【未定】" << std::endl;
         diagOut() << "    (spec §6b 末: 标定 c_s = 54.55 mm 与解析几何反推的 75.8 mm 对不上,"
                   << " 而传感器总高只有 31.5 mm)。" << std::endl;
-        diagOut() << "  ★ 本次【什么也没应用】: 不写本地补偿、不写 payload_calib.json /"
-                  << " force_calib.json、不发 EnableRobot / PayLoad / LoadSwitch。" << std::endl;
-        diagOut() << "    【别好心把它们接回来】—— 接回来就是把一个原点未定的量当成法兰系负载"
-                  << "下发, 那会改机械臂的补偿并让它动 (2026-09-18 1.5 kg 那次突动的同一类)。"
-                  << std::endl;
-        diagOut() << "    下发路径的开通条件在 plan Task 9; 在那之前这一屏就是全部产出。"
+        if (!fitOk) {
+            diagOut() << "  ★ 本次【什么也没应用】: 求解【未通过】(见上面【模型形式检验】那一行,"
+                      << " 与 stderr 上那条自检拒绝), 所以【没有】把它装进本地补偿, 也没有写"
+                      << " force_calib.json。" << std::endl;
+        } else if (!installed) {
+            diagOut() << "  ★ 本次【没能装进本地补偿】: setCalibration 拒收了这份模型 (原因见"
+                      << " stderr 上那条【拒绝安装】) —— 本地补偿【仍未启用】, 一致性闸门会"
+                      << " 继续报\"没有可用模型\"。" << std::endl;
+        } else if (!saved) {
+            diagOut() << "  ★ 本次【已装进本地补偿, 但没能落盘】: 本会话生效。" << std::endl;
+            diagOut() << "    ⚠ 落盘是【以写模式打开文件】的 ⇒ 打开那一刻, 盘上【旧的那一份就"
+                      << "已经被截断了】。所以重启之后不是\"还是上一次标定的那一份\", 而是"
+                      << "\"没有可用文件\"或\"文件被截断/改坏\"。要恢复只能重按 's'。" << std::endl;
+        } else {
+            diagOut() << "  ★ 本次【已装进本地补偿, 并已落盘】: 本会话生效; force_calib.json"
+                      << " 已按 version 3 写入 (下次启动自动装载)。" << std::endl;
+        }
+        diagOut() << "    以上动的是【本地补偿】, 不是机械臂 —— 一个字节都没发给它。"
+                  << "它现在用的仍是连接时序里 EnableRobot 带下去的那一份。" << std::endl;
+        diagOut() << "    ⚠ 从这一刻起闸门【有模型可比了】—— 它不再是在比较之前就早退, 而是"
+                  << "真的在比。" << std::endl;
+        diagOut() << "      至于比出来是【放行】还是【一致性拒绝】, 取决于【机械臂那边】此刻的"
+                  << "负载参数对不对 —— 而这一条本次【没有测过】, 别当成已知。" << std::endl;
+        diagOut() << "    payload_calib.json 【仍然不写】; 下发路径的开通条件仍在 plan Task 9"
+                  << " (那一步要的是法兰系的整条链, 换算未定)。" << std::endl;
+        diagOut() << "    本地补偿不需要那个换算 —— 它全程在传感器系内闭环, 所以这一步等得起。"
                   << std::endl;
 
         // ===== Task 8a: 发送候选 —— 先摆出来、过两道闸、【此刻一个字节都不发】 =====
@@ -1648,6 +1753,12 @@ namespace BiasCheck {
             diagOut() << std::endl;
         } else {
             // ===== Task 8a-2: 候选 = 【活路径本次实测出来的那一份】 =====
+            //
+            // ⚠ 前提复核 (2026-09-20): 上面新加的"装本地补偿"【没有】改变这一段的前提 ——
+            //   装的是 ForceCompensation 的全量模型 (A / b_F / b_M / c_s), 而 effective()
+            //   报的是 PayloadCalibration 的 (massKg, comMm), 即【机械臂侧】要用的那对参数。
+            //   本任务一个字节都没碰后者, 所以 effective() 仍然是旧的 —— 候选仍必须从本次
+            //   实测里拼 (下面就是那个拼装)。别因为"s 现在会装东西了"就以为 effective() 新了。
             //
             // 8a 这里取的是 PayloadCalibration::effective() —— 而那是【断的】: 让 effective()
             // 跟着本次求解结果变的 applyResult / save / setMassCom 三个调用【只存在于下面那个
@@ -1856,12 +1967,18 @@ namespace BiasCheck {
             }
         }
 
-        // 这批数据【仍然有效】, 所以【不】动 dataUnderCurrentPayload: 从前把它置 false 是因为
-        // 求解会改本地补偿, 同一份数据在新补偿下不再可比; 现在没有任何东西被改, 复验照旧可用。
+        // 这批数据【仍然有效】, 所以【不】动 dataUnderCurrentPayload。
+        // 【为什么这次改了本地补偿、数据却仍然可比】: 那面旗子看的是【机械臂侧】的负载 ——
+        //   report()/复验 读的是 bias[][] = 各姿态平均的 raw 力/力矩, 来源是 @576
+        //   (ActualTCPForce, 机械臂【自己】补偿过的回显), 不是本地补偿的输出。本次装的是
+        //   本地模型 (compensated 那一路), 机械臂的负载一个字节没改 ⇒ @576 照旧 ⇒ 数据照旧可比。
+        // ⚠ 已知缺口 (本次【不】修, 记在这里): 活路径里现在【没有任何地方】把旗子置 false ——
+        //   它唯一的写者躺在 #if 0 里。于是真改了机械臂负载之后 ('p'+'y' 生效之后) 复验仍会
+        //   放行, 而那时数据确实不再可比。这条要单独处理, 别顺手在这里糊上。
         // 复验按哪个 'm' 要说清: 【在 'm' 模式里】再按一次 = 退出模式并重出报告 (数据不丢);
         // 从模式外按 'm' = 重新开始采集 (走 reset(), 这批数据丢弃)。两者是同一个键、相反的结果。
-        diagOut() << "  → 复验: 【就在 'm' 模式里】再按一次 'm' 即退出并重出报告 (已采数据不作废,"
-                  << " 本次没有改动任何生效值);\n"
+        diagOut() << "  → 复验: 【就在 'm' 模式里】再按一次 'm' 即退出并重出报告 (已采数据不作废"
+                  << " —— 本次改的是【本地补偿】, 而报告读的 @576 是机械臂侧, 不受它影响);\n"
                   << "     从模式外按 'm' 是【重开采集】—— 那会丢弃这批数据。\n"
                   << "     注意: 那份报告 (report) 报的是【旧模型/当前生效配置】的量"
                   << " (当前负载 / CZ符号), 不是上面这一屏解出的东西。" << std::endl;
@@ -1882,11 +1999,21 @@ namespace BiasCheck {
             consecutiveFails = 0;
         }
 
-        // outcome 用 PRINTED_ONLY 开头: 这一行【不代表任何东西被应用了】。
-        // (从前这里是 DISPATCHED —— 那时确实写了两处文件与本地补偿; 现在一个字都没写。)
+        // outcome 的前缀要如实说【这一行代表什么被应用了】:
+        //   PRINTED_ONLY            求解未通过 ⇒ 确实什么都没装
+        //   INSTALLED               已装进本地补偿 (并已落盘)
+        //   INSTALL_REJECTED        判决通过, 但 setCalibration 拒收了 —— 理论上不该发生;
+        //                           真发生就必须有人看见, 所以给它一个自己的前缀
+        //   INSTALLED save_failed   装上了, 但 force_calib.json 没写成 ⇒ 重启即丢
+        // ⚠ 从前这里恒是 PRINTED_ONLY —— 那时确实一个字节都没写, 所以那是真话。
+        //   装进本地补偿之后, 无条件写 PRINTED_ONLY 就变成假话。
+        //   (列格式一个字没动, 变的只是 outcome 这一列的内容。)
+        const char* what = !fitOk ? "PRINTED_ONLY"
+                         : (!installed ? "INSTALL_REJECTED"
+                         : (!saved ? "INSTALLED save_failed" : "INSTALLED"));
         char outcome[160];
-        snprintf(outcome, sizeof(outcome), "PRINTED_ONLY %s modelform=%s rmsF=%.4f",
-                 fitOk ? "fit_ok" : "fit_rejected",
+        snprintf(outcome, sizeof(outcome), "%s %s modelform=%s rmsF=%.4f",
+                 what, fitOk ? "fit_ok" : "fit_rejected",
                  modelFormStatusName(fit.modelFormStatus), fit.rmsForceN);
         logCalibAttempt(outcome, &fit, count);
 
@@ -2804,19 +2931,19 @@ void keyboard(unsigned char key, int, int) {
         return;
     }
 
-    // 's' in BiasCheck mode: 拟合原始 @1304 通道并【全部打印】。
+    // 's' in BiasCheck mode: 拟合原始 @1304 通道并【全部打印】, 判决通过时装进本地补偿 + 落盘。
     //
-    // 三件事的【实际样子】—— 逐条对着 solveAndApply 的活路径核过 (写这条注释前的规矩: 每个
-    // 前提回到源头核一遍; 本行从前写的是"不写补偿 / 不写 json / 不下发", 而它把三件事混成
-    // 了一句, 也把"不写 json"读成了"什么都不落盘"):
-    //   · 【不】写本地补偿 —— 活路径里没有任何 setMassCom 调用 (该入口在 Task 6 已随残余模型
-    //     一并【删除】, 本项目已无此函数; 对它唯一残留的引用在下面的 #if 0 块里, 拆那层时
-    //     才会编不过 —— 见 Docs\superpowers\specs\2026-09-19-remaining-workflow.md §2 的
-    //     第 11 步)。
-    //   · 【不】写生效配置 ——【本条路径】(solveAndApply) 里没有任何
-    //     PayloadCalibration::applyResult / PayloadCalibration::save 调用 (调它们的是下面的
-    //     #if 0 块, 旧模型那一层), 所以 payload_calib.json 与 force_calib.json 都不会被这条
-    //     路径改动。
+    // 四件事的【实际样子】—— 逐条对着 solveAndApply 的活路径核过 (写这条注释前的规矩: 每个
+    // 前提回到源头核一遍; 本行从前写的是"不写补偿 / 不写 json / 不下发", 把几件事混成了一句):
+    //   · 【装】本地补偿 —— 判决 (fitOk) 通过时调 ForceCompensation::setCalibration。
+    //     ⚠ 这一条是 2026-09-20 才加上的, 之前【没有】: 那时求解结果没有任何路径能进
+    //       ForceCompensation (唯一的安装入口 setMassCom 已随残余模型在 Task 6 删除),
+    //       于是本地补偿永远未启用、一致性闸门在【做比较之前】就早退。见 solveAndApply 顶上。
+    //   · 【写】force_calib.json —— 同上, 按 version 3 (ForceCalibration::saveToFile), 且
+    //     【门控在"确实装上了"之后】: setCalibration 拒收的模型不落盘 —— 否则那份文件就是
+    //     "自称是标定结果、装载时又被拒一次"的坏文件。
+    //   · 【不】写 payload_calib.json —— 本条路径里没有任何 PayloadCalibration::applyResult /
+    //     PayloadCalibration::save 调用 (调它们的是下面的 #if 0 块, 旧模型那一层)。
     //     ⚠ 这一条从前把 TcpCalibration::setSensorYawDeg 也算进来了, 说"三个调用只出现在
     //       #if 0 块内" —— 【那是错的】: 它【在活路径上】, 只是不在这条路径上。真正的调用点是
     //       main() 的启动序列里、紧接 PayloadCalibration::load 之后那一处 (在 `else` of
@@ -2824,15 +2951,20 @@ void keyboard(unsigned char key, int, int) {
     //       时逐处核过全文件: 那两处之外没有第三个调用, solveAndApply 的【活路径】里一处都没有。
     //       ⚠ 措辞是"活路径"不是"里" —— 严格读"solveAndApply 里"是【假的】: 那个 #if 0 块
     //       (本函数末尾那一大段"旧模型") 就嵌在 solveAndApply 的花括号【内】, 而它里面确实有一处
-    //       setSensorYawDeg。上一句对 applyResult / save 用的就是"【本条路径】"这个限定,
-    //       这里与它对齐 (二次复审 Minor 3)。
-    //       (这里【故意不写行号】: 本注释自己一动行号就漂 —— 本项目已多次栽在照抄行号上。)
-    //   · 【不】下发机械臂 —— 活路径里没有任何 robotSendEnable / sendPayloadToRobot 调用;
+    //       setSensorYawDeg。(这里【故意不写行号】: 本注释自己一动行号就漂。)
+    //   · 【不】下发机械臂 —— 本条路径里没有任何 robotSendEnable / sendPayloadToRobot 调用;
     //     下发是另一个键 'p' 的事 (Task 8a), 而且要先过两道闸。
-    //   ⚠ 但它【不是】"什么都不写": 本次诊断会落三份文件 —— calib_log.txt 一行 (logCalibAttempt)、
-    //     calib_poses.txt 一批姿态原始数据 (logPoseData)、calib_report.md 一整块 (diagFinish)。
-    //     这三份是【记录】, 不是生效值 —— 别把"落盘了"读成"应用了"。
-    // (为什么活路径只打印不应用: 见 BiasCheck::solveAndApply 顶上的说明, 原点未定)
+    //     ⚠ 【装本地补偿不是下发】: 前者改的是"我们这边怎么理解传感器读数", 机械臂一个字节
+    //       都收不到; 后者要的是法兰系上整条链, 换算未定, 仍等 plan Task 9 (见 solveAndApply
+    //       顶上). 别把这两件事一起接回来 —— 它们的开通条件不是同一个。
+    //   ⚠ 它落的文件【最多四份】: calib_log.txt 一行 (logCalibAttempt)、calib_poses.txt 一批
+    //     姿态原始数据 (logPoseData)、calib_report.md 一整块 (diagFinish), 以及判决通过时的
+    //     force_calib.json。前三份是【记录】, 只有最后一份是【生效值】—— 它是"重启之后"的
+    //     那一份, 记的是按下 's' 那一刻装进去的模型。
+    //     ⚠ 别把"文件里的零偏"读成"此刻生效的零偏": 模块在【静止】时有一个把 b_F/b_M 拉向
+    //       "让 compensated→0"的在线 EMA (ForceCompensation 的 step 末段)。它只在闸门放行
+    //       时才跑, 所以今天 (未标定/不一致) 两者相等 —— 但闸门一旦开始放行, 它们就会慢慢分家。
+    //       要持久化【此刻生效的】零偏, 仍得走 'z' 那条路。
     if ((key == 's' || key == 'S') && BiasCheck::mode) {
         BiasCheck::solveAndApply();
         return;

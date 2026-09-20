@@ -607,6 +607,92 @@ static void test_zero_restartable() {
 static const char* TMP_NEW = "force_calib.json";        // 与 .gitignore 里那一条同名
 static const char* TMP_OLD = "force_calib.json";        // 旧格式也写同一个名字 (先覆盖再读)
 
+// ===== "安装 → 落盘 → 重启装载" 这条链 (2026-09-20) =====
+//
+// 【为什么单独立一条】: 上面的 calib_file_roundtrip 只做 save → load, 起点已经是内存里装好的
+// 模型。而【进程重启】实际发生的是: init() 把一切清空 → loadFromFile → setCalibration。
+// 's' 求解成功后走的是这条链的另一半 (setCalibration → saveToFile)。
+// 两半合起来才是"这次标定能活过重启"; 断哪一半, 现场看到的现象都是同一句:
+// 闸门报"没有可用模型"、控制台每 5 秒说一次"未标定" —— 而根因完全不同, 所以两半都要钉。
+//
+// ⚠ 本用例会调 ForceCompensation::init(), 所以它【注册在 main() 的最后】: 免得给后面的
+//   用例留下一台"刚开机"的机器。
+static void test_install_then_reload_roundtrip() {
+    TEST(install_then_reload_roundtrip);
+    double A[9]  = { 0.3645611253, 0.2105461118, -0.0000294763,
+                    -0.2182776660, 0.3733052719,  0.0029763987,
+                    -0.0115452228, -0.0149328140, -0.4139021828 };
+    double bF[3] = { -21.9, -1.4, 2.6 };
+    double bM[3] = { -0.18, 0.38, -0.025 };
+    double cS[3] = { 0.0005981153, -0.0005015476, 0.0545494358 };
+
+    // 1) 's' 的那一半: 装进本会话内存。
+    //    setCalibration 返回 void, 拒收与否只能靠 isCalibrated() 事后问 —— 这正是
+    //    solveAndApply 里那条判断的写法, 所以这里也照那个写法钉。
+    ForceCompensation::setCalibration(A, bF, bM, cS);
+    CHECK(ForceCompensation::isCalibrated());
+
+    // 2) 同一份再落盘。
+    CHECK(ForceCalibration::saveToFile(TMP_NEW, A, bF, bM, cS));
+
+    // 3) 模拟进程重启: init() 把模型清光 (这一步是 calib_file_roundtrip 没有的那一段)。
+    ForceCompensation::init();
+    CHECK(!ForceCompensation::isCalibrated());
+
+    // 4) 启动装载的那一半。
+    double A2[9], bF2[3], bM2[3], cS2[3];
+    CHECK(ForceCalibration::loadFromFile(TMP_NEW, A2, bF2, bM2, cS2));
+    ForceCompensation::setCalibration(A2, bF2, bM2, cS2);
+    CHECK(ForceCompensation::isCalibrated());
+
+    // 5) 装回去的必须与当初那一份一致 (容差与 calib_file_roundtrip 同口径:
+    //    A 用 %.9g、c_s 用 %.9g 落盘)。
+    double A3[9], cS3[3];
+    ForceCompensation::currentModel(A3, cS3);
+    for (int i = 0; i < 9; i++) CHECK(fabs(A3[i] - A[i]) < 1e-8);
+    for (int i = 0; i < 3; i++) CHECK(fabs(cS3[i] - cS[i]) < 1e-9);
+
+    remove(TMP_NEW);
+    PASS();
+}
+
+// ===== 为什么 solveAndApply 里那个"装上了才落盘"的门是真的在挡东西 =====
+//
+// 那条路径门控在 isCalibrated() 之后而不是无条件落盘。这条用例钉住它的理由:
+//   saveToFile 【不做任何校验】—— 给它一份 setCalibration 会拒收的 A, 它照样写得出来。
+// 所以"先装后落"不是多余的谨慎: 反过来做, 一次拒收就会用一份【装载时必然被拒】的模型
+// 覆盖掉盘上可能好用的那一份 —— 而 saveToFile 是 "w" 打开, 覆盖即截断, 没有备份。
+//
+// ⚠ 中间那个 fopen 不能省: loadFromFile 对"文件不存在"也返回 false, 少了它这条断言谁都能
+//   满足 —— 那时它证的是"没写出文件", 而不是"写出的文件被拒"。
+//   (同型说明见 test_calib_file_rejects_old_format 末尾。)
+static void test_save_writes_unusable_model_but_load_rejects() {
+    TEST(save_writes_unusable_model_but_load_rejects);
+    double zeroA[9] = {0};
+    double bF[3] = { -21.9, -1.4, 2.6 };
+    double bM[3] = { -0.18, 0.38, -0.025 };
+    double cS[3] = { 0.0005981153, -0.0005015476, 0.0545494358 };
+
+    // 全零 A 装不进去 (与 test_setcalib_rejects_zero_and_degenerate_A 共用同一条判据)。
+    ForceCompensation::setCalibration(zeroA, bF, bM, cS);
+    CHECK(!ForceCompensation::isCalibrated());
+
+    // 但 saveToFile 不检查 —— 它照写。
+    CHECK(ForceCalibration::saveToFile(TMP_NEW, zeroA, bF, bM, cS));
+
+    // 先确认文件【真的在】。
+    FILE* f = fopen(TMP_NEW, "r");
+    CHECK(f != nullptr);
+    if (f) fclose(f);
+
+    // 装载端拒它 —— 这就是"装不上就不该落盘"所指的那件事。
+    double A[9], bF2[3], bM2[3], cS2[3];
+    CHECK(!ForceCalibration::loadFromFile(TMP_NEW, A, bF2, bM2, cS2));
+
+    remove(TMP_NEW);
+    PASS();
+}
+
 static void test_calib_file_roundtrip() {
     TEST(calib_file_roundtrip);
     double A[9]  = { 0.3645611253, 0.2105461118, -0.0000294763,
@@ -831,6 +917,9 @@ int main() {
     test_calib_file_rejects_no_version();
     test_calib_file_rejects_truncated();
     test_calib_file_rejects_unusable_A();
+    test_save_writes_unusable_model_but_load_rejects();
+    // ⚠ 最后一条: 它会调 ForceCompensation::init() (模拟重启), 别让它影响上面任何用例。
+    test_install_then_reload_roundtrip();
     std::cout << "\nResults: " << g_passed << " passed, " << g_failed << " failed" << std::endl;
     return g_failed ? 1 : 0;
 }

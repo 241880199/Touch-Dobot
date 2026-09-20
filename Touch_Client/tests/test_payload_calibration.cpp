@@ -1084,6 +1084,26 @@ static void test_moment_lack_of_fit_rejects_non_cross_product() {
     CHECK(fit.lackOfFitMomentRatio > fit.lackOfFitMomentLimit);
     CHECK(margin > 5.0);          // 放宽不等于放过去 (见上: 观察值 9.09x, 底线 ~10x 在报告里记着)
     CHECK(!PayloadCalibration::fitRaw(poses, F, M, NQ, fit, nz, &REP_PAIR, 1));
+
+    // ===== 2026-09-20: MODEL_FORM_FORCE_ONLY —— 同一批数据, 力矩没过但【整体放行】 =====
+    //
+    // 必须用【上面同一批数据】: 上面那个 CHECK 证明旧策略拒, 这里证明新策略收 —— 两者的差别
+    // 就只能来自策略本身, 不可能来自数据。
+    PayloadCalibration::RawFit fitFO;
+    CHECK(PayloadCalibration::fitRaw(poses, F, M, NQ, fitFO, nz, &REP_PAIR, 1,
+                                     PayloadCalibration::MODEL_FORM_FORCE_ONLY));
+    // 力通道确实过了 —— 否则这条用例证明的不是"力矩不拦", 而是"力通道也放水了"。
+    CHECK(fitFO.modelFormChecked);
+    // ⚠ 【最要紧的一条】: 力矩那一半没过, 所以 momentFormChecked 必须【保持 false】。
+    //   它的语义是"做了【且通过】"。若这里为真, 下游 (main.cpp 的通过分支) 会把"力矩没验过"
+    //   读成"验过了" —— 那正是这个标志当初被引入时要消灭的那种假通过。
+    CHECK(!fitFO.momentFormChecked);
+    // 而"检验【做了】"是另一件事: dof > 0 说明它真的跑了, 只是没过 —— 不是被跳过。
+    CHECK(fitFO.lackOfFitMomentDof > 0);
+    CHECK(fitFO.lackOfFitMomentRatio > fitFO.lackOfFitMomentLimit);
+    // 力通道的判据一个字没动: 新策略下它的统计量与门限与旧策略逐位相同。
+    CHECK(fitFO.chi2RepForceRatio == fit.chi2RepForceRatio);
+    CHECK(fitFO.chi2RepForceLimit == fit.chi2RepForceLimit);
     PASS();
 }
 

@@ -1704,6 +1704,9 @@ namespace PayloadCalibration {
                 return false;
             }
             // 力矩通道: 失拟 (自由模型比叉乘结构是否显著地解释得更好)
+            // momentFailed 只为 MODEL_FORM_FORCE_ONLY 服务: 它要记住"力矩没过"这件事, 以便
+            // 稍后把 momentFormChecked 压在 false —— 否则那个标志会谎称"这一半验过了"。
+            bool momentFailed = false;
             if (out.lackOfFitMomentDof > 0) {
                 const double limM = out.lackOfFitMomentLimit;
                 if (!(out.lackOfFitMomentRatio < limM)) {
@@ -1723,7 +1726,11 @@ namespace PayloadCalibration {
                                     " 叉乘结构不成立。\n",
                             out.lackOfFitMomentRatio, limM, prodLoF, RAW_MODEL_FORM_ALPHA,
                             chi2Quantile(6.0, RAW_MODEL_FORM_ALPHA) / 6.0, eLoF);
-                    return false;
+                    momentFailed = true;
+                    if (policy != MODEL_FORM_FORCE_ONLY) return false;
+                    fprintf(stderr, "[Payload] ⚠ 本次按 MODEL_FORM_FORCE_ONLY 放行: 力通道验过"
+                                    "且通过, 力矩通道【没过】。参数照给 —— 但 momentFormChecked"
+                                    " 保持 false, 力矩那一半【不许】读成「验过了」。\n");
                 }
             } else if (3 * n > 12) {
                 // 【力矩那一半没验成, 不能悄悄过去】: 3n > 12 说明自由度是够的, 那么自由模型
@@ -1737,7 +1744,10 @@ namespace PayloadCalibration {
             // true, 于是"力通道被判错、整体拒绝"时它照样亮着, 读起来像"至少力矩那半边是好的"
             // —— 但【两者不同进同退】: 前者无条件 true, 后者按 dof > 0, 在 dof == 0 处分岔。
             out.modelFormChecked = true;
-            out.momentFormChecked = (out.lackOfFitMomentDof > 0);
+            // ⚠ 只有在【力矩那一半真的过了】时才置 true (见 .h 里它自己的语义: "做了【且通过】")。
+            //   从前这里是裸的 (lackOfFitMomentDof > 0) —— 那在旧流程下等价 (没过的已经在上面
+            //   return 了), 所以看不出问题; 加了 MODEL_FORM_FORCE_ONLY 之后不再等价, 必须扣掉。
+            out.momentFormChecked = !momentFailed && (out.lackOfFitMomentDof > 0);
         }
         // 报告量: 各向同性比与它的构成 (奇异值)。【不是判决】, 理由见上。
         // 换工具/重装传感器/换一支笔, 这个数会变 —— 它是"此刻这只传感器响应有多正"的读数。
