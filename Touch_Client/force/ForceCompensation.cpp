@@ -232,10 +232,21 @@ static void setGuardState(ForceCompensation::GuardState st) {
         g_guardReportMs = now;
         return;
     }
-    if (!changed && (now - g_guardReportMs) < static_cast<DWORD>(Config::FORCE_GUARD_REPORT_MS)) return;
+    const bool uncal = (st == ForceCompensation::GuardState::UNCALIBRATED);
+    // 【UNCALIBRATED 不在复报之列】
+    // 它是【配置态】, 不是【数据态】: "没有模型"这件事不会自己好, 也不随机械臂的动作变,
+    // 所以复报出来的那 14 行与上一次【逐字相同】—— 唯一的效果是把别的输出挤出可视区,
+    // 而这一屏本来是要在现场读的。实测 2026-09-20: 一次约 95 s 的会话里它出现过 19 次。
+    // 启动那一路已经报过 ("无可用 force_calib.json — 按 'z' 调零"), 状态跃迁时这里再报
+    // 一次, 就够了。
+    // ⚠ INCONSISTENT 【仍然】复报: 它下面那张逐通道表的数据【会变】, 复报带的是新信息 ——
+    //   那正是"复报"这个机制原本要服务的情形。
+    if (!changed) {
+        if (uncal) return;
+        if ((now - g_guardReportMs) < static_cast<DWORD>(Config::FORCE_GUARD_REPORT_MS)) return;
+    }
     g_guardReportMs = now;
 
-    const bool uncal = (st == ForceCompensation::GuardState::UNCALIBRATED);
     // 输出一律走 stderr —— 与 ForceCalibration 的"响亮地说出来"同一条路; stdout 有缓冲,
     // 混着打会让这段在最需要它的时候缺半截。
     fprintf(stderr,
