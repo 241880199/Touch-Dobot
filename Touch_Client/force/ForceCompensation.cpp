@@ -285,22 +285,23 @@ static void setGuardState(ForceCompensation::GuardState st) {
     // (走到这里且 !changed 只可能是 INCONSISTENT: !changed && uncal 在上面已经 return 了。)
     static const char* NM[6] = { "Fx(N)", "Fy(N)", "Fz(N)", "Mx(Nm)", "My(Nm)", "Mz(Nm)" };
     if (!changed) {
-        char line[320];
-        int off = snprintf(line, sizeof(line), "[Force] !! (复报) 一致性闸门仍在拒绝:");
-        // ⚠ snprintf 可以返回负值; 若不管, 下面 sizeof(line) - (size_t)off 会回绕成一个
-        //   巨大 size_t —— 那是典型的缓冲区溢出写法。夹到 0。
-        if (off < 0) off = 0;
+        // 【复报把六个通道【两个对照量】都报出来】(2026-09-20 修订)。
+        // 原来只报超限的那几个通道的 @576 值 —— 但真正要看的是【@576 与 @720 哪个更接近 0】,
+        // 而那只在【全表】里有, 全表又只在状态跃迁时打 ⇒ 操作员每次重启才看得到一次。
+        // 现在这行就是一份【随时可读】的紧凑读数: 每个通道 "@576 / @720" 并排。
+        // 一行约 130 字符、每 5 s 一次 —— 比原来那 14 行的块省得多, 而信息更全。
+        char line[384];
+        int off = snprintf(line, sizeof(line),
+                           "[Force] !! (复报) 仍在拒绝  [@576 / @720]:");
+        if (off < 0) off = 0;   // snprintf 可返回负值; 不管的话下面 (size_t)off 会回绕
         for (int i = 0; i < 6; i++) {
-            const bool ex = g_guardVote[i] && (g_guardTol[i] > 0.0)
-                         && (fabs(g_guardEma[i]) > g_guardTol[i]);
-            if (!ex) continue;
-            if ((size_t)off + 32 >= sizeof(line)) break;   // 余量不足就停, 不越界
-            const int w = snprintf(line + off, sizeof(line) - (size_t)off, " %s%+.3f>%.2f",
-                                   NM[i], g_guardEma[i], g_guardTol[i]);
+            if ((size_t)off + 40 >= sizeof(line)) break;   // 余量不足就停, 不越界
+            const int w = snprintf(line + off, sizeof(line) - (size_t)off, " %s%+.3f/%+.4f",
+                                   NM[i], g_guardEma[i], g_guardEma720[i]);
             if (w > 0) off += w;
         }
         if ((size_t)off < sizeof(line))
-            snprintf(line + off, sizeof(line) - (size_t)off, "   (全表只在状态变化时打)\n");
+            snprintf(line + off, sizeof(line) - (size_t)off, "\n");
         fprintf(stderr, "%s", line);
         fflush(stderr);
         return;
