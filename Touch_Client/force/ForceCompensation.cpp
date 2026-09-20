@@ -36,6 +36,19 @@ static bool g_lastPoseValid = false;
 // 全部由 ForceReader/pollForce 线程访问 (step() 是唯一入口), 与 g_A 那些用 g_calibMutex
 // 保护的量不同 —— 这里不加锁, 与 g_motion 同理: 只有一个写者。
 static double g_guardEma[6]  = {0};      // compensated − @576 的逐通道 EMA
+// ===== 第二组 EMA: compensated − @720 (2026-09-20) —— 【只报不判】 =====
+// 为什么加: 厂商接口文档把两个 TCP 力分得很清楚 ——
+//     ActualTCPForce @576 = "TCP【传感器】力值"
+//     TCPForce       @720 = "TCP力值 (【通过关节电流计算】)"
+//   "通过关节电流算力"就必须知道负载 (重力矩 + 惯量矩) ⇒ @720 才反映控制器正在用的负载参数。
+//   而一致性闸门比的却是 @576 —— 且项目自己早有一条实测记录
+//   (relay/RelayCore.cpp): "改 EnableRobot 的负载, @576 纹丝不动, 为什么还不清楚"。
+// ⇒ 把两组差【并排放出来】, 就能直接看出闸门的参考量该是谁:
+//     若 (compensated − @720) 显著小于 (compensated − @576) ⇒ 该比 @720。
+// ⚠ 【只报不判】: 放行/拒绝的逻辑一个字没动, 也不参与任何容差比较 ——
+//   在看清它之前改判据, 就是拿一个没读过的数去改门。
+static double g_guardEma720[6] = {0};    // compensated − @720 的逐通道 EMA (只报不判)
+static bool   g_guardSeeded720 = false;  // 上面那一组的播种标志
 // 逐通道容差。⚠ 【在静态初始化时就填好】, 不留"init() 没跑就是 0"的空档 ——
 // 容差为 0 时 |EMA| > 0 都成立, 判决会退化, 而"退化"的方向必须是【拒绝】而不是放行。
 static double g_guardTol[6]  = { Config::FORCE_GUARD_TOL_FORCE_N,  Config::FORCE_GUARD_TOL_FORCE_N,
@@ -331,6 +344,11 @@ static void setGuardState(ForceCompensation::GuardState st) {
         return;
     }
     fprintf(stderr, "[Force] !! 逐通道结果 (EMA 差 = compensated − @576; 单位见各行标签):\n");
+    // 【为什么每行末尾多一个 @720】(2026-09-20): 厂商文档 —— @576 = "TCP传感器力值",
+    // @720 = "TCP力值 (通过关节电流计算)" ⇒ 后者才反映控制器用的负载参数, 而闸门比的是前者。
+    // 两组并排, 一眼就能看出参考量该是谁。⚠ 它【只报不判】, 不参与任何容差比较。
+    fprintf(stderr, "[Force] !!   行末的「与 @720」= compensated − @720 —— 只报不判,"
+                    " 用来判闸门的参考量该是谁\n");
     for (int i = 0; i < 6; i++) {
         const bool ex = (g_guardTol[i] > 0.0) && (fabs(g_guardEma[i]) > g_guardTol[i]);
         if (!g_guardVote[i]) {
@@ -338,8 +356,10 @@ static void setGuardState(ForceCompensation::GuardState st) {
                             "@576 的 z 响应秩 2 (奇异值 0.212/0.201/0.008), 它动不了就证不了什么\n",
                     NM[i], g_guardEma[i], g_guardTol[i]);
         } else {
-            fprintf(stderr, "[Force] !!   %-6s %+10.4f  容差 %.4f  %s\n",
-                    NM[i], g_guardEma[i], g_guardTol[i], ex ? "超限  <== 触发" : "在限内");
+            fprintf(stderr, "[Force] !!   %-6s %+10.4f  容差 %.4f  %-16s └ 与 @720: %+9.4f"
+                            " (只报不判)\n",
+                    NM[i], g_guardEma[i], g_guardTol[i], ex ? "超限  <== 触发" : "在限内",
+                    g_guardEma720[i]);
         }
     }
     // (走到这里只可能是 INCONSISTENT —— UNCALIBRATED 上面已经 return 了)
@@ -352,6 +372,8 @@ static void setGuardState(ForceCompensation::GuardState st) {
 static void resetGuard() {
     for (int i = 0; i < 6; i++) g_guardEma[i] = 0.0;
     g_guardSeeded = false;
+    for (int i = 0; i < 6; i++) g_guardEma720[i] = 0.0;
+    g_guardSeeded720 = false;
     g_guardFrames = 0;
     g_guardState  = ForceCompensation::GuardState::UNCALIBRATED;
     g_guardReportMs = 0;
@@ -673,8 +695,14 @@ void step(AppState::ForceData& fd, const double poseRxyz[6]) {
         const double d = comp[i] - fd.raw[i];
         if (!g_guardSeeded) g_guardEma[i] = d;
         else g_guardEma[i] += Config::FORCE_GUARD_EMA_ALPHA * (d - g_guardEma[i]);
+        // 第二组: 与 @720 的差。同一个 α、同一帧、同一次 comp —— 只换对照量。
+        // 【只报不判】, 见 g_guardEma720 的说明: 它不参与任何容差比较。
+        const double d720 = comp[i] - fd.tcpForce[i];
+        if (!g_guardSeeded720) g_guardEma720[i] = d720;
+        else g_guardEma720[i] += Config::FORCE_GUARD_EMA_ALPHA * (d720 - g_guardEma720[i]);
     }
     g_guardSeeded = true;
+    g_guardSeeded720 = true;
     g_guardFrames++;
 
     bool inconsistent = false;
