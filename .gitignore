@@ -33,6 +33,10 @@ Relay_Station/logs/
 Thumbs.db
 Desktop.ini
 
-# 标定【运行时状态】: 活路径会重写, 不进库 (推导引用的证据文件另行入库)
-Touch_Client/calib/payload_calib.json
-Touch_Client/calib/force_calib.json.expired
+# 标定【运行时状态】: 整个目录都不进库。活路径会被 app 重写 (CalibStore::dir() 从可执行文件
+# 位置推目录, 与 CWD 无关), 且 calib_poses.txt 只追加、永不截断 ⇒ 提交它会让被文档引用的数字
+# 随手漂、每次采集都把工作区弄脏。推导引用的数改引 tests/fixtures/ 下的【冻结快照】。
+# ⚠ 磁盘上的活文件【保留】: force_calib.json 是 app 启动装载的标定, 删掉就得重标一次。
+Touch_Client/calib/
+# 仓库根的 calib/: exe 落在 Touch_Client\ 下一层时按同一套规则产生的运行时输出 (前导 / 锚定)
+/calib/

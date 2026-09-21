@@ -36,13 +36,20 @@
 
 ## 1. 数据源与口径
 
+**⚠ 引用路径已改指【冻结快照】(2026-09-21 Task 8):** 本节原来写的是 `Touch_Client/calib/…`。
+那个目录是 **`CalibStore` 的运行时可写目录**（路径由可执行文件位置推出，与 CWD 无关），
+`calib_poses.txt` 在那里**只追加、永不截断** ⇒ 每次标定采集都会改写被本文引用的文件，
+**数字会随手漂**。所以本文引用的四份文件已**逐字节冻进** `Touch_Client/tests/fixtures/`，
+文件名带 `_2026-09-20_frozen` 后缀；**活文件仍在原处、只是不再入库**（它继续被 app 写）。
+⇒ 本文所有数字的复现基础是**快照**，不是本机的活文件。
+
 | 用途 | 文件 | 说明 |
 |---|---|---|
-| `@720` 的**唯一原始数据** | `Touch_Client/calib/calib_poses.txt` | 三份带 `F720*`/`M720*` 列的 `# attempt`：`2026-09-20 21:58:46` / `22:12:28` / `22:18:42`，各 10 行 = **5 对原地复采**（每对同姿态，行注记 `repeat: first=1,3,5,7,9 seconds=2,4,6,8,10`）。更早的尝试只有 `F576*`/`M576*`/`F1304*`/`M1304*`，**没有 `@720` 列**，所以本轮只能用这三轮。 |
-| 已安装模型 | `Touch_Client/calib/force_calib.json` | `version 3`，与 `calib_log.txt` 里 `2026-09-20 22:18:42 … INSTALLED` 对应（`a_matrix` / `bias_force_n` / `bias_torque_nm` / `com_sensor_m`）。 |
+| `@720` 的**唯一原始数据** | `Touch_Client/tests/fixtures/calib_poses_2026-09-20_frozen.txt` | 三份带 `F720*`/`M720*` 列的 `# attempt`：`2026-09-20 21:58:46` / `22:12:28` / `22:18:42`，各 10 行 = **5 对原地复采**（每对同姿态，行注记 `repeat: first=1,3,5,7,9 seconds=2,4,6,8,10`）。更早的尝试只有 `F576*`/`M576*`/`F1304*`/`M1304*`，**没有 `@720` 列**，所以本轮只能用这三轮。 |
+| 已安装模型 | `Touch_Client/tests/fixtures/force_calib_2026-09-20_frozen.json` | `version 3`，与 `calib_log_2026-09-20_frozen.txt` 里 `2026-09-20 22:18:42 … INSTALLED` 对应（`a_matrix` / `bias_force_n` / `bias_torque_nm` / `com_sensor_m`）。 |
 | 通道定义 | `Docs/机械臂资料/TCP_IP远程控制接口文档.md` 的 30004 布局表 | `ActualTCPForce` @576 = "TCP传感器力值"；`TCPForce` @720 = "TCP力值 (通过关节电流计算)"；`SixForceValue` @1304 = "当前六维力数据原始值"。 |
 | 容差 | `Touch_Client/config/Config.h` | `FORCE_GUARD_TOL_FORCE_N = 0.50`、`FORCE_GUARD_TOL_MOMENT_NM = 0.03`（只引符号名，不引行号）。 |
-| 拟合参数 / 失拟 | `Touch_Client/calib/calib_report.md`、`calib_log.txt` | ⚠ **只对 `@1304` 建了模**（报告里那一节标题写的是"原始通道 (@1304 SixForceValue) 线性解"）。**全库没有任何文件对 `@720` 建过模** —— 这是 §2.2 那条账的根源。 |
+| 拟合参数 / 失拟 | `Touch_Client/tests/fixtures/calib_report_2026-09-20_frozen.md`、`calib_log_2026-09-20_frozen.txt` | ⚠ **只对 `@1304` 建了模**（报告里那一节标题写的是"原始通道 (@1304 SixForceValue) 线性解"）。**全库没有任何文件对 `@720` 建过模** —— 这是 §2.2 那条账的根源。 |
 
 **⚠ 一条转录音损（有文件记）:** `.superpowers/sdd/progress.md` 的"2026-09-19 文档教训：读了转录，没读原文"
 一节记：`ActualTCPForce` @576 的 **PDF 原文**是"TCP传感器力值**（通过六维力计算）**"，
@@ -68,8 +75,8 @@
 | `My`(N·m) | +0.115 | +1.147 | 0.030 | 大 10× |
 | `Mz`(N·m) | +0.061 | +1.316 | 0.030 | 大 22× |
 
-**★ 用文件独立复现** —— 输入：`force_calib.json` 的 `A/bF/bM/com_sensor_m` +
-`calib_poses.txt` 三轮的 `@1304`（力 `F1304*` / 力矩 `M1304*`）、`@576`、`@720` 列；
+**★ 用文件独立复现** —— 输入：`force_calib_2026-09-20_frozen.json` 的 `A/bF/bM/com_sensor_m` +
+`calib_poses_2026-09-20_frozen.txt` 三轮的 `@1304`（力 `F1304*` / 力矩 `M1304*`）、`@576`、`@720` 列；
 按 `ForceCompensation` 的式子 `comp = @1304 − bF − A·g`、`M: comp = @1304 − bM − (c_s × (A·g))`，
 `g = TcpCalibration::gravitySensorFrameAtYaw(pose, 0.0)`，静止 ⇒ 不含惯性项：
 
@@ -107,7 +114,7 @@
 
 （⚠ 口径要说准：我查的是"**有没有文件产生/记录这组 `@720` 力偏置**"，不是"这三个字符串唯一不唯一"。
 只按字符串查，它们**不是**唯一的 —— `0.144` 在 `Docs/superpowers/evidence/cs-bias-report.md` 里
-是**另一个**三元组的分量，`0.181` 在 `calib_poses.txt` 里出现（坐标列 `640.181`、`M576*`/`M1304*` 列 `-0.181`）。
+是**另一个**三元组的分量，`0.181` 在 `calib_poses_2026-09-20_frozen.txt` 里出现（坐标列 `640.181`、`M576*`/`M1304*` 列 `-0.181`）。
 那些是**字符串撞车**，不是本三元组的出处；本条"没有文件"的结论只针对**这组 `@720` 力偏置**。）
 
 **② 独立重算（方法先在三个已知数上校准过，见 §5）:**
@@ -302,7 +309,7 @@ Task 3 的判据是 `余量 = FORCE_GUARD_TOL_FORCE_N / (Max + Drift) ≥ 2`：
 它讲的是"力矩通道已查清、没有可用参考量"，**没有**这句话。
 ⇒ 计划那处括注**只给了 `run-004 §7.2` 这一个出处，而这个出处不成立**；台账里同一句话
 **也没有给出第二个出处** ⇒ **这条声称的最终来源不在仓库里**（仓库里能查到的只有这条错引）。
-**但这条声称我可以用文件检验**，而检验结果是**它成立**（`calib_poses.txt` 三轮，逐分量 Pearson）：
+**但这条声称我可以用文件检验**，而检验结果是**它成立**（`calib_poses_2026-09-20_frozen.txt` 三轮，逐分量 Pearson）：
 
 | 轮次 | 力：`corr(@720,@1304)` | 力：`corr(@576,@1304)` | 力矩：`corr(@720,@1304)` | 力矩：`corr(@576,@1304)` |
 |---|---|---|---|---|
@@ -334,7 +341,7 @@ Task 3 的判据是 `余量 = FORCE_GUARD_TOL_FORCE_N / (Max + Drift) ≥ 2`：
 **② 零信息量风险的一般形式。** `@720` 的力**已经被机械臂自己补偿掉了**：它的质量系数在 **x 分量**上
 只有 `0.007 ~ 0.016 kg`（`run-004 §4.5②` 的原文就带 `(x)` 限定），**九个分量整体也只有 `0.0051 ~ 0.0286 kg`**
 （§2.2 表最小/最大）；而实际工具链质量是 **0.4159 kg**（= 已安装模型的 `massScaleOf(A) = |det A|^(1/3)`，
-`A` 取自 `force_calib.json`；与 `calib_log.txt` 的 `mass_kg` 列在 `22:18:42` 记录的 `0.415864` 一致）。
+`A` 取自 `force_calib_2026-09-20_frozen.json`；与 `calib_log_2026-09-20_frozen.txt` 的 `mass_kg` 列在 `22:18:42` 记录的 `0.415864` 一致）。
 ⇒ 静止时"我们 vs 它"比的是**两个都≈0 的残余**。这与①是同一件事的两面。
 
 **③ 支撑"换"的数字里有一个是坏的。** `run-004 §4.5③` 的 `@720` 力偏置三元组
@@ -405,7 +412,7 @@ c_a = 截距 (最小二乘)
 comp[0..2] = @1304[0..2] − bF − A·g
 comp[3..5] = @1304[3..5] − bM − (c_s × (A·g))          # 静止 ⇒ 无惯性项
 记录量:  comp − @576 ,  comp − @720
-A, bF, bM, c_s 取自 Touch_Client/calib/force_calib.json
+A, bF, bM, c_s 取自 Touch_Client/tests/fixtures/force_calib_2026-09-20_frozen.json
 ```
 ⚠ 该 `json` 是 **22:18:42 INSTALLED** 那一版；用它去算更早的两轮会带一点模型差
 （这正是 §2.1 里三轮均值不同的来源之一）。**三条结论对这一点不敏感**（三轮都同向）。
@@ -434,9 +441,9 @@ A, bF, bM, c_s 取自 Touch_Client/calib/force_calib.json
 
 - `Docs/superpowers/specs/2026-09-20-raw-channel-calibration-run-004.md`（§3 / §4.5 / §4.5① / §4.5② / §4.5③ / §7.1 / §7.2）
 - `Docs/superpowers/plans/2026-09-21-gate-reference-and-moment-vote.md`（Task 1 / Task 3 的口径）
-- `Touch_Client/calib/calib_poses.txt`（三段带 `F720*`/`M720*` 的 `# attempt`）
-- `Touch_Client/calib/force_calib.json`（version 3）
-- `Touch_Client/calib/calib_report.md`、`Touch_Client/calib/calib_log.txt`
+- `Touch_Client/tests/fixtures/calib_poses_2026-09-20_frozen.txt`（三段带 `F720*`/`M720*` 的 `# attempt`）
+- `Touch_Client/tests/fixtures/force_calib_2026-09-20_frozen.json`（version 3）
+- `Touch_Client/tests/fixtures/calib_report_2026-09-20_frozen.md`、`Touch_Client/tests/fixtures/calib_log_2026-09-20_frozen.txt`
 - `Docs/superpowers/evidence/cs-bias-report.md`（只用于 §2.2① 的"字符串撞车"说明）
 - `Touch_Client/config/Config.h`（`FORCE_GUARD_TOL_FORCE_N` / `FORCE_GUARD_TOL_MOMENT_NM`）
 - `Touch_Client/calibration/TcpCalibration.cpp` / `.h`（重力约定）

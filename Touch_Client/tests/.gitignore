@@ -2,3 +2,9 @@ build_constraint_test.bat
 *_log*.txt
 # 测试运行产物 (ForceCalibration::saveToFile 写当前目录)
 force_calib.json
+# ⚠ 上面两条通配是冲着【测试运行产物】去的, 不许吃掉 fixtures/ 里的【入库证据快照】——
+#   那是只读副本, 与本机的运行状态无关。2026-09-21: fixtures/calib_log_*_frozen.txt 曾被
+#   `*_log*.txt` 吃掉 (git check-ignore 抓到的), 下面两条把它按回入库面。否定规则必须写在
+#   通配之后 (后者胜出), 所以它们放在文件末尾。
+!fixtures/*_log*.txt
+!fixtures/force_calib*.json

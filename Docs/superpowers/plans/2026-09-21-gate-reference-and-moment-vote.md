@@ -93,7 +93,7 @@
 
 数据源**只用仓库里已有的文件**，不要去现场、不要动机械臂：
 `Docs/superpowers/specs/2026-09-20-raw-channel-calibration-run-004.md`（§4.5 与 §4.5③）、
-`.superpowers/sdd/progress.md`、`Touch_Client/calib/calib_poses.txt`（三份带 `F720*`/`M720*` 列的尝试）。
+`.superpowers/sdd/progress.md`、`Touch_Client/tests/fixtures/calib_poses_2026-09-20_frozen.txt`（三份带 `F720*`/`M720*` 列的尝试）。
 
 逐条记下并**注明出处文件与段落**：
 - `comp − @720` 的逐通道值（六个）与当时的容差
@@ -539,7 +539,7 @@ git commit -m "test(force): 零偏漂移检查在闸门放行后的分支首次�
 
 - [ ] **Step 3: 用已有数据逐条判**
 
-**优先用 Task 1 复核过的 `@720` 数据**（`calib_poses.txt` 里带 `F720*` 列的那几轮）。
+**优先用 Task 1 复核过的 `@720` 数据**（`calib_poses_2026-09-20_frozen.txt` 里带 `F720*` 列的那几轮）。
 **不新增机械臂动作。**
 
 - [ ] **Step 4: 写下判决 —— 允许的结论只有三种**
@@ -632,23 +632,53 @@ git commit -m "docs(gate): 查清 A 第三行/z 缺口 —— 结论与它取代
       **并且必须把【分子/分母】的分开说清楚**（Task 6 复审查出：z 行的绝对量几乎没变
       `0.0148–0.0201 kg` → `0.0051–0.0164 kg`，**是 x/y 塌了**（`0.20–0.21` → `0.008–0.029 kg`），
       所以"z 不再被结构性压小"说的是**比值**，不是 z 被修好了）。**不许改掩码、不许改任何数。**
-- [ ] **Step 2: 标定证据文件搬家（用户 2026-09-21 指令）。**
-      现状：`d81ebb4` 把证据提交在了 `Touch_Client/calib/` —— 而那是**运行时会写**的目录
-      （`CalibStore::dir()` 从**可执行文件位置**推路径：测试 exe 在 `Touch_Client\tests\` ⇒ 上溯两级 ⇒
-      `Touch_Client\calib\`；且 `saveToFile(CalibStore::fileFor("force_calib.json"), ...)` 是活代码）。
-      **⇒ 一次普通测试运行就能静默盖掉被文档引用的证据。**
-      - 把四个证据文件移进 `Touch_Client/tests/fixtures/`（与 `8032aa7` 冻结的那批同处，运行时永不写那里）；
-      - `Touch_Client/calib/` **从 git 摘掉、退回纯运行时状态**（加 ignore；**磁盘文件留着**，
+- [ ] **Step 2: 标定证据文件 —— 【冻结快照】，不是"搬家"（用户 2026-09-21 指令；2026-09-21 修订）**
+
+      **⚠ 修订原因（已核查代码）: `Touch_Client/calib/` 下这些文件【不是静态证据，是运行时输出】。**
+      - `main.cpp` **写** `calib_log.txt`（`CalibStore::fileFor("calib_log.txt")`）；
+      - `main.cpp` 对 **`calib\calib_poses.txt` 只追加、永不截断**（它自己的注释原话）；
+      - `force_calib.json` 由 'z' 调零 / 's' 求解写；
+      - 而 `CalibStore::dir()` 是**从可执行文件位置**推目录的（与 CWD 无关）。
+
+      **⇒ 两个后果：**
+      1. **"移走"做不到** —— app 会一直在 `Touch_Client\calib\` 写；把活文件搬走只会让 app 在新位置重建它们。
+      2. **把活的追加目标提交进 git 是错的** —— 每次标定采集都会改动一个被跟踪的文件（持续 churn），
+         而被文档引用的**数字会随手漂**。
+
+      **⇒ 正确做法：把【快照】冻进 `Touch_Client/tests/fixtures/`**（与 `8032aa7` 冻结的那批同处），
+      **所有引用改指向快照**，活文件留在原地、不入库：
+      - 冻结一份**带日期的**副本（命名与既有夹具风格一致，例如 `calib_poses_2026-09-20_frozen.txt`，
+        由实施者定名并写进报告）；`calib_report.md` 与 `calib_log.txt` 同样处理；
+      - **必须核验**：被文档引用的那些数（尤其那三段带 `F720*` 列的 `# attempt`：`21:58:46`/`22:12:28`/`22:18:42`）
+        **确实在那份快照里**，否则 Task 1/3/6 的推导就从"可复现"变成"不可复现"；
+      - **先查有没有【读】这些文件的代码/脚本**（app 是追加写；若有解析器/重放工具在读，搬/冻都要同步改它）；
+      - `Touch_Client/calib/` **从 git 摘掉、退回纯运行时状态**（目录级 ignore；**磁盘文件留着**，
         那是 app 启动装载的标定）；
-      - 仓库根的 `calib/` 也一并 ignore（那是 exe 落在 `Touch_Client\` 下一层时的运行时输出）。
-- [ ] **Step 3: 修【所有】引用路径** —— Task 1 的 `2026-09-21-gate-reference-prereq.md`、本计划、
-      Task 6 的两份文档（`2026-09-21-z-gap-report.md` 与 `2026-09-19-remaining-workflow.md`）、
-      `runtime-guard-report.md`、以及任何 `Config.h` / 代码注释里提到 `Touch_Client/calib/...` 的地方。
+      - 仓库根的 `calib/` 也一并 ignore（那是 exe 落在 `Touch_Client\` 下一层时的运行时输出）；
+      - **不要**让新的 ignore 规则意外忽略 `tests/fixtures/`。
+- [ ] **Step 3: 修引用路径 —— 但要【分清两类】，不许一刀切**
+
+      **★ 只有一类该改：**
+      - **（甲）文档在"引用证据"** ⇒ 改指向**冻结快照**：Task 1 的 `2026-09-21-gate-reference-prereq.md`、
+        Task 6 的两份文档（`2026-09-21-z-gap-report.md` / `2026-09-19-remaining-workflow.md`）、
+        `runtime-guard-report.md`、以及本计划里引用那些数的地方。
+
+      **★ 另一类【不许改】：**
+      - **（乙）代码注释在"描述运行时行为"** ⇒ **保留活路径**。例如 `Config.h`、`SessionReport.h`、
+        `main.cpp`、`PayloadCalibration.cpp` 里那些注释说的是"app 往 `calib\` 写什么/追加什么"，
+        **那些说法是正确的**（app 确实在那写）。把它们改指快照反而**变成假话**。
+      - **判别办法：** 这句注释是在说"**这些数据从哪来（证据）**" 还是 "**程序往哪写（行为）**"？
+        前者改，后者留。**拿不准就两种写法都写上并说明理由**，不要猜。
 - [ ] **Step 4: 跑全部用例 + 完整构建**（搬文件会动到 `CalibStore` 相关路径时尤其要跑）。
       Expected: `test_force_compensation` 全 PASS；`test_payload_calibration` 仍是 **69/1**
       （红线不许变绿，也不许变 2 条红）。**不许说"全绿"。**
 - [ ] **Step 5: 提交**
-      `chore(gate): z-gap 结论写回代码注释 (分子/分母说清) + 标定证据文件移出运行时可写目录`
+      `chore(gate): z-gap 结论写回代码注释 (分子/分母说清) + 标定证据冻结快照入 fixtures, 活文件退回运行时状态`
+
+      **⚠ 2026-09-21 更正:** 这一行原本写的是"标定证据文件**移出**运行时可写目录"。**那是错的** ——
+      见上面 Step 2 的修订说明：活文件移不走（app 会一直在 `Touch_Client\calib\` 写），
+      所以实际做的是**冻结快照入 fixtures + 活文件 `git rm --cached` 退回运行时状态**。
+      提交信息按实际动作写。
 
 ---
 
