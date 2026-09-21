@@ -15,6 +15,7 @@
 #include <windows.h>
 #include "../force/ForceCompensation.h"
 #include "../force/ForceCalibration.h"
+#include "../force/ZeroDriftCheck.h"
 #include "../calibration/TcpCalibration.h"
 #include "../config/Config.h"
 
@@ -1072,6 +1073,146 @@ static void test_calib_file_rejects_truncated() {
     PASS();
 }
 
+// ===== 启动零偏漂移检查: 闸门【放行】之后的那几支 (2026-09-21, Task 5) =====
+//
+// 这段判定原先整个长在 main.cpp 的 runZeroDriftCheck() 里: 由主循环用真实时钟
+// (GetTickCount) 驱动、直接读 appState 与 ForceCompensation::guardState(), 【没有可注入点】
+// ⇒ 一个分支都测不到。而它只在闸门放行后才做事, 闸门此前一直拒绝, 所以它至今跑的全是
+// 【未做】那一支 —— 放行后正常 / 放行后超阈这两条路【从来没在现场跑过】。
+// 判定已抽成 force/ZeroDriftCheck.h 里的纯函数。下面调的是【那个真实实现】(头文件内联的
+// 唯一一份定义, main.cpp 与这里编译的是同一份), 不是测试里另写一份复制品。
+static void driftInput(ZeroDriftCheck::Input& in, double mx, double my, double mz) {
+    in.guard = ForceCompensation::GuardState::OK;
+    in.mean[0] = mx; in.mean[1] = my; in.mean[2] = mz;
+    in.refuseElapsedMs = 0;
+    in.sampleCount = 40;
+    in.thresholdN = Config::FORCE_ZERO_DRIFT_WARN_N;
+    in.waitMs = 60000;
+    in.minSamples = 10;
+}
+
+// 文字里必须出现【函数自己算出来的】那个数 —— 不是测试塞进去的任何一个分量。
+static bool textHasNumber(const std::string& text, double v) {
+    char buf[64];
+    snprintf(buf, sizeof(buf), "%g", v);
+    return text.find(buf) != std::string::npos;
+}
+
+static void test_zero_drift_normal_is_a_conclusion() {
+    TEST(zero_drift_normal_is_a_conclusion);
+    ZeroDriftCheck::Input in;
+    driftInput(in, 0.2, 0.2, 0.2);
+    const ZeroDriftCheck::Decision d = ZeroDriftCheck::decide(in);
+    // 闸门放行 -> 必须真的产出结论, 【不是】"未做"
+    CHECK(d.outcome == ZeroDriftCheck::Outcome::Normal);
+    CHECK(d.outcome != ZeroDriftCheck::Outcome::NotDone);
+    // 报的数是它自己算的三轴模, 不是任何一个分量
+    const double want = sqrt(0.2 * 0.2 + 0.2 * 0.2 + 0.2 * 0.2);
+    CHECK(fabs(d.driftN - want) < 1e-12);
+    CHECK(d.driftN != 0.2);
+    CHECK(textHasNumber(d.text, want));
+    // 正常那一支只说结论, 不许出现"未做"
+    CHECK(d.text.find("未做") == std::string::npos);
+    PASS();
+}
+
+static void test_zero_drift_over_threshold_is_a_conclusion() {
+    TEST(zero_drift_over_threshold_is_a_conclusion);
+    ZeroDriftCheck::Input in;
+    // 0.8 N 静偏: 闸门容差 (1.2464 N) 之内 -> 闸门会放行, 但本检查的 0.5 N 要报。
+    // 这正是本检查【比闸门紧】的地方 —— 两个数各有各的理由, 不许"对齐"成一个。
+    driftInput(in, 0.8, 0.0, 0.0);
+    const ZeroDriftCheck::Decision d = ZeroDriftCheck::decide(in);
+    CHECK(d.outcome == ZeroDriftCheck::Outcome::OverThreshold);
+    CHECK(d.outcome != ZeroDriftCheck::Outcome::NotDone);
+    CHECK(fabs(d.driftN - 0.8) < 1e-12);
+    CHECK(textHasNumber(d.text, 0.8));
+    CHECK(textHasNumber(d.text, in.thresholdN));   // 阈值也要写进话里
+    CHECK(d.text.find("未做") == std::string::npos);
+    PASS();
+}
+
+// 边界: 恰好等于阈值【不报】—— 判据是严格大于 (与旧代码一致, 抽出判定时原样保留)。
+// 取 0.5 N 单轴: 0.5 是二进制精确值, sqrt(0.5²)=0.5 精确, 所以这条边界不是浮点碰运气。
+static void test_zero_drift_exactly_at_threshold_is_normal() {
+    TEST(zero_drift_exactly_at_threshold_is_normal);
+    ZeroDriftCheck::Input in;
+    driftInput(in, 0.0, 0.0, 0.0);
+    in.mean[0] = in.thresholdN;   // 必须在 driftInput 之后取 (它才是设阈值的那个)
+    const ZeroDriftCheck::Decision d = ZeroDriftCheck::decide(in);
+    CHECK(d.driftN == in.thresholdN);
+    CHECK(d.outcome == ZeroDriftCheck::Outcome::Normal);
+    CHECK(d.text.find("未做") == std::string::npos);
+    PASS();
+}
+
+static void test_zero_drift_not_done_after_full_wait() {
+    TEST(zero_drift_not_done_after_full_wait);
+    // 两种拒绝原因 (没有可用模型 / 有模型但对不上) 走同一支: 都【未做】、都不给漂移数。
+    const ForceCompensation::GuardState refusals[] = {
+        ForceCompensation::GuardState::UNCALIBRATED,
+        ForceCompensation::GuardState::INCONSISTENT,
+    };
+    for (int k = 0; k < 2; k++) {
+        ZeroDriftCheck::Input in;
+        driftInput(in, 0.0, 0.0, 0.0);
+        in.guard = refusals[k];
+        in.refuseElapsedMs = in.waitMs;   // 从第一次被拒起算满等待期
+        in.sampleCount = 0;
+        const ZeroDriftCheck::Decision d = ZeroDriftCheck::decide(in);
+        CHECK(d.outcome == ZeroDriftCheck::Outcome::NotDone);
+        CHECK(d.text.find("未做") != std::string::npos);
+        // 拒绝期间 compensated 是被闸门置的 0, 拿它算出来的"漂移"恒为 0 -> 不许报成读数
+        CHECK(d.text.find("补偿后读数") == std::string::npos);
+        CHECK(d.driftN == 0.0);
+        CHECK(d.text.find("60 s") != std::string::npos);   // 等了多久要说出来
+    }
+    PASS();
+}
+
+// 还没等满 -> 不是结论, 一声不吭地继续等 (旧行为如此, 保持)。
+static void test_zero_drift_waiting_stays_silent() {
+    TEST(zero_drift_waiting_stays_silent);
+    ZeroDriftCheck::Input in;
+    driftInput(in, 0.0, 0.0, 0.0);
+    in.guard = ForceCompensation::GuardState::INCONSISTENT;
+    in.refuseElapsedMs = in.waitMs - 1;   // 差 1 ms
+    const ZeroDriftCheck::Decision d = ZeroDriftCheck::decide(in);
+    CHECK(d.outcome == ZeroDriftCheck::Outcome::Waiting);
+    CHECK(d.outcome != ZeroDriftCheck::Outcome::NotDone);
+    CHECK(d.text.empty());
+    PASS();
+}
+
+// ★ 样本不足这一支曾经是【静默】的: 设完 done 就 return, 既不报结论、也不报"没查" ——
+// 于是"查了、没发现问题"与"根本没查"在输出上分不开, 与该文件自己写的原则
+// ("『没查』必须有句话")冲突。用户指令: 改成明说, 并用这条钉住。
+static void test_zero_drift_insufficient_samples_speaks() {
+    TEST(zero_drift_insufficient_samples_speaks);
+    ZeroDriftCheck::Input in;
+    driftInput(in, 0.0, 0.0, 0.0);
+    in.sampleCount = in.minSamples - 1;
+    const ZeroDriftCheck::Decision d = ZeroDriftCheck::decide(in);
+    CHECK(d.outcome == ZeroDriftCheck::Outcome::InsufficientSamples);
+    CHECK(d.outcome != ZeroDriftCheck::Outcome::NotDone);
+    CHECK(!d.text.empty());                                  // 不许静默
+    CHECK(d.text.find("样本不足") != std::string::npos);
+    CHECK(d.text.find("不作结论") != std::string::npos);
+    // 也不许借机编一个结论出来
+    CHECK(d.text.find("补偿后读数") == std::string::npos);
+    CHECK(d.driftN == 0.0);
+    // 差多少要说清楚: 采到几个 / 至少几个
+    CHECK(d.text.find("9") != std::string::npos);
+    CHECK(d.text.find("10") != std::string::npos);
+    // 边界: 刚好够就必须给结论 (9 与 10 之差)
+    in.sampleCount = in.minSamples;
+    in.mean[0] = 0.2; in.mean[1] = 0.2; in.mean[2] = 0.2;
+    const ZeroDriftCheck::Decision d2 = ZeroDriftCheck::decide(in);
+    CHECK(d2.outcome == ZeroDriftCheck::Outcome::Normal);
+    CHECK(!d2.text.empty());
+    PASS();
+}
+
 int main() {
     std::cout << "=== ForceCompensation + Calibration Tests ===" << std::endl;
     test_motion_still();
@@ -1102,6 +1243,13 @@ int main() {
     test_calib_file_rejects_truncated();
     test_calib_file_rejects_unusable_A();
     test_save_writes_unusable_model_but_load_rejects();
+    // 启动零偏漂移检查在闸门【放行】后的分支 (此前一个分支都测不到, 见定义处注释)
+    test_zero_drift_normal_is_a_conclusion();
+    test_zero_drift_over_threshold_is_a_conclusion();
+    test_zero_drift_exactly_at_threshold_is_normal();
+    test_zero_drift_not_done_after_full_wait();
+    test_zero_drift_waiting_stays_silent();
+    test_zero_drift_insufficient_samples_speaks();
     // ⚠ 最后一条: 它会调 ForceCompensation::init() (模拟重启), 别让它影响上面任何用例。
     test_install_then_reload_roundtrip();
     std::cout << "\nResults: " << g_passed << " passed, " << g_failed << " failed" << std::endl;

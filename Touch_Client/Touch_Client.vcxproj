@@ -132,6 +132,7 @@
     <ClCompile Include="force\ForcePipeline.cpp" />
     <ClInclude Include="force\ForceCompensation.h" />
     <ClCompile Include="force\ForceCompensation.cpp" />
+    <ClInclude Include="force\ZeroDriftCheck.h" />
     <ClInclude Include="force\ForceCalibration.h" />
     <ClCompile Include="force\ForceCalibration.cpp" />
     <ClInclude Include="force\ForceLogger.h" />

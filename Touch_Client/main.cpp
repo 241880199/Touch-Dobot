@@ -19,6 +19,7 @@
 #include "calibration/TcpCalibration.h"
 #include "force/ForceCalibration.h"
 #include "force/ForceCompensation.h"
+#include "force/ZeroDriftCheck.h"
 #include "force/PayloadCalibration.h"
 #include "force/RepeatPairRegistry.h"
 #include "robot/Kinematics.h"
@@ -2441,7 +2442,15 @@ static int g_zeroCheckCount = 0;
 //   就定稿并打印【未做】。
 //   (另一条路是删掉截止、无限重试直到闸门放行 —— 那样更"贴心"(修好负载参数就不必重启),
 //    但漂移检查在闸门一直拒绝时会永远安静; 这里选截止 + 明说, 因为"没查"必须有句话。)
+//
+// ★ 2026-09-21 (Task 5): 上面这条原则原先【自己就没做到】—— 放行后样本不够那一支是
+//   静默的 (设完 g_zeroCheckDone 直接 return, 结论和"没查"都不打)。已改成明说
+//   (判定在 force/ZeroDriftCheck.h, 那一支现在吐【样本不足, 本次不作结论】)。
 static const DWORD ZERO_CHECK_GUARD_WAIT_MS = 60000;
+
+// 出结论所需的最少样本数。原先写死在下面的判定里 (字面量 10), 抽判定时提成常量:
+// 阈值/等待期/最少样本数这三个旋钮都由本侧传给纯函数, 判定侧不写死任何数。
+static const int ZERO_CHECK_MIN_SAMPLES = 10;
 
 // 启动加载 force_calib.json 是否成功 (成功才有"存储零偏"可比, 否则无可查)
 static bool g_hasStoredZeroCalib = false;
@@ -2463,34 +2472,37 @@ static void runZeroDriftCheck(bool hasStoredZero) {
     if (fd.isStale || now - g_zeroCheckStartMs < 2000) return;
 
     // ⚠ 闸门在拒绝 -> 读数被置零, 此刻量不到零偏。【不装作查过】。
-    if (ForceCompensation::guardState() != ForceCompensation::GuardState::OK) {
+    // 判定本身是纯函数 (force/ZeroDriftCheck.h): 本侧只负责【采样、时钟、定稿标志】,
+    // 判定侧不看时钟、不读全局、不打印 —— 于是它能被单测直接调用。
+    const ForceCompensation::GuardState gs = ForceCompensation::guardState();
+
+    ZeroDriftCheck::Input in;
+    in.guard = gs;
+    in.thresholdN = Config::FORCE_ZERO_DRIFT_WARN_N;
+    in.waitMs = ZERO_CHECK_GUARD_WAIT_MS;
+    in.minSamples = ZERO_CHECK_MIN_SAMPLES;
+
+    if (gs != ForceCompensation::GuardState::OK) {
         // 等待的起点是【第一次】被拒那一刻 —— 下面每次都会重开累计窗口, 拿窗口起点当
         // 等待起点的话这个截止永远到不了 (复审 Important 1)。
         if (!g_zeroCheckRefusalSeen) {
             g_zeroCheckRefusalSeen = true;
             g_zeroCheckFirstRefusalMs = now;
         }
-        if (now - g_zeroCheckFirstRefusalMs >= ZERO_CHECK_GUARD_WAIT_MS) {
-            g_zeroCheckDone = true;
-            std::cout << "[Force] 零偏漂移检查: 【未做】—— 一致性闸门从第一次拒绝起已 "
-                      << (now - g_zeroCheckFirstRefusalMs) / 1000 << " s 一直在拒绝"
-                      << " (原因见上面 \"[Force] !!\" 那一段, 那一段分得开'没有可用模型'与"
-                      << "'有模型但对不上')。" << std::endl;
-            std::cout << "[Force]   闸门拒绝时 compensated (以及由它推出来的 filtered) 是全 0,"
-                      << " 0 不是零偏 —— 拿它算出来的\"漂移\"恒为 0, 所以本检查在拒绝期间"
-                      << " 给不出任何结论。" << std::endl;
-            std::cout << "[Force]   ⚠ '对不上'不止'负载参数没发进机械臂'一种来源: 零偏漂到"
-                      << "超出容差同样会让两边对不上 (有模型但不一致时, 上面那段里的逐通道表"
-                      << "写着是哪些通道超了限)。别只查下发那一处。" << std::endl;
-            std::cout << "[Force]   闸门放行之后重启本程序即可 (本检查是启动时的一次性检查)。"
-                      << std::endl;
+        in.refuseElapsedMs = now - g_zeroCheckFirstRefusalMs;
+        in.sampleCount = g_zeroCheckCount;   // 拒绝分支不消费它, 但传真值, 免得读的人以为有值
+        const ZeroDriftCheck::Decision d = ZeroDriftCheck::decide(in);
+        if (d.outcome == ZeroDriftCheck::Outcome::Waiting) {
+            // 还没等满: 不是结论, 这一次不出声并重开窗口 —— 已经积进去的那一段是闸门置的 0,
+            // 留着会把后面的真读数稀释掉。(只动累计窗口, 不动上面那个等待时钟。)
+            g_zeroCheckStartMs = now;
+            g_zeroCheckCount = 0;
+            for (int i = 0; i < 3; i++) g_zeroCheckAccum[i] = 0.0;
             return;
         }
-        // 重开窗口: 已经积进去的那一段是闸门置的 0, 留着会把后面的真读数稀释掉。
-        // (只动累计窗口, 不动上面那个等待时钟。)
-        g_zeroCheckStartMs = now;
-        g_zeroCheckCount = 0;
-        for (int i = 0; i < 3; i++) g_zeroCheckAccum[i] = 0.0;
+        // 满等待期仍不放行 -> 【未做】: 明说本次没查, 不给漂移数。
+        g_zeroCheckDone = true;
+        std::cout << d.text << std::endl;
         return;
     }
 
@@ -2498,27 +2510,13 @@ static void runZeroDriftCheck(bool hasStoredZero) {
     g_zeroCheckCount++;
     if (now - g_zeroCheckStartMs < 3000) return;
 
-    // 定稿
+    // 定稿。样本够不够、能不能出结论, 都由判定侧说 —— 包括【样本不足】也必须说出口
+    // (旧代码在这一支设完 done 就 return, 一句都不打)。
+    for (int i = 0; i < 3; i++) in.mean[i] = g_zeroCheckAccum[i] / g_zeroCheckCount;
+    in.sampleCount = g_zeroCheckCount;
+    const ZeroDriftCheck::Decision d = ZeroDriftCheck::decide(in);
     g_zeroCheckDone = true;
-    if (g_zeroCheckCount < 10) return;   // 数据太少, 本次不作结论
-
-    const double drift = sqrt(
-        (g_zeroCheckAccum[0] / g_zeroCheckCount) * (g_zeroCheckAccum[0] / g_zeroCheckCount) +
-        (g_zeroCheckAccum[1] / g_zeroCheckCount) * (g_zeroCheckAccum[1] / g_zeroCheckCount) +
-        (g_zeroCheckAccum[2] / g_zeroCheckCount) * (g_zeroCheckAccum[2] / g_zeroCheckCount));
-
-    if (drift > Config::FORCE_ZERO_DRIFT_WARN_N) {
-        std::cout << "\n[Force] ⚠ 零偏漂移检查: 补偿后读数 " << drift
-                  << " N, 超过阈值 " << Config::FORCE_ZERO_DRIFT_WARN_N << " N" << std::endl;
-        std::cout << "[Force]   两种可能:" << std::endl;
-        std::cout << "[Force]     · 零偏漂了 (温度/时间)  -> 按 'z' 重新调零" << std::endl;
-        std::cout << "[Force]     · 硬件有变化 (加装/拆装) -> 按 'm' 采多姿态后 's' 重标负载"
-                  << std::endl;
-        std::cout << "[Force]   两种都不影响继续操作, 但建议尽快处理。" << std::endl;
-    } else {
-        std::cout << "[Force] 零偏漂移检查: 补偿后读数 " << drift
-                  << " N, 正常 (< " << Config::FORCE_ZERO_DRIFT_WARN_N << " N)" << std::endl;
-    }
+    std::cout << d.text << std::endl;
 }
 
 // ===== 启动运动检测器诊断 =====
