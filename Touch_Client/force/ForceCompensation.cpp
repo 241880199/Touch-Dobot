@@ -830,16 +830,6 @@ const char* guardStateName(GuardState s) {
     return "UNKNOWN";
 }
 
-// ===== 运动估计器的只读导出 (2026-09-21) —— 声明与理由见 ForceCompensation.h =====
-void lastMotionAcc(double out[3]) {
-    double vel[3];
-    g_motion.getState(vel, out);
-}
-
-bool lastMotionStill() {
-    return g_motion.isStill();
-}
-
 // 闸门状态 -> 错误码。
 // RelayCore 从前自己拿 static_cast<int>(guardState()) 去比字面量 1 和 2 —— 那是把
 // "哪个状态配哪个码"存在【两个地方的巧合】里: 改一次枚举的数值, "去标定"与"去查负载

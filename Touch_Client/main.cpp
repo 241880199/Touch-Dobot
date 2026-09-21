@@ -479,9 +479,15 @@ namespace BiasCheck {
                    fdz.compensated[0], fdz.compensated[1], fdz.compensated[2],
                    fdz.compensated[3], fdz.compensated[4], fdz.compensated[5],
                    ForceCompensation::guardStateName(ForceCompensation::guardState()));
-            printf("       在线零偏  bF=(%+.4f,%+.4f,%+.4f)  bM=(%+.4f,%+.4f,%+.4f)\n",
-                   fdz.calibBiasForce[0], fdz.calibBiasForce[1], fdz.calibBiasForce[2],
-                   fdz.calibBiasTorque[0], fdz.calibBiasTorque[1], fdz.calibBiasTorque[2]);
+            // ⚠ 零偏【不走 fdz】: ForceData 里那对 calibBiasForce/calibBiasTorque 是 HUD 字段,
+            //   step() 第 2 步每帧把它们与 compensated 一起置零、只在放行路径重填 ⇒ **闸门一拒绝
+            //   就会打印成 0** —— 那不是"零偏归零了", 是"这一帧没有 HUD 值"。2026-09-21 的 ② 那一笔
+            //   诊断正因此看不清零偏有没有动。⇒ 改读【持久的那一份】(与 EMA / setCalibration 同源)。
+            double bFnow[3] = {0, 0, 0}, bMnow[3] = {0, 0, 0};
+            ForceCompensation::currentBias(bFnow, bMnow);
+            printf("       在线零偏  bF=(%+.4f,%+.4f,%+.4f)  bM=(%+.4f,%+.4f,%+.4f)"
+                   "   (持久值; 与闸门状态无关)\n",
+                   bFnow[0], bFnow[1], bFnow[2], bMnow[0], bMnow[1], bMnow[2]);
         }
         count++;
     }

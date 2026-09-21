@@ -129,16 +129,11 @@ namespace ForceCompensation {
     void        guardReport(GuardReport& out);
     const char* guardStateName(GuardState s);
 
-    // ===== 运动估计器的【只读导出】(2026-09-21, 给落盘用) =====
-    // 【为什么导出它】Fi = mass·acc 的运动时误差只能靠【外部反算】来验证:
-    //   force_demo_log.csv 的 pose 列数值二阶差分就是"真加速度", 与这里的 acc 一比,
-    //   才知道 step() 里 dt 那处(曾按 125Hz 传 8ms, 真实 33ms ⇒ 加速度放大 17 倍)修得对不对。
-    //   ⚠ 【两次手拖比 ΔFi 是不可比的】(手拖的运动每次都不一样) —— 必须在同一个运动上自洽比较。
-    //   ⚠ 单位: acc 是 m/s² (MotionEstimator::update 内部把 pose 从 mm 换成 m)。
-    //     而落盘的 pose 列是【mm】⇒ 离线用 pose 反算时先 ×0.001 再与 acc 比, 否则差 1000 倍。
-    // ⚠ 它们说的是【最近一次 step()】的状态, 不是"此刻的机械臂"; 时效与闸门打印同级。
-    void lastMotionAcc(double out[3]);   // 滤波后的加速度 (三轴)
-    bool lastMotionStill();              // true = 估计器判"静止" ⇒ Fi 未被施加
+    // ⚠ 2026-09-21 记: 本段【原本】被我加过两个访问器 (lastMotionAcc / lastMotionStill) 与
+    //   一个 currentBias 重载 —— **三个都是重复**。既有的 motionState() (下面) 与
+    //   currentBias() (:180) 本来就有, 其中一个还写着 dt 那处可疑。已全部撤回。
+    //   教训: 动一个头文件之前, 【先 grep 这个头文件里有没有现成的访问器】——
+    //   "我以为没有" 与 "确实没有" 是两回事。
 
     // ===== GuardState -> RobotErrorCode (闸门唯一一处"状态转错误码") =====
     // 用 switch 穷举 (没有 default), 但【别指望编译器替你发现漏配】: 末尾那句

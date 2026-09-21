@@ -1933,10 +1933,14 @@ void RelayCore::pollForce() {
     // 运动估计器的状态也落盘 (2026-09-21, 追加在行末两列/四字段)。理由见 ForceLogger.h 表头说明:
     // Fi = mass·acc 的运动时误差【只能靠外部反算】验证 —— 本文件的 pose 列二阶差分就是真加速度,
     // 与 acc 列一比就知道 step() 里 dt 那处修对了没有。两次手拖比 ΔFi 是不可比的, 必须同一运动自洽比较。
-    double motionAcc[3] = {0, 0, 0};
-    ForceCompensation::lastMotionAcc(motionAcc);
+    // ⚠ 用【既有的】ForceCompensation::motionState(vel, acc) —— 它一次给出加速度与 isStill
+    //   判定; 而它自己的注释里本来就写着"update() 的 dt 与 pollForce() 实际采样节奏不符",
+    //   那正是 2026-09-21 修掉的那件事。本处【不另加访问器】(我一度加过 lastMotionAcc /
+    //   lastMotionStill, 那两个与它功能重复, 已撤回)。
+    double motionVel[3] = {0, 0, 0}, motionAcc[3] = {0, 0, 0};
+    const bool motionStill = ForceCompensation::motionState(motionVel, motionAcc);
     ForceLogger::log(now, filtered, logPose, appState.forceFeedbackEnabled ? 1 : 0,
-                     motionAcc, ForceCompensation::lastMotionStill() ? 1 : 0);
+                     motionAcc, motionStill ? 1 : 0);
 
     sendRelayUpdate(buf);
 
