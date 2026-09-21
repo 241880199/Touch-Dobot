@@ -537,6 +537,25 @@ static std::string capRead(const char* path) {
     return s;
 }
 
+// "这一段是整块"的判据 —— 整块独有的抬头句。两条用例都用它。
+// ⚠ 它是生产代码 (ForceCompensation.cpp 的 setGuardState) 里那一句的副本: 那边改了措辞,
+//   这里就找不到 -> 用例【响亮地红】。这与"捕获里没有某某字面量"那种写法【方向相反】——
+//   后者的判据一旦被改名就【恒真】(见下面 ③ 那条注释里的账)。
+static const char* kGuardBlockHeader = "============ 一致性闸门: 拒绝传递数据 ============";
+
+// 跑一帧并把这一次的 stderr 收回来。下面那条用例要抓五次, 所以提成助手。
+// ⚠ 窗口里【不许】出现 CHECK (见上面那条规矩): 本助手只回答"窗口有没有搭起来", 断言全在
+//   调用处 —— 失败时 return 也只会发生在窗口之外。
+static bool capStepForPrint(const char* path, AppState::ForceData& fd, const double pose[6],
+                            std::string& out) {
+    if (!capBegin(path)) return false;
+    ForceCompensation::step(fd, pose);
+    capEnd();
+    out = capRead(path);
+    remove(path);
+    return true;
+}
+
 // ★★ 2026-09-21 复审 (Important 1): 参考量不可用【第一次】被拒绝时, 那一段打印必须把
 //   两个可用性读数【当场说出来】。上面那条用例钉的是状态与错误码, 钉不住这一段文字。
 //
@@ -611,10 +630,17 @@ static void test_guard_unavailable_first_refusal_prints_the_two_values() {
             return;
         }
         // ③ 这两个数必须来自【跃迁】那一段, 不是 5 s 复报那一行。只喂了一帧、状态刚变,
-        //    所以捕获窗口里【不该】出现复报行 —— 出现就说明值是从那条没覆盖的路径来的。
-        if (txt.find("(复报)") != std::string::npos) {
-            std::cout << std::endl << "    FAIL (" << cases[k].why << "): 捕获到的是复报那一行"
-                      << ", 不是状态跃迁那一段 —— 那么上面两个数仍然只在复报行里。" << std::endl;
+        //    所以捕获窗口里必须是【整块】—— 是复报行就说明值是从那条没覆盖的路径来的。
+        //    ⚠ 判据【换了写法】(2026-09-21 收口 Fix 2): 原来写的是"捕获里没有字面量
+        //      `(复报)`" —— 而本波把那处文字改成了变量 (一行式的抬头按跃迁/复报分岔),
+        //      那个字面量于是【只活在这个文件里】: 这条断言从此【恒真】, 查什么都能过。
+        //      ⇒ 改成【正着查"整块在不在"】: 整块那一段有它自己的抬头句 (kGuardBlockHeader),
+        //        节流复报那一行【从不】带它。整块一旦不再打, 这里就红 (见 kGuardBlockHeader
+        //        处关于"正查/反查"的说明)。
+        if (txt.find(kGuardBlockHeader) == std::string::npos) {
+            std::cout << std::endl << "    FAIL (" << cases[k].why << "): 第一次拒绝那一段里"
+                      << "找不到整块的抬头句 —— 捕获到的不是状态跃迁那一段, 那么上面两个数"
+                      << "仍然只出现在别处的打印里。" << std::endl;
             g_failed++;
             return;
         }
@@ -922,17 +948,19 @@ static void test_guard_recovers_after_a_nonfinite_frame() {
     PASS();
 }
 
-// ★★ 状态【跃迁的整块打印】按既有间隔节流 (2026-09-21 收口, 最终复审 2b)。
-//   要钉住的病: 从前"一变就打整块", 而边缘链路上参考量一会儿有一会儿没、状态来回跳 ⇒
-//   每跳一次就是那一整块, 控制台被冲掉 (现场要读的偏偏是别的输出)。而这是"看不过来"，
-//   与"没报"在操作上是一回事的另一面。
-//   本用例驱动【两次】进入同一个拒绝状态, 中间不重新 init (那样会复位节流):
-//     · 第一次: 必须打整块 (它就是"第一次拒绝"该有的样子);
-//     · 第二次 (在同一个复报间隔内): 【不许】再打整块, 但【必须】出声 —— 走一行式的紧凑读数。
-//   ⚠ 两次都靠 GetTickCount 的真实时间: 本用例跑完远快于节流间隔, 所以"第二次被节流"是
-//     确定性的, 不是碰运气。
-static void test_guard_transition_block_is_throttled_but_never_silent() {
-    TEST(guard_transition_block_is_throttled_but_never_silent);
+// ★★ 状态跃迁【一律】打整块; 节流【只管复报】(2026-09-21 收口 Fix 1)。
+//   前一版把跃迁也按同一个间隔节流掉, 并在注释里承诺"整块到点补出" —— 那个承诺【没有兑现】
+//   (补出需要有"还欠着一块"的状态, 代码里没有它)。后果: 【在节流窗口里进入的状态】只剩一行
+//   紧凑读数, 原因/处置、本帧姿态、逐通道的"超限 <== 触发"标记全都看不到 —— 而现场抄数
+//   要抄的恰恰是这几样。本用例按【次序】钉四件事:
+//     ① 启动后第一次跃迁: 打整块;
+//     ② 同一个复报间隔内【再一次跃迁】: 仍然打整块 (前一版在这里只出一行 —— 被修掉的那条);
+//     ③ 复位 (setCalibration -> resetGuard) 之后第一次跃迁: 仍然打整块;
+//     ④ 复报【才】被节流: 状态不变 -> 一个字符都不打; 过一个间隔 -> 只出那一行紧凑读数。
+//   ⚠ ④ 要等一个【真实的】FORCE_GUARD_REPORT_MS (5 s): 判据用的是 GetTickCount, 没有注入
+//     时钟的口子, 而"间隔到点才复报"只能这么验。本用例因此比其他用例慢 5 s 出头。
+static void test_guard_transition_always_prints_block_repeat_is_throttled() {
+    TEST(guard_transition_always_prints_block_repeat_is_throttled);
     const char* capPath = "gate_transition_capture.tmp";
     double pose[6] = {0, 0, 0, 0, 0, 0};
 
@@ -947,63 +975,86 @@ static void test_guard_transition_block_is_throttled_but_never_silent() {
     bad.sixForceOnline = 0;
     AppState::ForceData good = gateVisibleFrame();
 
-    // 整块的判据 (整块才有这句) 与紧凑行的判据 (节流后走的那条)。
-    const std::string fullMark = "============ 一致性闸门: 拒绝传递数据 ============";
-    const std::string compactMark = "刚变成拒绝, 解析从略";
+    std::string t;
 
-    // ---- 第 1 次跃迁: 必须打整块 ----
-    if (!capBegin(capPath)) {
+    // ---- ① 启动后第一次跃迁: 整块 ----
+    if (!capStepForPrint(capPath, bad, pose, t)) {
         std::cout << std::endl << "    FAIL (捕获窗口没搭起来): 本条打印没有被钉住。" << std::endl;
         g_failed++;
         return;
     }
-    ForceCompensation::step(bad, pose);       // OK/初始 -> REFERENCE_UNAVAILABLE
-    capEnd();
-    const std::string t1 = capRead(capPath);
-    remove(capPath);
-
-    if (t1.find(fullMark) == std::string::npos) {
-        std::cout << std::endl << "    FAIL: 第一次拒绝没有打整块 (找不到整块的判据句) ——"
-                  << " 那么下面那条【第二次被节流】就无从谈起。" << std::endl;
+    if (t.find(kGuardBlockHeader) == std::string::npos) {
+        std::cout << std::endl << "    FAIL: 启动后第一次拒绝没有打整块 (找不到整块的抬头句)。"
+                  << std::endl;
         g_failed++;
         return;
     }
-    // ---- 回到放行 ----
+    CHECK(ForceCompensation::guardState() == ForceCompensation::GuardState::REFERENCE_UNAVAILABLE);
+
+    // ---- ② 回到放行, 再跃迁 (同一个复报间隔内): 仍然整块 ----
+    //   前一版在这里只出一行紧凑读数 —— 那正是被修掉的那条。
     ForceCompensation::step(good, pose);
     CHECK(ForceCompensation::guardState() == ForceCompensation::GuardState::OK);
-
-    // ---- 第 2 次跃迁 (同一个复报间隔内): 不许打整块, 但必须出声 ----
-    if (!capBegin(capPath)) {
+    if (!capStepForPrint(capPath, bad, pose, t)) {
         std::cout << std::endl << "    FAIL (捕获窗口没搭起来): 本条打印没有被钉住。" << std::endl;
         g_failed++;
         return;
     }
-    ForceCompensation::step(bad, pose);       // OK -> REFERENCE_UNAVAILABLE (第二次)
-    capEnd();
-    const std::string t2 = capRead(capPath);
-    remove(capPath);
-
-    CHECK(ForceCompensation::guardState() == ForceCompensation::GuardState::REFERENCE_UNAVAILABLE);
-    if (t2.find(fullMark) != std::string::npos) {
-        std::cout << std::endl << "    FAIL: 第二次跃迁又打了一整块 —— 状态来回跳时控制台"
-                  << "就是被这个冲掉的 (本节流机制的整条理由)。" << std::endl;
-        g_failed++;
-        return;
-    }
-    // 【不是静默】: 一行里要有状态、原因、以及本帧那两个可用性读数。
-    if (t2.find(compactMark) == std::string::npos || t2.empty()) {
-        std::cout << std::endl << "    FAIL: 第二次跃迁被节流之后【什么都没说】—— 节流掉的"
-                  << "只能是【整块的形态】, 不许把【报告】这件事一起节流掉。" << std::endl;
-        g_failed++;
-        return;
-    }
-    char wantOnline[64];
-    snprintf(wantOnline, sizeof(wantOnline), "@1037 = %d", bad.sixForceOnline);
-    if (t2.find("参考量不可用") == std::string::npos ||
-        t2.find(wantOnline) == std::string::npos) {
-        std::cout << std::endl << "    FAIL: 被节流后的那一行没有说清状态/原因"
-                  << " (要么没有\"参考量不可用\", 要么没有 \"" << wantOnline << "\")。"
+    if (t.find(kGuardBlockHeader) == std::string::npos) {
+        std::cout << std::endl << "    FAIL: 复报间隔内【第二次】跃迁没有打整块 —— 在节流窗口里"
+                  << "进入的那个状态丢了原因/处置/本帧姿态/逐通道标记 (本波修的就是这一条)。"
                   << std::endl;
+        g_failed++;
+        return;
+    }
+
+    // ---- ③ 复位之后第一次跃迁: 仍然整块 (整块不节流 ⇒ 不依赖任何时刻量) ----
+    ForceCompensation::setCalibration(A, bF, bM, com);   // -> resetGuard
+    if (!capStepForPrint(capPath, bad, pose, t)) {
+        std::cout << std::endl << "    FAIL (捕获窗口没搭起来): 本条打印没有被钉住。" << std::endl;
+        g_failed++;
+        return;
+    }
+    if (t.find(kGuardBlockHeader) == std::string::npos) {
+        std::cout << std::endl << "    FAIL: 复位之后第一次跃迁没有打整块 —— 那会让操作员"
+                  << "看不到新一套判据状态的原因与处置。" << std::endl;
+        g_failed++;
+        return;
+    }
+
+    // ---- ④(a) 状态不变、间隔没到: 一个字符都不打 (复报的节流就在这一条上) ----
+    if (!capStepForPrint(capPath, bad, pose, t)) {
+        std::cout << std::endl << "    FAIL (捕获窗口没搭起来): 本条打印没有被钉住。" << std::endl;
+        g_failed++;
+        return;
+    }
+    if (!t.empty()) {
+        std::cout << std::endl << "    FAIL: 状态没变、间隔也没到, 却又出声了 (" << t.size()
+                  << " 字节) —— 拒绝是常态, 这会把现场要读的别的输出冲掉。" << std::endl;
+        g_failed++;
+        return;
+    }
+    CHECK(ForceCompensation::guardState() == ForceCompensation::GuardState::REFERENCE_UNAVAILABLE);
+
+    // ---- ④(b) 过一个 FORCE_GUARD_REPORT_MS 之后: 只出那一行紧凑读数, 【不】出整块 ----
+    Sleep(static_cast<DWORD>(Config::FORCE_GUARD_REPORT_MS) + 200);
+    if (!capStepForPrint(capPath, bad, pose, t)) {
+        std::cout << std::endl << "    FAIL (捕获窗口没搭起来): 本条打印没有被钉住。" << std::endl;
+        g_failed++;
+        return;
+    }
+    // 正查: 间隔到点【必须】有一句话 (复报不是静默)。
+    if (t.find("仍在拒绝") == std::string::npos) {
+        std::cout << std::endl << "    FAIL: 复报间隔到点之后一个字的拒绝读数都没有 —— 那才是"
+                  << "静默。整块只在跃迁时打, 所以这里该出现的是一行紧凑读数。" << std::endl;
+        g_failed++;
+        return;
+    }
+    // 反查: 复报【不许】把整块重抄一遍 (这里配着上面那条正查用, 不会像"没有 (复报)"那样恒真 ——
+    // 抬头句一旦改名, ①②③ 会先红)。
+    if (t.find(kGuardBlockHeader) != std::string::npos) {
+        std::cout << std::endl << "    FAIL: 复报打出了整块 —— 全表只在跃迁时打 (每 5 s 一次"
+                  << "那几行解释 + 6 行表 + 姿态行会把现场要读的别的输出全冲掉)。" << std::endl;
         g_failed++;
         return;
     }
@@ -1689,7 +1740,7 @@ int main() {
     test_guard_force_channels_still_vote();
     test_guard_nonfinite_refuses_even_on_nonvoting_channel();
     test_guard_recovers_after_a_nonfinite_frame();
-    test_guard_transition_block_is_throttled_but_never_silent();
+    test_guard_transition_always_prints_block_repeat_is_throttled();
     test_guard_default_report_claims_no_mask();
     test_guard_ema_needs_sustained_mismatch();
     test_zero_only_no_motion();

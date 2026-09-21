@@ -73,8 +73,8 @@ namespace ForceCompensation {
     // 不一致 ⇒ 【compensated 全 6 个分量置零】(不是只置 haptic): 下游
     //   ForcePipeline::step 从 compensated 推 filtered/hapticOut/F| 帧 —— 所以断掉的是
     //   【传感器力那一条路】(Touch 上的反射力 + 发给 MATLAB 的 F| 帧)。
-    // ⚠ 它【不断】虚拟约束力: 那一条在 HapticCallback.cpp:168 由【位置】现算
-    //   (SafetyPredictor::computeConstraintForce), 与 compensated 无关, 也对
+    // ⚠ 它【不断】虚拟约束力: 那一条由【位置】现算 (SafetyPredictor::computeConstraintForce,
+    //   触觉回调里对当前位置求一次), 与 compensated 无关, 也对
     //   orientExtraForce / orientRepulsionForce 一样 —— 那两条同样是位置驱动的。
     //   不要把这里写成"触觉与约束力两条路一起断": 那是错的, 会让人以为拒绝之后
     //   操作员连安全边界的推手都没有了。

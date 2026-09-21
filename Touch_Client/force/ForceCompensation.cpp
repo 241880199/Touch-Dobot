@@ -113,11 +113,12 @@ static double g_guardTol[6]  = { Config::FORCE_GUARD_TOL_FORCE_N,  Config::FORCE
 static bool   g_guardSeeded  = false;    // EMA 是否已用第一帧播种
 static long   g_guardFrames  = 0;
 static ForceCompensation::GuardState g_guardState = ForceCompensation::GuardState::UNCALIBRATED;
-static DWORD  g_guardReportMs = 0;       // 上次打印/上报的时刻
-// 【上一次打整块】的时刻 (2026-09-21 收口)。与 g_guardReportMs 分开的理由: 那一份在【放行】
-// 时每帧都被刷新, 而放行是常态 ⇒ 拿它当"整块的节流"会让"长时间正常之后的第一声拒绝"
-// 被误当成"刚打过整块"而压掉。这一份只在【真的打出整块】时写。
-static DWORD  g_guardFullBlockMs = 0;
+// 上一次【出声】(整块或复报那一行) 的时刻。⚠ 它只服务【复报】的节流, 不节流整块 ——
+// 状态一变就打整块, 所以不需要记"上一次打整块是什么时候"。本波曾加过那样一个变量
+// (拿 0 当"还没打过"的哨兵, 而 0 也是 GetTickCount 的合法值), 配上一条"被节流掉的整块
+// 会在间隔到点后补出"的承诺 —— 补出的那条路没有实现过, 已随整块的节流一起删掉,
+// 理由见 setGuardState 头上那一段。
+static DWORD  g_guardReportMs = 0;
 
 // ===== 【哪些通道参与判决】—— 本数组是掩码的【唯一一份实现】 =====
 //   index:      0    1    2     3     4     5
@@ -357,22 +358,26 @@ bool MotionEstimator::isStill() const {
 
 // ===== 闸门的报告 =====
 
-// 【一行式】的拒绝读数 —— "仍在拒绝"的复报与"被节流掉整块的状态跃迁"共用这一份实现。
-// transition: true = 刚刚变成这个状态 (整块被节流掉了), false = 状态没变、复报。
-// ⚠ 它【不是"无需解释"】: 整块 (原因 + 处置 + 本帧姿态 + 逐通道表) 会在
-//   FORCE_GUARD_REPORT_MS 到点后补出来。这一行只是把这段时间里的状态与理由留下一句话。
+// 【一行式】的拒绝读数 —— 状态【没有变】、且距上次出声已过一个 FORCE_GUARD_REPORT_MS 时走这一条。
+// ⚠【跃迁不走这里】(2026-09-21 收口 Fix 1): 状态一变就打整块 (原因 + 处置 + 本帧姿态 +
+//   逐通道表, 见 setGuardState)。本波一度让跃迁被节流时改用这一行, 并承诺"整块到点补出" ——
+//   那个承诺没有实现: 补出需要有"还欠着一块"的状态, 而代码里没有它。后果是【在节流窗口里
+//   进入的状态】只剩这一行: 逐通道的"超限 <== 触发"标记、本帧姿态、成对的处置指引全都看不到。
+//   ⇒ 节流只用于复报, 本函数也只有这一种用法。
+// ⚠ 它是【一行】: 只带状态 + 原因一句话 + (INCONSISTENT 时) 六个通道的两路读数。
 // ⚠ 三种原因的措辞【不许合并】: 处置各不相同 (去标定 / 去查下发 / 去查这一路的数据),
 //   而这一行往往是操作员【第一眼】看到的东西。
-static void printCompactRefusal(ForceCompensation::GuardState st, bool transition) {
+static void printCompactRefusal(ForceCompensation::GuardState st) {
     static const char* NM[6] = { "Fx(N)", "Fy(N)", "Fz(N)", "Mx(Nm)", "My(Nm)", "Mz(Nm)" };
-    const char* lead = transition ? "刚变成拒绝, 解析从略" : "仍在拒绝";
 
     if (st == ForceCompensation::GuardState::UNCALIBRATED) {
         // 配置态: 原因一句话说得完 (逐通道表与它无关 —— 那时 compensated 恒为 0)。
-        fprintf(stderr, "[Force] !! (%s) 【没有可用模型】—— 本地补偿未启用,"
+        // ⚠ 本支【到不了】(按状态穷举的写法): setGuardState 在"状态没变 + UNCALIBRATED"
+        //   时已经先返回, 而跃迁那一支不调本函数。真走到这里时, 该说的话就是下面这句 ——
+        //   所以留着它, 但【不假装它是一条活路】。
+        fprintf(stderr, "[Force] !! 仍在拒绝: 【没有可用模型】—— 本地补偿未启用,"
                         " 不是\"标定与机械臂不符\"。\n"
-                        "[Force] !!   处理: 按 'm' 采多姿态 -> 's' 解出 A, 再按 'z' 调零。\n",
-                lead);
+                        "[Force] !!   处理: 按 'm' 采多姿态 -> 's' 解出 A, 再按 'z' 调零。\n");
         fflush(stderr);
         return;
     }
@@ -382,12 +387,12 @@ static void printCompactRefusal(ForceCompensation::GuardState st, bool transitio
         // ⚠ 这两个数【一定是本帧的】: 能进入本状态的 setGuardState 调用全程序只有一处, 就在
         //   写下这两个数的那几行下面 (step() 第 7b 步); 而 resetGuard() 把它们复位时状态同时
         //   被置回 UNCALIBRATED ⇒ "本状态成立"与"没有本帧"不会同时发生。
-        fprintf(stderr, "[Force] !! (%s) 参考量不可用 —— 判据那一侧没有数据"
+        fprintf(stderr, "[Force] !! 仍在拒绝: 参考量不可用 —— 判据那一侧没有数据"
                         " (六维力在线状态 @1037 = %d, 只有 1 算在线; 帧陈旧 = %d)。"
                         "逐通道对比表不适用: 没有第二个读数, 没有比过。\n"
                         "[Force] !!   处理: 把参考量这一路的数据找回来 (30004 帧 / 六维力在线状态),"
                         " 然后等它恢复 —— 本闸门会自动放行。\n",
-                lead, g_refOnlineLast, g_refStaleLast ? 1 : 0);
+                g_refOnlineLast, g_refStaleLast ? 1 : 0);
         fflush(stderr);
         return;
     }
@@ -397,7 +402,7 @@ static void printCompactRefusal(ForceCompensation::GuardState st, bool transitio
     //   guardReferenceValue 那一处定义决定, 这里不许再抄通道号。
     char line[384];
     int off = snprintf(line, sizeof(line),
-                       "[Force] !! (%s) 仍在拒绝  [判据(与参考量) / 诊断(与 @576)]:", lead);
+                       "[Force] !! 仍在拒绝  [判据(与参考量) / 诊断(与 @576)]:");
     if (off < 0) off = 0;   // snprintf 可返回负值; 不管的话下面 (size_t)off 会回绕
     for (int i = 0; i < 6; i++) {
         if ((size_t)off + 40 >= sizeof(line)) break;   // 余量不足就停, 不越界
@@ -416,12 +421,15 @@ static void printCompactRefusal(ForceCompensation::GuardState st, bool transitio
 // 闸门每帧都判 (30Hz), 每帧都印会把控制台冲掉, 而"看不过来"与"没报"在操作上是一回事。
 // ⚠ 复报【只对"拒绝"那一侧】: 放行是常态, 每 5 s 印一行"放行"同样是噪音
 //   (而且会把真正要紧的那段挤出可视区)。放行只在它【刚刚恢复】时印一次。
-// ★ 2026-09-21 收口 (最终复审 2b): 【状态跃迁也按同一个间隔节流整块】。
-//   从前"一变就整块": 边缘链路上参考量一会儿有一会儿没, 状态来回跳, 于是每跳一次
-//   就是一整块 —— 控制台被冲掉 (而这一屏本来是要在现场读的), 被冲掉的正是更能说明
-//   问题的那几行。现在: 距上次整块不足一个 FORCE_GUARD_REPORT_MS 时, 跃迁只出一行
-//   (见 printCompactRefusal) —— 【不是静默】, 状态、原因、处置都在那一行里, 整块到点补出。
-//   ⚠ 判据取自【既有常量】(那一个间隔本来就是这个机制的时间尺度), 没有新造门限。
+// ★ 2026-09-21 收口 (最终复审 Fix 1): 【跃迁一律打整块; 节流只管复报】。
+//   本波一度把跃迁也按同一个间隔节流掉, 并在这里写着"整块到点补出" —— 那句话【没有兑现】:
+//   补出需要有"还欠着一块"的状态, 代码里没有它, 于是【在节流窗口里进入的状态】永远只剩
+//   一行紧凑读数: 原因/处置、本帧姿态、逐通道的"超限 <== 触发"标记全都看不到 —— 而现场
+//   抄数要抄的恰恰是这几样。恢复本波之前的行为, 也是本函数原本的意图: 一变就打整块。
+//   ⚠ 代价【如实说】: 状态【来回跳】时 (边缘链路上参考量一会儿有一会儿没), 每跳一次就是
+//     一整块 —— 那正是本波当初想压掉的那件事, 现在【不压了】。取舍的理由: 一行紧凑读数
+//     放不下上面那几样诊断, 而"理由看得见"比"行数少"要紧。稳态不会被冲屏 —— 状态不变时
+//     的复报仍按既有间隔节流, 而拒绝长时间不变才是常态。
 static void setGuardState(ForceCompensation::GuardState st) {
     const DWORD now = GetTickCount();
     const bool changed = (st != g_guardState);
@@ -469,21 +477,12 @@ static void setGuardState(ForceCompensation::GuardState st) {
         //   写在那一行里 —— 那正是复报该带的唯一增量。
         // (走到这里且 !changed 只可能是 INCONSISTENT 或 REFERENCE_UNAVAILABLE:
         //  !changed && uncal 在上面已经 return 了。)
-        printCompactRefusal(st, false);
+        printCompactRefusal(st);
         return;
     }
 
-    // ★ 2026-09-21 收口 (2b): 状态【跃迁】也要按同一个既有间隔节流整块。理由见函数头上那段。
-    //   ⚠ 节流掉的是【整块的形态】, 不是"报告"这件事: 下面这一行仍然出声, 状态、原因、
-    //     处置都在里面, 与复报共用同一份实现。
-    if (g_guardFullBlockMs != 0 &&
-        (now - g_guardFullBlockMs) < static_cast<DWORD>(Config::FORCE_GUARD_REPORT_MS)) {
-        g_guardReportMs = now;
-        printCompactRefusal(st, true);
-        return;
-    }
+    // 状态【变了】: 一律打整块, 【不节流】—— 理由见函数头上那一段。
     g_guardReportMs = now;
-    g_guardFullBlockMs = now;
 
     // 逐通道表的标签 (与 printCompactRefusal 里那一份同名同序 —— 两处的下标含义由
     // guardReferenceValue / g_guardVote 那两个唯一定义决定, 各自都不许再抄通道号)。
@@ -622,10 +621,10 @@ static void resetGuard() {
     g_guardSeededDiag = false;
     g_guardFrames = 0;
     g_guardState  = ForceCompensation::GuardState::UNCALIBRATED;
+    // 复报那一行的节流也一起复位 (0 = "还没有过出声时刻", 比较式是 `now - 它 < 间隔`)。
+    // ⚠ 整块【不节流】, 所以这里没有"上一次打整块"要复位: 复位之后的第一声拒绝【一定】
+    //   打整块 —— 它不依赖任何时刻量。
     g_guardReportMs = 0;
-    // 整块的节流也一起复位: 复位之后是"一套新的判据状态", 它的第一次拒绝【必须】打整块
-    // (拿上一套判据刚打过整块当理由压掉它, 会让操作员看不到新状态的原因与处置)。
-    g_guardFullBlockMs = 0;
     // 参考量可用性的"本帧证据"一起复位: 复位之后就没有"本帧"了。状态在这里同时被置回
     // UNCALIBRATED ⇒ "参考量不可用"那两处打印不会拿复位后的值当事实 (见 g_refOnlineLast 处)。
     g_refOnlineLast = -1;
