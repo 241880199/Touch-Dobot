@@ -1994,9 +1994,34 @@ static int mgParseRepeat(const char* line, PayloadCalibration::RepeatPair* out, 
     return cnt;
 }
 
+// ===== 列布局: 认识的清单 + "看真列数"的扫描上限 (2026-09-21) =====
+//
+// 【为什么必须有这两个数】: mgSplitRow 的第三参是【上限】—— 一行比它宽时返回的仍是那个上限,
+//   第 maxOut 列之后的内容被静默丢弃。所以"返回值 == 某个数"这个判据挡得住【列变少】,
+//   挡不住【列变多】: 一行 31 列会被截成 25 列、判据满足、行被收下, 而多出来的那 6 列
+//   (正是参考量 @720 那一路) 一个数都没进内存。于是"读了夹具"与"读了夹具的前 25 列"
+//   在结论上【不可区分】。
+//
+// 两处调用点因此都改成【先看真列数, 再判】:
+//   · 解析那一趟传 MG_COLSCAN —— 它【高到能看见真实列数】, 不是"打算写入多少列";
+//   · 真列数 > MG_MAXCOLS (= 本读取器支持的最宽布局) ⇒ 【响亮拒绝】, 绝不截断后收下。
+static const int MG_COLSCAN = 64;   // 扫描上限: 任何已知布局都远窄于它 (最宽 = 31)
+static const int MG_MAXCOLS = 31;   // 支持的最宽布局 = 25 列 + 末尾 6 列参考量 (F720*/M720*)
+
+// 【响亮拒绝】的唯一一份打印。报出文件名、看错的列数与支持范围 —— 三个数齐了才谈得上
+// "布局变了"这四个字是可查的, 而不是要靠猜。
+// ⚠ 措辞【不用 "FAIL" 开头】: 它是读取器的一条【正常】拒收记录 (用例可以在等它出现),
+//   冠上 FAIL 会让"故意喂了一行坏数据"的用例看起来像坏了。
+static void mgRejectColumns(const char* file, int seen, const char* wanted) {
+    printf("    ★★ 读取器【拒收这一行】: 夹具 %s 有 %d 列, 不在支持的范围内 (支持 %s;"
+           " 最宽 %d 列)。⇒ 不截断到 %d 列再收下: 那样读到的数不是这一行的数。\n",
+           file, seen, wanted, MG_MAXCOLS, MG_MAXCOLS);
+}
+
 // 逗号分隔的一行 -> 逐列。返回值是【读到的列数, 但被 maxOut 截断】——
 // ⚠ 它【不是】"这一行有多少列": 第三参是**上限**, 行里第 maxOut 列之后的内容会被**静默丢弃**,
-//   返回的仍是 maxOut。调用方拿它判"列数对不对"时要知道这一点 (见下面两处调用点的说明)。
+//   返回的仍是 maxOut。所以上面那两处调用点都传 MG_COLSCAN (高到看得见真列数), 并且
+//   【按真列数判】—— 谁要拿一个"够用就好"的小上限来调它, 就先把上面那段说明读完。
 // 它能做的是: 少于 maxOut 列时如实返回更小的数 —— 所以"列数变少"看得见, "列数变多"看不见。
 static int mgSplitRow(const char* q, double* out, int maxOut) {
     int k = 0;
@@ -2027,15 +2052,19 @@ static bool mgLoad(const char* fixture, MomentCaptureData& d, const char*& pathU
         while (*q == ' ' || *q == '\t') q++;
         if (*q == '\0' || *q == '\r' || *q == '\n' || *q == '#') continue;
         if (d.n >= MG_MAXN) { fclose(fp); return false; }
-        double c[25];
-        // ⚠ 【这条检查挡的是"列数变少", 挡不住"列数变多"】(2026-09-21 复审): 上限就是 25,
-        //   所以一行有 31 列时 mgSplitRow 返回的仍是 25 —— 检查满足、行被收下, 而【第 25 列
-        //   之后的内容被静默丢弃】。从前这里写着"列数不是 25 = 布局变了" —— 那句话给了一个
-        //   这份实现给不出的保证。
-        //   要真的判"布局变了", 得把上限抬到一个"明知不会有那么多列"的值 (例如 64), 按
-        //   【真实列数】判, 高于本读取器支持的上限就【响亮拒绝】。那一步属于【夹具重采】
-        //   那一次 (它要同时让用例去消费多出来的那几列), 见收口项清单里的夹具重采一条。
-        if (mgSplitRow(q, c, 25) != 25) { fclose(fp); return false; }
+        double c[MG_COLSCAN];   // ⚠ 数组必须与【解析时传的上限】同宽 (解析会写到 maxOut 列)
+        // 【按真列数判, 不是按截断后的数判】(2026-09-21): MG_COLSCAN 高到看得见这一行
+        //   到底有多少列, 所以"列多了"这一侧现在也看得见 —— 32 列的行返回 32, 既不等于 25
+        //   也不等于 31 ⇒ 拒 (并向文件名/列数/支持范围)。从前上限就是 25, 31 列的行返回 25、
+        //   检查满足、行被收下, 而第 25 列之后的列【一个都没进内存】。
+        //   本读取器只用到前 25 列; 认下 31 列是因为【夹具重采】会把参考量 @720 那一路
+        //   追加在末尾 (25 -> 31 的追加, 前 25 列逐列不变) —— 拒掉它等于把重采挡在门外。
+        const int nc = mgSplitRow(q, c, MG_COLSCAN);
+        if (nc != 25 && nc != MG_MAXCOLS) {
+            mgRejectColumns(pathUsed, nc, "25 列或 31 列");
+            fclose(fp);
+            return false;
+        }
         // 列序 (main.cpp 落盘时写明): rx,ry,rz,x,y,z, F576*, M576*, F1304*, M1304*, N1304, sd*
         double src[6];
         for (int a = 0; a < 6; a++) src[a] = c[a];
@@ -2749,39 +2778,56 @@ struct T6Capture {
     double poses[T6_MAXN][6];                       // [x,y,z,rx,ry,rz] (求解器序)
     double F576[T6_MAXN][3],  M576[T6_MAXN][3];     // 旧模型的输入 (@576)
     double F1304[T6_MAXN][3], M1304[T6_MAXN][3];    // 新模型的输入 (@1304)
+    double F720[T6_MAXN][3],  M720[T6_MAXN][3];     // 【参考量】(@720) —— 只有 31 列布局才有
+    bool   hasRef = false;                          // 这份夹具带不带参考量那一路的列
 };
 
-// 读一份采集。列布局按【列数】分两种: 18 列 (12:38 那批) 或 25 列 (15:xx 那批, 多了 N 与 sd)。
-// 两种布局的前 18 列逐列相同 —— 这也是为什么可以共存 (夹具头部自己写着列名)。
-// ⚠ 【这个判据只能判"列少了", 判不了"列多了"】(2026-09-21 复审): 下面的解析上限就是 25,
-//   所以 31 列的行返回的也是 25 —— "是 18 或 25"满足、行被收下, 而第 25 列之后**被静默丢弃**。
-//   要判"布局变了"必须把上限抬高、按【真实列数】判并在超限时**响亮拒绝**, 那是【夹具重采】
-//   那一次要一起做的事 (见收口项清单), 不在本文件当前这版的能力范围内。
+// 读一份采集。列布局按【真实列数】分三种 (都不截断):
+//   18 列 = 姿态 6 + @576 6 + @1304 6                (12:38 那批)
+//   25 列 = 18 + N1304 + 6 个 sd                     (15:xx 那批: 多出来的 7 列是"尺子")
+//   31 列 = 25 + 末尾 6 列【参考量 @720】             (夹具重采后的布局)
+// 三者【前 18 列逐列相同】—— 这也是它们能共存的原因 (夹具头部自己写着列名)。31 列是
+// 【在 25 列末尾追加】, 所以 25 列的老夹具与 31 列的新夹具读同一段代码。
+// ⚠ 解析传的是 MG_COLSCAN (高到看得见真列数), 并按【真列数】判 —— 于是"列变多"这一侧
+//   也看得见: 32 列的行返回 32, 不是 31、也不是 25 ⇒ 拒。从前上限就是 25, 31 列的行
+//   返回 25、判据满足、行被收下, 而参考量那 6 列被静默丢掉: 那正是"重采了夹具、判据却
+//   还在拿合成值比"的那条路。
 static bool t6Load(T6Capture& cap) {
     static const char* DIRS[4] = { "fixtures/", "tests/fixtures/",
                                    "Touch_Client/tests/fixtures/",
                                    "../../Touch_Client/tests/fixtures/" };
     FILE* fp = nullptr;
+    char path[512] = {0};
     for (int i = 0; i < 4 && !fp; i++) {
-        char path[512];
         snprintf(path, sizeof(path), "%s%s", DIRS[i], cap.file);
         fp = fopen(path, "r");
     }
     if (!fp) return false;
 
     cap.n = 0;
+    cap.hasRef = false;
     char line[1024];
     while (fgets(line, sizeof(line), fp)) {
         const char* q = line;
         while (*q == ' ' || *q == '\t') q++;
         if (*q == '\0' || *q == '\r' || *q == '\n' || *q == '#') continue;
         if (cap.n >= T6_MAXN) { fclose(fp); return false; }
-        double c[25];
-        const int nc = mgSplitRow(q, c, 25);
-        // 【不静默跳行】但【只在"列少了"这一侧成立】: 列数不是这两种就拒 (拿一个列序读歪的
-        // 表去作结论只会得出一个假的)。⚠ "列多了"这一侧它看不见: 上限是 25 ⇒ 31 列的行
-        // 也返回 25, 满足这条检查、行被收下, 多出来的列被静默丢弃 (见上面那段 ⚠)。
-        if (nc != 18 && nc != 25) { fclose(fp); return false; }
+        double c[MG_COLSCAN];   // ⚠ 与【解析时传的上限】同宽 (解析会写到 maxOut 列)
+        const int nc = mgSplitRow(q, c, MG_COLSCAN);
+        // 【不静默跳行】: 列数不是这三种之一就拒 —— 拿一个列序读歪的表去作结论只会得出
+        //   一个假的。这条现在两侧都成立 (列多了也拒, 见上面那段 ⚠)。
+        if (nc != 18 && nc != 25 && nc != MG_MAXCOLS) {
+            mgRejectColumns(path, nc, "18 列 / 25 列 / 31 列");
+            fclose(fp);
+            return false;
+        }
+        if (nc == MG_MAXCOLS) {   // 带参考量那一路: 末尾 6 列 F720*/M720*, 逐列收下
+            cap.hasRef = true;
+            for (int a = 0; a < 3; a++) {
+                cap.F720[cap.n][a] = c[25 + a];
+                cap.M720[cap.n][a] = c[28 + a];
+            }
+        }
         double src[6];
         for (int a = 0; a < 6; a++) src[a] = c[a];
         repackPoseRow(src, cap.poses[cap.n]);
@@ -2795,6 +2841,150 @@ static bool t6Load(T6Capture& cap) {
     }
     fclose(fp);
     return cap.n >= 4;   // 少于 4 个姿态连 12 个参数都定不下来
+}
+
+// ===== 参考量那一侧的数据是【实测】还是【现算】—— 必须每次都说清楚 (2026-09-21) =====
+//
+// 判据是 `compensated − 参考量`, 参考量取自 fd.tcpForce (定义在 ForceCompensation.cpp 的
+// guardReferenceValue 一处)。夹具【带】F720*/M720* 那 6 列时, 这里喂的是【实测读数】——
+// 比的是真数据。夹具【不带】时只能拿本地模型现算一个合成值顶上, 而那个合成值与本地模型
+// 输出【恒等】(d ≡ 0 是代数结论) ⇒ 闸门一定放行。两条路的结论【完全不同】, 所以必须
+// 在运行时【响亮地】分开说: 合成值不能读成实测值, 那正是"重采了夹具、判据却还在拿合成值比"
+// 能悄悄溜过去的地方。
+static void t6AnnounceRefSource(const T6Capture& cap) {
+    if (cap.hasRef) {
+        std::cout << "    [参考量] 实测列: 判据那一侧吃的是夹具里的 @720 列 (F720*/M720*),"
+                     " 与本地模型的差是【量出来的】。" << std::endl;
+    } else {
+        std::cout << "    ⚠⚠ [参考量] 【合成值, 不是实测】: 夹具 " << cap.file
+                  << " 不带参考量 (@720) 那一列 ⇒ 本用例喂进闸门的参考量由本地模型现算"
+                     " (t6LocalModel), 它与模型输出恒等 ⇒ 【这一段验不了参考量那一侧】。"
+                  << std::endl;
+        std::cout << "       (要让它变成量出来的: 重采这份夹具、把末尾 6 列 F720*/M720* 带上;"
+                     " 本读取器认 31 列布局, 读到了就会自动改走上面那条路, 不需要再改代码。)"
+                  << std::endl;
+    }
+}
+
+// 一行 n 列 (逗号分隔)。数值本身不重要 —— 本用例只问"收不收"与"参考量那几列进没进内存"。
+static void mgSynthRow(char* dst, size_t cap, int ncols) {
+    int off = 0;
+    for (int c = 0; c < ncols && off < (int)cap - 1; c++)
+        off += snprintf(dst + off, cap - off, "%s%.1f", (c ? "," : ""), 10.0 + c);
+}
+
+// ★★ 2026-09-21: 【读取器对不认识的列数必须响亮拒绝, 不许截断后收下】。
+//
+// 本用例走【真的读取器】(t6Load), 不是把判据在本文件里抄一遍 —— 所以它的红/绿与那条
+// 判决本身是同一件事: 把旧行为放回去 (解析上限回到 25、只问"== 25"), 这一行 32 列就会被
+// 截成 25 列、旧判据满足、行被收下, 于是下面第一条断言当场变红。这就是它不空的理由。
+//
+// 两件事一起钉:
+//   (1) 32 列 (> 支持上限 31) ⇒ 拒;
+//   (2) 31 列 (= 支持的最宽布局) ⇒ 收, 【而且末尾那 6 列参考量真的进了内存】——
+//       只钉 (1) 会漏掉"收下了但把参考量丢掉"这半边, 而那正是本次要堵的洞。
+static void test_reader_rejects_fixture_wider_than_supported() {
+    TEST(reader_rejects_fixture_wider_than_supported);
+
+    // 合成夹具要写进【读取器的第一条搜索路径】, 用完立刻删 —— 不给仓库留运行产物。
+    static const char* DIRS[4] = { "fixtures/", "tests/fixtures/",
+                                   "Touch_Client/tests/fixtures/",
+                                   "../../Touch_Client/tests/fixtures/" };
+    char dir[256] = {0};
+    for (int i = 0; i < 4 && dir[0] == '\0'; i++) {
+        char probe[512];
+        snprintf(probe, sizeof(probe), "%s_synth_probe_reader_fix.txt", DIRS[i]);
+        FILE* pf = fopen(probe, "w");
+        if (pf) { fclose(pf); remove(probe); snprintf(dir, sizeof(dir), "%s", DIRS[i]); }
+    }
+    if (dir[0] == '\0') {
+        std::cout << "FAIL: 四个候选夹具目录一个都写不进去 —— 本用例作不了数, 记失败不记通过"
+                  << std::endl;
+        g_failed++;
+        return;
+    }
+
+    char row32[4096], row31[4096];
+    mgSynthRow(row32, sizeof(row32), 32);
+    mgSynthRow(row31, sizeof(row31), 31);
+
+    // ---------- (1) 比支持上限宽一列: 32 列 ----------
+    static const char* WIDE = "_synth_overwide_reader_fix.txt";
+    char pathW[512];
+    snprintf(pathW, sizeof(pathW), "%s%s", dir, WIDE);
+    {
+        FILE* f = fopen(pathW, "w");
+        if (!f) { std::cout << "FAIL: 写不出合成夹具 " << pathW << std::endl; g_failed++; return; }
+        for (int i = 0; i < 5; i++) fprintf(f, "%s\n", row32);
+        fclose(f);
+    }
+    T6Capture capW;
+    capW.label = "synth-32";
+    capW.file  = WIDE;
+    const bool wideLoaded = t6Load(capW);
+    remove(pathW);   // ⚠ 在断言【之前】删: 断言失败会 return, 那样文件就留下成了运行产物
+    CHECK(!wideLoaded);   // 32 列 > 31 ⇒ 拒。旧行为下这一行【会被收下】(见下面那段非空证明)
+
+    // ---------- (2) 支持的最宽布局: 31 列 ----------
+    static const char* OK31 = "_synth_supported_reader_fix.txt";
+    char pathO[512];
+    snprintf(pathO, sizeof(pathO), "%s%s", dir, OK31);
+    {
+        FILE* f = fopen(pathO, "w");
+        if (!f) { std::cout << "FAIL: 写不出合成夹具 " << pathO << std::endl; g_failed++; return; }
+        for (int i = 0; i < 5; i++) fprintf(f, "%s\n", row31);
+        fclose(f);
+    }
+    T6Capture cap31;
+    cap31.label = "synth-31";
+    cap31.file  = OK31;
+    const bool okLoaded = t6Load(cap31);
+    remove(pathO);
+    CHECK(okLoaded);            // 31 列 = 重采后的布局 ⇒ 必须【照收】, 否则重采被挡在门外
+    CHECK(cap31.n == 5);
+    CHECK(cap31.hasRef);        // ★ 参考量那一路【进了内存】(不是收下了却丢掉)
+    // 逐列核: 第 26 列 (下标 25) 起是 F720*/M720*, 值是 10.0 + 下标 ⇒ 35.0 ... 40.0。
+    // 旧行为下这几个数【永远是 0.0】(那 6 列一个都没被解析过) —— 所以这两条也是"截断
+    // 收下"这条路的哨兵: 只要参考量没被真读进来, 它们就红。
+    CHECK(fabs(cap31.F720[0][0] - 35.0) < 1e-9);
+    CHECK(fabs(cap31.M720[4][2] - 40.0) < 1e-9);
+
+    // ---------- (3) 另一个调用点 (力矩采集读取器 mgLoad) 吃同一份上限 ----------
+    // 它只认 25 列布局 (18 列没有 N 与 sd, 它读不了)。同一行长到 32 列 ⇒ 同样必须【拒】。
+    // 合成值全为正 ⇒ 25 列那一版能过它自己的 sd/nsamp 检查, 收得下 —— 所以下面两条
+    // 比的是"列数", 不是"数值不合法"。
+    static const char* MG_OK   = "_synth_mg_ok_reader_fix.txt";
+    static const char* MG_WIDE = "_synth_mg_overwide_reader_fix.txt";
+    char mgPath[512];
+    for (int k = 0; k < 2; k++) {
+        const char* nm = (k == 0) ? MG_OK : MG_WIDE;
+        snprintf(mgPath, sizeof(mgPath), "%s%s", dir, nm);
+        FILE* f = fopen(mgPath, "w");
+        if (!f) { std::cout << "FAIL: 写不出合成夹具 " << mgPath << std::endl; g_failed++; return; }
+        char r[4096];
+        mgSynthRow(r, sizeof(r), (k == 0) ? 25 : 32);
+        for (int i = 0; i < 3; i++) fprintf(f, "%s\n", r);
+        fclose(f);
+    }
+    MomentCaptureData mgOk, mgWide;
+    const char* usedOk = nullptr;
+    const char* usedWide = nullptr;
+    const bool mgOkLoaded   = mgLoad(MG_OK,   mgOk,   usedOk);
+    const bool mgWideLoaded = mgLoad(MG_WIDE, mgWide, usedWide);
+    snprintf(mgPath, sizeof(mgPath), "%s%s", dir, MG_OK);   remove(mgPath);
+    snprintf(mgPath, sizeof(mgPath), "%s%s", dir, MG_WIDE); remove(mgPath);
+    CHECK(mgOkLoaded);       // 25 列 ⇒ 照收 (防"一律拒"的假修复)
+    CHECK(!mgWideLoaded);    // 32 列 ⇒ 拒
+
+    // ---------- 非空证明: 旧读取器对同一行的行为 ----------
+    // 旧读取器把解析上限当成"够用就好"的 25: 返回的就是 25 (不是 32) ⇒ 旧判据
+    // ("是 18 或 25 吗")满足 ⇒ 行被收下, 而第 26..32 列【一个数都没进内存】。
+    double trunc[25];
+    CHECK(mgSplitRow(row32, trunc, 25) == 25);
+    CHECK(fabs(trunc[24] - 34.0) < 1e-9);   // 第 25 列 = 这一行的第 25 个数 (不是最后一个)
+    // 而参考量那 6 列在这条路上【根本没有被解析过】—— 这就是"夹具重采了, 参考量却还在被
+    // 现算"的那个洞 (见 t6AnnounceRefSource 的合成值标记)。
+    PASS();
 }
 
 // K×K 正规方程 (Gauss 消元, 部分主元)。退化返回 false。K ≤ 6。
@@ -2982,6 +3172,7 @@ static void test_runtime_compensation_pose_independence() {
             g_failed++;
             return;
         }
+        t6AnnounceRefSource(cap);   // 参考量那一侧是实测还是现算 —— 每份夹具说一次
 
         // ---------- 新 (全量) ----------
         PayloadCalibration::RawFit fit;
@@ -3003,13 +3194,23 @@ static void test_runtime_compensation_pose_independence() {
             // 【模型输出】, 所以把【参考量那一侧】喂成"模型说多少就是多少" (t6LocalModel) ——
             // 喂错边会让闸门读到 0, 那时量到的是 0 而不是模型输出, 而它会以"口径自校不过"
             // 的样子红掉, 看的却不是它要测的东西。
-            // (夹具只有 @576 / @1304 两列, 没有参考量那一路的列 —— 所以这里只能现算。)
+            // ★ 2026-09-21: 上面那条只在【夹具不带参考量那一列】时才成立 —— 现在分两路
+            //   (哪一路由 cap.hasRef 定, 由 t6Load 按真实列数置位):
+            //     · 带 F720*/M720* (31 列) ⇒ 吃【实测值】, 这一侧就是量出来的;
+            //     · 不带 ⇒ 维持现算, 并由 t6AnnounceRefSource 打出"合成值"的响亮标记。
             double mdl[6];
-            for (int a = 0; a < 3; a++) {
-                mdl[a]     = cap.F1304[i][a];
-                mdl[3 + a] = cap.M1304[i][a];
+            if (cap.hasRef) {
+                for (int a = 0; a < 3; a++) {
+                    mdl[a]     = cap.F720[i][a];
+                    mdl[3 + a] = cap.M720[i][a];
+                }
+            } else {
+                for (int a = 0; a < 3; a++) {
+                    mdl[a]     = cap.F1304[i][a];
+                    mdl[3 + a] = cap.M1304[i][a];
+                }
+                t6LocalModel(fit, cap.poses[i], mdl, mdl);
             }
-            t6LocalModel(fit, cap.poses[i], mdl, mdl);
             for (int a = 0; a < 6; a++) fd.tcpForce[a] = mdl[a];
             // ★ 2026-09-21 (Task 7): 还要声明【参考量可用】(帧新鲜 + 机械臂自报在线), 否则
             //   闸门判【参考量不可用】并拒绝 —— 那时量到的 compensated 是闸门置的 0, 于是
@@ -3067,13 +3268,21 @@ static void test_runtime_compensation_pose_independence() {
                 fd.sixForceRaw[a]     = cap.F1304[i][a];
                 fd.sixForceRaw[3 + a] = cap.M1304[i][a];
             }
-            {   // 闸门参考量那一侧的值: 由【留一那一次】的模型现算 (见 test_runtime_compensation_*)
+            {   // 闸门参考量那一侧: 夹具带 @720 那 6 列时吃【实测值】; 不带时由【留一那一次】
+                // 的模型现算 (合成值 —— 见上面 t6AnnounceRefSource 打出的那两行)。
                 double mdl[6];
-                for (int a = 0; a < 3; a++) {
-                    mdl[a]     = cap.F1304[i][a];
-                    mdl[3 + a] = cap.M1304[i][a];
+                if (cap.hasRef) {
+                    for (int a = 0; a < 3; a++) {
+                        mdl[a]     = cap.F720[i][a];
+                        mdl[3 + a] = cap.M720[i][a];
+                    }
+                } else {
+                    for (int a = 0; a < 3; a++) {
+                        mdl[a]     = cap.F1304[i][a];
+                        mdl[3 + a] = cap.M1304[i][a];
+                    }
+                    t6LocalModel(f2, cap.poses[i], mdl, mdl);
                 }
-                t6LocalModel(f2, cap.poses[i], mdl, mdl);
                 for (int a = 0; a < 6; a++) fd.tcpForce[a] = mdl[a];
             }
             // ★ 2026-09-21 (Task 7): 同上一处 —— 喂了参考量就得声明【参考量可用】
@@ -3324,6 +3533,8 @@ static void test_runtime_consistency_guard_replay() {
             return;
         }
 
+        t6AnnounceRefSource(cap);   // 参考量那一侧是实测还是现算 —— 每份夹具说一次
+
         // 容差的量级依据 (eps_F / eps_M 的现算、打印与"容差 > 最坏 eps"那条断言) 已挪到
         // 本用例开头的【前置遍历】—— 那里四份夹具全跑; 留在这里只会跑第一份, 见那里的 ⚠。
 
@@ -3368,6 +3579,22 @@ static void test_runtime_consistency_guard_replay() {
             for (int a = 0; a < 6; a++) fd.sixForceRaw[a] = six[a];
             fd.raw[0] = cap.F576[i][0]; fd.raw[1] = cap.F576[i][1]; fd.raw[2] = cap.F576[i][2];
             fd.raw[3] = cap.M576[i][0]; fd.raw[4] = cap.M576[i][1]; fd.raw[5] = cap.M576[i][2];
+            // ★ 2026-09-21: 上面那段 ⚠ 描述的是【夹具不带参考量那一列】的情形 —— 也就是
+            //   本文件里四份夹具【现在】的情形, 所以它现在仍然逐句成立。判据那一侧喂什么
+            //   由 cap.hasRef 决定 (t6Load 按【真实列数】置位):
+            //     · 带 F720*/M720* (31 列) ⇒ 喂【实测值】并声明这一帧有读数 —— 闸门于是
+            //       【真的比过】, 那条红着的断言也就第一次有了判别力 (它的结论会按数据走,
+            //       不再一律是"参考量不可用");
+            //     · 不带 ⇒ 保持走上面那段 ⚠ 说的默认值 (isStale=true / sixForceOnline=-1),
+            //       闸门判【参考量不可用】, 那条断言【照旧算失败】。
+            if (cap.hasRef) {
+                for (int a = 0; a < 3; a++) {
+                    fd.tcpForce[a]     = cap.F720[i][a];
+                    fd.tcpForce[3 + a] = cap.M720[i][a];
+                }
+                fd.isStale = false;
+                fd.sixForceOnline = 1;
+            }
             ForceCompensation::init();
             ForceCompensation::setCalibration(fit.A, fit.bF, fit.bM, fit.cS);
             // 连喂 8 帧同样的读数: 闸门逐帧都判, 这里要的是"持续"那一侧的语义
@@ -3448,6 +3675,12 @@ static void test_runtime_consistency_guard_replay() {
 
             // (乙) 反面对照: 把【参考量那一侧】换成与本地模型一致的值 -> 必须放行。
             // (夹具没有参考量那一路的列 —— 所以用 t6LocalModel 现算, 理由同上面那条 ⚠。)
+            // ★★★ 2026-09-21 【这一半与 (甲) 不同: 它【不】改吃夹具里的实测列, 即使夹具带了。】
+            //   理由: 它的对照量【按定义】就是"参考量 == 本地模型输出", 见下面那段 ⚠ ——
+            //   换成一个与模型无关的实测值, 这一半就不再是那个对照, 而会变成"拿这份数据
+            //   问一个它从没被设计来回答的问题"。所以夹具重采后 (甲) 会改走实测那条路,
+            //   而这里【仍然】是合成值: 【记号: 合成 —— 刻意, 与夹具带不带那一列无关】。
+            //   谁要找"参考量实测那一侧"的用例: 看 (甲) 与 test_runtime_compensation_*。
             // ⚠⚠ 【这条能证明什么、不能证明什么 —— 如实说 (复审 Important 4/§0)】:
             //   下面 mdl 是用 t6LocalModel 算的, 而 t6LocalModel 是 ForceCompensation::step()
             //   那条公式的【逐字副本】。所以"参考量 == 本地模型输出"这件事是【代数上恒真】的:
@@ -4071,6 +4304,11 @@ int main() {
     std::cout << "--- moment gate calibration (real captures, production fitRaw) ---" << std::endl;
     test_moment_gate_real_captures_golden();
     test_moment_gate_null_false_reject_rate();
+
+    // ★★ 读取器对【不认识的列数】必须响亮拒绝 (2026-09-21): 夹具重采的前提。
+    //   放在重放类用例【之前】—— 它要是红了, 下面那些"读到了夹具"的结论就都不作数。
+    std::cout << "--- fixture reader: layout acceptance ---" << std::endl;
+    test_reader_rejects_fixture_wider_than_supported();
 
     // ★★★ Task 6 验收: 本地补偿的姿态无关性 (全量 vs 残余, 逐通道, 四份采集)。
     // 【放在最后】: 它要跑生产补偿代码 (ForceCompensation::step), 并且会打一张表。
