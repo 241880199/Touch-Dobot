@@ -290,7 +290,16 @@ MotionEstimator::MotionEstimator() : m_idx(0), m_count(0) {
     for (int i = 0; i < 3; i++) {
         m_lpfX1[i] = m_lpfX2[i] = m_lpfY1[i] = m_lpfY2[i] = 0.0;
     }
-    // 10Hz LPF at effective sample rate
+    // 加速度估计的低通。⚠⚠ 【2026-09-21 记明, 未改系数】:
+    //   这里传的 fs 是 FORCE_EFFECTIVE_SAMPLE_RATE = 125Hz —— 那是【30004 帧的到达率】,
+    //   不是 MotionEstimator::update 的真实调用率。真实调用率由 ForceCompensation::step 的
+    //   节拍决定 = 1000/FORCE_POLL_INTERVAL_MS ≈ 30Hz (step 里 dt 那一处已按真实值修, 见那里)。
+    //   滤波器算的是"归一化频率" fc/fs, 所以同一个系数在 30Hz 下运行, 实际截止 =
+    //     10Hz × (30/125) ≈ 【2.4 Hz】 —— 比设计的钝 4.1 倍 (更平滑、也更滞后)。
+    //   ⇒ 【为什么不改】: 更钝意味着【噪声更低】, 而噪声正是死区 0.20 N 的定标依据。
+    //     把它"改对"会【增大】噪声 ⇒ 那是设计取舍, 要跟着死区的重定一起做 (run-005 §14 第 2 条),
+    //     不能这一趟顺手动。此处只留真实数值, 免得下一个人按 10Hz 去推理。
+    // 10Hz LPF【按 125Hz 设计, 实际运行在 ~30Hz ⇒ 实际 ≈2.4Hz】
     double fs = static_cast<double>(Config::FORCE_EFFECTIVE_SAMPLE_RATE);
     calcLpfCoeffs(Config::FORCE_ACC_FILTER_CUTOFF_HZ, fs,
         m_lpfB0, m_lpfB1, m_lpfB2, m_lpfA1, m_lpfA2);
@@ -863,16 +872,26 @@ void step(AppState::ForceData& fd, const double poseRxyz[6]) {
     g_lastPoseValid = true;
 
     // 1. Update motion estimator
-    // ⚠⚠ 【已知不一致, 本趟(2026-09-21)未修】: 这里传的是 1/125 = 8ms, 而本函数的【真实】
-    //   调用间隔是 Config::FORCE_POLL_INTERVAL_MS = 33ms (RelayCore::pollForce 的入口节流)。
-    //   后果是算得出来的: 速度被高估 33/8 = 4.1 倍, 加速度被高估 (33/8)² = 17 倍, 而
-    //   Fi = mass·acc (下面第 6 步) ⇒ 【运动时惯量项被放大 17 倍】。
-    //   方向要说明白 (免得把本趟的结论读反): 速度被【高估】⇒ isStill() 更不容易为真 ⇒
-    //   零偏 EMA 更少更新 ⇒ 本趟那条"持续外力被零偏吸收"的结论【不受影响】(只会更少, 不会更多)。
-    //   但不修它, 运动中的 comp 就带一个 16 倍的惯量残差 —— 那是"运动噪声"的来源之一,
-    //   也正是死区 0.20 N 要盖住的那个量。
-    //   改它 = 改行为(17 倍), 要单独上机验证 ⇒ 单列在 run-005 §14, 本趟不动。
-    double dt = 1.0 / static_cast<double>(Config::FORCE_EFFECTIVE_SAMPLE_RATE);
+    // ★ 2026-09-21【已修】: 这里从前传 1/FORCE_EFFECTIVE_SAMPLE_RATE (= 8ms), 而本函数的
+    //   【真实】调用间隔是 Config::FORCE_POLL_INTERVAL_MS (= 33ms, RelayCore::pollForce 的
+    //   入口节流)。差 4.1 倍 ⇒ 速度高估 4.1×、加速度高估 17× ⇒ 而 Fi = mass·acc (第 6 步)
+    //   ⇒ 【运动时惯量项被放大 17 倍】。
+    //   实机实测 (run-005 §7.6): 手拖模拟写字时 ΔFi_y ≈ 0.53 N —— 与整个写字力 (0.3~0.6 N) 同量级。
+    //   ⇒ 那是"运动噪声 0.17 N"的来源之一, 而那个数正是死区 0.20 N 的定标依据。
+    //
+    //   ⚠ 两处【连带后果】要记着 (不是缺陷, 但确实改变了行为, 上机时别误判):
+    //     · 速度降回真值 ⇒ isStill() 比从前【更容易】为真 ⇒ 零偏 EMA 更新得更多。但 τ = 600 s,
+    //       所以吸收量可忽略 (见 Config::FORCE_BIAS_EMA_TAU_S)。同时 FORCE_MOTION_VEL_THRESH_MS
+    //       的含义回到"真值 2mm/s"(从前实际相当于 0.49mm/s)。
+    //     · 慢速书写时可能被判"静止" ⇒ 那时 Fi = 0 (不补惯量, 但也不注入假力)。
+    //
+    //   ⚠ 【没有一起改的】: 下面 MotionEstimator 的加速度 LPF 与 ForcePipeline::init 的
+    //     Butterworth, 系数都按【以为的】速率设计 (125Hz / 120Hz), 而真实是 30Hz ⇒ 它们实际的
+    //     截止频率【偏低】(过平滑)。那是【设计取舍】不是 bug —— 改它会【增大】噪声, 所以本趟
+    //     只把真实截止写在两处, 不动系数。
+    //
+    //   【怎么验证这一步】同样的手拖写字实验: ΔFi_y 应从 ~0.53 N 掉到 ~0.03 N 量级。
+    const double dt = static_cast<double>(Config::FORCE_POLL_INTERVAL_MS) / 1000.0;
     g_motion.update(poseRxyz[0], poseRxyz[1], poseRxyz[2], dt);
 
     // 2. 默认输出 = 零。【fail closed 的落点】: 任何没走到"闸门放行"的路径都在这里留下 0。

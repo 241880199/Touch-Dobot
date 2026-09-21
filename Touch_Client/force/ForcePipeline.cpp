@@ -52,7 +52,17 @@ static double g_prevFiltered[6] = {0};  // for gradient limiting
 namespace ForcePipeline {
 
 void init() {
-    double fs = static_cast<double>(Config::FORCE_FILTER_CUTOFF) * 4.0; // effective sample rate ~120Hz
+    // ⚠⚠ 【2026-09-21 记明, 未改系数】这个 fs 是【猜的】, 而且是从截止频率【反推】的
+    //   (fs = 截止 × 4) —— 两个量互相定义, 所以它读起来像"设计成 fs/4 = 30Hz 的 Butterworth",
+    //   而注释写的"effective sample rate ~120Hz"是我们【以为的】速率。
+    //   真实速率: ForceCompensation::step 的节拍 = 1000/FORCE_POLL_INTERVAL_MS ≈ 【30Hz】
+    //   (那一步的 dt 已按真实值改, 见 ForceCompensation.cpp; 本处系数【故意不动】)。
+    //   滤波器算的是归一化频率 fc/fs, 所以同一系数在 30Hz 下运行, 实际截止 =
+    //     30Hz × (30/120) ≈ 【7.5 Hz】 —— 比设计的钝 4 倍 (更平滑、也更滞后)。
+    //   ⇒ 【为什么不改】: 同 MotionEstimator 那处 —— 更钝 = 噪声更低, 而噪声是死区 0.20 N
+    //     的定标依据; "改对"会【增大】噪声。⇒ 那是设计取舍, 要跟着死区的重定一起做
+    //     (run-005 §14 第 2 条)。此处只留真实数值, 免得下一个人按 30Hz 去推理。
+    double fs = static_cast<double>(Config::FORCE_FILTER_CUTOFF) * 4.0; // 以为的 fs ~120Hz ⇒ 实际截止 ≈7.5Hz
     double b0, b1, b2, a1, a2;
     calcButterworthCoeffs(static_cast<double>(Config::FORCE_FILTER_CUTOFF), fs, b0, b1, b2, a1, a2);
     for (int i = 0; i < 6; i++) {
