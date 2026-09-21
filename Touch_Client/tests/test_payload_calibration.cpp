@@ -3176,6 +3176,94 @@ static void test_runtime_consistency_guard_replay() {
                  " (⚠ 这条秩 2 是在【旧判据通道】上实测的, 换到参考量之后【未重测】)"
               << std::endl;
 
+    // ===== 容差的量级依据: 【四份夹具的前置遍历】(2026-09-21 复审 Important 1) =====
+    //   eps_F = rmsForceN(本地模型自己的失拟) + dist_to_scalar·9.81(机械臂那一侧的模型类差)
+    //   eps_M = rmsMomentNm + |c_s|·dist_to_scalar·9.81
+    // 9.81 = 标准重力 (与 TcpCalibration 的重力约定同一个常数)。
+    //
+    // ⚠ 为什么单独开这一遍, 而不是留在下面那个逐份循环里: 下面那一半在【第一份夹具的第一个
+    //   姿态】就按设计判失败并 return (它自 2026-09-21 起是红的, 见那里的 ⚠⚠)。留在一起的话,
+    //   这段打印与"容差 > eps"那条断言就【只跑第一份】—— 而第一份恰好是四份里要求最低的那份
+    //   (eps_F 0.153138 N), 于是"容差被设到最坏一份之下"这件事再也发现不了 (最坏 0.287098 N)。
+    //   前置遍历让它四份全跑, 并且按【最坏的一份】断言。这一遍只读夹具、只算 eps、只打印、
+    //   最后断言一次 —— 不改任何判据, 也不碰下面那条故意红着的断言。
+    //
+    // ⚠ dist_to_scalar = (σ1−σ3)/2 是【精确的】那一个 (2026-09-19 复审 Important 3 改的):
+    //   机械臂那一侧的力模型是"标量质量 × 正交"(m·Q), 而 A 到最近的 m·Q 的算子范数距离
+    //   恰好是 (σ1−σ3)/2 (在 m = (σ1+σ3)/2 处取到)。从前的写法是 max|σ−σ̄|, 那个量
+    //   【不是下界而是上界】(它恒 ≥ (σ1−σ3)/2), 所以用它当依据会把"容差是合法差的几倍"
+    //   说小, 而原文还称它"fail-closed 的方向"—— 方向正好说反了 (取大了容差只会更松)。
+    //   现在用的既然是精确距离, 余量就只有那个倍数本身。【那次】改口径时容差的数值
+    //   一个都没动 —— 但力通道的容差【后来】在 2026-09-21 上调过 (依据见 Config.h,
+    //   上调的是另一个误差项: 参考量自带的力偏置及其跨轮漂移); 力矩容差仍是 0.03 N·m。
+    //   两个量都在下面打出来, 好在改口径时一眼看出差了多少 (实测 0~15%)。
+    double epsFMax = 0.0, epsMMax = 0.0;      // 四份里的最坏值 —— 断言按它们判
+    const char* epsFMaxLabel = "";
+    const char* epsMMaxLabel = "";
+    for (int k = 0; k < 4; k++) {
+        T6Capture cap;
+        cap.label = LABELS[k];
+        cap.file  = FILES[k];
+        if (!t6Load(cap)) {
+            std::cout << "    FAIL: 夹具 " << FILES[k] << " 读不到" << std::endl;
+            g_failed++;
+            return;
+        }
+        PayloadCalibration::RawFit fit;
+        if (!PayloadCalibration::fitRawLinear(cap.poses, cap.F1304, cap.M1304, cap.n, fit)) {
+            std::cout << "    FAIL: " << cap.label << " 的 @1304 线性拟合失败" << std::endl;
+            g_failed++;
+            return;
+        }
+        double csLat = 0.0;      // |c_s| 的横向分量 (供 z 力漏洞那一条用, 见下)
+        double sg[3], sbar = 0.0, dev = 0.0, cs = 0.0;
+        t6SigmaA(fit.A, sg);
+        for (int a = 0; a < 3; a++) sbar += sg[a] / 3.0;
+        for (int a = 0; a < 3; a++) if (fabs(sg[a] - sbar) > dev) dev = fabs(sg[a] - sbar);
+        for (int a = 0; a < 3; a++) cs += fit.cS[a] * fit.cS[a];
+        cs = sqrt(cs);
+        csLat = sqrt(fit.cS[0] * fit.cS[0] + fit.cS[1] * fit.cS[1]);
+        if (csLat < csLatMin) csLatMin = csLat;
+        if (csLat > csLatMax) csLatMax = csLat;
+        const double distScalar = 0.5 * (sg[0] - sg[2]);   // σ 已降序 (t6SigmaA 最后排过)
+        const double epsClassF = distScalar * 9.81;
+        const double epsF = fit.rmsForceN + epsClassF;
+        const double epsM = fit.rmsMomentNm + cs * epsClassF;
+        std::cout << "    ---- " << cap.label << " 容差依据 ----" << std::endl;
+        std::cout << "      σ(A)=" << sg[0] << " " << sg[1] << " " << sg[2]
+                      << " kg, σ̄=" << sbar
+                      << "  (参考: max|σ−σ̄|=" << dev << " kg —— 这是【上界】, 只用于对照)"
+                      << std::endl;
+        std::cout << "      (σ1−σ3)/2=" << distScalar << " kg -> 类差 " << epsClassF
+                      << " N;  rms_力=" << fit.rmsForceN << " N, rms_力矩=" << fit.rmsMomentNm
+                      << " N·m" << std::endl;
+        std::cout << "      eps_F=" << epsF << " N,  eps_M=" << epsM << " N·m"
+                      << "   [容差/eps: 力 " << tolF / epsF << "x, 力矩 " << tolM / epsM << "x]"
+                      << std::endl;
+        // |c_s| 与它的横向分量 —— 【z 力漏洞的尺寸】就出在这两个数上 (复审 Important 2)。
+        std::cout << "      |c_s|=" << cs << " m (轴向 " << fit.cS[2] << "), |c_s_横向|="
+                      << csLat << " m  ⇒ 力矩通道能看见的 z 力误差下限 ~ tol_M/|c_s_横向| = "
+                      << (csLat > 0 ? tolM / csLat : 0.0) << " N" << std::endl;
+        if (epsF > epsFMax) { epsFMax = epsF; epsFMaxLabel = cap.label; }
+        if (epsM > epsMMax) { epsMMax = epsM; epsMMaxLabel = cap.label; }
+    }
+    std::cout << "    => 四份夹具里最坏: 力 eps_F=" << epsFMax << " N (" << epsFMaxLabel
+              << "), 力矩 eps_M=" << epsMMax << " N·m (" << epsMMaxLabel << ")"
+              << std::endl;
+    std::cout << "       容差/最坏 eps: 力 " << tolF / epsFMax << "x, 力矩 " << tolM / epsMMax
+              << "x" << std::endl;
+    // 容差【不许】落在实测导出的量级之下 —— 落下去就是"永远拒绝"，
+    // 而这条断言是那个决定唯一能被机器检查的地方。
+    // ⚠ 按【四份里最坏的一份】判 (2026-09-21): 只按第一份判的话, 第一份恰好最小, 容差被改到
+    //   最坏那一份之下也发现不了。这一条是【唯一】的容差断言 —— 下面那个逐份循环里不再重复,
+    //   否则重复的那一份必然是死代码 (前置遍历已经先把四份都判过了)。
+    if (!(tolF > epsFMax && tolM > epsMMax)) {
+        std::cout << "    FAIL: 容差低于实测导出的量级 (最坏 eps: 力 " << epsFMax << " N / 力矩 "
+                  << epsMMax << " N·m)" << std::endl;
+        g_failed++;
+        return;
+    }
+
     for (int k = 0; k < 4; k++) {
         T6Capture cap;
         cap.label = LABELS[k];
@@ -3192,57 +3280,8 @@ static void test_runtime_consistency_guard_replay() {
             return;
         }
 
-        // ===== 容差的量级依据 (逐份采集现算, 见报告"容差的推导") =====
-        //   eps_F = rmsForceN(本地模型自己的失拟) + dist_to_scalar·9.81(机械臂那一侧的模型类差)
-        //   eps_M = rmsMomentNm + |c_s|·dist_to_scalar·9.81
-        // 9.81 = 标准重力 (与 TcpCalibration 的重力约定同一个常数)。
-        //
-        // ⚠ dist_to_scalar = (σ1−σ3)/2 是【精确的】那一个 (2026-09-19 复审 Important 3 改的):
-        //   机械臂那一侧的力模型是"标量质量 × 正交"(m·Q), 而 A 到最近的 m·Q 的算子范数距离
-        //   恰好是 (σ1−σ3)/2 (在 m = (σ1+σ3)/2 处取到)。从前的写法是 max|σ−σ̄|, 那个量
-        //   【不是下界而是上界】(它恒 ≥ (σ1−σ3)/2), 所以用它当依据会把"容差是合法差的几倍"
-        //   说小, 而原文还称它"fail-closed 的方向"—— 方向正好说反了 (取大了容差只会更松)。
-        //   现在用的既然是精确距离, 余量就只有那个倍数本身。【那次】改口径时容差的数值
-        //   一个都没动 —— 但力通道的容差【后来】在 2026-09-21 上调过 (依据见 Config.h,
-        //   上调的是另一个误差项: 参考量自带的力偏置及其跨轮漂移); 力矩容差仍是 0.03 N·m。
-        //   两个量都在下面打出来, 好在改口径时一眼看出差了多少 (实测 0~15%)。
-        double csLat = 0.0;      // |c_s| 的横向分量 (供 z 力漏洞那一条用, 见下)
-        {
-            double sg[3], sbar = 0.0, dev = 0.0, cs = 0.0;
-            t6SigmaA(fit.A, sg);
-            for (int a = 0; a < 3; a++) sbar += sg[a] / 3.0;
-            for (int a = 0; a < 3; a++) if (fabs(sg[a] - sbar) > dev) dev = fabs(sg[a] - sbar);
-            for (int a = 0; a < 3; a++) cs += fit.cS[a] * fit.cS[a];
-            cs = sqrt(cs);
-            csLat = sqrt(fit.cS[0] * fit.cS[0] + fit.cS[1] * fit.cS[1]);
-            if (csLat < csLatMin) csLatMin = csLat;
-            if (csLat > csLatMax) csLatMax = csLat;
-            const double distScalar = 0.5 * (sg[0] - sg[2]);   // σ 已降序 (t6SigmaA 最后排过)
-            const double epsClassF = distScalar * 9.81;
-            const double epsF = fit.rmsForceN + epsClassF;
-            const double epsM = fit.rmsMomentNm + cs * epsClassF;
-            std::cout << "      σ(A)=" << sg[0] << " " << sg[1] << " " << sg[2]
-                      << " kg, σ̄=" << sbar
-                      << "  (参考: max|σ−σ̄|=" << dev << " kg —— 这是【上界】, 只用于对照)"
-                      << std::endl;
-            std::cout << "      (σ1−σ3)/2=" << distScalar << " kg -> 类差 " << epsClassF
-                      << " N;  rms_力=" << fit.rmsForceN << " N, rms_力矩=" << fit.rmsMomentNm
-                      << " N·m" << std::endl;
-            std::cout << "      eps_F=" << epsF << " N,  eps_M=" << epsM << " N·m"
-                      << "   [容差/eps: 力 " << tolF / epsF << "x, 力矩 " << tolM / epsM << "x]"
-                      << std::endl;
-            // |c_s| 与它的横向分量 —— 【z 力漏洞的尺寸】就出在这两个数上 (复审 Important 2)。
-            std::cout << "      |c_s|=" << cs << " m (轴向 " << fit.cS[2] << "), |c_s_横向|="
-                      << csLat << " m  ⇒ 力矩通道能看见的 z 力误差下限 ~ tol_M/|c_s_横向| = "
-                      << (csLat > 0 ? tolM / csLat : 0.0) << " N" << std::endl;
-            // 容差【不许】落在实测导出的量级之下 —— 落下去就是"永远拒绝"，
-            // 而这条断言是那个决定唯一能被机器检查的地方。
-            if (!(tolF > epsF && tolM > epsM)) {
-                std::cout << "    FAIL: " << cap.label << " 容差低于实测导出的量级" << std::endl;
-                g_failed++;
-                return;
-            }
-        }
+        // 容差的量级依据 (eps_F / eps_M 的现算、打印与"容差 > 最坏 eps"那条断言) 已挪到
+        // 本用例开头的【前置遍历】—— 那里四份夹具全跑; 留在这里只会跑第一份, 见那里的 ⚠。
 
         double worst[6] = {0, 0, 0, 0, 0, 0};   // 逐通道 |EMA|/容差 的最大值
         double sum[6]   = {0, 0, 0, 0, 0, 0};   // 逐通道 EMA 的均值 (本份采集内)

@@ -234,6 +234,9 @@ static void test_guard_reference_is_the_current_derived_channel() {
     //   而容差 2026-09-21 上调到 1.2464 N 之后, 0.90 N 无论判据看哪一路都放行 —— 那样
     //   "判据看的是哪一路"这件事就【没有被测到】(两条分支给同样的结果)。⇒ 取 2.0 N。
     fd.raw[0]         = 2.0;
+    // ⚠ 上面那个 ⚠ 说的"必须大于容差"这件事【在这里被机器检查】: 容差若哪天被抬到 2.0 N
+    //   以上, 这一条会先红, 而不是让整条用例安静地退化成恒真 (绿着什么都没测)。
+    CHECK(2.0 > Config::FORCE_GUARD_TOL_FORCE_N);
     ForceCompensation::step(fd, pose);
 
     CHECK(ForceCompensation::guardState() == ForceCompensation::GuardState::OK);
