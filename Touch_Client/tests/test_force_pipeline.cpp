@@ -148,10 +148,32 @@ static void test_stale_detection() {
     PASS();
 }
 
+// ★ 2026-09-21 新增: 死区现在是【唯一一份定义】(ForcePipeline.h 里那个 inline), 而且是软的。
+// 这条用例【直接调它】—— 证明头文件里确实暴露了它 (RelayCore 构造 F| 消息时用的就是同一个)。
+// 【为什么需要这条】这条规则曾经有【两份硬门实现】(触觉那路一份、F| 那路一份), 改了一份忘一份,
+//   现场就表现为"MATLAB 上 FZ 在 0 与 ±0.2 之间阶跃式跳"。
+// ⇒ 若谁把它改回硬门、或又在别处写第二份, 这条会红 (门限以下必须【不为 0】, 硬门会给 0)。
+static void test_soft_deadzone_shared_and_smooth() {
+    TEST(soft_deadzone_shared_and_smooth);
+    const double dz = Config::FORCE_RESIDUAL_DEADZONE_N;
+    // 门限以上: 【原样】1:1 —— 笔压 (0.3~0.6N) 落在这个区间, 幅值不许受影响
+    CHECK(ForcePipeline::softDeadzone(+1.0, dz) == +1.0);
+    CHECK(ForcePipeline::softDeadzone(-1.0, dz) == -1.0);
+    // 门限处: 连续 (上下两支相接)
+    CHECK(fabs(ForcePipeline::softDeadzone(dz, dz) - dz) < 1e-12);
+    // 门限以下: 被压小、但【不为 0】(软门; 硬门在这里会给 0 ⇒ 这就是跳变的来源)
+    CHECK(ForcePipeline::softDeadzone(+0.1, dz) > 0.0);
+    CHECK(ForcePipeline::softDeadzone(+0.1, dz) < 0.1);
+    // 符号保持
+    CHECK(ForcePipeline::softDeadzone(-0.1, dz) < 0.0);
+    PASS();
+}
+
 int main() {
     std::cout << "=== ForcePipeline Unit Tests ===" << std::endl;
     test_residual_deadzone();
     test_soft_deadzone_no_jump();
+    test_soft_deadzone_shared_and_smooth();
     test_saturation();
     test_coord_transform();
     test_filter_convergence();

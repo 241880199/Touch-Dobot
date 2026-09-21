@@ -1950,10 +1950,16 @@ void RelayCore::pollForce() {
     if (app.forceData.isStale) {
         snprintf(buf, sizeof(buf), "F|0.00,0.00,0.00,0.00,0.00,0.00,1");
     } else {
-        double dz = Config::FORCE_RESIDUAL_DEADZONE_N;
-        double fx = (fabs(app.forceData.filtered[0]) < dz) ? 0.0 : app.forceData.filtered[0];
-        double fy = (fabs(app.forceData.filtered[1]) < dz) ? 0.0 : app.forceData.filtered[1];
-        double fz = (fabs(app.forceData.filtered[2]) < dz) ? 0.0 : app.forceData.filtered[2];
+        // ★★ 2026-09-21: 这里从前【又写了一份硬门】: `(fabs(x) < dz) ? 0.0 : x`。
+        //   触觉那一路 (ForcePipeline::mapForceToTouch) 已经改成软门了, 而这一份没改
+        //   ⇒ **MATLAB 显示的那条 F| 路上照旧阶跃** —— 现场看到的正是"MATLAB 上 FZ 在 0 与
+        //   ±0.2 之间阶跃式跳"; 用户因此报"这个也需要改"。
+        //   ⇒ 现在两处【都调 ForcePipeline::softDeadzone】—— 死区的唯一一份定义在 ForcePipeline.h。
+        //   ⚠ 别再在这里写第三份: 同一个规则两份实现, 就是会改一份忘一份 (本项目第三笔了)。
+        //   注: 力矩 (filtered[3..5]) 从前就【不过死区】, 保持原样 (不在本次讨论范围)。
+        double fx = ForcePipeline::softDeadzone(app.forceData.filtered[0], Config::FORCE_RESIDUAL_DEADZONE_N);
+        double fy = ForcePipeline::softDeadzone(app.forceData.filtered[1], Config::FORCE_RESIDUAL_DEADZONE_N);
+        double fz = ForcePipeline::softDeadzone(app.forceData.filtered[2], Config::FORCE_RESIDUAL_DEADZONE_N);
         snprintf(buf, sizeof(buf), "F|%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%d",
             fx, fy, fz,
             app.forceData.filtered[3], app.forceData.filtered[4],
