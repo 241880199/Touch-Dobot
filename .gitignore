@@ -32,3 +32,7 @@ Relay_Station/logs/
 # OS
 Thumbs.db
 Desktop.ini
+
+# 标定【运行时状态】: 活路径会重写, 不进库 (推导引用的证据文件另行入库)
+Touch_Client/calib/payload_calib.json
+Touch_Client/calib/force_calib.json.expired
