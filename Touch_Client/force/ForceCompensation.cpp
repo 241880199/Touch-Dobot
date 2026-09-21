@@ -863,6 +863,15 @@ void step(AppState::ForceData& fd, const double poseRxyz[6]) {
     g_lastPoseValid = true;
 
     // 1. Update motion estimator
+    // ⚠⚠ 【已知不一致, 本趟(2026-09-21)未修】: 这里传的是 1/125 = 8ms, 而本函数的【真实】
+    //   调用间隔是 Config::FORCE_POLL_INTERVAL_MS = 33ms (RelayCore::pollForce 的入口节流)。
+    //   后果是算得出来的: 速度被高估 33/8 = 4.1 倍, 加速度被高估 (33/8)² = 17 倍, 而
+    //   Fi = mass·acc (下面第 6 步) ⇒ 【运动时惯量项被放大 17 倍】。
+    //   方向要说明白 (免得把本趟的结论读反): 速度被【高估】⇒ isStill() 更不容易为真 ⇒
+    //   零偏 EMA 更少更新 ⇒ 本趟那条"持续外力被零偏吸收"的结论【不受影响】(只会更少, 不会更多)。
+    //   但不修它, 运动中的 comp 就带一个 16 倍的惯量残差 —— 那是"运动噪声"的来源之一,
+    //   也正是死区 0.20 N 要盖住的那个量。
+    //   改它 = 改行为(17 倍), 要单独上机验证 ⇒ 单列在 run-005 §14, 本趟不动。
     double dt = 1.0 / static_cast<double>(Config::FORCE_EFFECTIVE_SAMPLE_RATE);
     g_motion.update(poseRxyz[0], poseRxyz[1], poseRxyz[2], dt);
 
@@ -1030,7 +1039,13 @@ void step(AppState::ForceData& fd, const double poseRxyz[6]) {
     //      那会让不一致自我掩盖, 而"安静地学错"正是这条闸门要防的东西。
     //      代价: 拒绝期间零偏不再自跟踪; 闸门放行后自动恢复。
     if (g_motion.isStill()) {
-        double alpha = Config::FORCE_BIAS_EMA_ALPHA;
+        // α 由【时间常数】与【真实节拍】算出 —— 为什么是 600 s 而不是旧的 3.3 s, 见
+        //   Config::FORCE_BIAS_EMA_TAU_S 那一大段说明 (一句话: 旧值把秒级的力当漂移吃掉了)。
+        // ⚠ 这里取 FORCE_POLL_INTERVAL_MS 而【不是】FORCE_EFFECTIVE_SAMPLE_RATE:
+        //   后者是 30004 帧的到达率, 前者才是本函数被调用的间隔 (与上面 dt 那一处不是同一个数
+        //   —— 那一处的不一致已写明但未修)。用错那个会让时间常数差 4 倍。
+        const double biasEmaHz = 1000.0 / static_cast<double>(Config::FORCE_POLL_INTERVAL_MS);
+        double alpha = 1.0 / (Config::FORCE_BIAS_EMA_TAU_S * biasEmaHz);
         // Update local copy, then write back under mutex
         bF[0] += alpha * (fd.sixForceRaw[0] - Fg[0] - bF[0]);
         bF[1] += alpha * (fd.sixForceRaw[1] - Fg[1] - bF[1]);

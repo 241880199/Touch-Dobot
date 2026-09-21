@@ -1815,7 +1815,10 @@ bool RelayCore::initForceReader() {
 void RelayCore::pollForce() {
     static DWORD lastPollMs = 0;
     DWORD now = GetTickCount();
-    if (now - lastPollMs < 33) return;
+    // 节拍取自 Config::FORCE_POLL_INTERVAL_MS: 它同时是 ForceCompensation::step 里
+    // 在线零偏 EMA 的【时间常数 ↔ α】换算所用的采样率。写成字面量 33 会让两处各有一个数,
+    // 而改了这里忘了那里 = 时间常数被悄悄改掉 (见该常数的说明)。
+    if (now - lastPollMs < (DWORD)Config::FORCE_POLL_INTERVAL_MS) return;
     lastPollMs = now;
 
     auto& app = appState;

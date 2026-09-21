@@ -220,10 +220,13 @@ cd "D:/Projects/Touch/Touch_Client/tests" && ./test_payload_calibration.exe
    **小于它的话，反号也会放行 ⇒ 零信息量。建议推/拉约 1.5 N。**
 
 3. **施加后【尽快】读（2 秒内）。** 两个时钟会吃掉信号：
-   - 闸门 EMA `FORCE_GUARD_EMA_ALPHA = 0.02`（`Config.h:273`）⇒ 约 **1.7 s** 才收敛；
-   - **★ 静止时在线零偏 EMA** `FORCE_BIAS_EMA_ALPHA = 0.01`（`Config.h:131`，仅 `isStill()` 时跑，
-     `ForceCompensation.cpp:1032`）⇒ 约 **3.3 s**，会**把静态外力吸收进零偏**
-     ⇒ 补偿值自己慢慢回到 0。
+   - 闸门 EMA `FORCE_GUARD_EMA_ALPHA = 0.02` ⇒ 约 **1.7 s** 才收敛；
+   - **★ 静止时在线零偏 EMA** —— ⚠ **本行已于 2026-09-21 晚被改**：
+     旧值是 `FORCE_BIAS_EMA_ALPHA = 0.01` ⇒ τ ≈ **3.3 s**，会把**秒级**的外力也吸收掉；
+     现改为 **`FORCE_BIAS_EMA_TAU_S = 600.0`**（τ 600 s），理由与三个时间尺度的对比见
+     `Config.h` 该常数处与 `2026-09-21-raw-channel-calibration-run-005.md §7.4`。
+     ⇒ **本次上机时它仍是 3.3 s**（下面的读数就是在这个 τ 下取的）；
+     改完之后"静止按住"不再会吃掉力，但**本§的读数时机建议仍按 2 秒内**（保守）。
 
 **做法：**
 

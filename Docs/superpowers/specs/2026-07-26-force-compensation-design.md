@@ -4,6 +4,12 @@
 **Status:** Design Approved
 **Branch:** master
 
+> **⚠ 2026-09-21 局部过期（勿照抄其中这一项）**：本文里的 `Config::FORCE_BIAS_EMA_ALPHA = 0.01`
+> 已被 **`Config::FORCE_BIAS_EMA_TAU_S = 600.0`**（时间常数，α 由它与真实节拍反算）取代 ——
+> 实测发现旧值（τ ≈ 3.3 s）会把**秒级的持续外力**当漂移吸收掉，见
+> `../specs/2026-09-21-raw-channel-calibration-run-005.md §7.4`。
+> 本文其余内容仍是当时有效的历史记录，**不追改**。
+
 ## 1. Problem Statement
 
 The KWR75B force sensor exhibits significant zero-offset bias even when no external force is applied:

@@ -2,6 +2,12 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **⚠ 2026-09-21 局部过期（勿照抄其中这一项）**：本文里的 `Config::FORCE_BIAS_EMA_ALPHA = 0.01`
+> （零偏"每帧更新率"）已被 **`Config::FORCE_BIAS_EMA_TAU_S = 600.0`**（时间常数）取代 ——
+> 原因（旧的 3.3 s 会把秒级外力当漂移吸收掉）见 `Touch_Client/config/Config.h` 该常数处
+> 与 `../specs/2026-09-21-raw-channel-calibration-run-005.md §7.4`。
+> 本文其余内容仍是当时有效的历史记录，**不追改**（它是计划，不是现行规格）。
+
 **Goal:** Build gravity+inertia force sensor compensation with automatic multi-pose calibration, replacing the simple deadzone with bias-subtraction+gravity-comp+inertia-comp.
 
 **Architecture:** New `ForceCompensation` module (motion estimator, gravity/inertia comp, EMA bias tracking) inserted before the existing `ForcePipeline`. New `ForceCalibration` module (state machine, multi-pose sweep, normal-equations solver, JSON persistence) triggered via 'c' key when idle.
