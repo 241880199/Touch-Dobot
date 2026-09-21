@@ -80,14 +80,13 @@ namespace Config {
     // ========== 力传感器参数 ==========
     const int FORCE_REALTIME_PORT = 30004;       // 实时反馈端口 (125Hz)
     const int FORCE_EFFECTIVE_SAMPLE_RATE = 125; // 传感器数据采样率 (Hz)
-    // 【力处理链的真实节拍】RelayCore::pollForce 的入口节流 —— 它决定
-    //   ForceCompensation::step 与 MotionEstimator::update 的【实际】调用间隔。
-    //   这个名字要显式存在, 是因为它和上面那个 125 不是同一个数(125 是【帧到达】率)。
-    //   ⚠ 【已知不一致, 尚未修】(run-005 §14): step() 里给运动估计器传的 dt 仍是
-    //     1/FORCE_EFFECTIVE_SAMPLE_RATE (=8ms), 而真实间隔是 33ms ⇒ 速度被高估 4.1×、
-    //     加速度被高估 17×, 而 Fi = mass·acc ⇒ 运动时惯量项被放大 17 倍。
-    //     改它 = 改行为(17 倍), 要单独验证, 所以本趟【只把这个不一致写在两处】, 不动它。
-    const int FORCE_POLL_INTERVAL_MS = 33;       // 力处理链实际节拍 (~30 Hz)
+    // 【力处理链的节流【下限】】RelayCore::pollForce 的入口节流: 两次处理【至少】隔这么久。
+    // ⚠ 它【不是】实际节拍 —— 真实节拍还要加上主循环本身的耗时。2026-09-21 实测
+    //   (用 force_demo_log.csv 的 t_ms 列): **46~203ms、均值 92~192ms, 而且【是变的】**。
+    //   ⇒ 所以任何"按固定采样率换算"的常数都是错的。step() 内部的 dt 与在线零偏的 α
+    //     都已改成【用实测耗时】(见 ForceCompensation 的 feedMotionEstimator / stepIntervalSec)。
+    //   ⚠ 这个常数【现在只有一个消费者】: pollForce 的节流门。别再拿它当采样率用。
+    const int FORCE_POLL_INTERVAL_MS = 33;       // 处理节流【下限】
 
     // 30004 帧自检 (TestValue @48 == 0x0123456789ABCDEF) 的档位。语义与理由见 robot/FrameLayout.h。
     //   0 = 关:  完全不做 (退回 2026-09-21 之前的行为)
@@ -146,9 +145,15 @@ namespace Config {
     // ========== 力补偿运行时参数 ==========
     const double FORCE_MOTION_VEL_THRESH_MS = 0.002;      // 静止判定: 速度阈值 (m/s)
     const double FORCE_MOTION_ACC_THRESH_MSS = 0.005;     // 静止判定: 加速度阈值 (m/s²)
+    // 运动估计器允许的最大喂样间隔 (s)。超过它就【重置】估计器, 不让二阶差分跨过一个坑。
+    // 【为什么需要】喂样间隔是实测的 (见 ForceCompensation.cpp 的 feedMotionEstimator):
+    //   实测 46~203ms 且【是变的】(主循环耗时), 偶尔还会卡得更久。跨过大坑的二阶差分
+    //   量的是"两次采样之间的任意运动", 不是加速度 —— 那个数没有任何含义, 只能丢掉重来。
+    //   取 0.5s = 实测最坏值(203ms)的 2.5 倍: 正常抖动碰不到它, 真卡顿才触发。
+    const double FORCE_MOTION_MAX_GAP_S = 0.5;
     // 在线零偏 EMA 的【时间常数】(s), 仅静止态更新。⚠ 语义是时间常数, 不是"每帧更新率":
-    //   每帧的 α 由它与采样率算出 (见 ForceCompensation::step 第 8 步) —— 这样改了采样率,
-    //   时间常数不会被悄悄改掉。
+    //   每帧的 α 由它与【实测的每帧耗时】算出 (见 ForceCompensation::step 第 8 步) ——
+    //   这样节拍怎么变, 时间常数都不会被悄悄改掉。
     //
     // 【为什么从 3.3 s 改成 600 s (2026-09-21, run-005 §7.4)】
     //   这个 EMA 把 bF 朝"comp → 0"拉, 而它【分不清】"传感器零点的慢漂"与"一个持续的外力"

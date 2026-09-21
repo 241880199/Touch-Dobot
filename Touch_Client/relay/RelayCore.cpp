@@ -1907,8 +1907,13 @@ void RelayCore::pollForce() {
     } else {
         for (int i = 0; i < 6; i++) logPose[i] = pose[i];
     }
-    ForceLogger::log(now, filtered, logPose,
-                     appState.forceFeedbackEnabled ? 1 : 0);
+    // 运动估计器的状态也落盘 (2026-09-21, 追加在行末两列/四字段)。理由见 ForceLogger.h 表头说明:
+    // Fi = mass·acc 的运动时误差【只能靠外部反算】验证 —— 本文件的 pose 列二阶差分就是真加速度,
+    // 与 acc 列一比就知道 step() 里 dt 那处修对了没有。两次手拖比 ΔFi 是不可比的, 必须同一运动自洽比较。
+    double motionAcc[3] = {0, 0, 0};
+    ForceCompensation::lastMotionAcc(motionAcc);
+    ForceLogger::log(now, filtered, logPose, appState.forceFeedbackEnabled ? 1 : 0,
+                     motionAcc, ForceCompensation::lastMotionStill() ? 1 : 0);
 
     sendRelayUpdate(buf);
 

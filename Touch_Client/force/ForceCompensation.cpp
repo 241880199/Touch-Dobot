@@ -830,6 +830,16 @@ const char* guardStateName(GuardState s) {
     return "UNKNOWN";
 }
 
+// ===== 运动估计器的只读导出 (2026-09-21) —— 声明与理由见 ForceCompensation.h =====
+void lastMotionAcc(double out[3]) {
+    double vel[3];
+    g_motion.getState(vel, out);
+}
+
+bool lastMotionStill() {
+    return g_motion.isStill();
+}
+
 // 闸门状态 -> 错误码。
 // RelayCore 从前自己拿 static_cast<int>(guardState()) 去比字面量 1 和 2 —— 那是把
 // "哪个状态配哪个码"存在【两个地方的巧合】里: 改一次枚举的数值, "去标定"与"去查负载
@@ -863,6 +873,69 @@ double currentMassKg() {
     return massScaleOf(A);   // A 全 0 -> det 0 -> 报 0
 }
 
+// ===== 运动估计器的【喂样】(2026-09-21 重做, 见 run-005 §7.7) =====
+// 【为什么重做 —— 两件事叠在一起, 让估计器量到的不是运动】
+//   (1) dt 从前是常数 1/FORCE_EFFECTIVE_SAMPLE_RATE = 8ms, 而本函数的真实调用间隔由
+//       pollForce 的 33ms 节流【与主循环耗时】共同决定 —— 实测 46~203ms, 而且【是变的】。
+//       加速度 = Δ²p / dt² ⇒ 拿 8ms 去除一个真实间隔 190ms 的差分, 放大 (190/8)² ≈ 560 倍;
+//       换成 33ms 仍放大 ~33 倍。**任何常数都不对。**
+//   (2) 姿态来源 robotActualPose 是 GetPose() 【每 100ms】才刷新一次, 而本函数 46~203ms 才被
+//       调一次 ⇒ 连续两次调用【常常拿到同一个姿态】。原样喂进去: 二阶差分读到 0, 而姿态真
+//       跳变的那一次又配上一段错的 dt ⇒ 量到的是"采样阶梯", 不是机械臂的运动。
+//       实测后果 (force_demo_log.csv 的 acc 列, 运动行): 均值 2.15 / 峰值 9.21 m/s²,
+//       且几乎不随动作变 ⇒ Fi = mass·acc ⇒ |Fi| 均值 0.90 N、峰值 3.87 N ——
+//       **是写字力 (0.3~0.6 N) 的 1.5~13 倍** ⇒ 运动时的力读数被它淹掉。
+//       (同一份日志: 运动行 sd 0.53~0.96 N, 而静止行 sd 只有 0.03~0.11 N。)
+//
+// 【现在怎么做】姿态没变就【不喂】(不推进环形缓冲); 变了才喂, 且 dt 用【距上次喂的真实耗时】。
+//   间隔超过 FORCE_MOTION_MAX_GAP_S 就重置估计器 —— 跨过一个大坑的二阶差分没有含义。
+// 【连带的影响, 上机时别误判】`isStill()` 的阈值 FORCE_MOTION_VEL_THRESH_MS 现在才真正等于
+//   "2 mm/s": 从前 dt 偏小 4~24 倍 ⇒ 速度被高估同样的倍数 ⇒ 实际相当于 0.08~0.49 mm/s。
+// 【怎么验证】同样的手拖: force_demo_log 里运动行的 sd 应从 0.53~0.96 N 回落到接近静止的
+//   0.03~0.11 N 量级。
+static void feedMotionEstimator(const double poseRxyz[6]) {
+    static DWORD  lastFeedMs = 0;
+    static double lastX = 0.0, lastY = 0.0, lastZ = 0.0;
+    static bool   have = false;
+
+    const double x = poseRxyz[0], y = poseRxyz[1], z = poseRxyz[2];
+    const DWORD  now = GetTickCount();
+
+    if (!have) {
+        // 第一个样本只用来建时基 (没有"上一次"可比)。
+        lastFeedMs = now; lastX = x; lastY = y; lastZ = z; have = true;
+        return;
+    }
+    if (x == lastX && y == lastY && z == lastZ) {
+        // 姿态没刷新 (GetPose 还没回来) ⇒ 【不喂】。喂了环形缓冲会堆重复样本, 二阶差分读 0,
+        // 而那是纯人工的"0", 不是"臂真的没动"。
+        return;
+    }
+
+    const double dt = (now - lastFeedMs) / 1000.0;
+    lastFeedMs = now; lastX = x; lastY = y; lastZ = z;
+
+    if (dt <= 0.0) return;
+    if (dt > Config::FORCE_MOTION_MAX_GAP_S) {
+        g_motion.reset();     // 卡过一个大坑 ⇒ 这一段不能当连续运动看, 丢掉重新起算
+        return;
+    }
+    g_motion.update(x, y, z, dt);
+}
+
+// step() 两次调用之间的【真实】耗时 (s); 第一次调用返回 0。
+// 【为什么要它】在线零偏 EMA 的 α 必须按【真实】节拍换算, 而真实节拍是变的 (实测 46~203ms,
+//   见 Config::FORCE_POLL_INTERVAL_MS 的说明) ⇒ 任何假定的采样率都会让时间常数偏掉。
+//   α = dt/τ 对任意 dt 都成立 (小 dt/τ 下与 1−e^(−dt/τ) 等价), 所以这里直接用它。
+static double stepIntervalSec() {
+    static DWORD lastMs = 0;
+    const DWORD now = GetTickCount();
+    if (lastMs == 0) { lastMs = now; return 0.0; }
+    const double dt = (now - lastMs) / 1000.0;
+    lastMs = now;
+    return dt;
+}
+
 void step(AppState::ForceData& fd, const double poseRxyz[6]) {
     // poseRxyz = {X_mm, Y_mm, Z_mm, Rx_deg, Ry_deg, Rz_deg}
 
@@ -871,28 +944,15 @@ void step(AppState::ForceData& fd, const double poseRxyz[6]) {
     for (int i = 0; i < 6; i++) g_lastPose[i] = poseRxyz[i];
     g_lastPoseValid = true;
 
+    // 本帧距上一帧的真实耗时 —— 给第 8 步的在线零偏 EMA 换算时间常数用 (见 stepIntervalSec)。
+    const double stepDt = stepIntervalSec();
+
     // 1. Update motion estimator
-    // ★ 2026-09-21【已修】: 这里从前传 1/FORCE_EFFECTIVE_SAMPLE_RATE (= 8ms), 而本函数的
-    //   【真实】调用间隔是 Config::FORCE_POLL_INTERVAL_MS (= 33ms, RelayCore::pollForce 的
-    //   入口节流)。差 4.1 倍 ⇒ 速度高估 4.1×、加速度高估 17× ⇒ 而 Fi = mass·acc (第 6 步)
-    //   ⇒ 【运动时惯量项被放大 17 倍】。
-    //   实机实测 (run-005 §7.6): 手拖模拟写字时 ΔFi_y ≈ 0.53 N —— 与整个写字力 (0.3~0.6 N) 同量级。
-    //   ⇒ 那是"运动噪声 0.17 N"的来源之一, 而那个数正是死区 0.20 N 的定标依据。
-    //
-    //   ⚠ 两处【连带后果】要记着 (不是缺陷, 但确实改变了行为, 上机时别误判):
-    //     · 速度降回真值 ⇒ isStill() 比从前【更容易】为真 ⇒ 零偏 EMA 更新得更多。但 τ = 600 s,
-    //       所以吸收量可忽略 (见 Config::FORCE_BIAS_EMA_TAU_S)。同时 FORCE_MOTION_VEL_THRESH_MS
-    //       的含义回到"真值 2mm/s"(从前实际相当于 0.49mm/s)。
-    //     · 慢速书写时可能被判"静止" ⇒ 那时 Fi = 0 (不补惯量, 但也不注入假力)。
-    //
-    //   ⚠ 【没有一起改的】: 下面 MotionEstimator 的加速度 LPF 与 ForcePipeline::init 的
-    //     Butterworth, 系数都按【以为的】速率设计 (125Hz / 120Hz), 而真实是 30Hz ⇒ 它们实际的
-    //     截止频率【偏低】(过平滑)。那是【设计取舍】不是 bug —— 改它会【增大】噪声, 所以本趟
-    //     只把真实截止写在两处, 不动系数。
-    //
-    //   【怎么验证这一步】同样的手拖写字实验: ΔFi_y 应从 ~0.53 N 掉到 ~0.03 N 量级。
-    const double dt = static_cast<double>(Config::FORCE_POLL_INTERVAL_MS) / 1000.0;
-    g_motion.update(poseRxyz[0], poseRxyz[1], poseRxyz[2], dt);
+    // ★ 2026-09-21【重做】: dt 不再是常数, 也不再每帧都喂 —— 两件事都改在 feedMotionEstimator
+    //   里面, 那里有完整的理由 (实测间隔 46~203ms 且是变的; 姿态 100ms 才刷新一次) 与验证方法。
+    //   一句话: 从前那个常数 dt 让 Fi 被放大数十到数百倍 ⇒ |Fi| 实测均值 0.90 N、峰值 3.87 N,
+    //   是写字力 (0.3~0.6 N) 的 1.5~13 倍。
+    feedMotionEstimator(poseRxyz);
 
     // 2. 默认输出 = 零。【fail closed 的落点】: 任何没走到"闸门放行"的路径都在这里留下 0。
     //    从前这里是"把 @1304 原样抄进 compensated" (透传) —— 那就是评审判定的 Critical:
@@ -1058,13 +1118,16 @@ void step(AppState::ForceData& fd, const double poseRxyz[6]) {
     //      那会让不一致自我掩盖, 而"安静地学错"正是这条闸门要防的东西。
     //      代价: 拒绝期间零偏不再自跟踪; 闸门放行后自动恢复。
     if (g_motion.isStill()) {
-        // α 由【时间常数】与【真实节拍】算出 —— 为什么是 600 s 而不是旧的 3.3 s, 见
-        //   Config::FORCE_BIAS_EMA_TAU_S 那一大段说明 (一句话: 旧值把秒级的力当漂移吃掉了)。
-        // ⚠ 这里取 FORCE_POLL_INTERVAL_MS 而【不是】FORCE_EFFECTIVE_SAMPLE_RATE:
-        //   后者是 30004 帧的到达率, 前者才是本函数被调用的间隔 (与上面 dt 那一处不是同一个数
-        //   —— 那一处的不一致已写明但未修)。用错那个会让时间常数差 4 倍。
-        const double biasEmaHz = 1000.0 / static_cast<double>(Config::FORCE_POLL_INTERVAL_MS);
-        double alpha = 1.0 / (Config::FORCE_BIAS_EMA_TAU_S * biasEmaHz);
+        // α = dt/τ, 其中 dt 取【本帧实测】的耗时。为什么 τ 是 600 s 而不是旧的 3.3 s,
+        //   见 Config::FORCE_BIAS_EMA_TAU_S 那一大段 (一句话: 旧值把秒级的力当漂移吃掉了)。
+        // ⚠ 【2026-09-21 改】从前这里是 1/(τ × 假定采样率), 而假定值错了【两层】:
+        //   一是不该用 FORCE_EFFECTIVE_SAMPLE_RATE (那是 30004 帧的到达率, 不是本函数的调用率);
+        //   二是即使用 FORCE_POLL_INTERVAL_MS (33ms) 也对不上 —— 实测节拍是 46~203ms
+        //   且【是变的】(见 feedMotionEstimator 顶上那段)。**用假定值 ⇒ τ 实际差 1.4~6 倍。**
+        //   α = dt/τ 对任意 dt 都成立 (小 dt/τ 时与 1−e^(−dt/τ) 等价), 所以这里直接算。
+        //   stepDt == 0 只出现在第一次调用 ⇒ 那一帧不更新, 无害。
+        double alpha = (stepDt > 0.0) ? (stepDt / Config::FORCE_BIAS_EMA_TAU_S) : 0.0;
+        if (alpha > 1.0) alpha = 1.0;
         // Update local copy, then write back under mutex
         bF[0] += alpha * (fd.sixForceRaw[0] - Fg[0] - bF[0]);
         bF[1] += alpha * (fd.sixForceRaw[1] - Fg[1] - bF[1]);
