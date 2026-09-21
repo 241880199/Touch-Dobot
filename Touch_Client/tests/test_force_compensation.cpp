@@ -13,6 +13,11 @@
 #include <limits>
 #include <string>
 #include <windows.h>
+#ifdef _WIN32
+#include <io.h>          // _dup / _dup2 / _close —— "第一次拒绝"那段打印要抓进来看
+#include <fcntl.h>       // _O_CREAT / _O_TRUNC / _O_BINARY
+#include <sys/stat.h>    // _S_IREAD / _S_IWRITE
+#endif
 #include "../force/ForceCompensation.h"
 #include "../force/ForceCalibration.h"
 #include "../force/ZeroDriftCheck.h"
@@ -489,6 +494,130 @@ static void test_guard_reference_unavailable_does_not_pass() {
               std::string("REFERENCE_UNAVAILABLE"));
         CHECK(ForceCompensation::guardErrorCode(stInc) !=
               ForceCompensation::guardErrorCode(ForceCompensation::GuardState::REFERENCE_UNAVAILABLE));
+    }
+    PASS();
+}
+
+// ===== stderr 捕获窗口 (2026-09-21 复审, 服务下面那条用例) =====
+// 同源做法见 test_payload_calibration 的 mgMuteStderr (把 fd 2 接走, 跑完接回来), 区别只在
+// 这里接的是【临时文件】而不是 NUL —— 要读回来断言。
+// ⚠ 【窗口里不许出现 CHECK】: CHECK 失败会 return, 那时 fd 2 还指着临时文件, 后面所有用例的
+//   输出都会丢 (包括那条"结果计数"行)。所以窗口只包住一次 step() 调用, 断言全部在窗口之外。
+static int g_capSavedFd = -1;
+
+static bool capBegin(const char* path) {
+    fflush(stderr);
+    g_capSavedFd = _dup(2);
+    if (g_capSavedFd < 0) return false;
+    const int f = _open(path, _O_CREAT | _O_WRONLY | _O_TRUNC | _O_BINARY,
+                        _S_IREAD | _S_IWRITE);
+    if (f < 0) { _close(g_capSavedFd); g_capSavedFd = -1; return false; }
+    _dup2(f, 2);
+    _close(f);
+    return true;
+}
+
+static void capEnd() {
+    fflush(stderr);
+    if (g_capSavedFd >= 0) {
+        _dup2(g_capSavedFd, 2);
+        _close(g_capSavedFd);
+        g_capSavedFd = -1;
+    }
+}
+
+static std::string capRead(const char* path) {
+    std::string s;
+    FILE* f = fopen(path, "rb");
+    if (!f) return s;
+    char buf[4096];
+    size_t n = 0;
+    while ((n = fread(buf, 1, sizeof(buf), f)) > 0) s.append(buf, n);
+    fclose(f);
+    return s;
+}
+
+// ★★ 2026-09-21 复审 (Important 1): 参考量不可用【第一次】被拒绝时, 那一段打印必须把
+//   两个可用性读数【当场说出来】。上面那条用例钉的是状态与错误码, 钉不住这一段文字。
+//
+// 为什么非要有这条: 那两个数从前【只】出现在 5 s 复报那一行里, 而那一行没有用例覆盖
+//   (见任务报告的遗留清单); 于是最常见的第一次拒绝里, "根本没有帧"与"帧到了、但机械臂
+//   自报不在线"在操作员眼里【分不开】—— 而这两件事要做的处置不同。这条用例就是钉住
+//   "第一眼能拿到诊断": 三个 (online, stale) 组合各自印出【自己的】值。
+//
+// ⚠ 断言故意按子串找那两个数 (与复报行共用的写法 "@1037 = %d" / "帧陈旧 = %d"), 而不是逐字
+//   比对整段: 整段比对会在任何一句措辞调整时红掉 —— 那时它测的是措辞不是诊断能力。这两个
+//   子串是"值有没有被印出来"的最小证据, 也是复审点名的那件事。
+static void test_guard_unavailable_first_refusal_prints_the_two_values() {
+    TEST(guard_unavailable_first_refusal_prints_the_two_values);
+    const char* capPath = "gate_print_capture.tmp";
+    double pose[6] = {0, 0, 0, 0, 0, 0};
+
+    struct Case { const char* why; int online; bool stale; };
+    const Case cases[3] = {
+        { "sixForceOnline=0 (机械臂自报不在线)", 0,  false },
+        { "sixForceOnline=-1 (一帧都没收到)",   -1, false },
+        { "越过 FORCE_STALE_MS (帧已陈旧)",      1,  true  },
+    };
+    for (int k = 0; k < 3; k++) {
+        ForceCompensation::init();
+        double A[9]; diagA(1.0, A);
+        double com[3] = {0, 0, 0};
+        double bF[3] = {0, 0, 0}, bM[3] = {0, 0, 0};
+        ForceCompensation::setCalibration(A, bF, bM, com);
+
+        AppState::ForceData fd = gateVisibleFrame();
+        fd.isStale        = cases[k].stale;
+        fd.sixForceOnline = cases[k].online;
+        fd.sixForceRaw[2] = 9.81;   // 本地算出 compensated = (0,0,0)
+        fd.tcpForce[0]    = 0.0;    // 参考量: 零 —— 但这一路【没有数据】
+
+        if (!capBegin(capPath)) {
+            // 窗口没搭起来 (capBegin 失败时自己还原过 fd 2) —— 这里说实话: 断言没做成。
+            std::cout << std::endl << "    FAIL (捕获窗口没搭起来): 这条打印没有被钉住。"
+                      << std::endl;
+            g_failed++;
+            return;
+        }
+        // ↓↓ 窗口: 只有这一句 (上面说过窗口里不许 CHECK)
+        ForceCompensation::step(fd, pose);   // 状态跃迁 -> 第一次拒绝那一段
+        // ↑↑ 窗口到此为止
+        capEnd();
+        const std::string txt = capRead(capPath);
+        remove(capPath);
+
+        // ① 这一段确实是"参考量不可用"那一次跃迁的打印, 不是别的状态的。
+        if (txt.find("参考量不可用") == std::string::npos) {
+            std::cout << std::endl << "    FAIL (" << cases[k].why << "): 第一次拒绝那段里"
+                      << "没有说到【参考量不可用】。" << std::endl;
+            g_failed++;
+            return;
+        }
+        // ② ★ 本帧这两个读数在【跃迁这一次】打印里就有了 —— 本条用例存在的唯一理由。
+        char wantOnline[64], wantStale[64];
+        snprintf(wantOnline, sizeof(wantOnline), "@1037 = %d", cases[k].online);
+        snprintf(wantStale,  sizeof(wantStale),  "帧陈旧 = %d", cases[k].stale ? 1 : 0);
+        if (txt.find(wantOnline) == std::string::npos) {
+            std::cout << std::endl << "    FAIL (" << cases[k].why << "): 第一次拒绝那段里"
+                      << "没有印出六维力在线状态 (找不到 \"" << wantOnline
+                      << "\") —— 这一路没有数据的两种来源在操作员眼里分不开。" << std::endl;
+            g_failed++;
+            return;
+        }
+        if (txt.find(wantStale) == std::string::npos) {
+            std::cout << std::endl << "    FAIL (" << cases[k].why << "): 第一次拒绝那段里"
+                      << "没有印出帧陈旧 (找不到 \"" << wantStale << "\")。" << std::endl;
+            g_failed++;
+            return;
+        }
+        // ③ 这两个数必须来自【跃迁】那一段, 不是 5 s 复报那一行。只喂了一帧、状态刚变,
+        //    所以捕获窗口里【不该】出现复报行 —— 出现就说明值是从那条没覆盖的路径来的。
+        if (txt.find("(复报)") != std::string::npos) {
+            std::cout << std::endl << "    FAIL (" << cases[k].why << "): 捕获到的是复报那一行"
+                      << ", 不是状态跃迁那一段 —— 那么上面两个数仍然只在复报行里。" << std::endl;
+            g_failed++;
+            return;
+        }
     }
     PASS();
 }
@@ -1404,6 +1533,7 @@ int main() {
     test_guard_two_causes_are_distinguishable();
     // ★ Task 7: 参考量不可用时 fail-closed, 且与"不一致"分得开 (一条用例钉两件事)
     test_guard_reference_unavailable_does_not_pass();
+    test_guard_unavailable_first_refusal_prints_the_two_values();
     test_guard_error_code_mapping();
     test_guard_fz_reported_but_not_voted();
     test_guard_moment_channel_reports_but_does_not_vote();

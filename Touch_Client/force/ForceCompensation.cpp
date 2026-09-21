@@ -33,12 +33,17 @@ static double g_lastPose[6] = {0};   // {X_mm, Y_mm, Z_mm, Rx_deg, Ry_deg, Rz_de
 static bool g_lastPoseValid = false;
 
 // 【参考量可用性的本帧证据】—— 同上, 只为闸门那段打印服务 (2026-09-21, Task 7)。
-// 复报那一行要说清楚"为什么不可用" (六维力在线状态是多少、帧是不是陈旧), 而 setGuardState
-// 看不到 ForceData (它不是按 fd 传参的)。所以 step() 在判可用性之前把这两个数记下来。
+// 要说清楚"为什么不可用" (六维力在线状态是多少、帧是不是陈旧), 而 setGuardState 看不到
+// ForceData (它不是按 fd 传参的)。所以 step() 在判可用性之前把这两个数记下来 —— 状态【跃迁】
+// 那次打印与 5 s 复报那一行都要用它们。
 // ⚠ 与 g_lastPose 同一套规矩: 没有"本帧"就【不许】把残留值/默认值当成本帧的事实打出来。
+//   ★ 这两个数【不需要】再配一个"是不是本帧"的标志 (2026-09-21 复审去掉了一个, 它到不了):
+//     进入 REFERENCE_UNAVAILABLE 的 setGuardState 调用【全程序只有一处】, 紧跟在写这两个数
+//     的几行之后 (step() 第 7b 步); 而 resetGuard() 把这两个数复位时, 状态同时被置回
+//     UNCALIBRATED ⇒ "本状态成立"与"没有本帧"不会同时发生, 所以打出来的【永远】是触发本状态
+//     的那一帧的读数。默认值本身的含义也正是"一帧都没收到" (-1 / 陈旧), 不是"未知"。
 static int  g_refOnlineLast = -1;       // @1037 六维力在线状态的最近值 (-1 = 一帧都没收到)
 static bool g_refStaleLast  = true;     // 最近一帧的 fd.isStale
-static bool g_refFactsValid = false;    // 上面两个数是【本帧】记下的, 不是残留
 
 // ===== 运行时一致性闸门的状态 (2026-09-19) =====
 // 全部由 ForceReader/pollForce 线程访问 (step() 是唯一入口), 与 g_A 那些用 g_calibMutex
@@ -395,16 +400,17 @@ static void setGuardState(ForceCompensation::GuardState st) {
         //   "参考量"当被减数算出来的, 而这一路【没有数据】⇒ 那六个数不是任何一次比较的
         //   结果。复报仍然出声 (还得让人看见它没恢复), 但只说状态 + 为什么。
         if (!compared) {
-            if (g_refFactsValid) {
-                fprintf(stderr, "[Force] !! (复报) 仍在拒绝: 参考量【不可用】—— 判据那一侧没有数据"
-                                " (六维力在线状态 @1037 = %d, 只有 1 算在线; 帧陈旧 = %d)。"
-                                "逐通道对比表不适用: 没有第二个读数, 没有比过。\n",
-                        g_refOnlineLast, g_refStaleLast ? 1 : 0);
-            } else {
-                // 没有"本帧"时不许拿残留值当事实 —— 照实说没有。
-                fprintf(stderr, "[Force] !! (复报) 仍在拒绝: 参考量【不可用】—— 判据那一侧没有"
-                                "数据。逐通道对比表不适用: 没有第二个读数, 没有比过。\n");
-            }
+            // ⚠ 这两个数【一定是本帧的】(2026-09-21 复审): 这里从前分两支 —— "有本帧"与
+            //   "没有本帧, 照实说没有" —— 而后者【到不了】: 能进入 REFERENCE_UNAVAILABLE 的
+            //   setGuardState 调用全程序只有一处, 就在写下这两个数的那几行下面 (step() 第 7b
+            //   步); 而 resetGuard() 把它们复位时, 状态同时被置回 UNCALIBRATED ⇒ "本状态成立"
+            //   与"没有本帧"不会同时发生。留着那一支等于留一段【读起来像活路、实际走不到】的
+            //   文字 (这个项目记过账: 加枚举值时编译器不会替我们发现漏配, 是同一类问题)。
+            //   所以那一支连同它的标志一起去掉了, 判据没变: 打出来的永远是触发本状态的那一帧。
+            fprintf(stderr, "[Force] !! (复报) 仍在拒绝: 参考量【不可用】—— 判据那一侧没有数据"
+                            " (六维力在线状态 @1037 = %d, 只有 1 算在线; 帧陈旧 = %d)。"
+                            "逐通道对比表不适用: 没有第二个读数, 没有比过。\n",
+                    g_refOnlineLast, g_refStaleLast ? 1 : 0);
             fflush(stderr);
             return;
         }
@@ -438,6 +444,10 @@ static void setGuardState(ForceCompensation::GuardState st) {
     //   操作员会照着一件不相干的事去忙 —— 那比不报还坏。
     const char* reasonText = nullptr;
     const char* actionText = nullptr;
+    // REFERENCE_UNAVAILABLE 的处置文字要带上【本帧刚记下的两个可用性读数】, 所以它得现拼
+    // (其余状态的文字都是字面量)。下面那段文字实际约 570 字节, 缓冲区分了三成余量 ——
+    // static 缓冲区不够时 snprintf 【静默截断】, 而截掉的正好是末尾那句处置。
+    char refAction[768];
     switch (st) {
         case ForceCompensation::GuardState::UNCALIBRATED:
             reasonText = "【没有可用模型】本地补偿未启用 —— 不是\"标定与机械臂不符\"";
@@ -448,12 +458,21 @@ static void setGuardState(ForceCompensation::GuardState st) {
                          " 也不是\"两边对不上\"";
             // 处置【必须与另外两个分开】: 没有第二个读数时, 重标模型与查负载参数这两件事
             // 都没有依据 —— 要做的是把这一路的数据找回来。
-            actionText =
-                "[Force] !!   参考量这一路没有数据 -> 去查【为什么没有】:\n"
+            // ★ 2026-09-21 复审: 把下面那两条要查的东西【各自读到几】当场打出来。这两个数
+            //   从前【只】出现在 5 s 复报那一行里 (那一行没有用例覆盖), 于是最常见的第一次
+            //   拒绝里, "根本没有帧"与"帧到了、但机械臂自报不在线"在操作员眼里【分不开】——
+            //   而这两件事要做的处置并不相同。这一行就是"第一眼"能拿到的诊断。
+            //   ⚠ 打的是【本帧】的值: 见 g_refOnlineLast 处 —— 进入本状态之前, 这两个数
+            //     刚由触发这一状态的那一帧写下, 所以这里不是残留值。
+            snprintf(refAction, sizeof(refAction),
+                "[Force] !!   参考量这一路没有数据 -> 去查【为什么没有】。本帧这两个数现在是:"
+                " 六维力在线状态 @1037 = %d (只有 1 算在线), 帧陈旧 = %d。\n"
                 "[Force] !!     · 30004 帧还在不在来 (判据是 fd.isStale / Config::FORCE_STALE_MS);\n"
                 "[Force] !!     · 机械臂自报的六维力在线状态 (@1037) 是不是 1 (只有 1 算在线)。\n"
                 "[Force] !!   ⚠ 【不要】去重标模型、也【不要】去查负载参数有没有发进去:\n"
-                "[Force] !!     那两个动作都以\"存在一个可比的参考读数\"为前提, 而这里没有。\n";
+                "[Force] !!     那两个动作都以\"存在一个可比的参考读数\"为前提, 而这里没有。\n",
+                g_refOnlineLast, g_refStaleLast ? 1 : 0);
+            actionText = refAction;
             break;
         case ForceCompensation::GuardState::INCONSISTENT:
             reasonText = "【有模型, 但与机械臂对不上】两边估计的不是同一个外力";
@@ -467,8 +486,6 @@ static void setGuardState(ForceCompensation::GuardState st) {
             actionText = "[Force] !!   (这个状态没有配处置指引: 它的原因与要做的事都未定义。)\n";
             break;
     }
-    // 输出一律走 stderr —— 与 ForceCalibration 的"响亮地说出来"同一条路; stdout 有缓冲,
-    // 混着打会让这段在最需要它的时候缺半截。
     // 输出一律走 stderr —— 与 ForceCalibration 的"响亮地说出来"同一条路; stdout 有缓冲,
     // 混着打会让这段在最需要它的时候缺半截。
     fprintf(stderr,
@@ -553,11 +570,10 @@ static void resetGuard() {
     g_guardFrames = 0;
     g_guardState  = ForceCompensation::GuardState::UNCALIBRATED;
     g_guardReportMs = 0;
-    // 参考量可用性的"本帧证据"一起复位: 复位之后就没有"本帧"了, 打印端据此照实说没有
-    // (见 g_refFactsValid)。
+    // 参考量可用性的"本帧证据"一起复位: 复位之后就没有"本帧"了。状态在这里同时被置回
+    // UNCALIBRATED ⇒ "参考量不可用"那两处打印不会拿复位后的值当事实 (见 g_refOnlineLast 处)。
     g_refOnlineLast = -1;
     g_refStaleLast  = true;
-    g_refFactsValid = false;
 }
 
 // ===== ForceCompensation namespace =====
@@ -884,11 +900,11 @@ void step(AppState::ForceData& fd, const double poseRxyz[6]) {
     //   这层门一恢复就能接着用上一次的【真实】证据判 (若一帧都没比过, 播种标志仍是假,
     //   恢复后由第一帧真实读数播种)。
     if (!guardReferenceAvailable(fd)) {
-        // 先记下本帧的可用性证据, 再报状态 —— 复报那一行要用它说清楚"为什么没有数据"
-        // (见 g_refOnlineLast 的说明)。
+        // 先记下本帧的可用性证据, 再报状态 —— 状态【跃迁】那次打印与复报那一行都要用它
+        // 说清楚"为什么没有数据" (见 g_refOnlineLast 的说明)。这两行是那两个读数【唯一】
+        // 的写入点, 而下一行是进入本状态【唯一】的入口 ⇒ 打印端拿到的永远是本帧的值。
         g_refOnlineLast = fd.sixForceOnline;
         g_refStaleLast  = fd.isStale;
-        g_refFactsValid = true;
         setGuardState(GuardState::REFERENCE_UNAVAILABLE);
         return;
     }
