@@ -18,6 +18,12 @@ static double g_biasForce[3] = {0};
 static double g_biasTorque[3] = {0};
 static MotionEstimator g_motion;
 
+// 最近一帧算出的重力项 (工具系): Fg = A·g, Mg = c_s × (A·g)。
+// 【为什么要缓存】A·g 的唯一一份定义在 step() 里; 别的模块 (调零) 需要它时读这份缓存,
+//   而不是自己再算一遍 —— "同一个量两份实现"就是会漂开。读法见 currentGravityTerm()。
+static double g_lastFg[3] = {0, 0, 0};
+static double g_lastMg[3] = {0, 0, 0};
+
 // 【本帧的姿态】—— 只为闸门那段打印服务 (2026-09-20 加)。
 // 闸门报的那六个数是"残差对姿态的依赖"的读数, 而【没有姿态就没法解释它们】: 现场抄数的人
 // 不把姿态一起抄下来, 事后就分不开"随姿态变"与"固定偏置", 也拟合不了 M = 残差/g 的各向同性
@@ -830,6 +836,17 @@ const char* guardStateName(GuardState s) {
     return "UNKNOWN";
 }
 
+// 最近一帧的重力项 (工具系) —— Fg = A·g, Mg = c_s×(A·g)。
+// 【谁在用】调零 (ForceCalibration 的 TARE 定稿)。全量模型下零偏必须是 "@1304 − A·g"
+//   (力矩同理减 c_s×(A·g)): 因为 @1304 里含着重力项, 而 comp 又会再减一次 A·g ——
+//   少了这一步, 零偏就把重力算进去两遍 ⇒ comp = −A·g ≈ 4N (2026-09-21 现场实测)。
+//   ⇒ 它必须读【这里】(即 step() 算的那一份), 【不许】自己用 TcpCalibration 再算一遍:
+//     同一个量两份实现就是会漂开。
+// ⚠ 时效: 是【最近一次 step()】的, 不是"此刻的姿态"。调零是静止流程, 所以够用。
+void currentGravityTerm(double Fg[3], double Mg[3]) {
+    for (int i = 0; i < 3; i++) { Fg[i] = g_lastFg[i]; Mg[i] = g_lastMg[i]; }
+}
+
 // 闸门状态 -> 错误码。
 // RelayCore 从前自己拿 static_cast<int>(guardState()) 去比字面量 1 和 2 —— 那是把
 // "哪个状态配哪个码"存在【两个地方的巧合】里: 改一次枚举的数值, "去标定"与"去查负载
@@ -1002,6 +1019,13 @@ void step(AppState::ForceData& fd, const double poseRxyz[6]) {
     // Gravity torque: c_s × (A·g) —— 与 Fg 同一个 w = A·g (叉乘结构, 不是独立的 3×3)。
     double Mg[3];
     cross(com, Fg, Mg);
+
+    // ★ 缓存本帧的重力项 —— 【A·g 的唯一一份定义就在这里】。
+    //   别的模块需要它时走 currentGravityTerm() 读这份缓存, 【不许自己再算一遍】:
+    //   "同一个量两份实现"就是会漂开 (2026-09-21 调零那处正是踩了这个: 它按残余模型时代
+    //   直接存原始读数当零偏, 而全量模型的 A·g 又减一次 ⇒ 重力被减两遍 ⇒ comp = −A·g ≈ 4N)。
+    g_lastFg[0] = Fg[0]; g_lastFg[1] = Fg[1]; g_lastFg[2] = Fg[2];
+    g_lastMg[0] = Mg[0]; g_lastMg[1] = Mg[1]; g_lastMg[2] = Mg[2];
 
     // 6. Inertia force (only if moving) —— 语义、时机、系数一字未改 (仍是 mass·a);
     //    mass 现在取自全量模型的质量尺度 |det A|^(1/3) (见 currentMassKg)。

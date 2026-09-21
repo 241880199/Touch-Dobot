@@ -163,6 +163,14 @@ namespace ForceCompensation {
     // 取出当前零偏 (供「仅调零」把新零偏写回文件时复用)
     void currentBias(double biasForce[3], double biasTorque[3]);
 
+    // 取出【最近一帧】的重力项 (工具系): Fg = A·g, Mg = c_s×(A·g)。
+    // ★ 2026-09-21 加 —— 为调零用。全量模型下零偏必须是 "@1304 − A·g"(力矩减 c_s×(A·g)),
+    //   因为 @1304 里含着重力项、而 comp 又会再减一次 A·g。
+    //   ⚠ 【A·g 的唯一一份定义在 step() 里】—— 本访问器读的就是那一份。别拿 TcpCalibration
+    //     再算一遍: 同一个量两份实现会漂开 (2026-09-21 的调零就是踩了这个:
+    //     按残余模型时代的写法直接存原始读数当零偏 ⇒ 重力被减两遍 ⇒ comp = −A·g ≈ 4N)。
+    void currentGravityTerm(double Fg[3], double Mg[3]);
+
     // 诊断用: 把运动检测器的当前状态与判定读出来。返回 isStill() 的当前值。
     // 存在的理由: isStill() 疑似在生产中永远为假 (那样在线 EMA 零偏更新就不跑),
     // 需要用实机噪声量级来判定, 而不是靠读代码猜。

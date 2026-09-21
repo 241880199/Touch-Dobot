@@ -69,13 +69,41 @@ const char* statusText() {
 }
 
 // 由采集缓冲定稿零偏 (力 + 力矩)
+// 上一次定稿时【从零偏里减掉的重力项】—— 只为了让 TARE done 那行报出来。
+// 用途: 调零之后若有人怀疑"零偏怎么和原始读数差了 4N", 那一行就是答案 (不是零偏怪,
+//   是重力项被归到模型那边去了)。
+static double g_lastFinalizeFg[3] = {0, 0, 0};
+static double g_lastFinalizeMg[3] = {0, 0, 0};
+
 static void finalizeBias() {
     int n = (g_tareCount > 0) ? g_tareCount : 1;
     for (int i = 0; i < 6; i++) g_tareAccum[i] /= n;
+
+    // ★ 2026-09-21 修: 全量模型下, 零偏必须是 "@1304 − A·g", 不是 "@1304 本身"。
+    //   模型是 comp = @1304 − bF − A·g (力矩: @1304_M − bM − c_s×(A·g)), 而 @1304 里【含着
+    //   重力项】。残余模型时代那条式子里的重力项由标量 mass 提供, 那时 mean(@1304) 正好就是
+    //   传感器零点, 所以这里从前直接存平均。**换成全量模型之后 A·g 由模型提供, 同一个重力
+    //   就被减了两遍。**
+    //   实测后果 (2026-09-21 现场, 按 'z' 之后): comp = −A·g ≈ 4N ⇒ 闸门判 INCONSISTENT ⇒
+    //   compensated 全置零 ⇒ **一点力反馈都没有**; 而且 force_calib.json 被写成错零偏 ⇒
+    //   此后每次启动都拒。
+    //   【独立确认】两个零偏的偏移量 —— 力 (-2.29,-1.80,+3.33) 模长 4.5N、力矩模长 0.13 N·m ——
+    //   与 |A·g| = m·g = 0.4196×9.81 = 4.12N、|c_s × Fg| = 0.0554×4.12 = 0.23 N·m 同量级。
+    //   ⇒ 读到 step() 算的那一份重力项并减掉, 让"调零之后该姿态上 comp ≈ 0"这条定义成立。
+    //   ⚠ A 全 0 (还没有全量模型) 时 Fg/Mg 也是 0 ⇒ 本修法与从前等价 ⇒ 下面那条
+    //     "A 全 0" 的警告路径不受影响。
+    //   ⚠ 读的是【step() 那一份】(唯一一份定义), 不是在这里另算一遍 —— 同一个量两份实现
+    //     正是本 bug 的成因。
+    double Fg[3], Mg[3];
+    ForceCompensation::currentGravityTerm(Fg, Mg);
+
     for (int i = 0; i < 3; i++) {
-        g_biasForce[i]  = g_tareAccum[i];
-        g_biasTorque[i] = g_tareAccum[i + 3];
+        g_biasForce[i]  = g_tareAccum[i]     - Fg[i];
+        g_biasTorque[i] = g_tareAccum[i + 3] - Mg[i];
     }
+    // 把减掉的量也报出来: 调零之后若有人怀疑"零偏怎么和原始读数差 4N", 这一行就是答案。
+    g_lastFinalizeFg[0] = Fg[0]; g_lastFinalizeFg[1] = Fg[1]; g_lastFinalizeFg[2] = Fg[2];
+    g_lastFinalizeMg[0] = Mg[0]; g_lastFinalizeMg[1] = Mg[1]; g_lastFinalizeMg[2] = Mg[2];
 }
 
 // 可启动: 空闲, 或上一次已结束 (DONE/ABORTED) — 允许同一进程内重新调零/重标
@@ -160,6 +188,14 @@ bool update(double dt, const double raw[6], const double pose[6]) {
             printf("[Force] TARE done: biasF=(%+.3f, %+.3f, %+.3f) N  biasM=(%+.4f, %+.4f, %+.4f) Nm\n",
                    g_biasForce[0], g_biasForce[1], g_biasForce[2],
                    g_biasTorque[0], g_biasTorque[1], g_biasTorque[2]);
+            // ★ 2026-09-21: 报出【从零偏里扣掉的重力项】。全量模型下 零偏 = mean(@1304) − A·g,
+            //   所以它比控制台上看到的 @1304 原始读数【小约 |A·g| = m·g ≈ 4N】——
+            //   那不是异常, 是重力项归到模型那边去了。没有这一行, 下一个人会以为零偏算错了
+            //   (本 bug 当初就是没意识到这一点才写成的)。
+            printf("[Force]   (全量模型: 已从零偏扣掉 A·g=(%+.3f, %+.3f, %+.3f) N 与 "
+                   "c_s×(A·g)=(%+.4f, %+.4f, %+.4f) Nm ⇒ 零偏比 @1304 原始读数小约 4N, 不是异常)\n",
+                   g_lastFinalizeFg[0], g_lastFinalizeFg[1], g_lastFinalizeFg[2],
+                   g_lastFinalizeMg[0], g_lastFinalizeMg[1], g_lastFinalizeMg[2]);
 
             // ===== 仅调零: 直接应用+存盘, 保留现有全量模型 (A / c_s), 不进 MOTION、不开拖拽 =====
             if (g_tareOnly) {
