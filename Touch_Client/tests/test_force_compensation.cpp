@@ -229,7 +229,11 @@ static void test_guard_reference_is_the_current_derived_channel() {
     AppState::ForceData fd;
     fd.sixForceRaw[2] = 9.81;   // 本地算出 compensated = (0,0,0)
     fd.tcpForce[0]    = 0.05;   // @720 说 x 上几乎没外力      <- 判据该看这个
-    fd.raw[0]         = 0.90;   // @576 说 x 上有 0.9 N         <- 不该再看这个
+    // @576 说 x 上有 2.0 N                                <- 不该再看这个
+    // ⚠ 这个数必须【大于力通道容差】, 否则这条用例会退化成恒真: 容差 0.50 N 时 0.90 N 就够,
+    //   而容差 2026-09-21 上调到 1.2464 N 之后, 0.90 N 无论判据看哪一路都放行 —— 那样
+    //   "判据看的是哪一路"这件事就【没有被测到】(两条分支给同样的结果)。⇒ 取 2.0 N。
+    fd.raw[0]         = 2.0;
     ForceCompensation::step(fd, pose);
 
     CHECK(ForceCompensation::guardState() == ForceCompensation::GuardState::OK);
@@ -273,7 +277,13 @@ static void test_guard_refuses_when_inconsistent() {
     double pose[6] = {0, 0, 0, 0, 0, 0};
     AppState::ForceData fd;
     fd.sixForceRaw[2] = 9.81;                  // 本地算出 compensated = (0,0,0)
-    fd.tcpForce[0] = 0.90;                     // 参考量说 x 上有 0.9 N 的外力 (容差 0.5)
+    // 参考量说 x 上有 2.0 N 的外力, 而本地算出 0 ⇒ 差 2.0 N。
+    // ⚠ 这个数【跟着容差上调过】(2026-09-21): 力通道容差从 0.50 N 换成 1.2464 N (依据见
+    //   Config.h), 原来的 0.90 N 已经落在新容差【之内】—— 那一版这里会放行, 于是这条用例
+    //   会因为容差变大而假红。取 2.0 N (= 新容差的 1.6 倍) 而不是"刚好越过": 让它明显
+    //   超过, 免得下次微调容差时又变成一条卡在边界上的用例。它钉的是【拒绝这条路走不走得通】,
+    //   不是容差的数值 —— 容差的数值由 test_runtime_consistency_guard_replay 那半边守。
+    fd.tcpForce[0] = 2.0;
     fd.tcpForce[1] = 0.05;                     // y 在限内
     ForceCompensation::step(fd, pose);
 
@@ -285,7 +295,7 @@ static void test_guard_refuses_when_inconsistent() {
     ForceCompensation::GuardReport rep;
     ForceCompensation::guardReport(rep);
     CHECK(rep.state == ForceCompensation::GuardState::INCONSISTENT);
-    CHECK(fabs(rep.ema[0] - (-0.90)) < 1e-9);
+    CHECK(fabs(rep.ema[0] - (-2.0)) < 1e-9);
     CHECK(rep.exceeded[0] == true);
     CHECK(rep.exceeded[1] == false);
     CHECK(rep.voted[0] == true);
@@ -384,7 +394,7 @@ static void test_guard_fz_reported_but_not_voted() {
     double pose[6] = {0, 0, 0, 0, 0, 0};
     AppState::ForceData fd;
     fd.sixForceRaw[2] = 9.81;                 // compensated = (0,0,0)
-    fd.tcpForce[2] = 3.0;                     // 参考量的 z 报 3 N —— 远超容差 0.5
+    fd.tcpForce[2] = 3.0;                     // 参考量的 z 报 3 N —— 远超力通道容差 1.2464
     ForceCompensation::step(fd, pose);
 
     CHECK(ForceCompensation::guardState() == ForceCompensation::GuardState::OK);  // (a)
@@ -443,13 +453,17 @@ static void test_guard_ema_needs_sustained_mismatch() {
     AppState::ForceData fd;
     fd.sixForceRaw[2] = 9.81;
 
-    // 第 1 帧: 瞬时差 0.30 N, 在容差 0.50 之内 -> 放行 (EMA 由第 1 帧播种)。
+    // 第 1 帧: 瞬时差 0.30 N, 在容差 1.2464 之内 -> 放行 (EMA 由第 1 帧播种)。
     fd.tcpForce[0] = -0.30;
     ForceCompensation::step(fd, pose);
     CHECK(ForceCompensation::guardState() == ForceCompensation::GuardState::OK);
 
-    // 之后持续 0.90 N: EMA 从 0.30 爬向 0.90, alpha = 0.02 —— 第 5 帧还不够, 第 40 帧够了。
-    fd.tcpForce[0] = -0.90;
+    // 之后持续 2.5 N: EMA 从 0.30 爬向 2.5, alpha = 0.02 —— 第 5 帧还不够, 第 41 帧够了
+    // (第 5 帧 EMA ≈ 0.47 N, 第 41 帧 ≈ 1.52 N, 两者夹着力通道容差 1.2464 N)。
+    // 目标值必须【明显】超过容差, 否则"哪一帧越线"就落在噪声上了, 而这条钉的正是那个帧数。
+    // ⚠ 从 0.90 改成 2.5 (2026-09-21): 容差 0.50 -> 1.2464 之后, 0.90 N 永远越不过去
+    //   (EMA 的稳态值就是 0.90), 这条会假红。
+    fd.tcpForce[0] = -2.5;
     for (int k = 0; k < 4; k++) ForceCompensation::step(fd, pose);
     CHECK(ForceCompensation::guardState() == ForceCompensation::GuardState::OK);
     for (int k = 0; k < 36; k++) ForceCompensation::step(fd, pose);

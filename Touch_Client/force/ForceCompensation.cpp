@@ -421,7 +421,9 @@ void init() {
     }
     g_motion.reset();
 
-    // 闸门: 逐通道容差与状态。容差的【出处】写在 Config.h 的注释里 (实测导出, 不是猜)。
+    // 闸门: 逐通道容差与状态。容差的【出处】写在 Config.h 的注释里 (实测导出, 不是猜) ——
+    // 力通道那一项有两个来源: .superpowers/sdd/runtime-guard-report.md (本地失拟 + 模型类差)
+    // 与 Docs/superpowers/specs/2026-09-21-gate-reference-prereq.md (参考量自带的力偏置及其漂移)。
     for (int i = 0; i < 3; i++) {
         g_guardTol[i]     = Config::FORCE_GUARD_TOL_FORCE_N;
         g_guardTol[3 + i] = Config::FORCE_GUARD_TOL_MOMENT_NM;
