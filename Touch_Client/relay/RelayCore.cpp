@@ -1893,10 +1893,12 @@ void RelayCore::pollForce() {
     // 走现成通道: RobotDiagnostics 记一条 (落 robot_diagnostics.log + 计数进会话报告),
     // 并经 reportDiagnostic 把 D| 帧发给 MATLAB GUI。data 侧已经由 step() 无条件置零,
     // 这里只管【把原因说清楚】。
-    // 【两种原因用两个错误码】—— 处置一样 (都拒绝), 但操作员要做的事不同:
+    // 【三种原因用三个错误码】—— 处置一样 (都拒绝), 但操作员要做的事不同:
     //   ERR_FORCE_UNCALIBRATED -> 去按 'm'+'s' 重标模型;
-    //   ERR_FORCE_INCONSISTENT -> 去查负载参数有没有真的发进机械臂 (Task 8)。
-    // 合并成一个码会让这两件事在日志里长得一样, 而"该做什么"全靠这一位区分。
+    //   ERR_FORCE_INCONSISTENT -> 去查负载参数有没有真的发进机械臂 (Task 8);
+    //   ERR_FORCE_REFERENCE_UNAVAILABLE (2026-09-21 Task 7) -> 去查参考量这一路为什么没有数据
+    //     (30004 帧 / 六维力在线状态) —— 【不是】前两件事中的任何一件。
+    // 合并成一个码会让这几件事在日志里长得一样, 而"该做什么"全靠这一位区分。
     // ⚠ 状态 -> 错误码的映射【只有一份实现】: ForceCompensation::guardErrorCode (见那里的
     //   说明)。这里从前是 static_cast<int>(guardState()) 比字面量 1 / 2 —— 一改枚举的
     //   数值就会把两条处置指引对调, 而且没有任何测试看得见。

@@ -2993,6 +2993,13 @@ static void test_runtime_compensation_pose_independence() {
             }
             t6LocalModel(fit, cap.poses[i], mdl, mdl);
             for (int a = 0; a < 6; a++) fd.tcpForce[a] = mdl[a];
+            // ★ 2026-09-21 (Task 7): 还要声明【参考量可用】(帧新鲜 + 机械臂自报在线), 否则
+            //   闸门判【参考量不可用】并拒绝 —— 那时量到的 compensated 是闸门置的 0, 于是
+            //   下面那条"口径自校"会红, 而它红得【看不懂】(它量的是模型输出, 不是数据可用性)。
+            //   本用例喂的参考量是现算的、一定有值 ⇒ 这一帧就是"机械臂报了读数"的那一帧;
+            //   生产里这几件事由 RelayCore 在同一帧里一起做好。
+            fd.isStale = false;
+            fd.sixForceOnline = 1;
             ForceCompensation::init();                       // 干净的估计器状态 (见文件头说明)
             ForceCompensation::setCalibration(fit.A, fit.bF, fit.bM, fit.cS);
             ForceCompensation::step(fd, cap.poses[i]);
@@ -3051,6 +3058,11 @@ static void test_runtime_compensation_pose_independence() {
                 t6LocalModel(f2, cap.poses[i], mdl, mdl);
                 for (int a = 0; a < 6; a++) fd.tcpForce[a] = mdl[a];
             }
+            // ★ 2026-09-21 (Task 7): 同上一处 —— 喂了参考量就得声明【参考量可用】
+            //   (帧新鲜 + 机械臂自报在线), 否则闸门判"不可用"、compensated 被置零,
+            //   量出来的就不是模型输出了。
+            fd.isStale = false;
+            fd.sixForceOnline = 1;
             ForceCompensation::init();
             ForceCompensation::setCalibration(f2.A, f2.bF, f2.bM, f2.cS);
             ForceCompensation::step(fd, cap.poses[i]);
@@ -3310,22 +3322,30 @@ static void test_runtime_consistency_guard_replay() {
 
             // (甲) 真实夹具: @576 用夹具里的那一列
             //
-            // ⚠⚠ 【这一半自 2026-09-21 起是红的, 而且【不许】靠改它变绿】(判据参考量换到
-            //   另一路之后留下的事实, 不是笔误):
-            //   本行的 @576 现在是【诊断侧】, 判据不再看它 ⇒ 判据那一侧喂进去的是 0, 而
-            //   本地模型给出的外力 [就是拟合残差, 量级 ~0.02 N / ~0.001 N·m] 远在容差
-            //   之下 (力通道容差见 Config.h; 它是"越大越容易放行"那一侧) ⇒ 闸门【放行】,
-            //   于是下面那句"每一帧都必须拒绝"必然失败。
-            //   也就是说: 【这份数据回答不了"真实夹具上判据会不会拒绝"】。
-            //   ⚠ 力通道容差 2026-09-21 上调过 (0.50 -> 1.2464 N), 这条红的【原因不变】,
-            //     只是"离容差多远"变了: 上调只会让它更牢地落在放行那一侧。
-            //   ⚠ 为什么不能就地修: 四份夹具的列是 F576/M576 与 F1304/M1304 —— 没有判据
-            //     参考量那一路的列, 所以它的真值【在这份数据里不存在】。把 @576 那两行删掉
-            //     并不改变它 (仍然是 0), 换成别的东西就是【凭空造数】(本项目最忌的一条)。
+            // ⚠⚠ 【这一半仍然红着, 但红的【原因】自 2026-09-21 Task 7 起换了一个 —— 换的是
+            //   描述, 不是结论。结论不变: 【这份数据回答不了"真实夹具上判据会不会拒绝"】,
+            //   而且它【不许】被算成原断言得到满足。】
+            //
+            //   改动【前】的现状 (2026-09-21 当天实测): 判据参考量换到另一路之后, 判据那一侧
+            //   喂进去的是 0 (夹具没有那一路的列), 而本地模型的残差 (~0.02 N / ~0.001 N·m)
+            //   远在容差之下 ⇒ 闸门【放行】, 于是"每一帧都必须拒绝"失败, 消息是
+            //   "竟然放行了 (state=OK)"。
+            //   改动【后】的现状: 判据多了一道【参考量可用性】判据 (Task 7,
+            //   ForceCompensation.cpp 的 guardReferenceAvailable)。这份 ForceData 的初值
+            //   (isStale=true / sixForceOnline=-1) 表达的正是【这一路没有数据】⇒ 闸门判
+            //   【参考量不可用】, 拒绝, 于是"每一帧都必须拒绝"【同样不成立】——
+            //   它【只是不再靠"放行"来不成立】。
+            //   ⚠ 为什么两版都算不上"通过": 那条断言要的是"闸门在【比过】之后拒绝",
+            //     而这里【根本没有比过】—— 无论闸门当时是"放行"还是"不可用", 这份数据都
+            //     没有回答过它。把"参考量不可用"记成"原断言通过", 就是把一件未验证的事
+            //     变成绿的 (用户明确否决过)。
+            //   ⚠ 这份 ForceData 的默认值【不是】在声明"那台机械臂当时不在线": 夹具文件头
+            //     记的是 sixForceOnline=1。这里声明的是【这份数据里没有参考量那一路的值】——
+            //     它没有那一列, 所以喂进去的 0 是【缺列】, 不是读数。
+            //   ⚠ 保留它【红着】是刻意的: 它是"这份数据不再支持旧结论"的唯一机器可见的记录。
             //   ⇒ 要它重新有判别力, 只有两条路 (都需要【新的采集】, 不在本计划内):
             //     ① 重采一份【带参考量那一路的列】的夹具, 用真值喂 (甲);
             //     ② 由所有者决定这一半改成测什么 (但【不许】把它删成一个绿的空壳)。
-            //   ⚠ 保留它【红着】是刻意的: 它是"这份数据不再支持旧结论"的唯一机器可见的记录。
             AppState::ForceData fd;
             for (int a = 0; a < 6; a++) fd.sixForceRaw[a] = six[a];
             fd.raw[0] = cap.F576[i][0]; fd.raw[1] = cap.F576[i][1]; fd.raw[2] = cap.F576[i][2];
@@ -3340,19 +3360,29 @@ static void test_runtime_consistency_guard_replay() {
             ForceCompensation::guardReport(rep);
             if (rep.state == ForceCompensation::GuardState::INCONSISTENT) refused++;
             if (i == 0) {
-                char line[512];
-                int off = snprintf(line, sizeof(line), "      pose 1 逐通道 (EMA 差, 超限倍数):");
-                for (int a = 0; a < 6; a++) {
-                    if (!vote[a]) {
-                        // 不投票的原因【不在这里再抄一遍】(Fz 是"秩 2 依据未复测", 力矩是
-                        // "与参考量之间没有一致态" —— 两件事, 混成一句就是另一份会漂的文字)。
-                        off += snprintf(line + off, sizeof(line) - off, "  %s=不投票", NM[a]);
-                    } else {
-                        off += snprintf(line + off, sizeof(line) - off, "  %s %+.3f(%.1fx)",
-                                        NM[a], rep.ema[a], fabs(rep.ema[a]) / tol[a]);
+                // ★ 2026-09-21 (Task 7): 只有【比过】才有逐通道结果可打。参考量不可用时
+                //   那六个数不是任何一次比较的结果 (被减数那一侧没有数据) —— 打出来就是把
+                //   "没比过"说成"比过了"。
+                if (rep.state != ForceCompensation::GuardState::INCONSISTENT) {
+                    std::cout << "      pose 1 逐通道: 【没有比过】—— 闸门状态 "
+                              << ForceCompensation::guardStateName(rep.state)
+                              << ", 所以没有 EMA 差可打 (不是\"在限内\", 是\"没比过\")。"
+                              << std::endl;
+                } else {
+                    char line[512];
+                    int off = snprintf(line, sizeof(line), "      pose 1 逐通道 (EMA 差, 超限倍数):");
+                    for (int a = 0; a < 6; a++) {
+                        if (!vote[a]) {
+                            // 不投票的原因【不在这里再抄一遍】(Fz 是"秩 2 依据未复测", 力矩是
+                            // "与参考量之间没有一致态" —— 两件事, 混成一句就是另一份会漂的文字)。
+                            off += snprintf(line + off, sizeof(line) - off, "  %s=不投票", NM[a]);
+                        } else {
+                            off += snprintf(line + off, sizeof(line) - off, "  %s %+.3f(%.1fx)",
+                                            NM[a], rep.ema[a], fabs(rep.ema[a]) / tol[a]);
+                        }
                     }
+                    std::cout << line << std::endl;
                 }
-                std::cout << line << std::endl;
             }
             for (int a = 0; a < 6; a++) {
                 sum[a] += rep.ema[a] / cap.n;
@@ -3361,11 +3391,24 @@ static void test_runtime_consistency_guard_replay() {
                 if (r > worst[a]) worst[a] = r;
             }
             poses++;
-            // 每一帧都必须拒绝: 任何一个姿态放行都是"闸门没在看数据"。
+            // 每一帧都必须拒绝 —— 【而且必须是"比过之后拒绝"】。
+            // ⚠ 2026-09-21 (Task 7): 这里【仍然算失败、仍然是 1 条】, 只是把"为什么不是
+            //   INCONSISTENT"说清楚。不许把"参考量不可用"算成这条断言通过 —— 它要的是
+            //   "闸门比过之后拒绝", 而没有参考量时【根本没有比过】。
             if (rep.state != ForceCompensation::GuardState::INCONSISTENT) {
                 std::cout << "    FAIL: " << cap.label << " pose " << (i + 1)
-                          << " 竟然放行了 (state=" << ForceCompensation::guardStateName(rep.state)
-                          << ")" << std::endl;
+                          << " 不是 INCONSISTENT (state="
+                          << ForceCompensation::guardStateName(rep.state) << ")" << std::endl;
+                if (rep.state == ForceCompensation::GuardState::REFERENCE_UNAVAILABLE) {
+                    std::cout << "      ⇒ 【参考量不可用】: 这份夹具没有【参考量那一路】的列,"
+                                 " 所以判据那一侧没有数据 (Task 7 的存在性守卫把它择出来了)。"
+                              << std::endl;
+                    std::cout << "      ⇒ 【原断言仍然没有被验证】: 它问的是\"两边【比过】之后"
+                                 " 会不会拒绝\", 而这里两边【没有比过】。这条【照旧算失败】——"
+                                 " 把它记成通过, 就是把一件未验证的事变绿。" << std::endl;
+                    std::cout << "      ⇒ 要它重新有判别力只能靠【重采一份带参考量那一路的列"
+                                 "的夹具】(它是本计划的收口必做项), 不是靠改这里。" << std::endl;
+                }
                 g_failed++;
                 return;
             }
@@ -3388,6 +3431,12 @@ static void test_runtime_consistency_guard_replay() {
             t6LocalModel(fit, cap.poses[i], mdl, mdl);
             AppState::ForceData fd2;
             for (int a = 0; a < 6; a++) { fd2.sixForceRaw[a] = six[a]; fd2.tcpForce[a] = mdl[a]; }
+            // ★ 2026-09-21 (Task 7): 这一半喂的是一个【真的读到了值】的参考量 (由本地模型
+            //   现算), 所以必须同时声明"这一帧是新鲜的、机械臂自报在线" —— 否则闸门判的是
+            //   【参考量不可用】, 这一半就不再是"放行那条路通不通"的对照 (它的全部意义就是
+            //   当那个对照)。生产里这几件事由 RelayCore 在同一帧里一起做好。
+            fd2.isStale = false;
+            fd2.sixForceOnline = 1;
             ForceCompensation::init();
             ForceCompensation::setCalibration(fit.A, fit.bF, fit.bM, fit.cS);
             for (int f = 0; f < 8; f++) ForceCompensation::step(fd2, cap.poses[i]);

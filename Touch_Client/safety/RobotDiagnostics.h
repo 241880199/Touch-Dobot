@@ -36,7 +36,7 @@ public:
 
     // m_errorCounts 的槽位数。【新增错误码时必须同步改这里】—— 槽位不够时计数会被
     // 静默丢掉 (下面的 log() 有边界判断), 会话报告就会少算, 而"少算"看不出来。
-    static const int ERROR_CODE_SLOTS = 25;
+    static const int ERROR_CODE_SLOTS = 26;
 
     // 环形缓冲区 (供 HUD 显示)
     static const int HISTORY_SIZE = 200;

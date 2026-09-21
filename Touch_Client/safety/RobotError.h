@@ -3,9 +3,12 @@
 #include <cstdio>
 #include "../relay/CoordinateTransform.h"
 
-// ===== 机器人错误码 (25种) =====
+// ===== 机器人错误码 (26种) =====
 // ⚠ 这个数字必须与 RobotDiagnostics::ERROR_CODE_SLOTS 相等 (它决定计数槽位数, 槽位不够时
-//   计数被静默丢掉)。加码时两个地方一起改 —— 本注释是 2026-09-19 闸门加两个码时同步的。
+//   计数被静默丢掉)。加码时两个地方一起改 —— 本注释最近一次同步是 2026-09-21 闸门加
+//   第三个码 (ERR_FORCE_REFERENCE_UNAVAILABLE) 时。
+//   ⚠ 计数按【码的个数】算, 而码的值是【从 0 连续编号】(RobotDiagnostics 拿它当数组下标)
+//     ⇒ 新码只能加在末尾, 不能插在中间。
 enum class RobotErrorCode {
     // PRE-MOTION — 运动前预判
     ERR_WORKSPACE_RADIUS,       // 超出 620mm 工作半径
@@ -34,14 +37,24 @@ enum class RobotErrorCode {
     ERR_ALARM_MODE9,            // 机器人进入 mode=9
     ERR_EMERGENCY_STOP,         // 急停被触发
     ERR_COLLISION,              // 碰撞检测触发
-    // RUNTIME-GUARD — 本地补偿的运行时一致性闸门 (2026-09-19)。【两个码必须分开】:
-    // 它们要做的事不同 —— 前者去按 'm'+'s' 重标模型, 后者去查负载参数有没有真的发进机械臂。
-    // 合成一句话会让操作员在两个完全不同的动作之间乱猜。
+    // RUNTIME-GUARD — 本地补偿的运行时一致性闸门 (2026-09-19)。【三个码必须分开】:
+    // 它们要做的事不同 —— 第一个去按 'm'+'s' 重标模型, 第二个去查负载参数有没有真的发进
+    // 机械臂, 第三个去查【参考量那一路为什么没有数据】(既不是重标, 也不是查下发)。
+    // 合成一句话会让操作员在三个完全不同的动作之间乱猜。
     ERR_FORCE_UNCALIBRATED,     // 【没有可用模型】: 未标定 / A 全零 / A 数值退化 -> 拒绝传数据
     ERR_FORCE_INCONSISTENT,     // 有模型, 但与机械臂自报的【参考量】在某个【投票通道】上对不上
                                 // -> 拒绝传数据 (参考量是哪一路: ForceCompensation.cpp 的
                                 // guardReferenceValue; 投票通道是哪几个: 同文件的 g_guardVote ——
                                 // Fz 与力矩三个分量只报不判, 理由见那一段)
+    ERR_FORCE_REFERENCE_UNAVAILABLE,
+                                // 【参考量不可用】(2026-09-21 Task 7): 模型在, 但参考量这一路
+                                // 【没有数据】—— 六维力在线状态 (@1037) 不是 1, 或帧已陈旧
+                                // (FORCE_STALE_MS) -> 拒绝传数据。
+                                // ⚠ 【不是】ERR_FORCE_INCONSISTENT: 那个码的字面意思是"两边都
+                                // 读到了数, 但对不上", 而这里【没有比过】。报成"对不上"会让日志
+                                // 里出现一个没发生过的事实, 操作员照它去查下发会白忙一场。
+                                // 判据的唯一一份定义: ForceCompensation.cpp 的
+                                // guardReferenceAvailable。
 
     OK = -1                     // 无错误
 };
@@ -119,6 +132,9 @@ inline Severity getSeverity(RobotErrorCode code) {
         // 若日后要让严重度真的生效 (接进 onError), 那时才需要重新论证 REJECT vs FATAL。
         case RobotErrorCode::ERR_FORCE_UNCALIBRATED:
         case RobotErrorCode::ERR_FORCE_INCONSISTENT:
+        // 参考量不可用: 同属"本帧力数据不可用" -> 拒绝。上面那段关于严重度【当前
+        // 只是日志标签】的说明对它一样成立 (2026-09-21 Task 7 加码时复核过)。
+        case RobotErrorCode::ERR_FORCE_REFERENCE_UNAVAILABLE:
             return Severity::REJECT;
 
         case RobotErrorCode::ERR_WORKSPACE_RADIUS:
@@ -163,6 +179,8 @@ inline const char* errorCodeName(RobotErrorCode code) {
         case RobotErrorCode::ERR_COLLISION:         return "ERR_COLLISION";
         case RobotErrorCode::ERR_FORCE_UNCALIBRATED:   return "ERR_FORCE_UNCALIBRATED";
         case RobotErrorCode::ERR_FORCE_INCONSISTENT:   return "ERR_FORCE_INCONSISTENT";
+        case RobotErrorCode::ERR_FORCE_REFERENCE_UNAVAILABLE:
+                                                    return "ERR_FORCE_REFERENCE_UNAVAILABLE";
         default:                                    return "OK";
     }
 }

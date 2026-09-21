@@ -94,17 +94,43 @@ inline Decision decide(const Input& in) {
         }
         d.outcome = Outcome::NotDone;
         const unsigned long secs = in.refuseElapsedMs / 1000;
+        // ★ 2026-09-21 (Task 7): 闸门拒绝的原因【不止两种】—— 第三种是"参考量不可用"。
+        //   这一段从前说的是"那一段分得开'没有可用模型'与'有模型但对不上'", 而下面那句
+        //   ⚠ 又只讲"对不上"的一种来源 —— 参考量不可用时那两句都成了误导: 那一刻
+        //   【根本没有第二个读数】, 拿"对不上"的处置 (查下发 / 查零偏) 去忙是白忙。
+        //   ⇒ 原因不同, 该说的话就不同 (判据各分支的处置本来就不一样, 见 ForceCompensation.h
+        //     的三种拒绝原因)。三种状态【共用一个 outcome】: 结论都是"本次没查"。
+        const char* causeLine = nullptr;
+        switch (in.guard) {
+            case ForceCompensation::GuardState::REFERENCE_UNAVAILABLE:
+                causeLine =
+                    "[Force]   ⚠ 本次\"没查\"的原因【不是】模型、也【不是】负载参数:"
+                    " 判据的参考量这一路【没有数据】(六维力在线状态不是在线 / 帧已陈旧)\n"
+                    "[Force]     ⇒ 两边【没有比过】, 逐通道表也没有。要去查的是这一路的数据"
+                    "(30004 帧、六维力在线状态), 不是去重标、也不是去查下发。\n";
+                break;
+            case ForceCompensation::GuardState::UNCALIBRATED:
+                causeLine =
+                    "[Force]   ⚠ 本次\"没查\"的原因【不是】负载参数: 【没有可用模型】"
+                    "(未标定 / A 全零 / A 数值退化) ⇒ 连要比的模型都没有。\n"
+                    "[Force]     先按 'm' 采多姿态 -> 's' 解出 A, 再按 'z' 调零。\n";
+                break;
+            default:   // INCONSISTENT —— 只有这一支是"两边都读到了数, 但对不上"
+                causeLine =
+                    "[Force]   ⚠ '对不上'不止'负载参数没发进机械臂'一种来源: 零偏漂到"
+                    "超出容差同样会让两边对不上 (上面那段里的逐通道表\n"
+                    "[Force]     写着是哪些通道超了限)。别只查下发那一处。\n";
+                break;
+        }
         d.text =
             "[Force] 零偏漂移检查: 【未做】—— 一致性闸门从第一次拒绝起已 "
             + num((double)secs) +
-            " s 一直在拒绝 (原因见上面 \"[Force] !!\" 那一段, 那一段分得开'没有可用模型'与"
-            "'有模型但对不上')。\n"
+            " s 一直在拒绝 (原因见上面 \"[Force] !!\" 那一段; 那一段把【没有可用模型】与"
+            "【参考量不可用】与【有模型但对不上】三种原因分开报, 处置各不相同)。\n"
             "[Force]   闸门拒绝时 compensated (以及由它推出来的 filtered) 是全 0,"
             " 0 不是零偏 —— 拿它算出来的\"漂移\"恒为 0, 所以本检查在拒绝期间"
             " 给不出任何结论。\n"
-            "[Force]   ⚠ '对不上'不止'负载参数没发进机械臂'一种来源: 零偏漂到"
-            "超出容差同样会让两边对不上 (有模型但不一致时, 上面那段里的逐通道表"
-            "写着是哪些通道超了限)。别只查下发那一处。\n"
+            + causeLine +
             "[Force]   闸门放行之后重启本程序即可 (本检查是启动时的一次性检查)。";
         return d;
     }

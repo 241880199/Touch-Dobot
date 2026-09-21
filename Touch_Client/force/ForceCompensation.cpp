@@ -32,6 +32,14 @@ static double g_lastPose[6] = {0};   // {X_mm, Y_mm, Z_mm, Rx_deg, Ry_deg, Rz_de
 //   —— 那是凭空造了一个数。没有就照实说没有。
 static bool g_lastPoseValid = false;
 
+// 【参考量可用性的本帧证据】—— 同上, 只为闸门那段打印服务 (2026-09-21, Task 7)。
+// 复报那一行要说清楚"为什么不可用" (六维力在线状态是多少、帧是不是陈旧), 而 setGuardState
+// 看不到 ForceData (它不是按 fd 传参的)。所以 step() 在判可用性之前把这两个数记下来。
+// ⚠ 与 g_lastPose 同一套规矩: 没有"本帧"就【不许】把残留值/默认值当成本帧的事实打出来。
+static int  g_refOnlineLast = -1;       // @1037 六维力在线状态的最近值 (-1 = 一帧都没收到)
+static bool g_refStaleLast  = true;     // 最近一帧的 fd.isStale
+static bool g_refFactsValid = false;    // 上面两个数是【本帧】记下的, 不是残留
+
 // ===== 运行时一致性闸门的状态 (2026-09-19) =====
 // 全部由 ForceReader/pollForce 线程访问 (step() 是唯一入口), 与 g_A 那些用 g_calibMutex
 // 保护的量不同 —— 这里不加锁, 与 g_motion 同理: 只有一个写者。
@@ -51,6 +59,36 @@ static double g_guardEma[6]  = {0};      // compensated − 【参考量】的�
 //   这条注释就是判据唯一的出处。
 static inline double guardReferenceValue(const AppState::ForceData& fd, int ch) {
     return fd.tcpForce[ch];
+}
+
+// ===== 参考量【可用不可用】: 全程序【唯一一份】定义 (2026-09-21, Task 7) =====
+//
+// 为什么要加它 (用户 2026-09-21 指令): 判据是 `compensated − 参考量`。参考量读到 ~0 时,
+//   判据退化成"本地输出是否在自己的容差内" —— 而按构造它总是在 ⇒ 闸门在【一个不携带信息
+//   的通道上放行】。"零"既可能是"真的没有外力", 也可能是"这一路没有数据 / 已失效",
+//   两者从前【不可区分】⇒ 对"没有信息"放行 = fail-open。所以: 不可用【不放行】。
+//
+// ⚠ 【防紧】性质, 不是修一个正在发生的 bug: 生产链路上 RelayCore 在【同一次 30004 收帧、
+//   同一把 forceDataMutex】里一起填 raw[] / tcpForce[] / sixForceRaw[] / sixForceOnline
+//   ⇒ "通道其实有数但读数为零"在【实机目前不可达】。它只在【回放 / 夹具】路径出现
+//   (tests/fixtures 的四份采集没有参考量那一路的列 ⇒ 判据那一侧恒为 0)。
+//
+// 判据【只用既有信号, 不新造门限】(依据在这里, 别处不许再定义一份):
+//   (1) fd.sixForceOnline —— 30004 帧 @1037「六维力在线状态」, 机械臂【自己】说的。
+//       实机实测值 = 1 (采集记录: 四份夹具文件头 `sixForceOnline=1`, 2026-09-19/20 多次);
+//       ForceData 的初值 −1 = 【一帧都还没收到】(RelayCore 每收到一帧就写 buf[1037])。
+//       ⇒ 只有 == 1 才算"这一路在线"。0 (机械臂自报不在线) 与 −1 (根本没有帧) 都不算。
+//       取"正向确认"而不是"没说不在线就算在线": 无法确认时【不放行】才是 fail-closed,
+//       而实机实测值就是 1 ⇒ 这不会把正常工况判成不可用。
+//   (2) fd.isStale —— 既有超时常量 Config::FORCE_STALE_MS 的落点 (RelayCore::pollForce
+//       用 lastUpdateMs 与它算出这个标志, 同一把锁内、就在 step() 之前)。
+//       陈旧帧里的参考量是【上一次读数】, 不是"这一路的当前状态" ⇒ 同样不可用。
+//       ⚠ 这里【读这个标志】而不是自己再算一遍帧龄: 帧龄的算法只有一份 (RelayCore 那处),
+//         库里再算一份就会出现"闸门说新鲜、F| 组帧说陈旧"这种两个答案的场面。
+//   ⇒ 两个信号都是布尔/枚举级的事实, 【不需要任何新的数值门限】—— 这也是本判据不许
+//     凭感觉取一个"零附近多大算零"的原因: 那种门限会把"真的没有外力"判成不可用。
+static inline bool guardReferenceAvailable(const AppState::ForceData& fd) {
+    return !fd.isStale && (fd.sixForceOnline == 1);
 }
 
 // ===== 第二组 EMA: compensated − @576 (2026-09-20 并排报出 / 2026-09-21 角色互换) =====
@@ -309,13 +347,21 @@ static void setGuardState(ForceCompensation::GuardState st) {
 
     if (st == ForceCompensation::GuardState::OK) {
         if (changed) {
-            fprintf(stderr, "[Force] 一致性闸门: 放行 (本地全量模型与【参考量】在【投票通道】上一致)\n");
+            // ★ 2026-09-21 (Task 7): "放行"现在包含三件事 —— 有模型、参考量【可用】、
+            //   且在投票通道上一致。"参考量可用"要写出来: 它是这一行与从前的区别所在
+            //   (从前的放行可能发生在【根本没有第二个读数】的时候)。
+            fprintf(stderr, "[Force] 一致性闸门: 放行 (本地全量模型与【参考量】在【投票通道】上一致;"
+                            " 参考量本帧【可用】)\n");
             fflush(stderr);
         }
         g_guardReportMs = now;
         return;
     }
     const bool uncal = (st == ForceCompensation::GuardState::UNCALIBRATED);
+    // ★ 2026-09-21 (Task 7): 有没有【真的比过】。只有 INCONSISTENT 比过 —— UNCALIBRATED
+    //   没有模型, REFERENCE_UNAVAILABLE 没有第二个读数。逐通道表只在"比过"时才有意义:
+    //   印一张"六个通道全在限内"的表, 就是把"没比过"说成"比过了且没问题"。
+    const bool compared = (st == ForceCompensation::GuardState::INCONSISTENT);
     // 【UNCALIBRATED 不在复报之列】
     // 它是【配置态】, 不是【数据态】: "没有模型"这件事不会自己好, 也不随机械臂的动作变,
     // 所以复报出来的那 14 行与上一次【逐字相同】—— 唯一的效果是把别的输出挤出可视区,
@@ -324,6 +370,9 @@ static void setGuardState(ForceCompensation::GuardState st) {
     // 一次, 就够了。
     // ⚠ INCONSISTENT 【仍然】复报: 它下面那张逐通道表的数据【会变】, 复报带的是新信息 ——
     //   那正是"复报"这个机制原本要服务的情形。
+    // ⚠ REFERENCE_UNAVAILABLE 【仍然】复报 (2026-09-21): 它是【数据态】, 会自己好
+    //   (帧恢复 / 六维力重新在线), 所以"还在不在这个状态"是要盯的一件事 —— 与
+    //   UNCALIBRATED 那种"配置态、复报出来逐字相同"不是一回事。
     if (!changed) {
         if (uncal) return;
         if ((now - g_guardReportMs) < static_cast<DWORD>(Config::FORCE_GUARD_REPORT_MS)) return;
@@ -338,9 +387,28 @@ static void setGuardState(ForceCompensation::GuardState st) {
     //   这与刚被取消的 UNCALIBRATED 复报是【同一个病】: 复报的内容与上次逐字相同。
     // 复报仍然出声 (拒绝没变这件事还得让人看见), 只是不再重抄整块; 哪几个通道超限直接
     //   写在那一行里 —— 那正是复报该带的唯一增量。
-    // (走到这里且 !changed 只可能是 INCONSISTENT: !changed && uncal 在上面已经 return 了。)
+    // (走到这里且 !changed 只可能是 INCONSISTENT 或 REFERENCE_UNAVAILABLE:
+    //  !changed && uncal 在上面已经 return 了。)
     static const char* NM[6] = { "Fx(N)", "Fy(N)", "Fz(N)", "Mx(Nm)", "My(Nm)", "Mz(Nm)" };
     if (!changed) {
+        // ★ REFERENCE_UNAVAILABLE 的复报【不能】用下面那行逐通道读数: 那些差是拿
+        //   "参考量"当被减数算出来的, 而这一路【没有数据】⇒ 那六个数不是任何一次比较的
+        //   结果。复报仍然出声 (还得让人看见它没恢复), 但只说状态 + 为什么。
+        if (!compared) {
+            if (g_refFactsValid) {
+                fprintf(stderr, "[Force] !! (复报) 仍在拒绝: 参考量【不可用】—— 判据那一侧没有数据"
+                                " (六维力在线状态 @1037 = %d, 只有 1 算在线; 帧陈旧 = %d)。"
+                                "逐通道对比表不适用: 没有第二个读数, 没有比过。\n",
+                        g_refOnlineLast, g_refStaleLast ? 1 : 0);
+            } else {
+                // 没有"本帧"时不许拿残留值当事实 —— 照实说没有。
+                fprintf(stderr, "[Force] !! (复报) 仍在拒绝: 参考量【不可用】—— 判据那一侧没有"
+                                "数据。逐通道对比表不适用: 没有第二个读数, 没有比过。\n");
+            }
+            fflush(stderr);
+            return;
+        }
+
         // 【复报把六个通道【两个对照量】都报出来】(2026-09-20 修订; 2026-09-21 角色互换)。
         // 原来只报超限的那几个通道的值 —— 但真正要看的是【两个对照量哪个更接近 0】,
         // 而那只在【全表】里有, 全表又只在状态跃迁时打 ⇒ 操作员每次重启才看得到一次。
@@ -365,20 +433,54 @@ static void setGuardState(ForceCompensation::GuardState st) {
         return;
     }
 
+    // 【三种原因, 三句不同的话】(2026-09-21 Task 7 起; 从前这里是两元的三目运算符)。
+    // ⚠ 原因文字与处置指引【必须成对】(见 .h 的三种拒绝原因): 报错了原因而没错处置,
+    //   操作员会照着一件不相干的事去忙 —— 那比不报还坏。
+    const char* reasonText = nullptr;
+    const char* actionText = nullptr;
+    switch (st) {
+        case ForceCompensation::GuardState::UNCALIBRATED:
+            reasonText = "【没有可用模型】本地补偿未启用 —— 不是\"标定与机械臂不符\"";
+            actionText = "[Force] !!   未标定 -> 去标定 ('m' 采多姿态 + 's' 解 A, 再 'z' 调零)。\n";
+            break;
+        case ForceCompensation::GuardState::REFERENCE_UNAVAILABLE:
+            reasonText = "【参考量不可用】判据那一侧【没有数据】—— 不是\"标定与机械臂不符\","
+                         " 也不是\"两边对不上\"";
+            // 处置【必须与另外两个分开】: 没有第二个读数时, 重标模型与查负载参数这两件事
+            // 都没有依据 —— 要做的是把这一路的数据找回来。
+            actionText =
+                "[Force] !!   参考量这一路没有数据 -> 去查【为什么没有】:\n"
+                "[Force] !!     · 30004 帧还在不在来 (判据是 fd.isStale / Config::FORCE_STALE_MS);\n"
+                "[Force] !!     · 机械臂自报的六维力在线状态 (@1037) 是不是 1 (只有 1 算在线)。\n"
+                "[Force] !!   ⚠ 【不要】去重标模型、也【不要】去查负载参数有没有发进去:\n"
+                "[Force] !!     那两个动作都以\"存在一个可比的参考读数\"为前提, 而这里没有。\n";
+            break;
+        case ForceCompensation::GuardState::INCONSISTENT:
+            reasonText = "【有模型, 但与机械臂对不上】两边估计的不是同一个外力";
+            actionText = "[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。\n";
+            break;
+        default:
+            // 不该发生 (GuardState 只有上面四个值; OK 在上面已经 return 了)。
+            // 但【不许】拿别的状态的话来兜底 —— 那等于替一个不认识的状态撒谎, 而这个项目
+            // 记过一笔账: 加枚举值时编译器不会替我们发现漏配 (见 guardErrorCode 段)。
+            reasonText = "【未知的闸门状态】—— GuardState 加了新值而这里没配";
+            actionText = "[Force] !!   (这个状态没有配处置指引: 它的原因与要做的事都未定义。)\n";
+            break;
+    }
+    // 输出一律走 stderr —— 与 ForceCalibration 的"响亮地说出来"同一条路; stdout 有缓冲,
+    // 混着打会让这段在最需要它的时候缺半截。
     // 输出一律走 stderr —— 与 ForceCalibration 的"响亮地说出来"同一条路; stdout 有缓冲,
     // 混着打会让这段在最需要它的时候缺半截。
     fprintf(stderr,
             "[Force] !! ============ 一致性闸门: 拒绝传递数据 ============\n"
             "[Force] !! 原因: %s\n"
-            "[Force] !!   未标定 -> 去标定 ('m' 采多姿态 + 's' 解 A, 再 'z' 调零);\n"
-            "[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。\n"
-            "[Force] !!   【两者的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。\n"
+            "%s"
+            "[Force] !!   【三种原因的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。\n"
             "[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推\n"
             "[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。\n"
             "[Force] !!   (虚拟约束力【不受影响】: 它在 HapticCallback.cpp:168 由位置现算,\n"
             "[Force] !!    与 compensated 无关 —— 安全边界的推手还在, 只是不再有传感器力。)\n",
-            uncal ? "【没有可用模型】本地补偿未启用 —— 不是\"标定与机械臂不符\""
-                  : "【有模型, 但与机械臂对不上】两边估计的不是同一个外力");
+            reasonText, actionText);
     // 【把本帧姿态一起打出来】(2026-09-20)。理由见 g_lastPose 的说明: 下面那六个数只能
     //   【连着姿态】才有意义 —— 现场抄数必须一起抄, 否则事后分不开"随姿态变"与"固定偏置",
     //   也拟合不了 M = 残差/g 的各向同性 (判 H1/H2)。出处 run-004 §4.3 的判别判据。
@@ -394,11 +496,20 @@ static void setGuardState(ForceCompensation::GuardState st) {
         fprintf(stderr, "[Force] !! 本帧姿态: 【没有】—— 这一段不是由某一帧触发的"
                         " (例如装载/拒收路径), 所以没有姿态可报。\n");
     }
-    if (uncal) {
-        // 没有模型时【不打逐通道表】: 那时 compensated 恒为 0, 印出来会是"六个通道全在限内",
-        // 而"在限内"在这里没有意义 —— 那是把"没比过"说成"比过了且没问题"。
-        fprintf(stderr, "[Force] !! (没有模型可比较: 逐通道对比表不适用。上面那一段才是原因。)\n");
-        fprintf(stderr, "[Force] !! 处理: 先按 'm' 采多姿态 -> 's' 解出 A, 再按 'z' 调零存盘。\n");
+    if (!compared) {
+        // 【没比过就不打逐通道表】—— 两种状态各有各的"没比过":
+        //   · UNCALIBRATED: 那时 compensated 恒为 0, 印出来会是"六个通道全在限内";
+        //   · REFERENCE_UNAVAILABLE (Task 7): 被减数那一侧没有数据, 那些差不是比较结果。
+        // 两种情形下那张表都只有一个作用: 把"没比过"说成"比过了且没问题"。
+        fprintf(stderr, "[Force] !! (%s: 逐通道对比表不适用。上面那一段才是原因。)\n",
+                uncal ? "没有模型可比较" : "参考量这一路没有数据, 没有比过");
+        if (uncal) {
+            fprintf(stderr, "[Force] !! 处理: 先按 'm' 采多姿态 -> 's' 解出 A, 再按 'z' 调零存盘。\n");
+        } else {
+            // ⚠ 处置【不是】"去重标/去查负载参数" —— 见上面那段 actionText 的理由。
+            fprintf(stderr, "[Force] !! 处理: 把参考量这一路的数据找回来 (30004 帧 / 六维力在线状态),"
+                            " 然后等它恢复 —— 本闸门会自动放行。\n");
+        }
         fflush(stderr);
         return;
     }
@@ -427,7 +538,7 @@ static void setGuardState(ForceCompensation::GuardState st) {
                     g_guardEmaDiag[i]);
         }
     }
-    // (走到这里只可能是 INCONSISTENT —— UNCALIBRATED 上面已经 return 了)
+    // (走到这里只可能是 INCONSISTENT —— 另外两个状态上面已经 return 了)
     fprintf(stderr, "[Force] !! 处理: 查负载参数有没有真的发进机械臂 (Task 8), 或重跑离线一致性检查。\n"
                     "[Force] !!   【不要】靠改容差把它压过去 —— 容差是由实测导出的。\n");
     fflush(stderr);
@@ -442,6 +553,11 @@ static void resetGuard() {
     g_guardFrames = 0;
     g_guardState  = ForceCompensation::GuardState::UNCALIBRATED;
     g_guardReportMs = 0;
+    // 参考量可用性的"本帧证据"一起复位: 复位之后就没有"本帧"了, 打印端据此照实说没有
+    // (见 g_refFactsValid)。
+    g_refOnlineLast = -1;
+    g_refStaleLast  = true;
+    g_refFactsValid = false;
 }
 
 // ===== ForceCompensation namespace =====
@@ -629,6 +745,7 @@ const char* guardStateName(GuardState s) {
         case GuardState::OK:            return "OK";
         case GuardState::UNCALIBRATED:  return "UNCALIBRATED";
         case GuardState::INCONSISTENT:  return "INCONSISTENT";
+        case GuardState::REFERENCE_UNAVAILABLE: return "REFERENCE_UNAVAILABLE";
     }
     return "UNKNOWN";
 }
@@ -649,6 +766,11 @@ RobotErrorCode guardErrorCode(GuardState s) {
         case GuardState::OK:            return RobotErrorCode::OK;
         case GuardState::UNCALIBRATED:  return RobotErrorCode::ERR_FORCE_UNCALIBRATED;
         case GuardState::INCONSISTENT:  return RobotErrorCode::ERR_FORCE_INCONSISTENT;
+        // ⚠ 2026-09-21 (Task 7): 这里【换了一个码, 不是复用】ERR_FORCE_INCONSISTENT。
+        //   那个码的字面意思是"有模型, 但与机械臂自报的参考量在某个投票通道上对不上" ——
+        //   参考量不可用时【没有比过】, 报成"对不上"就是让日志里出现一个没发生过的事实,
+        //   而操作员照它去"查负载参数有没有发进机械臂"会白忙一场 (要做的是查这一路的数据)。
+        case GuardState::REFERENCE_UNAVAILABLE: return RobotErrorCode::ERR_FORCE_REFERENCE_UNAVAILABLE;
     }
     return RobotErrorCode::OK;
 }
@@ -754,8 +876,25 @@ void step(AppState::ForceData& fd, const double poseRxyz[6]) {
     comp[4] = fd.sixForceRaw[4] - bM[1] - Mg[1];
     comp[5] = fd.sixForceRaw[5] - bM[2] - Mg[2];
 
-    // ===== 7b. 运行时一致性闸门 (用户指令 1/2) =====
-    // 判据与两个原因的分辨写在 .h 里; 这里只做: 更新逐通道 EMA -> 投票 -> 放行或拒绝。
+    // ===== 7b. 参考量可用性 (Task 7): 先判"有没有得比", 再谈"比得对不对" =====
+    // 不可用 ⇒ 拒绝 (compensated 保持第 2 步写的全零), 并且【报的是一个独立的状态】——
+    // 它【不是】"不一致": 不一致说的是"两边都读到了数、但对不上"。这里根本没有第二个读数。
+    // ⚠ 位置【在更新 EMA 之前】: 参考量不可用时那个差是拿"假设的 0"算出来的 —— 把它喂进
+    //   EMA 就是【凭空造一个零读进判据的状态里】, 而本项目最忌凭空造数。跳过更新还让
+    //   这层门一恢复就能接着用上一次的【真实】证据判 (若一帧都没比过, 播种标志仍是假,
+    //   恢复后由第一帧真实读数播种)。
+    if (!guardReferenceAvailable(fd)) {
+        // 先记下本帧的可用性证据, 再报状态 —— 复报那一行要用它说清楚"为什么没有数据"
+        // (见 g_refOnlineLast 的说明)。
+        g_refOnlineLast = fd.sixForceOnline;
+        g_refStaleLast  = fd.isStale;
+        g_refFactsValid = true;
+        setGuardState(GuardState::REFERENCE_UNAVAILABLE);
+        return;
+    }
+
+    // ===== 7c. 运行时一致性闸门 (用户指令 1/2) =====
+    // 判据与三个原因的分辨写在 .h 里; 这里只做: 更新逐通道 EMA -> 投票 -> 放行或拒绝。
     // 参考量【不在这里写死】: 它是 guardReferenceValue, 判据的唯一一份定义。
     // 【EMA 无条件更新】(包括正在拒绝的时候): 否则闸门一旦拒绝就再也回不来, 而 Task 8
     //  "把负载发进去 -> 看它放行" 正是靠它回来的。

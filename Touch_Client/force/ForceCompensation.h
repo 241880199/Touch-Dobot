@@ -81,17 +81,28 @@ namespace ForceCompensation {
     // ⚠ 未标定 -> step() 不再透传 @1304 (旧行为会把 @1304 的 ~21.9 N 偏置经 ForcePipeline
     //   的 0.0165×5 变成手上 ~1.8 N 的恒定推力; 置零之后没有这个偏置)。
     //
-    // 两种拒绝原因【必须分得开】(处置一样 = 都拒绝, 但操作员要做的事不同):
-    //   UNCALIBRATED -> 去标定 (按 'm' 采多姿态 + 's' 解 A, 再 'z' 调零);
-    //   INCONSISTENT -> 去查负载参数有没有真的发进机械臂 (Task 8), 或重跑离线一致性检查。
+    // 三种拒绝原因【必须分得开】(处置一样 = 都拒绝, 但操作员要做的事不同):
+    //   UNCALIBRATED          -> 去标定 (按 'm' 采多姿态 + 's' 解 A, 再 'z' 调零);
+    //   INCONSISTENT          -> 去查负载参数有没有真的发进机械臂 (Task 8), 或重跑离线一致性检查;
+    //   REFERENCE_UNAVAILABLE -> ★ 都是空的: 等参考量这一路恢复 (查 30004 帧 / 六维力在线状态)。
+    //     既不是去标定, 也不是去查负载参数 —— 那两个动作在【没有参考量】时都没有依据。
+    //     ⚠ 它【不是】"不一致": 判据是 compensated − 参考量, 参考量为 0 时判据退化成
+    //       "本地输出是否在自己的容差内", 而按构造它总是在 ⇒ 从前会在【一个不携带信息的
+    //       通道上放行】。这个状态就是把"没有信息"从"一致"里择出来, 并且不放行。
+    // ⚠ 【三种拒绝原因】, 不是两种 (2026-09-21 Task 7 加了第三种)。处置一样 (都拒绝、
+    //   compensated 全置零), 但操作员要做的事不同 —— 所以原因必须能分开报。
     enum class GuardState {
-        OK = 0,             // 模型在, 且【投票通道】与参考量一致 -> 数据放行
+        OK = 0,             // 模型在, 参考量可用, 且【投票通道】与参考量一致 -> 数据放行
         UNCALIBRATED = 1,   // 没有可用模型 (未标定 / A 全零 / A 退化) -> 拒绝
-        INCONSISTENT = 2    // 模型在, 但与【参考量】在某个【投票通道】上对不上 -> 拒绝
+        INCONSISTENT = 2,   // 模型在, 参考量【可用】, 但两者在某个【投票通道】上对不上 -> 拒绝
                             //   (参考量 = .cpp 的 guardReferenceValue, 判据的唯一一份定义;
                             //    投票通道 = .cpp 的 g_guardVote, 掩码的唯一一份定义 ——
                             //    当前是 Fx/Fy 两个; Fz 与力矩三个分量【照报不判】,
                             //    理由是它们与参考量之间没有"一致"态, 见 g_guardVote 段)
+        REFERENCE_UNAVAILABLE = 3
+                            // 模型在, 但【参考量这一路没有数据】-> 拒绝 (2026-09-21, Task 7;
+                            //   依据与"为什么不用新门限"见 .cpp 里 guardReferenceAvailable ——
+                            //   那是这条判据的唯一一份定义)
     };
     struct GuardReport {
         GuardState state = GuardState::UNCALIBRATED;
@@ -116,7 +127,10 @@ namespace ForceCompensation {
     // 就没有 C4715; 而 C4062 (unhandled enumerator) 【默认关闭】: 2026-09-19 用一个
     // "漏一个 case + 末尾兜底 return" 的探针实测过, /W1 /W3 /W4 都不报, 只有 /Wall 报。
     // 本项目按 /W1 编译。真正把这张表钉住的是 test_force_compensation 的
-    // guard_error_code_mapping (三条映射逐条断言 + 与 errorCodeName 对上), 不是编译器。
+    // guard_error_code_mapping (每条映射逐条断言 + 与 errorCodeName 对上), 不是编译器。
+    // ⚠ 2026-09-21 (Task 7) 加了第四个 GuardState —— 那次加值【没有】被编译器发现,
+    //   是靠上面这条用例与 guardStateName / 这张表三处一起改才补齐的 (漏一处就是
+    //   "状态 3 落到兜底 return OK" ⇒ 拒绝却报无错误, 与本项目最忌的"安静地错"同类)。
     // 同一段说明也写在 ForceCompensation.cpp 的实现处。
     // 为什么非要有这张表 —— RelayCore 从前拿 static_cast<int>(guardState()) 去比字面量 1 和 2,
     // 于是"给 GuardState 换顺序"这种无害重构会把"去标定"与"去查负载参数"两条完全不同的

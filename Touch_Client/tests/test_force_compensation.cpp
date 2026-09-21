@@ -26,6 +26,21 @@ static void diagA(double m, double A[9]) {
     A[0] = A[4] = A[8] = m;
 }
 
+// ===== "闸门看得见的一帧" (2026-09-21, Task 7) =====
+// 闸门要求【参考量可用】: 帧新鲜 (fd.isStale == false) 且机械臂自报六维力在线
+// (fd.sixForceOnline == 1)。生产里这两件事与 tcpForce 是【同一帧、同一把锁】里一起做好的
+// (RelayCore 的 ForceReader 每收到一帧就置 isStale=false 并写 @1037), 所以凡是"给闸门喂一个
+// 参考读数"的用例, 都得显式声明这一帧是新鲜的、在线 —— 否则闸门判的是【参考量不可用】
+// (Task 7), 而用例名说的是另一件事。
+// ⚠ 这不是把夹具放宽: 它补的是原来缺的那部分夹具事实 —— AppState::ForceData 的初值是
+//   isStale=true / sixForceOnline=-1, 语义是"一帧都还没收到"。
+static AppState::ForceData gateVisibleFrame() {
+    AppState::ForceData fd;
+    fd.isStale = false;
+    fd.sixForceOnline = 1;
+    return fd;
+}
+
 static int g_passed = 0, g_failed = 0;
 
 #define TEST(name) do { std::cout << "  " << #name << "... "; } while(0)
@@ -74,7 +89,7 @@ static void test_motion_moving() {
 static void test_comp_uncalibrated_refuses() {
     TEST(comp_uncalibrated_refuses);
     ForceCompensation::init();
-    AppState::ForceData fd;
+    AppState::ForceData fd = gateVisibleFrame();
     fd.sixForceRaw[0] = -20.65; fd.sixForceRaw[1] = -2.07; fd.sixForceRaw[2] = 3.055;
     fd.sixForceRaw[3] = -0.27;  fd.sixForceRaw[4] = 0.42;  fd.sixForceRaw[5] = -0.025;
     fd.raw[0] = -0.65; fd.raw[1] = -1.07; fd.raw[2] = 0.055;
@@ -103,7 +118,7 @@ static void test_comp_gravity_only() {
     double biasM[3] = {0, 0, 0};
     ForceCompensation::setCalibration(A, biasF, biasM, com);
 
-    AppState::ForceData fd;
+    AppState::ForceData fd = gateVisibleFrame();
     // pose 0 (R=I) -> g = Rᵀ(0,0,9.81) = (0, 0, +9.81) —— 传感器吊着工具时读到的是 +Z 支撑力。
     // 期望: Fz 读 +9.81, 重力项把它减掉 -> 0。
     fd.sixForceRaw[0] = 0.0; fd.sixForceRaw[1] = 0.0; fd.sixForceRaw[2] = 9.81;
@@ -137,7 +152,7 @@ static void test_comp_gravity_goes_through_A() {
     ForceCompensation::setCalibration(A, bF, bM, com);
     CHECK(ForceCompensation::isCalibrated());        // 非退化 -> 收下了
 
-    AppState::ForceData fd;
+    AppState::ForceData fd = gateVisibleFrame();
     double pose[6] = {0, 0, 0, 0, 0, 0};
     // pose 0: g = (0,0,9.81) -> Fg = A·g = (9.81, 0, 0)。读数正是它 -> 补偿到 0。
     fd.sixForceRaw[0] = 9.81; fd.sixForceRaw[1] = 0.0; fd.sixForceRaw[2] = 0.0;
@@ -150,7 +165,7 @@ static void test_comp_gravity_goes_through_A() {
     // 绕 z 转任意角: g 沿基座 z, Rz 不动它 -> 补偿结果必须一模一样。
     // (这一条同时钉住"ψ 不在补偿路径里": 若还有人拿模块态 ψ 去转重力, Rz 一改结果就变。)
     double pose2[6] = {0, 0, 0, 0, 0, 137.0};
-    AppState::ForceData fd2;
+    AppState::ForceData fd2 = gateVisibleFrame();
     fd2.sixForceRaw[0] = 9.81;
     ForceCompensation::step(fd2, pose2);
     CHECK(fabs(fd2.compensated[0]) < 1e-9);
@@ -161,7 +176,7 @@ static void test_comp_gravity_goes_through_A() {
     double g[3];
     TcpCalibration::gravitySensorFrameAtYaw(pose3, 0.0, g);
     CHECK(fabs(g[2]) < 1e-9);          // Ry(90) 把 g 转到水平面内 -> g_z = 0
-    AppState::ForceData fd3;
+    AppState::ForceData fd3 = gateVisibleFrame();
     // 把 Fg = A·g 全三个分量都填上 = 一个"模型完全对"的读数, 于是补偿结果必须是 0。
     fd3.sixForceRaw[0] = g[2];         // Fg_x = A(0,:)·g = g_z
     fd3.sixForceRaw[1] = g[1];
@@ -184,7 +199,7 @@ static void test_comp_moment_is_cross_of_Ag() {
     // (a) c_s 沿 z (与 w 平行): 叉乘为 0 -> 力矩补偿量恒 0。读数原样留到 compensated。
     double cS_z[3] = {0.0, 0.0, 0.05};     // 单位【米】= 50 mm
     ForceCompensation::setCalibration(A, bF, bM, cS_z);
-    AppState::ForceData fd;
+    AppState::ForceData fd = gateVisibleFrame();
     fd.sixForceRaw[4] = 0.4905;
     // 一致性闸门要求【参考量】与本地模型给的是同一个数 —— 这一帧给它们相等,
     // 于是闸门放行, 下面量的才是【补偿结果】本身, 而不是被闸门置零的 0。
@@ -198,7 +213,7 @@ static void test_comp_moment_is_cross_of_Ag() {
     //     写成 w × c_s 会得到 +0.4905, 于是补偿后的读数变成 −0.981 而不是 0。
     double cS_x[3] = {0.05, 0.0, 0.0};
     ForceCompensation::setCalibration(A, bF, bM, cS_x);
-    AppState::ForceData fd2;
+    AppState::ForceData fd2 = gateVisibleFrame();
     fd2.sixForceRaw[4] = -0.4905;
     ForceCompensation::step(fd2, pose);
     CHECK(fabs(fd2.compensated[4]) < 1e-9);
@@ -228,7 +243,7 @@ static void test_guard_reference_is_the_current_derived_channel() {
     ForceCompensation::setCalibration(A, bF, bM, com);
 
     double pose[6] = {0, 0, 0, 0, 0, 0};
-    AppState::ForceData fd;
+    AppState::ForceData fd = gateVisibleFrame();
     fd.sixForceRaw[2] = 9.81;   // 本地算出 compensated = (0,0,0)
     fd.tcpForce[0]    = 0.05;   // @720 说 x 上几乎没外力      <- 判据该看这个
     // @576 说 x 上有 2.0 N                                <- 不该再看这个
@@ -255,7 +270,7 @@ static void test_guard_passes_when_consistent() {
     ForceCompensation::setCalibration(A, bF, bM, com);
 
     double pose[6] = {0, 0, 0, 0, 0, 0};       // g = (0,0,9.81) -> Fg = (0,0,9.81)
-    AppState::ForceData fd;
+    AppState::ForceData fd = gateVisibleFrame();
     fd.sixForceRaw[2] = 9.81;                  // 读数 = 重力 -> compensated 应为 0
     fd.tcpForce[2] = 0.0;                      // 参考量也说是 0 (两边一致)
     fd.sixForceRaw[0] = 1.25;                  // 再叠一个真实外力: 两边都必须看到它
@@ -280,7 +295,7 @@ static void test_guard_refuses_when_inconsistent() {
     ForceCompensation::setCalibration(A, bF, bM, com);
 
     double pose[6] = {0, 0, 0, 0, 0, 0};
-    AppState::ForceData fd;
+    AppState::ForceData fd = gateVisibleFrame();
     fd.sixForceRaw[2] = 9.81;                  // 本地算出 compensated = (0,0,0)
     // 参考量说 x 上有 2.0 N 的外力, 而本地算出 0 ⇒ 差 2.0 N。
     // ⚠ 这个数【跟着容差上调过】(2026-09-21): 力通道容差从 0.50 N 换成 1.2464 N (依据见
@@ -309,14 +324,17 @@ static void test_guard_refuses_when_inconsistent() {
     PASS();
 }
 
-// ★ 两种原因必须分得开 (简报硬要求): 处置一样 (都拒绝), 但操作员要做的事不同 ——
-//   一个是"去标定", 一个是"去查负载参数有没有发进去"。合成一句话就会让人乱猜。
+// ★ 拒绝的原因必须分得开 (简报硬要求): 处置一样 (都拒绝), 但操作员要做的事不同 ——
+//   "去标定"、"去查负载参数有没有发进去"、"去查参考量这一路为什么没有数据" 是三件事。
+//   合成一句话就会让人乱猜。
+//   ⚠ 用例名里的 "two" 是历史 (2026-09-19 那版只有两种原因), 2026-09-21 Task 7 起是三种。
+//   本用例【三种都钉】; (甲) 与 (乙) 是三件里的前两件, (丙) 是第三件。
 static void test_guard_two_causes_are_distinguishable() {
     TEST(guard_two_causes_are_distinguishable);
 
     // (甲) 没有可用模型
     ForceCompensation::init();
-    AppState::ForceData fd;
+    AppState::ForceData fd = gateVisibleFrame();
     double pose[6] = {0, 0, 0, 0, 0, 0};
     ForceCompensation::step(fd, pose);
     const ForceCompensation::GuardState stA = ForceCompensation::guardState();
@@ -326,17 +344,152 @@ static void test_guard_two_causes_are_distinguishable() {
     double com[3] = {0, 0, 0};
     double bF[3] = {0, 0, 0}, bM[3] = {0, 0, 0};
     ForceCompensation::setCalibration(A, bF, bM, com);
-    AppState::ForceData fd2;
+    AppState::ForceData fd2 = gateVisibleFrame();
     fd2.tcpForce[0] = 5.0;   // 参考量那一侧严重不符 -> INCONSISTENT
     ForceCompensation::step(fd2, pose);
     const ForceCompensation::GuardState stB = ForceCompensation::guardState();
 
+    // (丙) 有模型, 但参考量这一路没有数据 (Task 7)
+    AppState::ForceData fd3 = gateVisibleFrame();
+    fd3.sixForceOnline = 0;      // 机械臂自报六维力【不】在线 -> 参考量不可用
+    fd3.tcpForce[0] = 5.0;      // ★ 就算参考量【像是】有个大偏差, 也不许报成"对不上"
+    ForceCompensation::step(fd3, pose);
+    const ForceCompensation::GuardState stC = ForceCompensation::guardState();
+
     CHECK(stA == ForceCompensation::GuardState::UNCALIBRATED);
     CHECK(stB == ForceCompensation::GuardState::INCONSISTENT);
+    CHECK(stC == ForceCompensation::GuardState::REFERENCE_UNAVAILABLE);
     CHECK(stA != stB);
+    CHECK(stA != stC);
+    CHECK(stB != stC);
     // 名字也要分得开 —— 日志里落的是名字。
     CHECK(std::string(ForceCompensation::guardStateName(stA)) == "UNCALIBRATED");
     CHECK(std::string(ForceCompensation::guardStateName(stB)) == "INCONSISTENT");
+    CHECK(std::string(ForceCompensation::guardStateName(stC)) == "REFERENCE_UNAVAILABLE");
+    PASS();
+}
+
+// ★★★ Task 7 (2026-09-21, 用户指令追加): 参考量【不可用】时 fail-closed, 且必须与
+//   "不一致" 分得开。本用例【同时钉住这两件事】。
+//
+// 要关的那个洞: 判据是 compensated − 参考量。参考量读到 ~0 时判据退化成"本地输出是否在
+//   自己的容差内" —— 而按构造它总是在 ⇒ 闸门在【一个不携带信息的通道上放行】。
+//   "零"既可能是"真的没有外力", 也可能是"这一路没有数据 / 已失效", 两者从前【不可区分】。
+//
+// ⚠ 【这是防紧, 不是修一个正在发生的 bug】: 生产链路上 RelayCore 在【同一帧、同一把锁】里
+//   一起填 raw[] / tcpForce[] / sixForceRaw[] / sixForceOnline ⇒ "通道其实有数但读数为零"
+//   在【实机目前不可达】。它只在【回放 / 夹具】路径出现 (四份夹具没有参考量那一路的列,
+//   见 test_payload_calibration 的 runtime_consistency_guard_replay)。
+//
+// 怎么在没有机械臂的情况下驱动 —— 依据只用【既有信号】, 不新造门限:
+//   · fd.sixForceOnline (30004 帧 @1037): 实机实测值 1 = 在线; 初值 −1 = 一帧都没收到;
+//   · fd.isStale: 既有超时常量 Config::FORCE_STALE_MS 的落点 (RelayCore::pollForce 里用
+//     lastUpdateMs 算出这个标志, 就在 step() 之前、同一把锁内 —— 所以这里是"越过那个
+//     窗口"的等价驱动方式)。
+static void test_guard_reference_unavailable_does_not_pass() {
+    TEST(guard_reference_unavailable_does_not_pass);
+    double pose[6] = {0, 0, 0, 0, 0, 0};
+
+    // ---- (甲) 参考量【不可用】, 而"判据差"按构造是 0 —— 就是那个退化的放行场景 ----
+    struct Case { const char* why; int online; bool stale; };
+    const Case cases[3] = {
+        { "sixForceOnline=0 (机械臂自报不在线)", 0,  false },
+        { "sixForceOnline=-1 (一帧都没收到)",   -1, false },
+        { "越过 FORCE_STALE_MS (帧已陈旧)",      1,  true  },
+    };
+    for (int k = 0; k < 3; k++) {
+        ForceCompensation::init();
+        double A[9]; diagA(1.0, A);
+        double com[3] = {0, 0, 0};
+        double bF[3] = {0, 0, 0}, bM[3] = {0, 0, 0};
+        ForceCompensation::setCalibration(A, bF, bM, com);
+
+        AppState::ForceData fd = gateVisibleFrame();
+        fd.isStale        = cases[k].stale;
+        fd.sixForceOnline = cases[k].online;
+        fd.sixForceRaw[2] = 9.81;   // 本地算出 compensated = (0,0,0)
+        fd.tcpForce[0]    = 0.0;    // 参考量: 零 —— 但这一路【没有数据】
+        ForceCompensation::step(fd, pose);
+
+        const ForceCompensation::GuardState st = ForceCompensation::guardState();
+        const std::string nm(ForceCompensation::guardStateName(st));
+        if (st == ForceCompensation::GuardState::OK) {
+            std::cout << std::endl << "    FAIL (" << cases[k].why << "): 参考量不可用"
+                      << "【竟然放行了】—— 判据退化成了\"本地输出是否在自己的容差内\","
+                      << " 那个比较不携带任何信息。" << std::endl;
+            g_failed++;
+            return;
+        }
+        // ① 状态本身: 必须是那个【独立】的状态, 不许是"不一致", 也不许是"没有模型"。
+        if (nm != "REFERENCE_UNAVAILABLE") {
+            std::cout << std::endl << "    FAIL (" << cases[k].why << "): 状态是 " << nm
+                      << " —— 参考量不可用必须有自己的状态名 (日志里落的是名字)。"
+                      << std::endl;
+            g_failed++;
+            return;
+        }
+        if (st == ForceCompensation::GuardState::INCONSISTENT ||
+            st == ForceCompensation::GuardState::UNCALIBRATED) {
+            std::cout << std::endl << "    FAIL (" << cases[k].why << "): \"不可用\"与"
+                      << "\"不一致/没有模型\"混成了同一个状态。" << std::endl;
+            g_failed++;
+            return;
+        }
+        // ② 拒绝的落地: compensated 全 6 个分量置零 + 下游不许被标成"已标定"。
+        for (int i = 0; i < 6; i++) CHECK(fabs(fd.compensated[i]) < 1e-12);
+        CHECK(fd.isCalibrated == false);
+        // ③ 错误码对得上这个状态 (报错是给操作员看的"该做什么")。
+        CHECK(std::string(errorCodeName(ForceCompensation::guardErrorCode(st))) ==
+              "ERR_FORCE_REFERENCE_UNAVAILABLE");
+        CHECK(ForceCompensation::guardErrorCode(st) != RobotErrorCode::ERR_FORCE_INCONSISTENT);
+        CHECK(ForceCompensation::guardErrorCode(st) != RobotErrorCode::ERR_FORCE_UNCALIBRATED);
+        CHECK(getSeverity(ForceCompensation::guardErrorCode(st)) == Severity::REJECT);
+    }
+
+    // ---- (乙) 正面对照: 参考量【可用】且一致 -> 必须放行 ----
+    // 没有这一半, "一律拒绝"的桩也能让上面全绿 —— 那时上面钉的就不是"可用性"了。
+    {
+        ForceCompensation::init();
+        double A[9]; diagA(1.0, A);
+        double com[3] = {0, 0, 0};
+        double bF[3] = {0, 0, 0}, bM[3] = {0, 0, 0};
+        ForceCompensation::setCalibration(A, bF, bM, com);
+
+        AppState::ForceData fd = gateVisibleFrame();
+        fd.isStale = false;             // 帧新鲜
+        fd.sixForceOnline = 1;          // 机械臂自报在线 (实机实测值就是 1)
+        fd.sixForceRaw[2] = 9.81;       // compensated = (0,0,0)
+        fd.tcpForce[0] = 1.25;          // 参考量真的读到 1.25 N, 本地也看到 1.25 N
+        fd.sixForceRaw[0] = 1.25;
+        ForceCompensation::step(fd, pose);
+
+        CHECK(ForceCompensation::guardState() == ForceCompensation::GuardState::OK);
+        CHECK(fabs(fd.compensated[0] - 1.25) < 1e-9);   // 数据真的过去了
+    }
+
+    // ---- (丙) 反面对照: 参考量【可用】但两边对不上 -> INCONSISTENT, 且与 (甲) 分得开 ----
+    // 这一半钉的是"可区分": 同一个 0 读数, 有数据时是"不一致", 没数据时是"不可用"。
+    {
+        ForceCompensation::init();
+        double A[9]; diagA(1.0, A);
+        double com[3] = {0, 0, 0};
+        double bF[3] = {0, 0, 0}, bM[3] = {0, 0, 0};
+        ForceCompensation::setCalibration(A, bF, bM, com);
+
+        AppState::ForceData fd = gateVisibleFrame();
+        fd.isStale = false;
+        fd.sixForceOnline = 1;
+        fd.sixForceRaw[2] = 9.81;       // 本地算出 0
+        fd.tcpForce[0] = 2.0;           // 参考量读到 2.0 N (远超力通道容差) -> 对不上
+        ForceCompensation::step(fd, pose);
+
+        const ForceCompensation::GuardState stInc = ForceCompensation::guardState();
+        CHECK(stInc == ForceCompensation::GuardState::INCONSISTENT);
+        CHECK(std::string(ForceCompensation::guardStateName(stInc)) !=
+              std::string("REFERENCE_UNAVAILABLE"));
+        CHECK(ForceCompensation::guardErrorCode(stInc) !=
+              ForceCompensation::guardErrorCode(ForceCompensation::GuardState::REFERENCE_UNAVAILABLE));
+    }
     PASS();
 }
 
@@ -345,9 +498,10 @@ static void test_guard_two_causes_are_distinguishable() {
 //   映射【没有任何测试】: 给 GuardState 换个顺序, ERR_FORCE_UNCALIBRATED 与
 //   ERR_FORCE_INCONSISTENT 就悄悄对调, 而用户指令 1 的全部意义就是告诉操作员
 //   【该去标定还是该去查负载参数】—— 报错报反了比不报还坏。
-//   现在唯一的实现是 ForceCompensation::guardErrorCode, 本用例把它的三个输入逐条钉住,
-//   并顺手钉住"错误码 -> 名字 -> 严重度"这条下游链 (报告里说的"严重度现在是咨询性的"
-//   也在这条链上: 这里只断言它是 REJECT, 断言不了它有没有被消费)。
+//   现在唯一的实现是 ForceCompensation::guardErrorCode, 本用例把它的【四个】输入逐条钉住
+//   (2026-09-21 Task 7 加第四个), 并顺手钉住"错误码 -> 名字 -> 严重度"这条下游链
+//   (报告里说的"严重度现在是咨询性的"也在这条链上: 这里只断言它是 REJECT, 断言不了
+//   它有没有被消费)。
 static void test_guard_error_code_mapping() {
     TEST(guard_error_code_mapping);
 
@@ -355,30 +509,49 @@ static void test_guard_error_code_mapping() {
     const RobotErrorCode cOk   = ForceCompensation::guardErrorCode(GuardState::OK);
     const RobotErrorCode cUnc  = ForceCompensation::guardErrorCode(GuardState::UNCALIBRATED);
     const RobotErrorCode cInc  = ForceCompensation::guardErrorCode(GuardState::INCONSISTENT);
+    // ★ 2026-09-21 (Task 7): 第四个状态。它的码【不是】复用 INCONSISTENT —— 参考量不可用时
+    //   【没有比过】, 报成"对不上"就是让日志里出现一个没发生过的事实。
+    const RobotErrorCode cRef =
+        ForceCompensation::guardErrorCode(GuardState::REFERENCE_UNAVAILABLE);
 
     CHECK(cOk == RobotErrorCode::OK);                                  // 放行 -> 不上报
     CHECK(cUnc == RobotErrorCode::ERR_FORCE_UNCALIBRATED);
     CHECK(cInc == RobotErrorCode::ERR_FORCE_INCONSISTENT);
-    // 两个码必须不同 —— 否则"两种原因分开报"这件事在日志里根本不成立。
+    CHECK(cRef == RobotErrorCode::ERR_FORCE_REFERENCE_UNAVAILABLE);
+    // 三个码必须互不相同 —— 否则"三种原因分开报"这件事在日志里根本不成立。
     CHECK(cUnc != cInc);
-    // 与枚举的数值索引【无关】: 这两个码在 RobotErrorCode 里的位置本来就与 GuardState 不同,
+    CHECK(cRef != cInc);
+    CHECK(cRef != cUnc);
+    // 与枚举的数值索引【无关】: 这几个码在 RobotErrorCode 里的位置本来就与 GuardState 不同,
     // 所以"按 static_cast<int> 对上"这种巧合不许再被依赖。
     CHECK(static_cast<int>(cUnc) != static_cast<int>(GuardState::UNCALIBRATED));
     CHECK(static_cast<int>(cInc) != static_cast<int>(GuardState::INCONSISTENT));
+    CHECK(static_cast<int>(cRef) != static_cast<int>(GuardState::REFERENCE_UNAVAILABLE));
 
     // 名字 (进 robot_diagnostics.log 与 D| 帧的那一个) 也必须对得上, 且分得开。
     CHECK(std::string(errorCodeName(cUnc)) == "ERR_FORCE_UNCALIBRATED");
     CHECK(std::string(errorCodeName(cInc)) == "ERR_FORCE_INCONSISTENT");
+    CHECK(std::string(errorCodeName(cRef)) == "ERR_FORCE_REFERENCE_UNAVAILABLE");
 
-    // 严重度: 两个码都是 REJECT —— 而且二者一致 (给操作员看的档位不该因原因而不同)。
+    // 严重度: 三个码都是 REJECT —— 而且三者一致 (给操作员看的档位不该因原因而不同)。
     CHECK(getSeverity(cUnc) == Severity::REJECT);
     CHECK(getSeverity(cInc) == Severity::REJECT);
+    CHECK(getSeverity(cRef) == Severity::REJECT);
     CHECK(getSeverity(cUnc) == getSeverity(cInc));
+    CHECK(getSeverity(cRef) == getSeverity(cInc));
 
-    // 名字函数: 三个状态都要能读出来, 且互不相同。
+    // 名字函数: 四个状态都要能读出来, 且互不相同。
     CHECK(std::string(ForceCompensation::guardStateName(GuardState::OK)) == "OK");
     CHECK(std::string(ForceCompensation::guardStateName(GuardState::UNCALIBRATED)) !=
           std::string(ForceCompensation::guardStateName(GuardState::INCONSISTENT)));
+    CHECK(std::string(ForceCompensation::guardStateName(GuardState::REFERENCE_UNAVAILABLE)) ==
+          "REFERENCE_UNAVAILABLE");
+    CHECK(std::string(ForceCompensation::guardStateName(GuardState::REFERENCE_UNAVAILABLE)) !=
+          std::string(ForceCompensation::guardStateName(GuardState::INCONSISTENT)));
+    CHECK(std::string(ForceCompensation::guardStateName(GuardState::REFERENCE_UNAVAILABLE)) !=
+          std::string(ForceCompensation::guardStateName(GuardState::UNCALIBRATED)));
+    CHECK(std::string(ForceCompensation::guardStateName(GuardState::REFERENCE_UNAVAILABLE)) !=
+          std::string(ForceCompensation::guardStateName(GuardState::OK)));
     PASS();
 }
 
@@ -397,7 +570,7 @@ static void test_guard_fz_reported_but_not_voted() {
     ForceCompensation::setCalibration(A, bF, bM, com);
 
     double pose[6] = {0, 0, 0, 0, 0, 0};
-    AppState::ForceData fd;
+    AppState::ForceData fd = gateVisibleFrame();
     fd.sixForceRaw[2] = 9.81;                 // compensated = (0,0,0)
     fd.tcpForce[2] = 3.0;                     // 参考量的 z 报 3 N —— 远超力通道容差 1.2464
     ForceCompensation::step(fd, pose);
@@ -432,7 +605,7 @@ static void test_guard_moment_channel_reports_but_does_not_vote() {
     ForceCompensation::setCalibration(A, bF, bM, com);
 
     double pose[6] = {0, 0, 0, 0, 0, 0};
-    AppState::ForceData fd;
+    AppState::ForceData fd = gateVisibleFrame();
     fd.sixForceRaw[2] = 9.81;      // 本地算出 compensated_z = 0 (重力被减掉)
     fd.sixForceRaw[0] = 1.05;      // 一个【真实】外力 —— 用来证明力通道的数据真的出门了
     fd.tcpForce[0] = 1.10;         // 力: 参考量只差 0.05, 在限内 (< 力通道容差)
@@ -468,7 +641,7 @@ static void test_guard_force_channels_still_vote() {
     ForceCompensation::setCalibration(A, bF, bM, com);
 
     double pose[6] = {0, 0, 0, 0, 0, 0};
-    AppState::ForceData fd;
+    AppState::ForceData fd = gateVisibleFrame();
     fd.sixForceRaw[2] = 9.81;
     fd.tcpForce[0] = 5.00;         // 力严重不符 (5.00 > 力通道容差)
     CHECK(5.00 > Config::FORCE_GUARD_TOL_FORCE_N);
@@ -503,7 +676,7 @@ static void test_guard_nonfinite_refuses_even_on_nonvoting_channel() {
         double bF[3] = {0, 0, 0}, bM[3] = {0, 0, 0};
         ForceCompensation::setCalibration(A, bF, bM, com);
 
-        AppState::ForceData fd;
+        AppState::ForceData fd = gateVisibleFrame();
         fd.sixForceRaw[2] = 9.81;      // compensated = (0,0,0) (重力被减掉)
         fd.sixForceRaw[0] = 0.5;       // 一个真实外力 —— 分辨"放行"与"拒绝" (拒绝时它必是 0)
         fd.tcpForce[0] = 0.5;          // 力通道一致
@@ -526,7 +699,7 @@ static void test_guard_nonfinite_refuses_even_on_nonvoting_channel() {
         double bF[3] = {0, 0, 0}, bM[3] = {0, 0, 0};
         ForceCompensation::setCalibration(A, bF, bM, com);
 
-        AppState::ForceData fd;
+        AppState::ForceData fd = gateVisibleFrame();
         fd.sixForceRaw[2] = 9.81;
         fd.sixForceRaw[0] = 0.5;
         fd.tcpForce[0] = 0.5;          // 投票通道完全正常 —— 拒绝只可能来自那个 NaN
@@ -549,7 +722,7 @@ static void test_guard_nonfinite_refuses_even_on_nonvoting_channel() {
         double bF[3] = {0, 0, 0}, bM[3] = {0, 0, 0};
         ForceCompensation::setCalibration(A, bF, bM, com);
 
-        AppState::ForceData fd;
+        AppState::ForceData fd = gateVisibleFrame();
         fd.sixForceRaw[2] = 9.81;
         fd.sixForceRaw[0] = 0.5;
         fd.tcpForce[0] = 0.5;
@@ -587,7 +760,7 @@ static void test_guard_ema_needs_sustained_mismatch() {
     ForceCompensation::setCalibration(A, bF, bM, com);
 
     double pose[6] = {0, 0, 0, 0, 0, 0};      // g = (0,0,9.81), com = 0 -> compensated 全是 0
-    AppState::ForceData fd;
+    AppState::ForceData fd = gateVisibleFrame();
     fd.sixForceRaw[2] = 9.81;
 
     // 第 1 帧: 瞬时差 0.30 N, 在容差 1.2464 之内 -> 放行 (EMA 由第 1 帧播种)。
@@ -663,7 +836,7 @@ static void test_zero_only_no_motion() {
     //   y: 5 − (−1.35)          = 6.35
     //   z: 5 − (−0.02) − 4.1202 = 0.8998
     //   M: 5 − (0.010, −0.020, 0.005)
-    AppState::ForceData fd;
+    AppState::ForceData fd = gateVisibleFrame();
     for (int i = 0; i < 6; i++) fd.sixForceRaw[i] = 5.0;
     fd.tcpForce[0] = 5.48; fd.tcpForce[1] = 6.35; fd.tcpForce[2] = 0.90;
     fd.tcpForce[3] = 4.99; fd.tcpForce[4] = 5.02; fd.tcpForce[5] = 4.995;
@@ -712,7 +885,7 @@ static void test_zero_abort_not_applied() {
     }
 
     // 补偿结果里用的仍是旧零偏: x = 5 − 1.0 = 4.0 (不是 5 − (−0.48) = 5.48)。
-    AppState::ForceData fd;
+    AppState::ForceData fd = gateVisibleFrame();
     for (int i = 0; i < 6; i++) fd.sixForceRaw[i] = 5.0;
     fd.tcpForce[0] = 4.0; fd.tcpForce[1] = 3.0; fd.tcpForce[2] = 5.0 - 3.0 - 4.1202;
     fd.tcpForce[3] = 4.9; fd.tcpForce[4] = 4.8; fd.tcpForce[5] = 4.7;
@@ -987,7 +1160,7 @@ static void test_setcalib_rejects_zero_and_degenerate_A() {
     CHECK(ForceCompensation::isCalibrated() == false);
 
     // (f) 拒收之后闸门状态是"没有可用模型" (不是"不一致")。
-    AppState::ForceData fd;
+    AppState::ForceData fd = gateVisibleFrame();
     double pose[6] = {0, 0, 0, 0, 0, 0};
     ForceCompensation::step(fd, pose);
     CHECK(ForceCompensation::guardState() == ForceCompensation::GuardState::UNCALIBRATED);
@@ -1148,12 +1321,16 @@ static void test_zero_drift_exactly_at_threshold_is_normal() {
 
 static void test_zero_drift_not_done_after_full_wait() {
     TEST(zero_drift_not_done_after_full_wait);
-    // 两种拒绝原因 (没有可用模型 / 有模型但对不上) 走同一支: 都【未做】、都不给漂移数。
+    // 【三种】拒绝原因走同一支: 结论都是【未做】、都不给漂移数 (2026-09-21 Task 7 起了
+    // 第三种【参考量不可用】—— 它同样"没有比过", 所以同样给不出漂移数)。
+    // ⚠ 它们共用一个 outcome, 但【该说的话不一样】: decide() 按状态给出不同的
+    //   "为什么没查"那一段 (去标定 / 去查下发 / 去查这一路的数据是【三件不同的事】)。
     const ForceCompensation::GuardState refusals[] = {
         ForceCompensation::GuardState::UNCALIBRATED,
         ForceCompensation::GuardState::INCONSISTENT,
+        ForceCompensation::GuardState::REFERENCE_UNAVAILABLE,
     };
-    for (int k = 0; k < 2; k++) {
+    for (int k = 0; k < 3; k++) {
         ZeroDriftCheck::Input in;
         driftInput(in, 0.0, 0.0, 0.0);
         in.guard = refusals[k];
@@ -1225,6 +1402,8 @@ int main() {
     test_guard_passes_when_consistent();
     test_guard_refuses_when_inconsistent();
     test_guard_two_causes_are_distinguishable();
+    // ★ Task 7: 参考量不可用时 fail-closed, 且与"不一致"分得开 (一条用例钉两件事)
+    test_guard_reference_unavailable_does_not_pass();
     test_guard_error_code_mapping();
     test_guard_fz_reported_but_not_voted();
     test_guard_moment_channel_reports_but_does_not_vote();
