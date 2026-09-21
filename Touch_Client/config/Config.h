@@ -114,7 +114,22 @@ namespace Config {
 
     const double FORCE_MAX_SENSOR_N = 200.0;     // 传感器量程 (N)
     const double FORCE_MAX_TOUCH_N = 3.3;        // Touch 最大安全力 (N)
-    const double FORCE_REFLECTION_GAIN = 5.0;    // 力反射增益 — 放大传感器力到可感知范围
+    // 力反射增益 —— 【净比例 = (FORCE_MAX_TOUCH_N / FORCE_MAX_SENSOR_N) × 本增益 = 0.0165 × 本增益】
+    //   即输出到 Touch 的力 = 传感器力 × 净比例 (逐轴, 且先过 FORCE_RESIDUAL_DEADZONE_N)。
+    //
+    // ★ 2026-09-21 从 5.0 改成 60.0 (净比例 0.0825 → 0.99, 约【1:1】)。依据与代价:
+    //   · 原来的 5.0 是照"放大到可感知范围"定的, 而 ForcePipeline.cpp 的设计注释写明它假设的
+    //     是【典型接触力 5~30 N】(净比例约 12:1)。**毛笔的笔压不在那个区间。**
+    //   · 实测 (run-005 §7.6): 模拟写字的笔压只有 0.3~0.6 N, 主分量约 0.36 N。
+    //     代进旧比例: 0.36 × 0.0825 = 0.030 N —— 只有 Touch 自身分辨率(~0.06 N)的【一半】
+    //     ⇒ **摸不到**。净比例 ~0.99 之后 0.36 N → 0.36 N (约 6× 分辨率) ⇒ 清晰可感。
+    //   ⚠ 代价【如实说】: 运动噪声同比例放大。实测运动噪声 sd = 0.11~0.16 N (run-005 §7.7,
+    //     空中跟随/手不施力) ⇒ 改后手上会有约 0.15 N 的抖动。
+    //     **SNR ≈ 2~5 不变**(同比例放大不改 SNR); 那个上限由传感器底噪(~0.1 N)与写字力
+    //     (0.3~0.6 N)之比决定 —— 不换更硬的笔/写得更用力就压不下去。
+    //   ⚠ 安全性不变: 力在 mapForceToTouch 里先 clamp 到 FORCE_MAX_TOUCH_N, hapticCallback
+    //     里还有一道 ⇒ 净比例 ~1 时 3.3 N 的笔尖力即撞上限。
+    const double FORCE_REFLECTION_GAIN = 60.0;   // 力反射增益 (净比例 ≈1:1, 对着毛笔 0.3~0.6N)
     const double FORCE_GRADIENT_LIMIT = 50.0;    // 梯度限幅 (N/frame)
     const int FORCE_RECONNECT_INTERVAL = 2000;   // 断线重试间隔 (ms)
 
