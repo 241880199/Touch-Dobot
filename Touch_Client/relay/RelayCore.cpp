@@ -1522,6 +1522,19 @@ void RelayCore::initRelayReporting() {
 
     if (connect(sock, (SOCKADDR*)&addr, sizeof(addr)) == SOCKET_ERROR) {
         closesocket(sock);
+        // ★ 失败必须出声 (2026-09-21)。从前这里是【静默 return】, 而整个程序里唯一会提到
+        //   "GUI 没连上"的地方, 是 reportPosition() 里那句每 3.3 s 一次的 "last send=-1B" ——
+        //   它把这件事写成一个不可读的数, 现场只会当噪音忽略。那句刷屏已删
+        //   ⇒ 本句是【唯一】会说这件事的地方, 所以一次说全: 什么没在跑、影响哪几路、
+        //     以及【它不是故障】—— 免得下一个人把它当异常去查。
+        std::cout << "[Relay] GUI reporting 【未连接】—— " << Config::RELAY_IP << ":"
+                  << Config::RELAY_PORT << " 上没有在听 (MATLAB relay_gui 没在跑?)" << std::endl;
+        std::cout << "[Relay]   影响: P| / C| / FB| 三路都发不出去 (位置上报 / 命令回显 / 反馈回显)。"
+                  << std::endl;
+        std::cout << "[Relay]   不影响: 机械臂控制、力数据采集 (@576/@720/@1304)、一致性闸门、"
+                     "本地补偿 —— 它们都不走这条 socket。" << std::endl;
+        std::cout << "[Relay]   要恢复: 先在 MATLAB 那一侧起 relay_gui, 再重启本程序"
+                     " (本函数只在启动时调用一次, 见 main 的调用点)。" << std::endl;
         return;
     }
 
@@ -1580,11 +1593,18 @@ void RelayCore::reportPosition() {
     snprintf(buf, sizeof(buf), "P|%.2f,%.2f,%.2f,%.2f,%.2f,%.2f",
         pos[0], pos[1], pos[2], sx, sy, sz);
 
-    int sent = sendRelayUpdate(buf);
-    static int dbgCount = 0;
-    if (++dbgCount % 100 == 0) {
-        std::cout << "[Relay] Sent " << dbgCount << " position updates, last send=" << sent << "B" << std::endl;
-    }
+    // ⚠ 这里从前每 100 次 (RELAY_UPDATE_INTERVAL = 33ms ⇒ ≈3.3 s) 打一行
+    //   "[Relay] Sent <N> position updates, last send=-1B"。2026-09-21 删掉，理由两条：
+    //     · 那个 "-1" 是 sendRelayUpdate 在【socket 无效】时的返回 (见该函数), 也就是
+    //       "MATLAB 那一侧没连上" —— 一个【整个会话恒定不变】的状态, 却被写成不可读的 "-1B",
+    //       于是现场只能把它当噪音;
+    //     · 它按 3.3 s 的节拍刷屏, 而本项目的控制台正是现场要读的东西 (闸门拒绝的原因/处置、
+    //       逐通道表占十几行) —— 刷屏等于"看不见"。
+    //   ⇒ 它想说的那件事改由 initRelayReporting() 在【连接失败那一次】一次性、可读地说全。
+    //     【不是】把这件事变成静默: 那一句现在存在 (从前失败路径是静默 return, 靠这句刷屏
+    //     隐晦地暗示 —— 那正是"安静地错"的形状)。
+    //   返回值已无人消费 (reportCommand / reportFeedback 一直就忽略它), 所以不接。
+    (void)sendRelayUpdate(buf);
 }
 
 void RelayCore::reportCommand(const char* cmd) {

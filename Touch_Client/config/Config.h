@@ -80,6 +80,16 @@ namespace Config {
     // ========== 力传感器参数 ==========
     const int FORCE_REALTIME_PORT = 30004;       // 实时反馈端口 (125Hz)
     const int FORCE_EFFECTIVE_SAMPLE_RATE = 125; // 传感器数据采样率 (Hz)
+
+    // 30004 帧自检 (TestValue @48 == 0x0123456789ABCDEF) 的档位。语义与理由见 robot/FrameLayout.h。
+    //   0 = 关:  完全不做 (退回 2026-09-21 之前的行为)
+    //   1 = 只报不判【默认】: 校验 + 首次报字节序 + 不匹配时响亮报警, 但【照旧收下这一帧】
+    //   2 = 判:  不匹配就拒帧 + 断线重连 (把"安静地错位"变成"响亮地重连")
+    // ⚠ 为什么默认 1 而不是 2: 我们【还没在真机上见过这个字段】—— 它可能没被填, 也可能
+    //   不是我们以为的字节序。判错一档而猜反, 客户端会变成【永久重连循环】(那会挡掉现场工作)。
+    //   ⇒ 先在真机上确认一次"自检通过 + 字节序是哪个", 再改 2。
+    //   这与"闸门表先并排报 comp−@720、看清参考量之前不改判据"是同一套做法: 先观察, 后判决。
+    const int FORCE_FRAME_MAGIC_MODE = 1;
     const int FORCE_FILTER_CUTOFF = 30;          // Butterworth 截止频率 (Hz)
     const int FORCE_STALE_MS = 200;              // 数据超时阈值 (ms)
     const double FORCE_RESIDUAL_DEADZONE_N = 0.20; // 补偿后死区 (N) — 略高于运动噪声 0.17N

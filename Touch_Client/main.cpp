@@ -457,6 +457,32 @@ namespace BiasCheck {
                avgCount,
                sqrt(varSix[count][0] / avgCount), sqrt(varSix[count][1] / avgCount),
                sqrt(varSix[count][2] / avgCount));
+
+        // ===== ★ 本地派生量: comp 与【在线零偏】(2026-09-21 加) =====
+        // 【为什么必须打它】本模式从前只报三路【原始】通道, 而三路原始通道都看不出下面这件事:
+        //   本地补偿的在线零偏 (bF/bM) 会以 τ≈3.3 s 把【持续施加】的外力吸收掉 ——
+        //   见 ForceCompensation.cpp 第 8 步: bF 的 EMA 目标正是把 comp 拉向 0。
+        //   ⇒ 挂一个重物不动: comp 几秒内回到 0, 而三路【原始】读数一点不变。
+        //   现场看不出来的东西等于没有 ⇒ 把它打出来, 让它可见。
+        // ⚠ 读数约定 (不写出来必被误读):
+        //   · comp 是【闸门放行时】的本地补偿输出; 闸门拒绝 / 帧陈旧时它被【置零】——
+        //     所以这一行【必须先报闸门状态】, 否则那个 0 会被读成"没有力"。
+        //   · bF/bM 是【在线零偏】的当前值, 不是标定文件里那份 ('s' 解出的只是初值)。
+        //   ☞ 判读: 挂上重物后连按几次 SPACE —— 若 bF 朝载荷量级爬、comp 缩回 0,
+        //     那就是"外力被零偏吸收"实锤。**挂什么重物都行, 不需要知道它多重。**
+        {
+            AppState::ForceData fdz;
+            EnterCriticalSection(&appState.forceDataMutex);
+            fdz = appState.forceData;
+            LeaveCriticalSection(&appState.forceDataMutex);
+            printf("       comp  F=(%+.4f,%+.4f,%+.4f)  M=(%+.4f,%+.4f,%+.4f)   [闸门 %s]\n",
+                   fdz.compensated[0], fdz.compensated[1], fdz.compensated[2],
+                   fdz.compensated[3], fdz.compensated[4], fdz.compensated[5],
+                   ForceCompensation::guardStateName(ForceCompensation::guardState()));
+            printf("       在线零偏  bF=(%+.4f,%+.4f,%+.4f)  bM=(%+.4f,%+.4f,%+.4f)\n",
+                   fdz.calibBiasForce[0], fdz.calibBiasForce[1], fdz.calibBiasForce[2],
+                   fdz.calibBiasTorque[0], fdz.calibBiasTorque[1], fdz.calibBiasTorque[2]);
+        }
         count++;
     }
 
