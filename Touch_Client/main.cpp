@@ -488,6 +488,22 @@ namespace BiasCheck {
             printf("       在线零偏  bF=(%+.4f,%+.4f,%+.4f)  bM=(%+.4f,%+.4f,%+.4f)"
                    "   (持久值; 与闸门状态无关)\n",
                    bFnow[0], bFnow[1], bFnow[2], bMnow[0], bMnow[1], bMnow[2]);
+
+            // ★ 笔杆姿态的【第二个角】—— 2026-09-21 加, 用来验"按钮2 大幅晃动"的退化假设。
+            // 【为什么必须有这一行】姿态跟随用的是【Euler 角作差】, 而 ry 接近 ±90° 时 rx/rz
+            //   退化 (提取式 ry = asin(-R[2][0]); 奇点分支直接把 rz 定成 0) ⇒ 微小的物理转动
+            //   会产出巨大的角度差, 再被【无界累加】进 m_targetOrient ⇒ 缓慢转动也会大幅晃动、
+            //   且范围越走越大。**判它的唯一线索就是这里这个 ry。**
+            // ⚠ MATLAB 不显示这三个角 (P| 那条消息里有, 但界面没画) ⇒ 只能在这里看。
+            // 读法: 若【Ry 接近 ±90°】(比如 70°~110°) ⇒ 假设成立 ⇒ 该把"Euler 作差"换成
+            //   【四元数/旋转矢量求相对旋转】; 若离 ±90° 很远 ⇒ 假设不成立, 另找。
+            double sty[3] = {0, 0, 0};
+            EnterCriticalSection(&appState.stylusOrientMutex);
+            for (int i = 0; i < 3; i++) sty[i] = appState.stylusOrient[i];
+            LeaveCriticalSection(&appState.stylusOrientMutex);
+            printf("       笔杆姿态  Rx=%+.1f Ry=%+.1f Rz=%+.1f deg"
+                   "   [Ry 接近 ±90° ⇒ 姿态的 Euler 作差退化]\n",
+                   sty[0], sty[1], sty[2]);
         }
         count++;
     }
