@@ -2454,17 +2454,33 @@ static int g_zeroCheckCount = 0;
 //   去查这一路的数据"三件事)。别在这里再补一句笼统的"闸门在拒绝"。
 static const DWORD ZERO_CHECK_GUARD_WAIT_MS = 60000;
 
-// 出结论所需的最少样本数。原先写死在下面的判定里 (字面量 10), 抽判定时提成常量:
-// 阈值/等待期/最少样本数这三个旋钮都由本侧传给纯函数, 判定侧不写死任何数。
-static const int ZERO_CHECK_MIN_SAMPLES = 10;
-
 // 启动加载 force_calib.json 是否成功 (成功才有"存储零偏"可比, 否则无可查)
 static bool g_hasStoredZeroCalib = false;
 
 static void runZeroDriftCheck(bool hasStoredZero) {
-    if (g_zeroCheckDone || !hasStoredZero) return;
-    // --no-robot 下没有力数据可读, 本就没有可查的东西: 直接定稿, 免得每帧空转。
-    if (g_noRobot) { g_zeroCheckDone = true; return; }
+    if (g_zeroCheckDone) return;
+
+    // ★ 2026-09-21 收口 (最终复审): 上面那句"『没查』必须有句话"【也管本检查自己没跑的两条路】。
+    //   它们从前一个字符都不打就 return, 于是输出上分不出"查了、没发现问题"与"根本没查" ——
+    //   与本检查当初为消除的那条静默路径是同一个病。两条都【只报一次】(本函数每帧被调),
+    //   并且各说各的【为什么没查】(两条的原因不同, 处置也不同)。
+    if (!hasStoredZero) {
+        // 基准都没有: 没有装载到存储零偏时, 连"应该等于多少"都比不了。
+        g_zeroCheckDone = true;
+        std::cout << "[Force] 零偏漂移检查: 【未做】—— 启动时没有可用的 force_calib.json"
+                     " (上面装载那一行给了原因), 没有可比的基准, 本次【没有查】。\n"
+                     "[Force]   这不是\"查了没发现问题\"。要有得查: 按 'z' 调零存盘, 再重启本程序。"
+                  << std::endl;
+        return;
+    }
+    if (g_noRobot) {
+        // 没有机械臂就没有 30004 力帧, appState.forceData 会一直是初值。
+        g_zeroCheckDone = true;
+        std::cout << "[Force] 零偏漂移检查: 【未做】—— --no-robot 模式没有力数据可读"
+                     " (力帧来自机械臂的 30004), 本次【没有查】。\n"
+                     "[Force]   这不是\"查了没发现问题\"。" << std::endl;
+        return;
+    }
 
     DWORD now = GetTickCount();
     if (g_zeroCheckStartMs == 0) { g_zeroCheckStartMs = now; return; }
@@ -2474,19 +2490,23 @@ static void runZeroDriftCheck(bool hasStoredZero) {
     fd = appState.forceData;
     LeaveCriticalSection(&appState.forceDataMutex);
 
-    // 启动后前 2s 让读数稳定, 之后取 1s 均值
-    if (fd.isStale || now - g_zeroCheckStartMs < 2000) return;
-
     // ⚠ 闸门在拒绝 -> 读数被置零, 此刻量不到零偏。【不装作查过】。
     // 判定本身是纯函数 (force/ZeroDriftCheck.h): 本侧只负责【采样、时钟、定稿标志】,
     // 判定侧不看时钟、不读全局、不打印 —— 于是它能被单测直接调用。
+    //
+    // ★ 2026-09-21 收口 (最终复审 Important): 这一段【必须排在下面那句 fd.isStale 早退之前】。
+    //   闸门的"参考量不可用"由两件事【之一】触发: 六维力在线状态不是 1, 或【帧陈旧】。
+    //   而现场最可能的那一个原因是"帧停了"—— 那正是 fd.isStale。从前 isStale 在这里先早退,
+    //   于是"参考量不可用"这条路【永远走不到 decide()】: 一句"未做"也打不出来, 本检查
+    //   会一直安静地等下去 —— 而消除这种静默正是本检查被写出来的理由。
+    //   ⇒ 顺序改成"先按闸门状态决定该说什么", 再决定"这一帧能不能进采样窗"。
     const ForceCompensation::GuardState gs = ForceCompensation::guardState();
 
     ZeroDriftCheck::Input in;
     in.guard = gs;
     in.thresholdN = Config::FORCE_ZERO_DRIFT_WARN_N;
     in.waitMs = ZERO_CHECK_GUARD_WAIT_MS;
-    in.minSamples = ZERO_CHECK_MIN_SAMPLES;
+    in.minSamples = Config::FORCE_ZERO_DRIFT_MIN_SAMPLES;
 
     if (gs != ForceCompensation::GuardState::OK) {
         // 等待的起点是【第一次】被拒那一刻 —— 下面每次都会重开累计窗口, 拿窗口起点当
@@ -2511,6 +2531,13 @@ static void runZeroDriftCheck(bool hasStoredZero) {
         std::cout << d.text << std::endl;
         return;
     }
+
+    // 闸门放行了, 剩下的只是【采样】。陈旧帧不能进窗口: 那一帧的 filtered 是陈旧处理
+    // 置的 0, 累进均值里会把真读数稀释掉。(闸门放行本身就要求参考量本帧可用, 这一句只防
+    // "主循环这份快照比 step() 更旧"的那个窗口。)
+    if (fd.isStale) return;
+    // 启动后前 2s 让读数稳定, 之后取 1s 均值
+    if (now - g_zeroCheckStartMs < 2000) return;
 
     for (int i = 0; i < 3; i++) g_zeroCheckAccum[i] += fd.filtered[i];
     g_zeroCheckCount++;

@@ -1704,7 +1704,10 @@ static void test_replay_real_capture() {
         if (*q == '\0' || *q == '\r' || *q == '\n' || *q == '#') continue;   // 空行与注释头
         if (n >= MAXN) { n = -1; break; }                                    // 行数超上限
         double c[18];
-        // 【不静默跳行】: 列数对不上 = 布局变了, 拿它去对金标只会得出一个假的结论。
+        // 【不静默跳行】—— 但只在"列少了"这一侧: 这条检查问的是"从头能不能读出 18 个浮点",
+        // 多个字段它会【静默忽略】(sscanf 数够就返回 18), 所以"这行有 18 列"这个结论它给不出。
+        // 拿它去对金标仍然安全 (金标只用到前 18 列, 且这份夹具的列布局由表头写着),
+        // 但"列数变了就会被拦住"这句话不成立 —— 要判它得数【真实列数】(见 mgSplitRow 那段 ⚠)。
         if (sscanf(q, "%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf",
                    &c[0], &c[1], &c[2], &c[3], &c[4], &c[5], &c[6], &c[7], &c[8],
                    &c[9], &c[10], &c[11], &c[12], &c[13], &c[14], &c[15], &c[16], &c[17]) != 18) {
@@ -1719,8 +1722,8 @@ static void test_replay_real_capture() {
     fclose(fp);
 
     if (n < 0) {
-        std::cout << "FAIL: 采集文件读不动 (行数超上限 或 有一行不是 18 列浮点) ——"
-                     " 布局变了就别拿它去对金标。" << std::endl;
+        std::cout << "FAIL: 采集文件读不动 (行数超上限, 或有一行的【前 18 个字段】读不出 18 个"
+                     " 浮点) —— 布局变了就别拿它去对金标。" << std::endl;
         g_failed++;
         return;
     }
@@ -1991,8 +1994,10 @@ static int mgParseRepeat(const char* line, PayloadCalibration::RepeatPair* out, 
     return cnt;
 }
 
-// 逗号分隔的一行 -> 逐列。【数一下列数】: 列数不是 25 = 布局变了, 不静默跳行 ——
-// 拿一个列序读歪的表去对金标, 只会得出一个假的结论。
+// 逗号分隔的一行 -> 逐列。返回值是【读到的列数, 但被 maxOut 截断】——
+// ⚠ 它【不是】"这一行有多少列": 第三参是**上限**, 行里第 maxOut 列之后的内容会被**静默丢弃**,
+//   返回的仍是 maxOut。调用方拿它判"列数对不对"时要知道这一点 (见下面两处调用点的说明)。
+// 它能做的是: 少于 maxOut 列时如实返回更小的数 —— 所以"列数变少"看得见, "列数变多"看不见。
 static int mgSplitRow(const char* q, double* out, int maxOut) {
     int k = 0;
     while (*q && k < maxOut) {
@@ -2023,6 +2028,13 @@ static bool mgLoad(const char* fixture, MomentCaptureData& d, const char*& pathU
         if (*q == '\0' || *q == '\r' || *q == '\n' || *q == '#') continue;
         if (d.n >= MG_MAXN) { fclose(fp); return false; }
         double c[25];
+        // ⚠ 【这条检查挡的是"列数变少", 挡不住"列数变多"】(2026-09-21 复审): 上限就是 25,
+        //   所以一行有 31 列时 mgSplitRow 返回的仍是 25 —— 检查满足、行被收下, 而【第 25 列
+        //   之后的内容被静默丢弃】。从前这里写着"列数不是 25 = 布局变了" —— 那句话给了一个
+        //   这份实现给不出的保证。
+        //   要真的判"布局变了", 得把上限抬到一个"明知不会有那么多列"的值 (例如 64), 按
+        //   【真实列数】判, 高于本读取器支持的上限就【响亮拒绝】。那一步属于【夹具重采】
+        //   那一次 (它要同时让用例去消费多出来的那几列), 见收口项清单里的夹具重采一条。
         if (mgSplitRow(q, c, 25) != 25) { fclose(fp); return false; }
         // 列序 (main.cpp 落盘时写明): rx,ry,rz,x,y,z, F576*, M576*, F1304*, M1304*, N1304, sd*
         double src[6];
@@ -2739,8 +2751,12 @@ struct T6Capture {
     double F1304[T6_MAXN][3], M1304[T6_MAXN][3];    // 新模型的输入 (@1304)
 };
 
-// 读一份采集。列布局由【列数】判: 18 列 (12:38 那批) 或 25 列 (15:xx 那批, 多了 N 与 sd)。
+// 读一份采集。列布局按【列数】分两种: 18 列 (12:38 那批) 或 25 列 (15:xx 那批, 多了 N 与 sd)。
 // 两种布局的前 18 列逐列相同 —— 这也是为什么可以共存 (夹具头部自己写着列名)。
+// ⚠ 【这个判据只能判"列少了", 判不了"列多了"】(2026-09-21 复审): 下面的解析上限就是 25,
+//   所以 31 列的行返回的也是 25 —— "是 18 或 25"满足、行被收下, 而第 25 列之后**被静默丢弃**。
+//   要判"布局变了"必须把上限抬高、按【真实列数】判并在超限时**响亮拒绝**, 那是【夹具重采】
+//   那一次要一起做的事 (见收口项清单), 不在本文件当前这版的能力范围内。
 static bool t6Load(T6Capture& cap) {
     static const char* DIRS[4] = { "fixtures/", "tests/fixtures/",
                                    "Touch_Client/tests/fixtures/",
@@ -2762,7 +2778,9 @@ static bool t6Load(T6Capture& cap) {
         if (cap.n >= T6_MAXN) { fclose(fp); return false; }
         double c[25];
         const int nc = mgSplitRow(q, c, 25);
-        // 【不静默跳行】: 列数不是这两种 = 布局变了, 拿它去作结论只会得出一个假的
+        // 【不静默跳行】但【只在"列少了"这一侧成立】: 列数不是这两种就拒 (拿一个列序读歪的
+        // 表去作结论只会得出一个假的)。⚠ "列多了"这一侧它看不见: 上限是 25 ⇒ 31 列的行
+        // 也返回 25, 满足这条检查、行被收下, 多出来的列被静默丢弃 (见上面那段 ⚠)。
         if (nc != 18 && nc != 25) { fclose(fp); return false; }
         double src[6];
         for (int a = 0; a < 6; a++) src[a] = c[a];

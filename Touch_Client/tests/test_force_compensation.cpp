@@ -784,11 +784,14 @@ static void test_guard_force_channels_still_vote() {
 //   "不投票"说的是"这一路的差【不参与容差比较】", 不是"这一路可以是 NaN"。NaN/Inf 不是
 //   "差多少"的问题, 而是"这个数根本不是个读数"的问题 —— 没有任何容差能容纳它, 所以它必须
 //   拒绝, 且与投票与否无关。
-//   ⚠ 这条钉的是【曾经真的漏掉】的那条路: 判决循环里 isfinite 原来排在
-//     `if (!g_guardVote[i]) continue;` 之下, 于是不投票通道上的非有限值直接放行, 原样进
-//     fd.compensated[3..5], 经 ForcePipeline 的梯度限幅器 (NaN 与任何数比较都为假) 打到
-//     F| 帧上。"力矩不再投票"这次改动把这个漏法扩到了【所有】不投票的通道 —— 补上之后
-//     Fz (它在力矩之前就已经不投票) 那个【既有】缺口也一并关上。
+//   ⚠ 这条钉的是【次序】: 判决循环里 isfinite 原来排在
+//     `if (!g_guardVote[i]) continue;` 之下, 于是不投票通道上的非有限值直接放行 ——
+//     非有限值既没有大小, 也就没有任何容差能容纳它, 它不许被当成"差在限内"报出去。
+//     (它【不是】在说数值会漏到下游: ForcePipeline 的第一道是 Butterworth, 那道滤波器
+//     自己就检出并拒收非有限输入、返回 0 (见 ForcePipeline.cpp 的 Butterworth2::step),
+//     所以梯度限幅器根本见不到非有限值。)
+//     "力矩不再投票"这次改动把这条次序缺口扩到了【所有】不投票的通道 —— 补上之后
+//     Fz (它在力矩之前就已经不投票) 那个【既有】的次序缺口也一并关上。
 //   ⚠ 本用例必须【同时】喂"极大但有限"的同一个通道, 否则它会退化成恒真: 若哪天该通道被
 //     改成投票通道, 只喂 NaN 时两条分支都拒绝, 用例绿着什么都没测到。下面 (a) 是这个对照 ——
 //     它证明该通道【确实不投票】(极大的有限差照样放行), 于是 (b) 的拒绝只可能来自"非有限"。
@@ -1390,7 +1393,10 @@ static void driftInput(ZeroDriftCheck::Input& in, double mx, double my, double m
     in.sampleCount = 40;
     in.thresholdN = Config::FORCE_ZERO_DRIFT_WARN_N;
     in.waitMs = 60000;
-    in.minSamples = 10;
+    // ⚠ 取【生产的那一个常量】, 不在这里写一个字面量: 从前这里是硬编码的 10, 于是
+    // 常量改了这边不会红, 而那几条边界断言 (9 与 10 之差) 会【静默地换含义】。
+    // 值的本身由下面那条用例显式钉住。
+    in.minSamples = Config::FORCE_ZERO_DRIFT_MIN_SAMPLES;
 }
 
 // 文字里必须出现【函数自己算出来的】那个数 —— 不是测试塞进去的任何一个分量。
@@ -1495,6 +1501,9 @@ static void test_zero_drift_waiting_stays_silent() {
 // ("『没查』必须有句话")冲突。用户指令: 改成明说, 并用这条钉住。
 static void test_zero_drift_insufficient_samples_speaks() {
     TEST(zero_drift_insufficient_samples_speaks);
+    // ★ 钉住最少样本数的【值】(2026-09-21 收口): 本用例下面那两条断言 (话里要出现 9 与 10)
+    //   是按 10 写的。常量若被改掉, 它们不会红, 会【静默地换成另一条边界】⇒ 这里让它响亮地红。
+    CHECK(Config::FORCE_ZERO_DRIFT_MIN_SAMPLES == 10);
     ZeroDriftCheck::Input in;
     driftInput(in, 0.0, 0.0, 0.0);
     in.sampleCount = in.minSamples - 1;

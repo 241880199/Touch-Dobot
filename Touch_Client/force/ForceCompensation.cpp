@@ -508,8 +508,11 @@ static void setGuardState(ForceCompensation::GuardState st) {
             "[Force] !!   【三种原因的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。\n"
             "[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推\n"
             "[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。\n"
-            "[Force] !!   (虚拟约束力【不受影响】: 它在 HapticCallback.cpp:168 由位置现算,\n"
-            "[Force] !!    与 compensated 无关 —— 安全边界的推手还在, 只是不再有传感器力。)\n",
+            "[Force] !!   (虚拟约束力【不受影响】: 它由【位置】现算"
+            " (SafetyPredictor::computeConstraintForce,\n"
+            "[Force] !!    在触觉回调里对当前位置求一次), 与 compensated 无关 ——"
+            " 安全边界的推手还在,\n"
+            "[Force] !!    只是不再有传感器力。)\n",
             reasonText, actionText);
     // 【把本帧姿态一起打出来】(2026-09-20)。理由见 g_lastPose 的说明: 下面那六个数只能
     //   【连着姿态】才有意义 —— 现场抄数必须一起抄, 否则事后分不开"随姿态变"与"固定偏置",
@@ -946,20 +949,19 @@ void step(AppState::ForceData& fd, const double poseRxyz[6]) {
     bool inconsistent = false;
     for (int i = 0; i < 6; i++) {
         // ⚠ 【非有限值先判, 再问投不投票】—— 顺序不能换: 不投票说的是"这一路的差【不参与
-        //   容差比较】", 不是"这一路可以是 NaN"。NaN/Inf 不是"差多少"的问题, 是"这个数根本
-        //   不是个读数"的问题, 它没有任何容差能容纳它。
-        //   放在 continue 之下会漏掉: 非有限值不再被拦 -> 原样传进 fd.compensated[3..5] ->
-        //   经 ForcePipeline 的梯度限幅器 (NaN 与任何数比较都为假) 一路漏到 F| 帧上打出 nan。
-        //   ⚠ Fz 在本次改动之前就是这个漏法 (它更早就已经不投票了), 所以这一改动把 Fz 的洞
-        //     一并补上 —— 是顺带修好的既有缺口, 不是新引入的行为。
+        //   容差比较】", 不是"这一路可以是 NaN"。非有限值【不是一个读数】: 它没有大小、
+        //   也就没有任何容差能容纳它 ⇒ 它既不许进这个比较, 也不许被当成这个比较的结果报出去。
+        //   (Fz 在本次改动之前就是"先问投不投票"的次序, 所以这一改动把那个既有的次序缺口
+        //     一并补上 —— 与实际数值有没有坏无关, 讲的是判据的次序。)
         if (!std::isfinite(g_guardEma[i])) { inconsistent = true; break; }  // NaN/Inf 也算不一致
         if (!g_guardVote[i]) continue;   // 不投票的通道到此为止, 但照报 (见 g_guardVote 段)
         if (fabs(g_guardEma[i]) > g_guardTol[i]) { inconsistent = true; break; }
     }
     if (inconsistent) {
         // 拒绝: fd.compensated 保持第 2 步写下的全零 -> 下游由它推的 filtered / hapticOut /
-        // F| 帧断开 (即【传感器力那一条路】)。⚠ 虚拟约束力【不断】—— 它在 HapticCallback.cpp:168
-        // 由位置现算, 与 compensated 无关 (同 ForceCompensation.h 顶部与 RelayCore.cpp 那段)。
+        // F| 帧断开 (即【传感器力那一条路】)。⚠ 虚拟约束力【不断】—— 它由【位置】现算
+        // (SafetyPredictor::computeConstraintForce, 触觉回调里对当前位置求一次),
+        // 与 compensated 无关 (同 ForceCompensation.h 顶部与 RelayCore.cpp 那段)。
         setGuardState(GuardState::INCONSISTENT);
         return;
     }
