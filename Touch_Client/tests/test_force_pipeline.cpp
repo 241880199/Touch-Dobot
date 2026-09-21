@@ -78,7 +78,16 @@ static void test_saturation() {
 
     double clampedMax = Config::FORCE_MAX_TOUCH_N * Config::FORCE_REFLECTION_GAIN;
     CHECK(fabs(fd.hapticOut[0]) <= clampedMax + 0.01);
-    CHECK(fd.hapticOut[0] > 0.0); // positive input → positive output
+    // ⚠ 2026-09-21: 这里从前写的是 `fd.hapticOut[0] > 0.0; // positive input → positive output`
+    //   —— 那句"正输入给正输出"随横向映射整体取 −1 而【过期】。它真正要说的是【符号跟着映射走】,
+    //   所以现在钉映射后的符号 (故意写死负号, 理由与 coord_transform 里那一段同: 拿 Config 的
+    //   常数算断言会让它对常数恒真)。
+    CHECK(fd.hapticOut[0] < 0.0); // 正输入 ⇒ 负输出 (横向映射 FORCE_FEEDBACK_LATERAL_SIGN = −1)
+    // ⚠ 【已知的弱点, 照实标出, 本次未改】本条用例叫 saturation, 但它【并没有验证饱和】:
+    //   只调了 1 次 step(), 而 fc=5Hz/fs=125Hz 的 Butterworth 一步只给 b0·x ≈ 0.013·500 ≈ 6.7 N,
+    //   离 3.3 N 的夹子(映射后)还差得远 ⇒ 上面那条 `<= clampedMax` 是【恒真】地通过的。
+    //   要真验证饱和得先跑到收敛 (像 coord_transform 那样 100 步)。没有顺手改: 那是另一件事,
+    //   而且改了它会从"恒真"变成"真的在判" ⇒ 得单独确认新断言是对的。
     PASS();
 }
 
@@ -97,20 +106,31 @@ static void test_coord_transform() {
         ForcePipeline::step(fd);
     }
 
-    // hapticOut 的映射: Fx→X, +Fz→Y, +Fy→Z, 各自乘净比例 (ratio × gain)。
-    // ★ 2026-09-21 垂直项【从 -Fz 改成 +Fz】—— 本用例原来把 -Fz 钉死 (旧断言:
-    //   `fd.hapticOut[1] < -0.01`, 注释 "should be from -Fz = -30")。
-    //   改的理由【不是调参】: 反馈要的是【阻力】, 而 -Fz 的语义是"操作员压下去、触觉也往下推"
-    //   —— 那是帮忙不是抵抗 (那行代码自己的注释举的例子就自相矛盾)。依据与现场实测见
-    //   Config::FORCE_FEEDBACK_Z_SIGN 那一大段。
-    //   ⚠ 这条断言【当初钉住的是一件错的东西】—— 一次正确的修法在这种用例下会【看起来像回归】。
-    //     保留这段说明, 免得下一个人以为符号是随手改的。
+    // hapticOut 的映射: Fx→Touch X、Fy→Touch Z 各带整体符号 −1 再乘净比例 (ratio × gain);
+    //                    Fz→Touch Y 那一轴【整轴关掉了】(常量 0)。
+    // ★★ 2026-09-21 当天定案两次, 本行钉住最终值。
+    //
+    // 【横向为什么是负号】力映射 = 位置映射的逆 (L = Mᵀ), 而代码里写死的轴对应等于 Mᵀ 再整体
+    //   取负 ⇒ L = −Mᵀ。那个整体符号由【唯一有实测锚点的那一行】(垂直: 压笔 ⇒ comp_z = −1.55,
+    //   且现场确认 −fz 方向是对的) 定死, 再对三行一起成立。用户同时报告"阻力的方向都反了"。
+    //   ⇒ 完整推导 (含"这只是推导+现场描述、可证伪的检验是什么") 见
+    //     Config::FORCE_FEEDBACK_LATERAL_SIGN 那一大段 —— 动符号之前先读它。
+    //
+    // 【垂直为什么整轴关】Touch Y 正是操作员用来【落笔 / 维持入纸深度】的那一轴: 往下推 =
+    //   帮忙往纸里按; 往上推 = 把笔抬起来, **根本落不了笔** ⇒ 两个方向都不行, 不是符号问题。
+    //
+    // ⚠ 三个数这里【都故意写字面值】, 不写 `* Config::FORCE_FEEDBACK_*`: 拿常数去算断言会让
+    //   本用例对它们【恒真】—— 改符号/重新打开那一轴它也不红, 而"这三路各是什么方向、
+    //   垂直开着还是关着"正是本行要测的东西。
+    //   ⇒ 将来谁要动它们, 本行【会红】, 那是**故意的**: 它逼人回去读那两段注释并按实测重定。
+    // ⚠ 输入故意给 fz = +30 (很大的值): 若垂直那轴还开着, 输出会是 ±0.99 N 量级, 0.01 的容差
+    //   必然拦住 ⇒ 这条断言不会因为"输入太小"而恒真地通过。
     // 三个轴都按【带符号的精确值】检查 (不只查方向): 方向对而幅值错同样是错的。
     double ratio = Config::FORCE_MAX_TOUCH_N / Config::FORCE_MAX_SENSOR_N;
     double gain = Config::FORCE_REFLECTION_GAIN;
-    CHECK(fabs(fd.hapticOut[0] - ratio * 10.0 * gain) < 0.01);   // 来自 +Fx = +10
-    CHECK(fabs(fd.hapticOut[1] - ratio * 30.0 * gain) < 0.01);   // 来自 +Fz = +30 ⇒ 正
-    CHECK(fabs(fd.hapticOut[2] - ratio * 20.0 * gain) < 0.01);   // 来自 +Fy = +20
+    CHECK(fabs(fd.hapticOut[0] - (-ratio * 10.0 * gain)) < 0.01);     // 来自 +Fx = +10 ⇒ 【负】
+    CHECK(fabs(fd.hapticOut[1]) < 0.01);                              // Fz→Y 已关 ⇒ 与 fz=+30 无关
+    CHECK(fabs(fd.hapticOut[2] - (-ratio * 20.0 * gain)) < 0.01);     // 来自 +Fy = +20 ⇒ 【负】
     PASS();
 }
 

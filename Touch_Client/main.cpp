@@ -19,6 +19,7 @@
 #include "calibration/TcpCalibration.h"
 #include "force/ForceCalibration.h"
 #include "force/ForceCompensation.h"
+#include "force/NoiseProbe.h"        // 帧率噪声探针 ('n') 的统计量 (唯一一份定义, 有单测)
 #include "force/ZeroDriftCheck.h"
 #include "force/PayloadCalibration.h"
 #include "force/RepeatPairRegistry.h"
@@ -88,6 +89,30 @@ namespace BiasCheck {
     static double varSix[MAX_POSES][6];
     // 每个姿态参与平均的样本数 (方差的分母就是它) —— 缺了它, sqrt(var/N) 只是半截信息。
     static int    samples[MAX_POSES];
+
+    // ===== ★ 惯量项读数 (2026-09-21 加) —— 裁决"comp 的摆动是不是 Fi 注入的" =====
+    // 【被裁决的现象】同一个姿态上, 各按一次 SPACE (每笔是 1 秒均值): comp_z 从 +0.10 走到
+    //   −0.22, 而同一批的 @1304 z 只跨 0.10 N、bF 逐位相同、机器人姿态几乎不变。按
+    //     comp = @1304 − bF − A·g + Fi
+    //   前三项都可视为常量 ⇒ 只有 Fi 能解释那 0.3 N 的缺口 (0.3 N 要 ~0.76 m/s²)。
+    //   ⚠ 【那只是推理, 不是测量】: Fi 到底多大, 至今没量过。本模块就是把它变成测量的那一行。
+    // 【为什么采【1 秒窗口内】的均值与峰值, 而不是按 SPACE 那一刻的快照】
+    //   要判的是"这个读数在动" —— 而零均值的注入噪声在 1 秒均值上会被抹掉大半; 只读瞬时快照,
+    //   分不出"Fi 很大"与"Fi 是零均值噪声"。⇒ 两个都要:
+    //     · fiSum/fiFrames  = 逐姿态可比的均值 (与 comp 的均值同一批样本, 直接对着看);
+    //     · fiAbsMax        = 窗口内的峰值 (手抖是尖的: 均值小 ≠ 它小)。
+    // 【怎么判 (可证伪)】
+    //   · max|Fi| ~ 0.3 N 且与 comp 的摆动同量级 ⇒ 【是它】⇒ 该去查 acc 那一侧的来源与标度;
+    //   · max|Fi| ~ 0.02 N 而 comp 仍在摆 ⇒ 【它无罪】⇒ 别动 FORCE_INERTIA_SIGN, 摆动在别处;
+    //   · fiActiveFrames == 0 (整窗没在动) ⇒ 惯量项一次都没被算 ⇒ 上面那条推理从根上错。
+    //   ☞ 三个数必须一起看: 只看均值会把尖峰读没, 只看峰值会把零均值噪声读成"大摆动"。
+    static double fiSum[3];        // 窗口内 Fi 的累加 (除以 fiFrames 得均值)
+    static double fiAbsMax[3];     // 窗口内 |Fi| 逐轴最大绝对值
+    static int    fiFrames;        // 参与累加的帧数 (含 Fi 为 0 的帧 —— 分母必须与均值同一批)
+    static int    fiActiveFrames;  // 其中 Fi 非零 (= 运动估计器判"在动") 的帧数
+    static double compSum[3];      // 窗口内 compensated 前三轴的累加 (只在非全零帧上)
+    static int    compFrames;      // 上面那个均值的分母
+    static int    compZeroFrames;  // 窗口内 compensated 全为 0 的帧数 (闸门拒绝/帧陈旧)
 
     // ===== 重复姿态 (模型形式检验的尺子) =====
     // 【协议: 原地复采】(2026-09-19 修订)
@@ -254,6 +279,9 @@ namespace BiasCheck {
             accum[i] = 0.0; accumTcp[i] = 0.0; accumSix[i] = 0.0;
             accumSq[i] = 0.0; accumTcpSq[i] = 0.0; accumSixSq[i] = 0.0;
         }
+        // 惯量项那一批 (见 fiSum 的说明) —— 与上面六个累加器【同一生命周期】: 每次采样重开。
+        for (int i = 0; i < 3; i++) { fiSum[i] = 0.0; fiAbsMax[i] = 0.0; compSum[i] = 0.0; }
+        fiFrames = fiActiveFrames = compFrames = compZeroFrames = 0;
         avgCount = 0;
         lastSampleMs = 0;
         sampleStartMs = GetTickCount();
@@ -329,6 +357,36 @@ namespace BiasCheck {
             accumSixSq[i] += fd.sixForceRaw[i] * fd.sixForceRaw[i];
         }
         avgCount++;
+
+        // ★ 惯量项读数 (判读见 fiSum 那一大段)。读的是【本帧】的 fd 与【本帧】的 Fi ——
+        //   跨帧配对会让"comp 的摆动"与"Fi 的大小"对不上时间, 那正是这条仪器要避免的错。
+        //   ⚠ currentInertiaTerm() 读的是最近一次 step() 的缓存 (无锁, 见其实现注释):
+        //     极端情况下可能差一帧 —— 对"窗口均值/峰值"无害, 但不构成逐帧严格对齐的证据。
+        {
+            double fi[3] = {0.0, 0.0, 0.0};
+            ForceCompensation::currentInertiaTerm(fi);
+            for (int i = 0; i < 3; i++) {
+                fiSum[i] += fi[i];
+                const double a = fabs(fi[i]);
+                if (a > fiAbsMax[i]) fiAbsMax[i] = a;
+            }
+            fiFrames++;
+            if (fi[0] != 0.0 || fi[1] != 0.0 || fi[2] != 0.0) fiActiveFrames++;
+
+            // comp 的窗口均值: 【只收非全零帧】。闸门拒绝或帧陈旧时 compensated 被整体置零 ——
+            // 把那些 0 混进均值, 量到的就成了"闸门拒了多少帧", 不是"读数自己在怎么动"。
+            // 全零帧单独计数, 由打印端一起报出来 (否则一个"闸门在拒"的窗口会被读成"读数在跳")。
+            bool compAllZero = true;
+            for (int i = 0; i < 6; i++) {
+                if (fd.compensated[i] != 0.0) { compAllZero = false; break; }
+            }
+            if (compAllZero) {
+                compZeroFrames++;
+            } else {
+                for (int i = 0; i < 3; i++) compSum[i] += fd.compensated[i];
+                compFrames++;
+            }
+        }
 
         if (now - sampleStartMs < AVG_MS) return;
 
@@ -504,6 +562,29 @@ namespace BiasCheck {
             printf("       笔杆姿态  Rx=%+.1f Ry=%+.1f Rz=%+.1f deg"
                    "   [Ry 接近 ±90° ⇒ 姿态的 Euler 作差退化]\n",
                    sty[0], sty[1], sty[2]);
+
+            // ★ 惯量项读数 (2026-09-21 加) —— 【判读规则写在 fiSum 的定义处, 不在这里复述】。
+            // 【先报分母, 再报值】: 没有 fiFrames 的均值是半截信息 (N=3 与 N=31 算出来的"均值"
+            //   不是同一个东西)。compFrames / compZeroFrames 是判"这一窗的 comp 有没有被闸门
+            //   置过零"的唯一线索 —— 少了它, 一个"闸门一直在拒"的窗口会被读成"读数在跳"。
+            // ⚠ 【窗口均值 comp】与上面那行【按 SPACE 那一刻的快照 comp】是两种口径, 别混着比:
+            //   判决用的是【本行的窗口均值】与【Fi 的窗口均值】(同一批样本、一对一)。
+            {
+                const int nF = (fiFrames   > 0) ? fiFrames   : 1;   // 防 0 除 (理论上采样中不可能为 0)
+                const int nC = (compFrames > 0) ? compFrames : 1;
+                printf("       Fi(惯量项) 窗口均值=(%+.4f,%+.4f,%+.4f)"
+                       "  max|Fi|=(%.4f,%.4f,%.4f) N   非零帧=%d/%d   [m=%.4f kg, 标度=%+.1f]\n",
+                       fiSum[0] / nF, fiSum[1] / nF, fiSum[2] / nF,
+                       fiAbsMax[0], fiAbsMax[1], fiAbsMax[2],
+                       fiActiveFrames, fiFrames,
+                       ForceCompensation::currentMassKg(), Config::FORCE_INERTIA_SIGN);
+                printf("       comp 窗口均值 F=(%+.4f,%+.4f,%+.4f)"
+                       "   [收进均值的帧 %d/%d; 全零帧 %d = 闸门拒绝或帧陈旧]\n",
+                       compSum[0] / nC, compSum[1] / nC, compSum[2] / nC,
+                       compFrames, fiFrames, compZeroFrames);
+                printf("       ☞ 把本行 comp 的 z 与上一行 Fi 的 z 【逐姿态】比: 同量级同向 ⇒ 摆动"
+                       "就是 Fi; Fi≈0 而 comp 仍在摆 ⇒ 它无罪, 别改标度。\n");
+            }
         }
         count++;
     }
@@ -2637,11 +2718,14 @@ static void runZeroDriftCheck(bool hasStoredZero) {
 //     (position * 0.001), 所以 0.002 / 0.005 的量纲命名是对的。
 //     下面的单位标签是 2026-09-19 才从 mm/s 改正过来的: 旧标签把物理速度说小 1000 倍,
 //     操作者照着读会算错量级。阈值常量本来就是这个量纲 (Config.h:123-124)。
-//   · 真正可疑的是 dt 与实际采样间隔不符: update() 固定用 dt=1/125s, 而 step() 的唯一
-//     调用方 pollForce() 自我节流到 33ms、且它读的 robotActualPose 只由 queryPose()
-//     每 100ms 刷新一次 (RelayCore.cpp:1599, main.cpp poseQueryTimer)。即每 3 帧里约 2 帧
-//     位姿没变 (vel 恰为 0), 第 3 帧却把 100ms 的位移除以 8ms ⇒ 速度高估 ~12 倍,
-//     加速度经 1/dt² 放大更多。这会把 isStill() 往"永远为假"推。
+//   · 真正可疑的是 dt 与实际采样间隔不符: update() 固定用 dt=1/125s, 而它读的
+//     robotActualPose 只由 queryPose() 每 100ms 刷新一次 (main.cpp poseQueryTimer)。
+//     即每十几次调用里绝大多数位姿没变 (vel 恰为 0), 而变的那一次却把 100ms 的位移除以
+//     8ms ⇒ 速度高估 ~12 倍, 加速度经 1/dt² 放大更多。这会把 isStill() 往"永远为假"推。
+//     ⚠ 2026-09-21: 这两件事都已经被修过 —— 喂样改成"姿态没变就不喂 + dt 用实测耗时"
+//       (见 ForceCompensation::feedMotionEstimator), 而且 step() 已挪到帧率上跑
+//       (不再是"自我节流到 33ms 的 pollForce")。本探针是【当时】留下的临时诊断,
+//       读数仍有效, 但上面那两句描述的是【改之前】的状态。
 // 所以这里启动后打 30 行实测量, 【一个力帧一行】(见下), 好让上面这个 10Hz 位姿 / 125Hz dt
 // 的错配直接出现在输出里 —— 连续几帧 pos 一模一样、vel 恰为 0.000000, 然后一帧大跳 ——
 // 而不是靠读代码去推断。原先每 1s 打一行, 30 帧里只采到 1 帧, 那个节奏根本看不出阶梯。
@@ -2851,6 +2935,122 @@ void connectionHealthTimer(int) {
     }
 }
 
+// ===== 帧率噪声探针 ('n') (2026-09-21) =====
+// 【要回答的问题与判据】见 force/NoiseProbe.h 顶上那一段 —— 统计量的【唯一一份定义】在那里,
+//   而且它有单测 (谁把块平均写错, 那两条会红)。这里只做采集与打印, 不重算任何统计量。
+// 【为什么非要按这个键】已经量到的数字 (filtered 的 Fz sd 0.115 N、|Fz|>0.2 N 占 6.9%、
+//   尖峰折合手上 1.18 N) 只说明"抖动有多大", 【不说明怎么修】。修法取决于噪声在【帧率】下的结构:
+//     · 块平均按 1/sqrt(k) 掉 ⇒ 宽带噪声 ⇒ 把补偿+滤波挪到帧率上跑, √N 白赚;
+//     · 基本不掉             ⇒ 慢漂/带内/机械 ⇒ 那条路白走, 得换修法 (别白改一遍滤波)。
+//   ⇒ 这个键按出来的不是"解", 是"选哪条路"的那一个数。
+// ⚠ 采集在 ForceReader 线程里【每帧都做】(见 RelayCore::copyRecentForceFrames), 不在本键里开录 ——
+//   没有"忘了按"这种状态。本键只读最近 1024 帧。
+namespace ForceNoiseProbe {
+    static const int CAP = 1024;   // 最近这么多帧: 文档速率 125 Hz 下 8.2 s
+    static const int KS[5] = {2, 4, 8, 16, 32};
+
+    static void run() {
+        static RelayCore::ForceFrameSample buf[CAP];   // static: 32 KB 不进栈
+        const int n = RelayCore::instance().copyRecentForceFrames(buf, CAP);
+        std::cout << "\n===== 帧率噪声探针 (原始 @1304, 未补偿; 最近 " << n << " 帧) ====="
+                  << std::endl;
+        if (n < 64) {
+            std::cout << "  ✗ 只拿到 " << n << " 帧 (需要 ≥64)。帧来自 30004 —— 机械臂没连就没有,"
+                      << " 或者探针的锁还没初始化 (见 initForceReader)。" << std::endl;
+            return;
+        }
+
+        // ===== 真实帧率 =====
+        // ⚠ 用 steady_clock 微秒: GetTickCount 的粒度是 ~15.6 ms, 【分辨不出】8 ms 的帧间隔 ——
+        //   而那正是这里要量的东西 (文档说 8 ms, 从没实测过)。
+        const double spanMs = (double)(buf[n - 1].tickUs - buf[0].tickUs) / 1000.0;
+        double maxGapMs = 0.0;
+        for (int i = 1; i < n; i++) {
+            const double d = (double)(buf[i].tickUs - buf[i - 1].tickUs) / 1000.0;
+            if (d > maxGapMs) maxGapMs = d;
+        }
+        const double meanMs = spanMs / (double)(n - 1);
+        printf("  帧率: 平均间隔 %.3f ms (= %.1f Hz)   最大间隔 %.1f ms   跨度 %.0f ms\n",
+               meanMs, (meanMs > 0.0) ? 1000.0 / meanMs : 0.0, maxGapMs, spanMs);
+        printf("        (文档值: 8 ms / 125 Hz —— %s)\n",
+               (meanMs > 0.0 && meanMs < 12.0) ? "实测对得上" : "★ 实测【对不上】");
+
+        // ===== 逐轴: 单帧 sd + 相关时间 =====
+        static double x[CAP];
+        double sdRaw[3], meanRaw[3];
+        printf("\n  轴    mean          sd(单帧)     lag1自相关   lag2        lag4\n");
+        for (int a = 0; a < 3; a++) {
+            for (int i = 0; i < n; i++) x[i] = buf[i].f[a];
+            NoiseProbe::meanSd(x, n, &meanRaw[a], &sdRaw[a]);
+            printf("  %c  %+10.4f   %9.4f   %+8.3f   %+8.3f   %+8.3f\n",
+                   "xyz"[a], meanRaw[a], sdRaw[a],
+                   NoiseProbe::autocorr(x, n, 1), NoiseProbe::autocorr(x, n, 2),
+                   NoiseProbe::autocorr(x, n, 4));
+        }
+
+        // ===== ★ 判决: 块平均掉不掉 =====
+        // 比值 vs 理论 1/sqrt(k): 一致 ⇒ 样本【独立】(宽带噪声) ⇒ 过采样有收益。
+        printf("\n  块平均 (连续 k 帧取平均后的 sd / 单帧 sd);  理论值 = 1/sqrt(k)\n");
+        printf("    k        Fx        Fy        Fz      理论\n");
+        double ratioFz16 = -1.0;   // 判决用 z (抖动最大的那一路)
+        for (int j = 0; j < 5; j++) {
+            const int k = KS[j];
+            printf("  %3d ", k);
+            for (int a = 0; a < 3; a++) {
+                for (int i = 0; i < n; i++) x[i] = buf[i].f[a];
+                double sd = 0.0; int nb = 0;
+                NoiseProbe::blockSd(x, n, k, &sd, &nb);
+                const double r = (sdRaw[a] > 0.0) ? sd / sdRaw[a] : 0.0;
+                printf("   %7.3f ", r);
+                if (a == 2 && k == 16) ratioFz16 = r;
+            }
+            printf("  %7.3f\n", NoiseProbe::idealBlockRatio(k));
+        }
+
+        // ===== 判决行 =====
+        // 门限的依据: 块数 nb=64 (k=16) ⇒ 比值的相对标准误约 1/sqrt(2·63) ≈ 9%。
+        //   1.25 倍理论值 = 明显高于统计误差; 1.6 倍 = 基本没掉。
+        std::cout << "\n  ☞ 判决 (看 k=16 那一行 Fz):" << std::endl;
+        if (ratioFz16 < 0.0) {
+            std::cout << "     ✗ 没算出来 (sd 为 0?) —— 别下结论。" << std::endl;
+        } else if (ratioFz16 <= NoiseProbe::idealBlockRatio(16) * 1.25) {
+            std::cout << "     ✔ Fz 的块平均【跟着 1/sqrt(k) 掉】⇒ 样本近似独立 (宽带噪声)。\n"
+                      << "       ⇒ 把补偿+滤波挪到【帧率】上跑就能白赚 √N; 现在跑在 ~11 Hz 上,\n"
+                      << "         等于把 8 ms 一档的信息丢了 11 分之 10。" << std::endl;
+        } else if (ratioFz16 >= NoiseProbe::idealBlockRatio(16) * 1.6) {
+            std::cout << "     ✗ Fz 的块平均【基本不掉】⇒ 噪声落在比 16 帧更慢的频带上"
+                      << " (慢漂/机械)。\n       ⇒ 挪到帧率上跑【没用】, 别白改一遍滤波;"
+                      << " 得换修法。" << std::endl;
+        } else {
+            std::cout << "     ~ 落在两者之间 (部分相关): 过采样有【部分】收益。\n"
+                      << "       ⇒ 看上面 lag1 自相关: 它若不接近 0, 说明相关时间有若干帧。" << std::endl;
+        }
+
+        // ===== 平稳性体检 =====
+        // 块平均这条曲线在【非平稳】(缓慢漂移) 的段上会被人读成"平均没用"。半段均值差是
+        // 最省事的体检: 它明显大于 sd/sqrt(n/2) 就说明这一段本来就在漂, 那个读数不作数。
+        // ⚠★ 2026-09-21 修: 这句话从前是【写死在字符串里的】——不管算出来是多少都印
+        //   "明显更大 ⇒ 这段在漂"。实机第一趟就露馅: z 算出 +0.0028 而允许 0.0062 (根本没漂),
+        //   那行字照样断言它漂。仪器打假结论比没有仪器更糟 ⇒ 改成按 3σ 现判。
+        //   (9 次里有 3 次是假话; 这类"结论不跟数据走"的写法在本项目已经是老毛病了。)
+        printf("\n  平稳性体检 (前半段均值 − 后半段均值, 单位 N):\n");
+        for (int a = 0; a < 3; a++) {
+            for (int i = 0; i < n; i++) x[i] = buf[i].f[a];
+            double m1, s1, m2, s2;
+            NoiseProbe::meanSd(x, n / 2, &m1, &s1);
+            NoiseProbe::meanSd(x + n / 2, n - n / 2, &m2, &s2);
+            const double allowed = (n > 1) ? sdRaw[a] / sqrt((double)n / 2.0) : 0.0;
+            const double drift   = m1 - m2;
+            // 3σ: 允许值本身就是"半段均值的标准误", 差到 3 倍标准误才算真漂。
+            const bool drifting  = (allowed > 0.0) && (fabs(drift) > 3.0 * allowed);
+            printf("    %c: %+9.4f   噪声允许 ~%.4f (3σ 门限 %.4f)   %s\n",
+                   "xyz"[a], drift, allowed, 3.0 * allowed,
+                   drifting ? "★ 明显更大 ⇒ 这段在漂, 上一张表不作数"
+                            : "在容许内 ⇒ 这一段可当平稳");
+        }
+    }
+}
+
 void keyboard(unsigned char key, int, int) {
     if (key == 'q' || key == 'Q' || key == 27) { // q 或 ESC
         std::cout << "\nShutting down..." << std::endl;
@@ -2875,6 +3075,13 @@ void keyboard(unsigned char key, int, int) {
             std::cout << "[下发] 收到非确认键 ('" << key << "') -> 取消本次下发。" << std::endl;
             BiasCheck::cancelSendConfirm();
         }
+        return;
+    }
+
+    // 帧率噪声探针 (见 ForceNoiseProbe 那一大段)。放在发送确认拦截【之后】是必须的:
+    // 那个拦截要求"除确认键以外的任何键都取消下发", 排在它前面会让 'n' 变成例外。
+    if (key == 'n' || key == 'N') {
+        ForceNoiseProbe::run();
         return;
     }
 

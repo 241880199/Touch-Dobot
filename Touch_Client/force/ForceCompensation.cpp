@@ -24,6 +24,12 @@ static MotionEstimator g_motion;
 static double g_lastFg[3] = {0, 0, 0};
 static double g_lastMg[3] = {0, 0, 0};
 
+// 最近一帧算出的【惯量项】Fi (传感器系, N) —— 与上面那份同一条理由 (A·g 的缓存),
+// 只是这一份给"摆动是不是 Fi"这个判决用: 见头文件 currentInertiaTerm。
+// ⚠ 【0 是有含义的读数】: 步 6 只在 !isStill() 时算 Fi ⇒ 这一份为 (0,0,0) 就等于
+//   "本帧没在动, 惯量项没被注入"。别把它读成"缺数据"。
+static double g_lastFi[3] = {0, 0, 0};
+
 // 【本帧的姿态】—— 只为闸门那段打印服务 (2026-09-20 加)。
 // 闸门报的那六个数是"残差对姿态的依赖"的读数, 而【没有姿态就没法解释它们】: 现场抄数的人
 // 不把姿态一起抄下来, 事后就分不开"随姿态变"与"固定偏置", 也拟合不了 M = 残差/g 的各向同性
@@ -296,16 +302,19 @@ MotionEstimator::MotionEstimator() : m_idx(0), m_count(0) {
     for (int i = 0; i < 3; i++) {
         m_lpfX1[i] = m_lpfX2[i] = m_lpfY1[i] = m_lpfY2[i] = 0.0;
     }
-    // 加速度估计的低通。⚠⚠ 【2026-09-21 记明, 未改系数】:
-    //   这里传的 fs 是 FORCE_EFFECTIVE_SAMPLE_RATE = 125Hz —— 那是【30004 帧的到达率】,
-    //   不是 MotionEstimator::update 的真实调用率。真实调用率由 ForceCompensation::step 的
-    //   节拍决定 = 1000/FORCE_POLL_INTERVAL_MS ≈ 30Hz (step 里 dt 那一处已按真实值修, 见那里)。
-    //   滤波器算的是"归一化频率" fc/fs, 所以同一个系数在 30Hz 下运行, 实际截止 =
-    //     10Hz × (30/125) ≈ 【2.4 Hz】 —— 比设计的钝 4.1 倍 (更平滑、也更滞后)。
-    //   ⇒ 【为什么不改】: 更钝意味着【噪声更低】, 而噪声正是死区 0.20 N 的定标依据。
-    //     把它"改对"会【增大】噪声 ⇒ 那是设计取舍, 要跟着死区的重定一起做 (run-005 §14 第 2 条),
-    //     不能这一趟顺手动。此处只留真实数值, 免得下一个人按 10Hz 去推理。
-    // 10Hz LPF【按 125Hz 设计, 实际运行在 ~30Hz ⇒ 实际 ≈2.4Hz】
+    // 加速度估计的低通。⚠⚠ 【2026-09-21 又改了一次口径: 上一版在这里写的调用率也是错的】
+    //   这里传的 fs 是 FORCE_EFFECTIVE_SAMPLE_RATE = 125Hz。而 MotionEstimator::update 的
+    //   真实调用率【不是 step() 的节拍】—— update 只被 feedMotionEstimator 调用, 而那里
+    //   【姿态没变就不喂】⇒ 喂样率 = 位姿刷新率 = POSE_QUERY_INTERVAL (100 ms) ⇒ 最多 ~10 Hz。
+    //   (上一版这里写的是 1000/FORCE_POLL_INTERVAL_MS ≈ 30Hz —— 那是当时 step() 的节拍,
+    //    与 update() 的调用率是两件事; 2026-09-21 把 step 挪到帧率之后差得更远。)
+    //   滤波器算的是归一化频率 fc/fs ⇒ 同一系数在 ~10 Hz 下运行, 实际截止 =
+    //     10Hz × (10/125) ≈ 【0.8 Hz】 —— 比设计的钝 12.5 倍; 而且【静止时它干脆不推进】
+    //     (姿态不变 ⇒ 不发生喂样 ⇒ 状态冻结)。
+    //   ⇒ 【为什么不改】: 更钝 = 噪声更低, 而噪声正是死区 0.20 N 的定标依据; "改对"会
+    //     【增大】噪声。那是设计取舍, 要跟着死区的重定一起做, 不能这一趟顺手动。
+    //     ⚠ 而且 Fi 现在已被证明【不是】现场抖动的来源 (2026-09-21 帧率噪声探针实测:
+    //       max|Fi| 0.0094 N, 而同一批 comp 的摆动是 0.18 N), 所以更不值得为它单独动这一项。
     double fs = static_cast<double>(Config::FORCE_EFFECTIVE_SAMPLE_RATE);
     calcLpfCoeffs(Config::FORCE_ACC_FILTER_CUTOFF_HZ, fs,
         m_lpfB0, m_lpfB1, m_lpfB2, m_lpfA1, m_lpfA2);
@@ -433,7 +442,9 @@ static void printCompactRefusal(ForceCompensation::GuardState st) {
 
 // 闸门状态迁移 + 响亮地报出【逐通道】的比较结果。
 // 只在【状态变化】时立刻打印; 状态不变时按 FORCE_GUARD_REPORT_MS 复报一次 ——
-// 闸门每帧都判 (30Hz), 每帧都印会把控制台冲掉, 而"看不过来"与"没报"在操作上是一回事。
+// 闸门每帧都判 (2026-09-21 起 = 帧率, 实测 122.9 Hz), 每帧都印会把控制台冲掉, 而"看不过来"
+// 与"没报"在操作上是一回事。⚠ 节流与门限都按【墙钟】算 (FORCE_GUARD_REPORT_MS), 所以把
+// step() 挪到帧率上【不会】让这里变吵 —— 这一点在挪之前专门核过。
 // ⚠ 复报【只对"拒绝"那一侧】: 放行是常态, 每 5 s 印一行"放行"同样是噪音
 //   (而且会把真正要紧的那段挤出可视区)。放行只在它【刚刚恢复】时印一次。
 // ★ 2026-09-21 收口 (最终复审 Fix 1): 【跃迁一律打整块; 节流只管复报】。
@@ -847,6 +858,15 @@ void currentGravityTerm(double Fg[3], double Mg[3]) {
     for (int i = 0; i < 3; i++) { Fg[i] = g_lastFg[i]; Mg[i] = g_lastMg[i]; }
 }
 
+// 同上, 但读的是惯量项 —— 见头文件 currentInertiaTerm。
+// 时效: 是【最近一次 step()】的 (与 currentGravityTerm 同一个约定), 不是"此刻的姿态/运动"。
+//   ⚠ 无锁的理由与 motionState() 相同: g_lastFi 由 step() 写, step() 读 MotionEstimator 就是无锁的。
+//   ⇒ 采集端按帧读它时可能读到"上一帧"的值 —— 对"窗口内均值/峰值"这种统计量无害
+//     (差一帧不会改变量级), 但【别拿它当逐帧严格对齐的证据】。
+void currentInertiaTerm(double Fi[3]) {
+    for (int i = 0; i < 3; i++) Fi[i] = g_lastFi[i];
+}
+
 // 闸门状态 -> 错误码。
 // RelayCore 从前自己拿 static_cast<int>(guardState()) 去比字面量 1 和 2 —— 那是把
 // "哪个状态配哪个码"存在【两个地方的巧合】里: 改一次枚举的数值, "去标定"与"去查负载
@@ -886,9 +906,10 @@ double currentMassKg() {
 //       pollForce 的 33ms 节流【与主循环耗时】共同决定 —— 实测 46~203ms, 而且【是变的】。
 //       加速度 = Δ²p / dt² ⇒ 拿 8ms 去除一个真实间隔 190ms 的差分, 放大 (190/8)² ≈ 560 倍;
 //       换成 33ms 仍放大 ~33 倍。**任何常数都不对。**
-//   (2) 姿态来源 robotActualPose 是 GetPose() 【每 100ms】才刷新一次, 而本函数 46~203ms 才被
-//       调一次 ⇒ 连续两次调用【常常拿到同一个姿态】。原样喂进去: 二阶差分读到 0, 而姿态真
-//       跳变的那一次又配上一段错的 dt ⇒ 量到的是"采样阶梯", 不是机械臂的运动。
+//   (2) 姿态来源 robotActualPose 是 GetPose() 【每 100ms】才刷新一次, 而本函数【每次都被调】
+//       (step 的节拍, 2026-09-21 起 = 帧率 122.9 Hz) ⇒ 连续十几次调用【拿到的是同一个姿态】。
+//       原样喂进去: 二阶差分读到 0, 而姿态真跳变的那一次又配上一段错的 dt ⇒ 量到的是
+//       "采样阶梯", 不是机械臂的运动。(所以现在改成【姿态没变就不喂】, 见下一段。)
 //       实测后果 (force_demo_log.csv 的 acc 列, 运动行): 均值 2.15 / 峰值 9.21 m/s²,
 //       且几乎不随动作变 ⇒ Fi = mass·acc ⇒ |Fi| 均值 0.90 N、峰值 3.87 N ——
 //       **是写字力 (0.3~0.6 N) 的 1.5~13 倍** ⇒ 运动时的力读数被它淹掉。
@@ -934,13 +955,22 @@ static void feedMotionEstimator(const double poseRxyz[6]) {
 // 【为什么要它】在线零偏 EMA 的 α 必须按【真实】节拍换算, 而真实节拍是变的 (实测 46~203ms,
 //   见 Config::FORCE_POLL_INTERVAL_MS 的说明) ⇒ 任何假定的采样率都会让时间常数偏掉。
 //   α = dt/τ 对任意 dt 都成立 (小 dt/τ 下与 1−e^(−dt/τ) 等价), 所以这里直接用它。
+// 用例驱动的时间步长 (秒)。负数 = 不干预, 走实测。见头文件 setStepDtForTest / 它的定义。
+static double g_stepDtForTest = -1.0;
+
 static double stepIntervalSec() {
+    // 用例驱动的时间优先 (默认 -1 = 不干预, 走实测)。见头文件 setStepDtForTest。
+    if (g_stepDtForTest >= 0.0) return g_stepDtForTest;
     static DWORD lastMs = 0;
     const DWORD now = GetTickCount();
     if (lastMs == 0) { lastMs = now; return 0.0; }
     const double dt = (now - lastMs) / 1000.0;
     lastMs = now;
     return dt;
+}
+
+void setStepDtForTest(double sec) {
+    g_stepDtForTest = sec;
 }
 
 void step(AppState::ForceData& fd, const double poseRxyz[6]) {
@@ -1063,6 +1093,14 @@ void step(AppState::ForceData& fd, const double poseRxyz[6]) {
         Fi[2] = iSign * mass * aS[2];
     }
 
+    // ★ 缓存本帧的 Fi —— 【Fi 的唯一一份定义就在上面那一段】(含 R^T 那个坐标系变换)。
+    //   别的模块 (多姿态检查的 SPACE 打印) 需要它时读这份缓存, 【不许自己再乘一遍】:
+    //   同一个量两份实现就是会漂开 —— 而这一项【真的漂过】: 有一次调用方拿的是基座系的
+    //   acc 去减, 于是减掉一个方向不相干的 m·a (见上面那段坐标系说明)。
+    //   ⚠ 写在【闸门判决之前且无条件】: 它是"本帧算出来的 Fi", 与闸门放不放行无关;
+    //     跟着 compensated 一起归零等于把要看的那个数抹掉 —— 而它正是被看的东西。
+    g_lastFi[0] = Fi[0]; g_lastFi[1] = Fi[1]; g_lastFi[2] = Fi[2];
+
     // 7. Compensate: compensated = sixForceRaw − bias − gravity + inertia
     //    ⚠ 末项是 `+ Fi`, 而 Fi 里【带着符号】Config::FORCE_INERTIA_SIGN ∈ {−1, 0, +1}。
     //      历史: 原来写 `− Fi` 且 `Fi = mass·acc` (等价于 标度 = −1); 我 2026-09-21 一度
@@ -1100,6 +1138,14 @@ void step(AppState::ForceData& fd, const double poseRxyz[6]) {
     // 参考量【不在这里写死】: 它是 guardReferenceValue, 判据的唯一一份定义。
     // 【EMA 无条件更新】(包括正在拒绝的时候): 否则闸门一旦拒绝就再也回不来, 而 Task 8
     //  "把负载发进去 -> 看它放行" 正是靠它回来的。
+    // ★ 逐通道差那条 EMA 的 α —— 【按本帧实测耗时换算, 不再用每帧固定的常数】。
+    //   理由与代价见 Config::FORCE_GUARD_EMA_TAU_S 那一大段: 那个 0.02 是【每帧】的, 隐含了
+    //   采样率; step() 挪到帧率 (123 Hz) 之后, 同一个数把时间常数从 ~4.6 s 压到 ~0.40 s —
+    //   闸门于是对噪声翻来翻去, 被拒的帧 compensated 置零 ⇒ 手上的力一开一关。
+    //   α = dt/τ 对任意 dt 都成立 (小 dt/τ 时与 1−e^(−dt/τ) 等价), 与零偏那条 EMA 同一写法。
+    //   stepDt == 0 只出现在第一次调用 ⇒ 那一次不推进 (下面 reseed 分支本来就占第一帧)。
+    double guardAlpha = (stepDt > 0.0) ? (stepDt / Config::FORCE_GUARD_EMA_TAU_S) : 0.0;
+    if (guardAlpha > 1.0) guardAlpha = 1.0;
     for (int i = 0; i < 6; i++) {
         // 判据的对照量【只在这里取】, 且取自 guardReferenceValue —— 判据看的是哪一路,
         // 全程序只有那一处定义。别再把这个下标换成字面通道。
@@ -1115,7 +1161,7 @@ void step(AppState::ForceData& fd, const double poseRxyz[6]) {
         //       拒绝的依据仍是【本帧的 d】, 与状态里的残留值无关, 参考量一恢复就自己回来。
         const bool reseed = !g_guardSeeded || !std::isfinite(g_guardEma[i]);
         if (reseed) g_guardEma[i] = d;
-        else g_guardEma[i] += Config::FORCE_GUARD_EMA_ALPHA * (d - g_guardEma[i]);
+        else g_guardEma[i] += guardAlpha * (d - g_guardEma[i]);
         // 诊断侧: 与 @576 (fd.raw) 的差。同一个 α、同一帧、同一次 comp —— 只换对照量。
         // 【只报不判】, 见 g_guardEmaDiag 的说明: 它不参与任何容差比较。
         // ⚠ 同上做有界恢复: 这一路不进判决, 但它【是印出来的】—— 永久 NaN 会让现场
@@ -1123,7 +1169,7 @@ void step(AppState::ForceData& fd, const double poseRxyz[6]) {
         const double dDiag = comp[i] - fd.raw[i];
         const bool reseedDiag = !g_guardSeededDiag || !std::isfinite(g_guardEmaDiag[i]);
         if (reseedDiag) g_guardEmaDiag[i] = dDiag;
-        else g_guardEmaDiag[i] += Config::FORCE_GUARD_EMA_ALPHA * (dDiag - g_guardEmaDiag[i]);
+        else g_guardEmaDiag[i] += guardAlpha * (dDiag - g_guardEmaDiag[i]);
     }
     g_guardSeeded = true;
     g_guardSeededDiag = true;
@@ -1165,8 +1211,10 @@ void step(AppState::ForceData& fd, const double poseRxyz[6]) {
         //   见 Config::FORCE_BIAS_EMA_TAU_S 那一大段 (一句话: 旧值把秒级的力当漂移吃掉了)。
         // ⚠ 【2026-09-21 改】从前这里是 1/(τ × 假定采样率), 而假定值错了【两层】:
         //   一是不该用 FORCE_EFFECTIVE_SAMPLE_RATE (那是 30004 帧的到达率, 不是本函数的调用率);
-        //   二是即使用 FORCE_POLL_INTERVAL_MS (33ms) 也对不上 —— 实测节拍是 46~203ms
+        //   二是即使用 FORCE_POLL_INTERVAL_MS (33ms) 也对不上 —— 当时实测节拍是 46~203ms
         //   且【是变的】(见 feedMotionEstimator 顶上那段)。**用假定值 ⇒ τ 实际差 1.4~6 倍。**
+        //   ★ 同日稍后 step() 被挪到帧率上 (实测 122.9 Hz) ⇒ 现在 dt 才是"假定值"那个数。
+        //     本行【不用改】: α = dt/τ 对任意 dt 都成立, 这正是当初把它写成实测值的原因。
         //   α = dt/τ 对任意 dt 都成立 (小 dt/τ 时与 1−e^(−dt/τ) 等价), 所以这里直接算。
         //   stepDt == 0 只出现在第一次调用 ⇒ 那一帧不更新, 无害。
         double alpha = (stepDt > 0.0) ? (stepDt / Config::FORCE_BIAS_EMA_TAU_S) : 0.0;

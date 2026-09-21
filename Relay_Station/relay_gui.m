@@ -31,6 +31,31 @@ function relay_gui()
     % 力历史环形缓冲 (100 点 ≈ 3s @ 30Hz)
     S.force_hist_fx = zeros(1,100); S.force_hist_fy = zeros(1,100);
     S.force_hist_fz = zeros(1,100); S.force_hist_idx = 1;
+    % ===== 3D 视野 (2026-09-21) =====
+    % 【以【底座】为原点】x/y 中心 = 0 (底座的轴线), z 中心 = 400 (工作高度中段)。
+    %   中心定在这里 ⇒ 画面里的坐标原点就是底座, 读数与面板上的 X/Y/Z 是同一个参考系。
+    % ⚠ 曾经试过"视野跟着末端走", 现场否掉了: 那样原点会跟着工具跑, 空间参考系就没了。
+    % 【三个轴共用一个边长】创建时那句 axis(ax3d,'equal') 要求等比 —— 等边长才是真正的
+    %   立方体视野; 不对称的范围会和 axis equal 打架, 把某个轴拉扁。
+    % ===== 滚轮放缩开关 (2026-09-21) =====
+    % true  = 注册图窗级滚轮回调 (滚轮放大 / 缩小, 见 onScrollZoom)
+    % false = 不注册 —— 用工具栏自带的 缩放/平移/旋转 按钮 (它们一直在, 与本开关无关)
+    % 【为什么做成开关】现场报告"注册之后拖不动视角"。我在这里查了两件事, 【都是阴性】:
+    %   ① ax.Interactions 在注册前后都是 DefaultAxesInteractionSet, 工具栏也还在;
+    %   ② 全文件没有"每帧重置视野/视角"的代码 —— ax3d.View 只在创建时设一次,
+    %      applyView() 只在【创建时】与【滚轮时】被调。
+    %   ⇒ 判不了就别猜, 给现场一个一行的判据: 改成 false 重跑一次 ——
+    %     拖动能回来 ⇒ 就是它 (那时我换成别的方式做放缩);
+    %     回不来     ⇒ 与它无关, 我从别处查 (那时请把"上一次能拖动是什么时候"告诉我)。
+    S.useWheelZoom = true;
+    S.viewCenter  = [0 0 400];   % mm
+    % 边长 1400 -> 1000 (2026-09-21 现场: "模型太小了")。等边长 + 中心 z=400 ⇒
+    %   x/y ∈ [-500,500], z ∈ [-100,900] —— 纵向仍然盖得住 CR3 总高 795, 而模型在画面里大 1.4 倍。
+    % ⚠ 横向 ±500 < 工作半径 620 ⇒ 【伸到最远处时末端会出画面】。这是刻意的取舍:
+    %   默认看得清 (现场诉求), 要全局就滚轮缩小或按工具栏的 Restore View。
+    S.viewSpan    = 1000;        % mm
+    S.viewSpanMin = 200;         % 滚轮放缩的下限/上限 (mm)
+    S.viewSpanMax = 4000;
     S.server = [];
     S.ff_enabled = true;      % 力反馈开关状态 (A组=true / B组=false)
     % 3D 场景对象 (Task 7)
@@ -220,7 +245,13 @@ function relay_gui()
     hold(ax3d, 'on'); axis(ax3d, 'equal');
     ax3d.Layout.Row = 1;  ax3d.Layout.Column = 1;
     ax3d.View = [60 25];
-    xlim(ax3d, [-350 400]); ylim(ax3d, [-400 400]); zlim(ax3d, [-50 800]);
+    % 视野与放缩 (2026-09-21): 范围从此由 S.viewCenter / S.viewSpan 一处给出, 见 applyView。
+    %   从前那三句固定范围 (x[-350,400] y[-400,400] z[-50,800]) 与 axis equal 是打架的,
+    %   而且末端一出盒子就看不见 —— 现场读成"孪生卡住了"。
+    applyView();
+    if S.useWheelZoom
+        fig.WindowScrollWheelFcn = @(~, evt) onScrollZoom(evt);
+    end
 
     % Robot State 面板
     pnlState = uigridlayout(glRight, [2 1]);
@@ -281,17 +312,13 @@ function relay_gui()
     quiver3(ax3d, 0,0,0, 0,150,0, 'g', 'LineWidth', 2, 'MaxHeadSize', 8);
     quiver3(ax3d, 0,0,0, 0,0,150, 'b', 'LineWidth', 2, 'MaxHeadSize', 8);
 
-    % 安全边界线框
-    xL = [cfg.safe_x_min cfg.safe_x_max];
-    yL = [cfg.safe_y_min cfg.safe_y_max];
-    zL = [cfg.safe_z_min cfg.safe_z_max];
-    plot3(ax3d, xL([1 1 2 2 1]), yL([1 2 2 1 1]), zL([1 1 1 1 1]), 'y--', 'LineWidth', 1);
-    plot3(ax3d, xL([1 1 2 2 1]), yL([1 2 2 1 1]), zL([2 2 2 2 2]), 'y--', 'LineWidth', 1);
-    for ii = 1:2
-        for jj = 1:2
-            plot3(ax3d, [xL(ii) xL(ii)], [yL(jj) yL(jj)], zL, 'y--', 'LineWidth', 1);
-        end
-    end
+    % ===== 安全边界黄框【已删】(2026-09-21, 用户要求) =====
+    % 原来这里有 12 条黄虚线画出 cfg.safe_x/y/z 那个盒子。删它的理由不是"不好看":
+    %   **那个盒子【已经不生效了】** —— 客户端那边工作空间钳位整个关掉了
+    %   (Config::SAFETY_BOUNDARY_CLAMP_ENABLED = false, 目的是让笔能够落到纸面高度)。
+    %   继续画它会让操作员以为机械臂还受它约束 —— 那正是本项目最忌的"画面说的事和代码做的不一样"。
+    % ⚠ 恢复: 从 git 历史取回这 12 行即可; 但【先确认钳位真的重新打开了】, 否则画出来的是假约束。
+    %   (cfg.safe_* 目前在本文件里没有别的使用者。)
 
     % 创建 STL patch 对象 (如果加载成功) 否则 fallback 骨架模型
     if stlLoaded
@@ -541,6 +568,10 @@ function relay_gui()
 
     function update3DModel()
         ja = S.joint_angles;
+        % ★ 2026-09-21: 前向运动学【先算一次】—— 下面【既用来画骨架, 也用来把视野窗跟着 TCP 走】
+        %   (见函数末尾那一段)。从前它只在 fallback 分支里算, 而视野需要 TCP ⇒ 提到最上面。
+        %   STL 分支因此多算一次 FK —— 代价可忽略, 换来的是"视野永远知道末端在哪"。
+        joints = fk.robotFk(ja(1),ja(2),ja(3),ja(4),ja(5),ja(6));
         % 更新 STL 模型 (hgtransform)
         if stlLoaded
             for i = 0:6
@@ -550,7 +581,6 @@ function relay_gui()
             end
         else
             % Fallback: 骨架模型 (复用原 computeFK 逻辑)
-            joints = fk.robotFk(ja(1),ja(2),ja(3),ja(4),ja(5),ja(6));
             % NOTE: Fallback path uses delete+redraw per frame.
             % Acceptable for infrequent use; optimize with persistent objects if needed.
             % 清除旧的 fallback 对象 (简化处理: 每帧重绘)
@@ -596,6 +626,43 @@ function relay_gui()
         else
             set(eeMarkerTarget, 'Visible', 'off');
         end
+
+        % 视野【不再】跟着末端走 —— 现场否掉了这种: 那样坐标原点会跟着工具跑, 空间参考系就没了。
+        % 现在视野由 S.viewCenter / S.viewSpan 一处给出 (以【底座】为原点 + 滚轮放缩), 见 applyView。
+        % ⚠ 视野【故意不在这里更新】: 它只在【创建时】与【滚轮】两处改。每帧重设 xlim/ylim/zlim
+        %   会把 MATLAB 的自动刻度反复触发, 画面会抖 —— 而且视野本来就不需要每帧重算。
+    end
+
+    function applyView()
+        % 3D 视野的【唯一一份定义】—— 中心与边长都来自 S, 别在别处再写一套 xlim/ylim/zlim。
+        % 【三个轴共用同一个边长】创建时那句 axis(ax3d,'equal') 要求等比; 等边长才是真正的
+        %   立方体视野。不对称的范围会和 axis equal 打架, 把某个轴拉扁 (从前就是这样)。
+        h = S.viewSpan / 2;
+        xlim(ax3d, [S.viewCenter(1)-h, S.viewCenter(1)+h]);
+        ylim(ax3d, [S.viewCenter(2)-h, S.viewCenter(2)+h]);
+        zlim(ax3d, [S.viewCenter(3)-h, S.viewCenter(3)+h]);
+    end
+
+    function onScrollZoom(evt)
+        % 滚轮放缩。只在【光标位于 3D 面板上】时生效 —— 否则在右边面板上滚一下也会把视野缩掉。
+        if ~isfield(evt, 'VerticalScrollCount') || evt.VerticalScrollCount == 0, return; end
+
+        % ⚠ 命中判定整段放在 try 里: CurrentPoint / getpixelposition 在 uifigure 上的可用性
+        %   随版本而变, 而"缩不了"比"在不该缩的地方缩了一下"更烦人 ⇒ 判不出来就【放行】。
+        try
+            cp = fig.CurrentPoint;
+            pp = getpixelposition(ax3d);
+            if cp(1) < pp(1) || cp(1) > pp(1)+pp(3) || cp(2) < pp(2) || cp(2) > pp(2)+pp(4)
+                return;
+            end
+        catch
+            % 判不了 ⇒ 放行 (见上)
+        end
+
+        % MATLAB 的 VerticalScrollCount: 【向下滚为正】。⇒ 上滚 (负) 应当【放大】⇒ 边长变小。
+        S.viewSpan = min(max(S.viewSpan * (1 + 0.12 * double(evt.VerticalScrollCount)), ...
+                             S.viewSpanMin), S.viewSpanMax);
+        applyView();
     end
 
     function updateTextPanels()

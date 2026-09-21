@@ -61,7 +61,7 @@ SafetyVerdict SafetyPredictor::evaluate(const Vec3& target) {
     }
 
     // 1c. safety boundary (reuse existing SafetyBoundary)
-    clamped = SafetyBoundary::clampToBoundary(target);
+    clamped = SafetyBoundary::clampToBoundaryActive(target);
     if (clamped.x != target.x || clamped.y != target.y || clamped.z != target.z) {
         m_lastVerdict.action = SafetyVerdict::REJECT;
         m_lastVerdict.errorCode = RobotErrorCode::ERR_SAFETY_BOUNDARY;
@@ -267,7 +267,7 @@ SafetyVerdict SafetyPredictor::evaluatePositionOnly(const Vec3& target) {
 
     // Safety boundary
     {
-        Vec3 clamped = SafetyBoundary::clampToBoundary(target);
+        Vec3 clamped = SafetyBoundary::clampToBoundaryActive(target);
         if (clamped.x != target.x || clamped.y != target.y || clamped.z != target.z) {
             m_lastVerdict.action = SafetyVerdict::REJECT;
             m_lastVerdict.errorCode = RobotErrorCode::ERR_SAFETY_BOUNDARY;

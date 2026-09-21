@@ -52,17 +52,16 @@ static double g_prevFiltered[6] = {0};  // for gradient limiting
 namespace ForcePipeline {
 
 void init() {
-    // ⚠⚠ 【2026-09-21 记明, 未改系数】这个 fs 是【猜的】, 而且是从截止频率【反推】的
-    //   (fs = 截止 × 4) —— 两个量互相定义, 所以它读起来像"设计成 fs/4 = 30Hz 的 Butterworth",
-    //   而注释写的"effective sample rate ~120Hz"是我们【以为的】速率。
-    //   真实速率: ForceCompensation::step 的节拍 = 1000/FORCE_POLL_INTERVAL_MS ≈ 【30Hz】
-    //   (那一步的 dt 已按真实值改, 见 ForceCompensation.cpp; 本处系数【故意不动】)。
-    //   滤波器算的是归一化频率 fc/fs, 所以同一系数在 30Hz 下运行, 实际截止 =
-    //     30Hz × (30/120) ≈ 【7.5 Hz】 —— 比设计的钝 4 倍 (更平滑、也更滞后)。
-    //   ⇒ 【为什么不改】: 同 MotionEstimator 那处 —— 更钝 = 噪声更低, 而噪声是死区 0.20 N
-    //     的定标依据; "改对"会【增大】噪声。⇒ 那是设计取舍, 要跟着死区的重定一起做
-    //     (run-005 §14 第 2 条)。此处只留真实数值, 免得下一个人按 30Hz 去推理。
-    double fs = static_cast<double>(Config::FORCE_FILTER_CUTOFF) * 4.0; // 以为的 fs ~120Hz ⇒ 实际截止 ≈7.5Hz
+    // ★ 2026-09-21 重定 —— 与 Config::FORCE_FILTER_FS_HZ / FORCE_FILTER_CUTOFF 那两段配套。
+    //   从前这里写的是 `fs = FORCE_FILTER_CUTOFF * 4.0` —— 【两个量互相定义】, 于是它读起来
+    //   像"设计成 fs/4 的 Butterworth", 而那个 fs 是猜的、从没实测过。
+    //   实测之后真相是: 流水线当时跑在 ~11 Hz 上 ⇒ 同一个系数在那里意味着实际截止 ≈2.75 Hz,
+    //   噪声只被削掉约 20% (原始 @1304 Fz sd 0.142 N ⇒ 日志里的 filtered Fz sd 0.115 N)。
+    //   ⇒ 现在 fs 直接取【流水线的真实工作速率】这个常数 (RelayCore::forceReaderThread 把它
+    //     挪到了帧率上; 实测 122.9 Hz vs 文档 125 Hz)。归一化频率 fc/fs 从此有意义。
+    //   ⚠ 【别再把它反推回截止频率】: `fs = fc × 4` 那种写法会让两个常数互相定义, 于是
+    //     "改截止"会【悄悄改采样率】, 而采样率是硬件事实, 不是设计自由度。
+    double fs = static_cast<double>(Config::FORCE_FILTER_FS_HZ);
     double b0, b1, b2, a1, a2;
     calcButterworthCoeffs(static_cast<double>(Config::FORCE_FILTER_CUTOFF), fs, b0, b1, b2, a1, a2);
     for (int i = 0; i < 6; i++) {
@@ -111,14 +110,22 @@ void step(AppState::ForceData& fd) {
     double fz = mapForceToTouch(fd.filtered[2]);
 
     // 4. Coordinate transform: Robot tool frame -> Touch device frame
-    //    ★ 2026-09-21: 反馈应当是【阻力】—— 操作员压下去 ⇒ 工具受到向上的反作用 ⇒ 手上被往上推。
-    //      ⇒ 垂直项改用 +fz (从前是 -fz, 那会【帮忙】往下推, 现场感受就是"斥力/被推开")。
-    //      依据 (含"原来那行注释举的例子自相矛盾")见 Config::FORCE_FEEDBACK_Z_SIGN 那一大段。
-    //    ⚠ 另两项本来就原样映射 (fx→X, fy→Z), 与同一个原则一致, 未动。
+    //    ★★★ 2026-09-21 定案: 垂直项【整轴关掉】(Config::FORCE_FEEDBACK_Z_SIGN = 0.0)。
+    //      理由不是符号选错, 而是这一轴【不该承担反馈】: Touch Y 正是操作员用来落笔、维持
+    //      入纸深度的那一轴 —— 往下推 = 帮忙往纸里按, 往上推 = 把笔抬起来根本落不了笔。
+    //      两个方向都不行 ⇒ 关掉。**"阻力"由横向两路给** (hapticOut[0] fx→X, hapticOut[2] fy→Z)。
+    //      ⚠ 完整依据 (含实测的 comp 符号、"若将来重开必须满足的三件事") 在
+    //        Config::FORCE_FEEDBACK_Z_SIGN 那一大段 —— **动它之前先读那一段。**
+    //    ⚠ 另两项本来就原样映射 (fx→X, fy→Z), 未动。
     //    ⚠ 第 4 步的【轴对应】本身尚未被独立验证 —— 若实测是"力出现在错的轴上", 那是另一件事。
-    fd.hapticOut[0] =  fx;                                  // Robot Fx -> Touch X
-    fd.hapticOut[1] =  fz * Config::FORCE_FEEDBACK_Z_SIGN;   // Robot Fz -> Touch Y (阻力, 见上)
-    fd.hapticOut[2] =  fy;                                  // Robot Fy -> Touch Z
+    //    ★★ 2026-09-21 (同日第二次定案): 横向两路也带上了整体符号 −1。
+    //      力映射应当是【位置映射的逆】(L = Mᵀ, M = convertTouchToRobot), 而代码里写死的轴对应
+    //      等于 Mᵀ 再整体取负 ⇒ L = −Mᵀ。那个整体符号 −1 由【唯一有实测锚点的那一行】(垂直)
+    //      定死, 再对三行一起成立。完整推导与"它为什么只是推导+现场描述"见
+    //      Config::FORCE_FEEDBACK_LATERAL_SIGN 那一大段 —— **动符号之前先读它。**
+    fd.hapticOut[0] =  fx * Config::FORCE_FEEDBACK_LATERAL_SIGN;  // Robot Fx -> Touch X
+    fd.hapticOut[1] =  fz * Config::FORCE_FEEDBACK_Z_SIGN;        // Robot Fz -> Touch Y (0 = 关)
+    fd.hapticOut[2] =  fy * Config::FORCE_FEEDBACK_LATERAL_SIGN;  // Robot Fy -> Touch Z
 
     // 5. Apply reflection gain (amplify for human perception)
     //    Typical contact forces (5-30N) → clearly perceptible (0.4-2.5N at Touch)

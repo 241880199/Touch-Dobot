@@ -43,7 +43,12 @@ namespace ForcePipeline {
     // Call once: initialize filter coefficients
     void init();
 
-    // Call at 30Hz: raw -> filtered -> hapticOut (writes into fd under caller's mutex)
+    // Call at the FRAME rate (~123 Hz, from ForceReader/RelayCore::forceReaderThread, 2026-09-21):
+    // raw -> filtered -> hapticOut (writes into fd under caller's mutex)
+    // ⚠ 这个速率【是 Butterworth 系数的前提】(Config::FORCE_FILTER_FS_HZ) —— 换了调用率就必须
+    //   同步改它, 否则归一化频率 fc/fs 跟着错位 (2026-09-21 之前就栽在这: 系数按 120 Hz 算、
+    //   实际跑在 ~11 Hz ⇒ 实际截止 2.75 Hz, 噪声只削掉 20%)。
+    // ⚠ 【全程序只有一个调用点】: 若在 pollForce 里也调一次, 滤波器每帧被推两次 ⇒ 相位乱。
     void step(AppState::ForceData& fd);
 
     // Call on shutdown

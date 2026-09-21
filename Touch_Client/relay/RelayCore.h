@@ -35,6 +35,23 @@ public:
     void pollForce();
     void shutdownForceReader();
 
+    // ===== 帧率噪声探针 (2026-09-21) =====
+    // 【要回答的问题】原始 @1304 的噪声, 在【帧率】下把连续 k 个样本取平均, sd 掉多少?
+    //   掉成 1/sqrt(k) ⇒ 宽带噪声 ⇒ 把力流水线挪到帧率上跑能白赚 √N;
+    //   基本不掉       ⇒ 噪声落在更慢的频带上 ⇒ 换修法。判据的统计量在 force/NoiseProbe.h (有单测)。
+    // 【为什么非要在这里取】流水线 (ForceCompensation/ForcePipeline) 跑在 pollForce 的 ~11 Hz 上,
+    //   而帧以 8 ms 到达 —— 快的那一路只有【本线程】看得见。取慢的那一路来回答"平均有没有用",
+    //   等于用被抽样过的数据回答抽样本身的问题。
+    // 【每一帧都存, 不是"按键才开始"】省掉一个"忘了按"的状态; 读的是最近 CAJ_N 帧。
+    // ⚠ 只读不动: 本探针【不参与】任何补偿/滤波/闸门计算, 加它不改变任何行为。
+    struct ForceFrameSample {
+        unsigned long long tickUs;   // steady_clock 微秒 (不能用 GetTickCount: 15.6 ms 粒度
+                                     // 分辨不出 8 ms 的帧间隔 —— 那正是要量的东西)
+        double f[3];                 // @1304 的 Fx,Fy,Fz (原始值, 未补偿)
+    };
+    // 取最近收到的 ≤maxN 帧, 按【从旧到新】写进 out。返回实际帧数。
+    int copyRecentForceFrames(ForceFrameSample* out, int maxN);
+
     // 力传感器标定
     bool startForceCalibration();
     // 仅调零: 静置采集零偏 → 直接应用+存盘 (不进 MOTION 相、不开拖拽模式)
@@ -82,6 +99,17 @@ public:
     void shutdownRelayReporting();
     int  sendRelayUpdate(const char* msg);
     void reportPosition();
+
+    // ===== relay socket 的健壮化 (2026-09-21) =====
+    // 【背景】这条 socket 从前【只在启动时连一次, 没有重试】, 而且 send 的返回值没人检查
+    //   (两次 send 的返回值直接相加, -1 与 +1 互相抵消) ⇒ 连接事后死掉时, 客户端会一直往
+    //   死 socket 里写而【完全无声】。现场表现: MATLAB 的孪生停在默认姿势, 从那一头根本
+    //   分不出是"没收到数据"还是"显示坏了" —— 孪生的 3D 模型是拿 J|(关节角) 画的, 而
+    //   J|/RP|/P| 全走这条 socket。2026-09-21 现场就在这一头绕了很久。
+    //   ⇒ 三个入口各管一件事 (定义处有完整说明):
+    bool connectRelaySocket();                  // 建+连+装上; 不打印 (启动与重连共用)
+    bool ensureRelayConnected();                // 发之前保证连着; socket 无效时按秒重连
+    void markRelayDisconnected(const char* why); // 作废 socket; 只在状态真变化时出声一次
 
     // 发一条 MATLAB 端的警告 (W| 协议) —— ★【这个线上格式的唯一一份定义】(2026-09-21)。
     //   level      : 1 = 警告, 2 = 严重 (relay_gui 用它给顶栏染色并选显示方式)

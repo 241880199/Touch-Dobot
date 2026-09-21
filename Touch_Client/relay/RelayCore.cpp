@@ -8,6 +8,7 @@
 #include "../core/AppState.h"
 #include "../config/Config.h"
 #include <algorithm>
+#include <chrono>      // 帧率噪声探针要真实微秒: GetTickCount 的 15.6 ms 粒度分辨不出 8 ms 的帧间隔
 #include <cmath>
 #include <iostream>
 #include <windows.h>
@@ -39,6 +40,38 @@ static Vec3 clampOrientToBounds(const Vec3& target) {
                   << target.x << "," << target.y << "," << target.z << ")" << std::endl;
     }
     return clamped;
+}
+
+// ===== 帧率噪声探针的【环形缓冲】=====
+// 见 RelayCore.h 里那一段 (要回答什么问题) 与 force/NoiseProbe.h (统计量的判据)。
+// 【为什么在这里】本线程是【唯一】看得到 8 ms 那一档的地方: 力流水线当时跑在 pollForce 的
+//   ~11 Hz 上, 拿它来回答"帧率下平均有没有用", 等于用被抽样过的数据回答抽样本身的问题。
+//   (★ 探针按出来之后, 同一天就把补偿+滤波【搬到了本线程】来跑 —— 见下面帧解析那一段。
+//    本探针留在原处: 它量的是【原始 @1304】的结构, 与流水线搬没搬无关。)
+// 【容量】2048 帧 = 文档速率 125 Hz 下 16.4 s。够长到能算 lag=32 的自相关, 又不至于占内存。
+// ⚠ 加它【不改变任何行为】: 只存不改, 不进任何补偿/滤波/闸门路径。
+static const int kNoiseCap = 2048;
+static RelayCore::ForceFrameSample s_noiseBuf[kNoiseCap];
+static int                      s_noiseWrite = 0;   // 下一个写入位置
+static int                      s_noiseCount = 0;   // 已存帧数 (封顶到 kNoiseCap)
+static CRITICAL_SECTION         s_noiseLock;
+static bool                     s_noiseLockInit = false;
+
+// 只在 ForceReader 线程调用。加锁的理由: 读它的是主线程 (按键), 【不是】因为写入慢 ——
+// 125 Hz 下一次临界区可以忽略。与 forceDataMutex 分开, 免得探针的读把力数据的路径也拖住。
+static void pushForceFrame(double fx, double fy, double fz) {
+    if (!s_noiseLockInit) return;   // 初始化竞态里的最早期帧, 丢掉即可 (不改变任何判决)
+    const unsigned long long us =
+        (unsigned long long)std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+    EnterCriticalSection(&s_noiseLock);
+    s_noiseBuf[s_noiseWrite].tickUs = us;
+    s_noiseBuf[s_noiseWrite].f[0] = fx;
+    s_noiseBuf[s_noiseWrite].f[1] = fy;
+    s_noiseBuf[s_noiseWrite].f[2] = fz;
+    s_noiseWrite = (s_noiseWrite + 1) % kNoiseCap;
+    if (s_noiseCount < kNoiseCap) s_noiseCount++;
+    LeaveCriticalSection(&s_noiseLock);
 }
 
 // ===== ForceReader 线程: 阻塞读取 30004 实时力数据 (125Hz) =====
@@ -147,6 +180,31 @@ static DWORD WINAPI forceReaderThread(LPVOID) {
             // 帧长 1440: 1304+48=1352 与 1037 都在范围内。
             double* sixForcePtr = reinterpret_cast<double*>(buf + 1304);
             const int sixForceOnline = static_cast<int>(static_cast<unsigned char>(buf[1037]));
+
+            // ★★ 2026-09-21: 补偿与滤波搬到这里 (帧率) 来跑 —— 从前它们在 pollForce 里,
+            //    而 pollForce 的真实节拍是 ~11 Hz (实测间隔均值 92 ms, 见 force_demo_log.csv 的 t_ms)。
+            // 【为什么非搬不可】噪声只能靠【过采样 + 平均】压; 一条跑在 11 Hz 上的链, 把 125 Hz 的帧
+            //   用掉了 11 分之一, 而滤波器按 fs=120 Hz 算的系数撞上 11 Hz 的实际调用率
+            //   ⇒ 实际截止掉到 ~2.75 Hz, 且没有任何 √N 可赚。实测账 (帧率噪声探针 'n'):
+            //   原始 @1304 的 Fz sd 0.142 N, 连续 16 帧取平均可降到 0.022 N;
+            //   而旧链路只把它削到 0.115 N (日志里的 filtered 列)。
+            //   ⇒ 完整推导与取舍见 Config::FORCE_FILTER_CUTOFF / FORCE_FILTER_FS_HZ 那两段。
+            // 【姿态为什么在这里读】与 pollForce 【同一来源、同一把锁、同一顺序】:
+            //   robotPoseMutex 先取先放, 然后才取 forceDataMutex。反过来会与 pollForce 构成死锁。
+            //   (HapticCallback 从不嵌套这两把锁 —— 144~172 行是串行取的。)
+            //   ⚠ 姿态仍只由 GetPose() 每 100 ms 刷新 (robotActualPose) ⇒ A·g 是阶梯。
+            //     但重力项变化慢 (0.1° ≈ 0.007 N), 代价可接受。真要同帧对齐: 30004 帧里本来就带
+            //     ToolVectorActual @624 (已镜像进 forceData.tcpPoseActual) —— 那是第二步, 未做。
+            // 【★ 给下一个人的警告】这两个调用【全程序只能有这一处】。若在 pollForce 里再调一次,
+            //   滤波器每帧被推两次 (11 Hz 那一路会把 123 Hz 的结果又滤一遍) ⇒ 相位与幅值全乱,
+            //   而且没有任何报错。
+            double pose[6] = {0};
+            EnterCriticalSection(&app.robotPoseMutex);
+            pose[0] = app.robotActualPose.x;  pose[1] = app.robotActualPose.y;
+            pose[2] = app.robotActualPose.z;  pose[3] = app.robotActualPose.rx;
+            pose[4] = app.robotActualPose.ry; pose[5] = app.robotActualPose.rz;
+            LeaveCriticalSection(&app.robotPoseMutex);
+
             EnterCriticalSection(&app.forceDataMutex);
             for (int i = 0; i < 6; i++) {
                 app.forceData.raw[i] = forcePtr[i];
@@ -158,7 +216,17 @@ static DWORD WINAPI forceReaderThread(LPVOID) {
             app.forceData.sixForceOnline = sixForceOnline;
             app.forceData.lastUpdateMs = GetTickCount();
             app.forceData.isStale = false;
+
+            // 顺序不能反: 先补偿 (ForceCompensation), 再滤波 + 映射 (ForcePipeline)。
+            ForceCompensation::step(app.forceData, pose);
+            ForcePipeline::step(app.forceData);
+
             LeaveCriticalSection(&app.forceDataMutex);
+
+            // 帧率噪声探针: 存下这一帧的原始 @1304 三轴。
+            // ⚠ 位置在【本帧解析完之后、且与本帧的赋值同源】—— 存的是刚读进来的 sixForcePtr,
+            //   不是别的快照。存的这一列要拿来量"帧率下噪声的结构", 错一帧就白量。
+            pushForceFrame(sixForcePtr[0], sixForcePtr[1], sixForcePtr[2]);
 
             // 看门狗兜底: 每 300ms 检查一次 (GLUT 可能已死)
             static DWORD lastWatchdogCheck = 0;
@@ -778,7 +846,7 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
         candidate.z = m_targetPos.z + dz;
 
         // 安全边界钳位
-        clamped = SafetyBoundary::clampToBoundary(candidate);
+        clamped = SafetyBoundary::clampToBoundaryActive(candidate);
 
         // ===== SafetyPredictor 预判 (先评估，后更新，防止边界漂移) =====
         SafetyVerdict verdict = SafetyPredictor::instance().evaluate(clamped);
@@ -1169,7 +1237,7 @@ void RelayCore::onButtonPress(const Vec3& robotPos) {
         EnterCriticalSection(&app.robotPoseMutex);
         Vec3 rawPos(app.robotActualPose.x, app.robotActualPose.y, app.robotActualPose.z);
         LeaveCriticalSection(&app.robotPoseMutex);
-        m_targetPos = SafetyBoundary::clampToBoundary(rawPos);
+        m_targetPos = SafetyBoundary::clampToBoundaryActive(rawPos);
     }
     m_lastTouchPos = robotPos;
     m_lastTouchValid = true;
@@ -1235,7 +1303,7 @@ void RelayCore::onButton2Press(const Vec3& stylusOrient) {
             EnterCriticalSection(&app.robotPoseMutex);
             Vec3 tcpPos(app.robotActualPose.x, app.robotActualPose.y, app.robotActualPose.z);
             LeaveCriticalSection(&app.robotPoseMutex);
-            m_targetPos = SafetyBoundary::clampToBoundary(tcpPos);
+            m_targetPos = SafetyBoundary::clampToBoundaryActive(tcpPos);
         }
         m_transmitting = true;
         m_basePointSet = true;
@@ -1270,7 +1338,7 @@ void RelayCore::onButton2Release() {
             EnterCriticalSection(&app.robotPoseMutex);
             Vec3 rawPos(app.robotActualPose.x, app.robotActualPose.y, app.robotActualPose.z);
             LeaveCriticalSection(&app.robotPoseMutex);
-            m_targetPos = SafetyBoundary::clampToBoundary(rawPos);
+            m_targetPos = SafetyBoundary::clampToBoundaryActive(rawPos);
         }
         LeaveCriticalSection(&m_basePointLock);
         std::cout << "[Relay] Button2 RELEASE — orientation control stopped (button1 still held)" << std::endl;
@@ -1561,9 +1629,12 @@ void RelayCore::registerExtension(IExtension* ext) {
 
 // ===== MATLAB GUI 上报 =====
 
-void RelayCore::initRelayReporting() {
+// 建 + 连 + 装上 relay socket。**不打印任何东西** —— 打印由调用方决定:
+//   启动那一次失败要把处置说全 (见 initRelayReporting), 而【事后重连】成功只需一句。
+// 成功返回 true 且 m_relaySocket 已装好; 失败返回 false 且不留残余。
+bool RelayCore::connectRelaySocket() {
     SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (sock == INVALID_SOCKET) return;
+    if (sock == INVALID_SOCKET) return false;
 
     sockaddr_in addr;
     addr.sin_family = AF_INET;
@@ -1572,20 +1643,7 @@ void RelayCore::initRelayReporting() {
 
     if (connect(sock, (SOCKADDR*)&addr, sizeof(addr)) == SOCKET_ERROR) {
         closesocket(sock);
-        // ★ 失败必须出声 (2026-09-21)。从前这里是【静默 return】, 而整个程序里唯一会提到
-        //   "GUI 没连上"的地方, 是 reportPosition() 里那句每 3.3 s 一次的 "last send=-1B" ——
-        //   它把这件事写成一个不可读的数, 现场只会当噪音忽略。那句刷屏已删
-        //   ⇒ 本句是【唯一】会说这件事的地方, 所以一次说全: 什么没在跑、影响哪几路、
-        //     以及【它不是故障】—— 免得下一个人把它当异常去查。
-        std::cout << "[Relay] GUI reporting 【未连接】—— " << Config::RELAY_IP << ":"
-                  << Config::RELAY_PORT << " 上没有在听 (MATLAB relay_gui 没在跑?)" << std::endl;
-        std::cout << "[Relay]   影响: P| / C| / FB| 三路都发不出去 (位置上报 / 命令回显 / 反馈回显)。"
-                  << std::endl;
-        std::cout << "[Relay]   不影响: 机械臂控制、力数据采集 (@576/@720/@1304)、一致性闸门、"
-                     "本地补偿 —— 它们都不走这条 socket。" << std::endl;
-        std::cout << "[Relay]   要恢复: 先在 MATLAB 那一侧起 relay_gui, 再重启本程序"
-                     " (本函数只在启动时调用一次, 见 main 的调用点)。" << std::endl;
-        return;
+        return false;
     }
 
     int timeout = 100;
@@ -1594,9 +1652,76 @@ void RelayCore::initRelayReporting() {
     EnterCriticalSection(&m_relaySocketMutex);
     m_relaySocket = sock;
     LeaveCriticalSection(&m_relaySocketMutex);
+    return true;
+}
 
-    std::cout << "[Relay] GUI reporting connected to " << Config::RELAY_IP
-              << ":" << Config::RELAY_PORT << std::endl;
+void RelayCore::initRelayReporting() {
+    if (connectRelaySocket()) {
+        std::cout << "[Relay] GUI reporting connected to " << Config::RELAY_IP
+                  << ":" << Config::RELAY_PORT << std::endl;
+        return;
+    }
+    // ★ 失败必须出声 (2026-09-21)。从前这里是【静默 return】, 而整个程序里唯一会提到
+    //   "GUI 没连上"的地方, 是 reportPosition() 里那句每 3.3 s 一次的 "last send=-1B" ——
+    //   它把这件事写成一个不可读的数, 现场只会当噪音忽略。那句刷屏已删
+    //   ⇒ 本句是【唯一】会说这件事的地方, 所以一次说全: 什么没在跑、影响哪几路、
+    //     以及【它不是故障】—— 免得下一个人把它当异常去查。
+    std::cout << "[Relay] GUI reporting 【未连接】—— " << Config::RELAY_IP << ":"
+              << Config::RELAY_PORT << " 上没有在听 (MATLAB relay_gui 没在跑?)" << std::endl;
+    std::cout << "[Relay]   影响: P| / J| / RP| / C| / FB| 全部发不出去 (位置 / 关节角 / 实际位姿 /"
+                 " 命令回显 / 反馈回显)。" << std::endl;
+    std::cout << "[Relay]   不影响: 机械臂控制、力数据采集 (@576/@720/@1304)、一致性闸门、"
+                 "本地补偿 —— 它们都不走这条 socket。" << std::endl;
+    std::cout << "[Relay]   要恢复: 在 MATLAB 那一侧起 relay_gui 即可 —— ★ 本程序会【自动按秒重连】,"
+                 " 不必重启 (2026-09-21 起; 从前是只在启动时连一次, 所以那时确实要重启)。" << std::endl;
+}
+
+// 把 relay socket 作废, 并且【只在状态真的变化时】出声一次。
+// 【为什么必须出声】这条 socket 一断, 上面那几路全哑 —— 而现场看到的现象是
+//   【MATLAB 的孪生停在默认姿势】, 从那一头根本分不出是"没收到数据"还是"显示坏了"。
+//   一次都不说的话, 排查会从显示那一侧开始 (2026-09-21 现场就是这么绕了一大圈)。
+// ⚠ 这条路径从前【完全无声】: sendRelayUpdate 把两次 send 的返回值直接相加就 return,
+//   SOCKET_ERROR (-1) 与换行那次 (+1) 会抵消成正数 ⇒ 连接死掉看起来和正常一样。
+static bool s_relayDownReported = false;
+
+void RelayCore::markRelayDisconnected(const char* why) {
+    EnterCriticalSection(&m_relaySocketMutex);
+    const bool had = (m_relaySocket != INVALID_SOCKET);
+    if (had) {
+        closesocket(m_relaySocket);
+        m_relaySocket = INVALID_SOCKET;
+    }
+    LeaveCriticalSection(&m_relaySocketMutex);
+
+    if (!had || s_relayDownReported) return;   // 没变化 / 已经说过 ⇒ 不出声 (不刷屏)
+    s_relayDownReported = true;
+    std::cout << "[Relay] GUI reporting 【连接已断】(" << why << ") —— "
+                 "P| / J| / RP| / C| / FB| 全部发不出去了。" << std::endl;
+    std::cout << "[Relay]   现场表现: MATLAB 的孪生会【停在最后一次收到的位置】;"
+                 " 若从启动起一帧都没收到, 就是它的初值 (关节全 0 = 一个默认姿势)。" << std::endl;
+    std::cout << "[Relay]   本程序会自动按秒重连; 重连上会再报一句。" << std::endl;
+}
+
+// 发之前保证连着: socket 无效时【按秒重连】。
+// 【为什么】从前只在启动时连一次 (见 initRelayReporting 的旧文案): 启动那一刻的竞态、
+//   或事后对端关掉, 都会让【整个会话】静默地发不出去 —— 而现场唯一能看到的只是"孪生不动"。
+// 返回值: true = 现在可以发。
+bool RelayCore::ensureRelayConnected() {
+    EnterCriticalSection(&m_relaySocketMutex);
+    const bool up = (m_relaySocket != INVALID_SOCKET);
+    LeaveCriticalSection(&m_relaySocketMutex);
+    if (up) return true;
+
+    static DWORD lastTryMs = 0;
+    const DWORD now = GetTickCount();
+    if (lastTryMs != 0 && (now - lastTryMs) < 1000) return false;   // 每秒最多试一次, 别空转
+    lastTryMs = now;
+
+    if (!connectRelaySocket()) return false;
+    s_relayDownReported = false;
+    std::cout << "[Relay] GUI reporting 【已重连】到 " << Config::RELAY_IP << ":"
+              << Config::RELAY_PORT << std::endl;
+    return true;
 }
 
 void RelayCore::shutdownRelayReporting() {
@@ -1614,8 +1739,20 @@ int RelayCore::sendRelayUpdate(const char* msg) {
     LeaveCriticalSection(&m_relaySocketMutex);
     if (sock == INVALID_SOCKET) return -1;
 
+    // ★★ 2026-09-21: 从这里起【检查 send 的返回值】。
+    //   从前是 `return n1 + n2;` —— SOCKET_ERROR 是 -1, 而换行那次通常是 +1 ⇒ **两者相加
+    //   正好把错误抵消掉**, 调用方永远看不到失败, 连接死掉这件事在代码里【完全不留痕】。
+    //   现场代价: MATLAB 的孪生停在默认姿势, 而没有任何一处能说明"是一条消息都没送到"。
     int n1 = send(sock, msg, (int)strlen(msg), 0);
+    if (n1 == SOCKET_ERROR) {
+        markRelayDisconnected("send() 失败");
+        return -1;
+    }
     int n2 = send(sock, "\n", 1, 0);
+    if (n2 == SOCKET_ERROR) {
+        markRelayDisconnected("send(换行) 失败");
+        return -1;
+    }
     return n1 + n2;
 }
 
@@ -1623,6 +1760,10 @@ void RelayCore::reportPosition() {
     DWORD now = GetTickCount();
     if (now - m_lastRelayUpdate < (DWORD)Config::RELAY_UPDATE_INTERVAL) return;
     m_lastRelayUpdate = now;
+
+    // ★ 2026-09-21: 发之前先保证连着 —— 从前 socket 只在启动时建立一次, 事后断开就哑掉
+    //   整个会话, 而现场只看到"孪生不动"。本函数是 33ms 节流, 重连自己另有 1s 节流。
+    if (!ensureRelayConnected()) return;
 
     auto& app = appState;
     char buf[256];
@@ -1874,6 +2015,13 @@ bool RelayCore::initForceReader() {
     ForcePipeline::init();
     ForceCompensation::init();
     ForceCalibration::setDragModeCallback(calibDragMode);
+    // 帧率噪声探针的锁 —— 【必须在线程起来之前】初始化: 线程一跑就会 pushForceFrame。
+    // pushForceFrame 里还有一道 s_noiseLockInit 兜底 (最早期几帧字面丢弃), 因为
+    // "先初始化再建线程"这件事本身没有编译期保证。
+    if (!s_noiseLockInit) {
+        InitializeCriticalSection(&s_noiseLock);
+        s_noiseLockInit = true;
+    }
     if (!ForceLogger::open(Config::FORCE_LOG_PATH)) {
         std::cerr << "[Force] Failed to open force log " << Config::FORCE_LOG_PATH << std::endl;
     }
@@ -1885,12 +2033,31 @@ bool RelayCore::initForceReader() {
     return true;
 }
 
+// 帧率噪声探针读出: 最近 ≤maxN 帧, 按【从旧到新】。见 RelayCore.h 里那一段。
+// ⚠ 【从旧到新】不是随便定的: 块平均、自相关都要时间顺序; 反过来算出来的自相关是共轭的,
+//   数值上看着一样但"哪个方向领先"就没了 —— 而正是那个方向说明"噪声是宽带还是慢漂"。
+// 锁内拷贝 (≤64 KB memcpy, 几微秒): 写侧是 125 Hz, 等这几微秒没有影响。
+int RelayCore::copyRecentForceFrames(ForceFrameSample* out, int maxN) {
+    if (!out || maxN <= 0 || !s_noiseLockInit) return 0;
+    EnterCriticalSection(&s_noiseLock);
+    int n = (s_noiseCount < maxN) ? s_noiseCount : maxN;
+    // 写指针指向"下一个待写" ⇒ 最旧的那一帧在 write − n 处 (模容量, 处理回绕)
+    const int start = ((s_noiseWrite - n) % kNoiseCap + kNoiseCap) % kNoiseCap;
+    for (int i = 0; i < n; i++) out[i] = s_noiseBuf[(start + i) % kNoiseCap];
+    LeaveCriticalSection(&s_noiseLock);
+    return n;
+}
+
 void RelayCore::pollForce() {
     static DWORD lastPollMs = 0;
     DWORD now = GetTickCount();
-    // 节拍取自 Config::FORCE_POLL_INTERVAL_MS: 它同时是 ForceCompensation::step 里
-    // 在线零偏 EMA 的【时间常数 ↔ α】换算所用的采样率。写成字面量 33 会让两处各有一个数,
-    // 而改了这里忘了那里 = 时间常数被悄悄改掉 (见该常数的说明)。
+    // 节拍取自 Config::FORCE_POLL_INTERVAL_MS。
+    // ★ 2026-09-21: 它的含义【变了】—— 从前它还是"力处理链的采样率"(补偿与滤波都在本函数里),
+    //   现在那两样已经搬到 ForceReader 线程 (帧率) 上跑, 所以本函数的节拍【只决定】
+    //   落盘 (ForceLogger) 与发给 MATLAB 的 F| 帧这两个输出口的更新率。
+    //   ⇒ 本函数里【不许再出现】任何"按固定采样率换算"的东西 (这是它从前的老毛病:
+    //     EMA 的 α 就曾按这个常数换算, 而实测节拍是 46~203 ms —— 见 ForceCompensation 的
+    //     stepIntervalSec / feedMotionEstimator, 那两处现在用的是【实测耗时】)。
     if (now - lastPollMs < (DWORD)Config::FORCE_POLL_INTERVAL_MS) return;
     lastPollMs = now;
 
@@ -1931,19 +2098,17 @@ void RelayCore::pollForce() {
         }
     }
 
-    // Run compensation (uses calibrated params if available).
-    // ⚠ 一致性闸门在这里面: 模型缺失或与【参考量】对不上时 (参考量见 ForceCompensation.cpp
-    //   的 guardReferenceValue), step() 会把 compensated[] 全置零,
-    //   下游由它推的 filtered / hapticOut / F| 帧随之断开 (即【传感器力那一条路】)。
-    //   ⚠ 【虚拟约束力不断】: 它在 HapticCallback.cpp:168 由【位置】现算
+    // ★★ 2026-09-21: 补偿 (ForceCompensation::step) 与滤波/映射 (ForcePipeline::step) 已经
+    //   【搬到 ForceReader 线程里跑】—— 见 forceReaderThread 里那一段的说明与
+    //   Config::FORCE_FILTER_CUTOFF / FORCE_FILTER_FS_HZ 两段。本函数【不要再调它们】:
+    //   每调一次就推进一次滤波器状态, 11 Hz 这一路再推一次会把 123 Hz 的结果又滤一遍,
+    //   相位与幅值全乱 —— 而且不会有任何报错 (这里【只剩读】)。
+    // ⚠ 一致性闸门的【判决】仍在 step() 里 (不通过的帧 compensated 被置零);
+    //   下面这个 guardSt 是【最近一帧的】状态, 用于报错, 【不用于判决】。
+    // ⚠ 【虚拟约束力不受影响】: 它在 HapticCallback.cpp:168 由【位置】现算
     //   (SafetyPredictor::computeConstraintForce), 与 compensated 无关 —— 别写成
     //   "触觉 / 约束力 / F| 一起断", 那会让人以为拒绝之后连安全边界的推手都没了。
-    //   闸门状态留在 ForceCompensation::guardState()。
-    ForceCompensation::step(app.forceData, pose);
     const ForceCompensation::GuardState guardSt = ForceCompensation::guardState();
-
-    // Run pipeline on compensated data
-    ForcePipeline::step(app.forceData);
 
     // Build F| protocol message — send filtered[] with deadzone applied
     char buf[128];

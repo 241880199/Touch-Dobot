@@ -141,6 +141,26 @@ if %ERRORLEVEL% EQU 0 (
 )
 echo.
 
+echo --- Building test_noise_probe ---
+call "%TESTDIR%\build_noise_probe_test.bat"
+if %ERRORLEVEL% EQU 0 (
+    echo   Build OK
+    echo.
+    echo === test_noise_probe.exe ===
+    "%TESTDIR%\test_noise_probe.exe"
+    if %ERRORLEVEL% EQU 0 (
+        set /a PASSED+=1
+        echo   [OK]
+    ) else (
+        set /a FAILED+=1
+        echo   [FAIL]
+    )
+) else (
+    echo   [FAIL: build error]
+    set /a FAILED+=1
+)
+echo.
+
 echo ================================================
 echo   Tests complete
 echo ================================================

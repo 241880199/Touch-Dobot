@@ -1091,21 +1091,42 @@ static void test_guard_ema_needs_sustained_mismatch() {
     ForceCompensation::step(fd, pose);
     CHECK(ForceCompensation::guardState() == ForceCompensation::GuardState::OK);
 
-    // 之后持续 2.5 N: EMA 从 0.30 爬向 2.5, alpha = 0.02 —— 第 5 帧还不够, 第 41 帧够了
-    // (第 5 帧 EMA ≈ 0.47 N, 第 41 帧 ≈ 1.52 N, 两者夹着力通道容差 1.2464 N)。
-    // 目标值必须【明显】超过容差, 否则"哪一帧越线"就落在噪声上了, 而这条钉的正是那个帧数。
+    // 之后持续 2.5 N: EMA 从 0.30 爬向 2.5, 迟早越过力通道容差 1.2464 N。
+    // 目标值必须【明显】超过容差, 否则"哪一帧越线"就落在噪声上了, 而这条钉的正是那个时间。
     // ⚠ 从 0.90 改成 2.5 (2026-09-21): 容差 0.50 -> 1.2464 之后, 0.90 N 永远越不过去
     //   (EMA 的稳态值就是 0.90), 这条会假红。
     fd.tcpForce[0] = -2.5;
+
+    // ★★ 2026-09-21: 这条用例的【时间】现在由用例自己给 —— 不再靠帧数隐含采样率。
+    // 【为什么必须改】闸门的 α 从前是每帧固定的 0.02 (隐含 30Hz), 当天改成按实测 dt 换算
+    //   (α = dt/τ, τ = FORCE_GUARD_EMA_TAU_S = 3.3 s)。而紧循环里 GetTickCount 的 dt ≈ 0
+    //   ⇒ EMA 冻住 ⇒ 原来"第 41 帧越线"的断言必然红, 而且【红得没有信息】(它测的是墙钟,
+    //   不是那条规则)。⇒ 用 setStepDtForTest 把时间钉成确定的输入。
+    // ⚠ 这也顺手消掉了墙钟依赖 —— 本项目已有一条用例因为用 Sleep 凑时间而间歇性假红 (A19)。
+    const double DT = 0.008;                       // 与生产实际节拍同量级 (125Hz)
+    ForceCompensation::setStepDtForTest(DT);
+
+    // 算清楚"多久才该越线"(这是本条断言的全部内容):
+    //   τ = 3.3 s, dt = 8 ms ⇒ α = dt/τ = 2.4242e-3
+    //   EMA(n) = 2.5 − (2.5−0.30)·(1−α)^n
+    //   越线条件 EMA(n) > 1.2464  ⇒  (1−α)^n < 0.56982  ⇒  n > 232  (≈1.86 s)
+    // ⇒ 取两侧都有余量的两个点: n=100 (≈0.24τ, EMA≈0.77) 与 n=400 (≈0.97τ, EMA≈1.67)。
     for (int k = 0; k < 4; k++) ForceCompensation::step(fd, pose);
     CHECK(ForceCompensation::guardState() == ForceCompensation::GuardState::OK);
-    for (int k = 0; k < 36; k++) ForceCompensation::step(fd, pose);
+
+    for (int k = 0; k < 96; k++) ForceCompensation::step(fd, pose);   // 累计 n=100 (0.8 s)
+    CHECK(ForceCompensation::guardState() == ForceCompensation::GuardState::OK);
+
+    for (int k = 0; k < 300; k++) ForceCompensation::step(fd, pose);  // 累计 n=400 (3.2 s)
     CHECK(ForceCompensation::guardState() == ForceCompensation::GuardState::INCONSISTENT);
 
     ForceCompensation::GuardReport rep;
     ForceCompensation::guardReport(rep);
     CHECK(rep.ema[0] > Config::FORCE_GUARD_TOL_FORCE_N);
-    CHECK(rep.frames == 41);
+    CHECK(rep.frames == 401);
+    // ⚠ 【必须还原】: 这是进程级全局, 不还原会漏给后面每一条用例 (本项目那份"测试之间
+    //   互相污染"的账就是这么来的 —— 见 guard 那条旧红)。
+    ForceCompensation::setStepDtForTest(-1.0);
     PASS();
 }
 

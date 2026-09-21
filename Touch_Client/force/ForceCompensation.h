@@ -28,7 +28,12 @@ namespace ForceCompensation {
     // Call once at startup — loads calibration file, initializes filters
     void init();
 
-    // Call at ~125Hz (from ForceReader thread) or ~30Hz (from pollForce)
+    // ★ 2026-09-21: 调用率【只有一处】—— 帧率, 实测 122.9 Hz (8.139 ms), 在
+    //   RelayCore::forceReaderThread 里紧挨着 30004 帧解析之后 (§一个调用点, 见那里的警告)。
+    //   从前它跑在 pollForce 的 ~11 Hz 上, 那是噪声压不下去的直接原因 (推导见 Config::
+    //   FORCE_FILTER_CUTOFF / FORCE_FILTER_FS_HZ)。
+    // ⚠ 【α 与 dt 都是按实测换算的, 所以本函数对调用率不敏感】—— 换率不会悄悄改时间常数
+    //   (stepIntervalSec / feedMotionEstimator)。但【滤波器系数是】: 见上面那两条常数。
     // fd.sixForceRaw[] (@1304, 原始读数) must be fresh; poseRxyz = {X,Y,Z,Rx,Ry,Rz} in mm & deg
     // from GetPose(). Writes fd.compensated[] (6-axis compensated force).
     // ⚠ 输入通道是 @1304, 【不是】@576 (fd.raw) —— 见下面全量模型的说明。
@@ -171,12 +176,38 @@ namespace ForceCompensation {
     //     按残余模型时代的写法直接存原始读数当零偏 ⇒ 重力被减两遍 ⇒ comp = −A·g ≈ 4N)。
     void currentGravityTerm(double Fg[3], double Mg[3]);
 
+    // 取出【最近一帧】算出的惯量项 Fi (传感器系, N)。
+    // ★ 2026-09-21 加 —— 给多姿态检查的 SPACE 打印用, 回答【comp 里的摆动有多少是这个量注进去的】。
+    //   ⚠ 【Fi 的唯一一份定义在 step() 里】—— 含那个"基座系 acc 映到传感器系"的 R^T 变换。
+    //     本访问器读的就是那一份。**别拿 motionState() 的 acc 在调用方自己乘一遍**:
+    //     那正是"同一个量两份实现", 而它就漂开过一次 (acc 没映到传感器系 ⇒ 减掉一个方向
+    //     不相干的 m·a ⇒ 现场表现为"阻力方向飘")。这是与 currentGravityTerm 同一条规矩。
+    //   ☞ 读法: 恰好 (0,0,0) ⇒ 本帧【没在动】(步 6 只在 !isStill() 时算它 ⇒ 惯量项没被注入);
+    //     非零 ⇒ 它就是 comp 里那一份注入量, 逐轴对着 comp 的摆动看即可。
+    //   ⚠ 闸门拒绝时它【不归零】(与 compensated 不同): 它是"本帧算出来的 Fi", 与闸门判决无关。
+    void currentInertiaTerm(double Fi[3]);
+
+    // ===== 测试钩子: 把 step() 认作的时间步长【钉成给定值】(秒) =====
+    // 【为什么需要它】step() 的 dt 是【实测】的 (stepIntervalSec ← GetTickCount), 这是刻意的
+    //   —— 按假定采样率换算正是本项目反复栽的错 (闸门 EMA 那个 0.02 就是这么坏的)。
+    //   代价是【用例没法驱动时间】: 紧循环里 dt≈0 ⇒ 任何"按时间常数换算 α"的 EMA 在用例里
+    //   都冻住 ⇒ 只能靠 Sleep 去凑真实时间, 而那会引入墙钟依赖 (本项目已有一条用例因此
+    //   间歇性假红, 记为 A19)。⇒ 用它把时间变成【确定的输入】。
+    // 传负数 = 恢复实测 (默认)。**只在用例里调**, 生产路径不许调。
+    void setStepDtForTest(double sec);
+
     // 诊断用: 把运动检测器的当前状态与判定读出来。返回 isStill() 的当前值。
     // 存在的理由: isStill() 疑似在生产中永远为假 (那样在线 EMA 零偏更新就不跑),
     // 需要用实机噪声量级来判定, 而不是靠读代码猜。
     // 注意 vel/acc 实际单位是 m/s 与 m/s² (MotionEstimator::update 里已 mm→m 换算),
-    // 与阈值常量同量纲 —— 可疑的不是单位, 是 update() 的 dt 与 pollForce() 实际
-    // 33ms/100ms 的采样节奏不符 (见 main.cpp 里 runMotionProbe 的注释)。
+    // 与阈值常量同量纲 —— 可疑的从来不是单位。
+    // ★ 2026-09-21 实机结论 (这条怀疑已经结了): 惯量项【确实一直在被算】——
+    //   四个姿态的 SPACE 窗口里 Fi 非零帧 = 22/22, 即 isStill() 几乎总是假。
+    //   但 Fi 的量级只有 max 0.0094 N (z), 面对 comp 0.18 N 的摆动是 19 分之一
+    //   ⇒ 它【不是】现场抖动的来源 (见 ForceCompensation::currentInertiaTerm)。
+    //   所以"EMA 零偏更新跑不跑"仍值得关心, 但那与力反馈的抖动是两件事。
+    //   ⚠ 探针读数 (main.cpp runMotionProbe / 本函数) 留在原处, 描述的是【改之前】的
+    //     dt/采样节奏错配; 那两件事 2026-09-21 已修 (喂样只在姿态变化时 + dt 用实测耗时)。
     bool motionState(double vel[3], double acc[3]);
 
     // Check if calibration is active
