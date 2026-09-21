@@ -122,7 +122,12 @@ bool start() {
     g_tareCount = 0;
     for (int i = 0; i < 6; i++) g_tareAccum[i] = 0.0;
 
-    printf("[Force] Calibration started — TARE phase (keep robot still for 2s)...\n");
+    // ★ 2026-09-21: 这里从前硬写 "2s" —— 而 TARE 现在多了一段 0.5s 静默期 (见 update() 的 TARE 分支),
+    //   总时长是 2.5s。跟上面那条一样: 时长写错会让操作员在静默期里就松手 ⇒ 又采到瞬态。
+    printf("[Force] Calibration started — TARE phase (keep robot still for %.0fs = "
+           "%.1fs 静默期 + %.0fs 累计)...\n",
+           Config::FORCE_CALIB_SETTLE_TIME_S + Config::FORCE_CALIB_STILL_COLLECT_S,
+           Config::FORCE_CALIB_SETTLE_TIME_S, Config::FORCE_CALIB_STILL_COLLECT_S);
     return true;
 }
 
@@ -135,8 +140,13 @@ bool startZero() {
     g_tareCount = 0;
     for (int i = 0; i < 6; i++) g_tareAccum[i] = 0.0;
 
+    // ★ 2026-09-21: 时长与分工要交代清楚 —— 前 0.5s 是【静默期】(不采样), 之后才累计。
+    //   不写出来, 操作员会按旧的 2 秒去等, 然后在静默期里就松手/动臂 ⇒ 又采到瞬态。
     printf("[Force] ZERO started — keep robot still for %.0fs "
-           "(TARE only: no motion phase, drag mode NOT enabled)...\n",
+           "(前 %.1fs 静默期不采样, 之后 %.0fs 才累计)...\n"
+           "        (TARE only: no motion phase, drag mode NOT enabled)...\n",
+           Config::FORCE_CALIB_SETTLE_TIME_S + Config::FORCE_CALIB_STILL_COLLECT_S,
+           Config::FORCE_CALIB_SETTLE_TIME_S,
            Config::FORCE_CALIB_STILL_COLLECT_S);
     return true;
 }
@@ -179,10 +189,26 @@ bool update(double dt, const double raw[6], const double pose[6]) {
 
     // ===== TARE: accumulate static bias =====
     case State::TARE: {
+        // ★★ 2026-09-21: 【先丢弃一段静默期, 再开始累计】(用户 2026-09-21 现场要求:
+        //   "静止与运动时保持 0, 只有接触到物体时才变化")。
+        // 【为什么需要它】现场: 按 'z' 之后静止读数仍有 ~0.14 N 残余 (主要 z 轴)。
+        //   而零偏漂移实测只有 0.16 N/小时 ⇒ **几分钟内本应是 ~0.02 N** ⇒ 那个 0.14 N
+        //   【不是漂移, 是调零采到了瞬态】: 操作员刚按完 z (可能刚松手、刚离开机械臂、
+        //   或臂还在回弹), 而 TARE 从前【立刻】开始平均 ⇒ 那两个秒里混进了过渡过程。
+        // 【处置】加一段 FORCE_CALIB_SETTLE_TIME_S 的静默期 —— 那个常数本来就有
+        //   (另一条标定流程在用), 只有 TARE 这条路没用它。静默期内【不累计】, 期满才从头收集。
+        // 【预期效果】把那个瞬态分量从零偏里去掉 ⇒ 静态残差降到噪声量级 (~0.02~0.05N)
+        //   ⇒ 0.20 的死区就能把剩下的噪声整个盖住 ⇒ 静止/运动时读数显 0 ✓
+        //   ⇒ 这是"显示 0"与"感觉到 0.3~0.6N 笔压"两条要求能同时成立的前提。
+        // ⚠ 总时长因此从 2.0s 变成 2.0 + 0.5 = 2.5s —— 启动提示文字也一起改了 (见 startZero),
+        //   否则操作员会按旧的 2 秒去等。
+        g_phaseTimer += dt;
+        if (g_phaseTimer < Config::FORCE_CALIB_SETTLE_TIME_S) {
+            return false;              // 静默期: 不累计
+        }
         for (int i = 0; i < 6; i++) g_tareAccum[i] += raw[i];
         g_tareCount++;
-        g_phaseTimer += dt;
-        if (g_phaseTimer >= Config::FORCE_CALIB_STILL_COLLECT_S) {
+        if (g_phaseTimer >= Config::FORCE_CALIB_SETTLE_TIME_S + Config::FORCE_CALIB_STILL_COLLECT_S) {
             // Auto-complete tare after collection time
             finalizeBias();
             printf("[Force] TARE done: biasF=(%+.3f, %+.3f, %+.3f) N  biasM=(%+.4f, %+.4f, %+.4f) Nm\n",
