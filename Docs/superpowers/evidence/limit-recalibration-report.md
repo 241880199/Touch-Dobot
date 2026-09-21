@@ -318,8 +318,9 @@ Cov(Â) = (JᵀJ)⁻¹ Jᵀ Σ J (JᵀJ)⁻¹ ,   Σ = diag( 逐姿态逐通道 
 
 ### 7.2 ⚠ 这一列是在**哪个 `A`** 上算的(解读的关键, 必须一起读)
 
-**是在生产的 `A_F` 上算的** —— 就是 `PayloadCalibration::fitRaw` 在
-`Touch_Client/calib/calib_poses.txt` 那一块上自己解出来的 `A`, 用来造零假设、
+**是在生产的 `A_F` 上算的** —— 就是 `PayloadCalibration::fitRaw` 在冻结快照
+`Touch_Client/tests/fixtures/calib_poses_2026-09-20_frozen.txt` 那一块上自己解出来的 `A`
+(活文件 `Touch_Client/calib/calib_poses.txt` 已退回运行时不跟踪; 该块在快照里逐行相同), 用来造零假设、
 也是实际采集那个统计量 `S = 27.2338` 的来源。**不是**联合估计的 `A_joint`。
 
 这带来一条必须写明的边界:

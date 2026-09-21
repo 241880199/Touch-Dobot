@@ -33,7 +33,8 @@
 
 ### 1.1 数据与精度(先说清楚, 免得报出假精度)
 
-- 四次采集都取自 `Touch_Client/calib/calib_poses.txt`: `12:38:19`(7 姿态, 18 列, **无噪声无重复对**)、
+- 四次采集都取自冻结快照 `Touch_Client/tests/fixtures/calib_poses_2026-09-20_frozen.txt`
+  (活文件 `Touch_Client/calib/calib_poses.txt` 已退回运行时不跟踪; 四个块逐行相同): `12:38:19`(7 姿态, 18 列, **无噪声无重复对**)、
   `15:25:23`(9 姿态, 3 对)、`15:30:03`(10 姿态, 5 对)、`15:33:38`(10 姿态, 5 对)。
   15:xx 三份与 `Touch_Client/tests/fixtures/calib_poses_2026-09-19_15*.txt` 内容一致。
 - **夹具把姿态写成 `%.1f`、把 @1304 的力与力矩写成 `%.3f`**, 所以:

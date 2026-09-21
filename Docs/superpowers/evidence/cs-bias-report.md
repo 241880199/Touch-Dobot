@@ -62,7 +62,8 @@ cmd.exe //c "D:\tmp\csbias\build.bat"
 D:\tmp\csbias\probe.exe > D:\tmp\csbias\out.txt 2> D:\tmp\csbias\err.txt
 ```
 
-数据: `Touch_Client/calib/calib_poses.txt` 的四个块(12:38 / 15:25 / 15:30 / 15:33),
+数据: 冻结快照 `Touch_Client/tests/fixtures/calib_poses_2026-09-20_frozen.txt` 的四个块(12:38 / 15:25 / 15:30 / 15:33)
+(活文件 `Touch_Client/calib/calib_poses.txt` 已退回运行时不跟踪; 那四个块在快照里与冻结夹具逐行相同),
 以及冻结夹具 `tests/fixtures/calib_poses_2026-09-19.txt`(7 姿态)与
 `tests/fixtures/calib_poses_2026-09-19_15{25,30,33}.txt`。
 **夹具的第一列是 `rx,ry,rz`、第 4~6 列是 `x,y,z`**, 而 `fitRaw` 要 `[x,y,z,rx,ry,rz]` ——
@@ -76,7 +77,7 @@ D:\tmp\csbias\probe.exe > D:\tmp\csbias\out.txt 2> D:\tmp\csbias\err.txt
 | 用**我的** `ssM`/`ssFree` 配**生产的** `σ_rep,M` 复算 `lackOfFitMomentRatio` | **7.1e-14 / 4.1e-14 / 6.9e-14**(15:xx 三次) |
 | `c_null`(B_g 的左零向量)的两条独立求法(最小特征向量 vs 三列的法向叉乘) | 夹角 **0.0004° / 0.0092° / 0.0003° / 0.0012°**;且 `‖B_gᵀ·c_null‖` **逐位等于 σ_min(B_g)** |
 | 规范律 `A_m → A_m/λ ⇒ c_s^(b) → λ·c_s^(b)` | λ=0.9/1.0/1.1 上 **1.1e-14 / 0 / 2.2e-15**(15:25: 3.2e-12) |
-| 7 姿态冻结夹具 vs `calib_poses.txt` 的同名块 | `max|ΔF| = 0  max|ΔM| = 0  max|ΔcS| = 0`(**同一份数据**) |
+| 7 姿态冻结夹具 vs 快照 `calib_poses_2026-09-20_frozen.txt` 的同名块 | `max|ΔF| = 0  max|ΔM| = 0  max|ΔcS| = 0`(**同一份数据**) |
 
 生产字段(`cS` 之外)全部从 `RawFit` 的公开字段取: `paramSigma`、`cond`、`rmsForceN/rmsMomentNm`、
 `lackOfFitMomentRatio/Limit`、`repeatSigmaF/M`、`repeatSysF/M` —— **没有重写任何生产统计量**。

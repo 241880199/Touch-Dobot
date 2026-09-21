@@ -4,7 +4,12 @@ build_constraint_test.bat
 force_calib.json
 # ⚠ 上面两条通配是冲着【测试运行产物】去的, 不许吃掉 fixtures/ 里的【入库证据快照】——
 #   那是只读副本, 与本机的运行状态无关。2026-09-21: fixtures/calib_log_*_frozen.txt 曾被
-#   `*_log*.txt` 吃掉 (git check-ignore 抓到的), 下面两条把它按回入库面。否定规则必须写在
+#   `*_log*.txt` 吃掉 (git check-ignore 抓到的), 下面第一条把它按回入库面。否定规则必须写在
 #   通配之后 (后者胜出), 所以它们放在文件末尾。
+#   【第二条为什么是 `*_frozen.json` 而不是 `force_calib*.json`】: 上面那条精确规则只匹配
+#   名为 force_calib.json 的文件, 而快照叫 force_calib_2026-09-20_frozen.json —— 名字对不上,
+#   所以【快照本来就没被吃掉】, 否定不是为它救场的。写成宽通配 `force_calib*.json` 反而会
+#   顺带把 fixtures/force_calib.json 这个【假设的运行时产物】也放回入库面, 白扩了不忽略的面积。
+#   收窄成 `*_frozen.json`: 只给冻结快照一个显式的"这是入库证据"标记, 运行时文件照旧被吃掉。
 !fixtures/*_log*.txt
-!fixtures/force_calib*.json
+!fixtures/*_frozen.json
