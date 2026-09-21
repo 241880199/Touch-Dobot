@@ -1040,16 +1040,35 @@ void step(AppState::ForceData& fd, const double poseRxyz[6]) {
     if (!g_motion.isStill()) {
         double vel[3], acc[3];
         g_motion.getState(vel, acc);
-        const double iSign = Config::FORCE_INERTIA_SIGN;   // +1 = 加回去 (物理推导要求)
-        Fi[0] = iSign * mass * acc[0];
-        Fi[1] = iSign * mass * acc[1];
-        Fi[2] = iSign * mass * acc[2];
+
+        // ★★★ 2026-09-21【坐标系】: 把加速度从【基座系】映到【传感器系】。
+        // 【为什么必须映】运动估计器的输入是 robotActualPose.x/y/z —— **基座系**的笛卡尔位置;
+        //   而 @1304 / Fg / comp 全在**传感器系**。工具是斜的 (现场 R≈(-174.8,+9.8,+68.2)),
+        //   同一个加速度投到传感器系上, 方向和大小【完全不同】 ⇒ 直接拿基座系的 acc 去减,
+        //   减掉的那个 m·a 指着不相干的方向 ⇒ **不是在抵惯量, 是在注入一股假力**。
+        //   ⇒ 这解释了现场的三件事: 翻符号没用(方向错, 不是符号错) · 阻力与运动方向对不上 ·
+        //     它总在跟你作对 (所以听起来像"阻力")。
+        // 【用的变换与重力项同一个】: flangeGravity 里 g0 = R^T·(0,0,G) 就是"把基座系的矢量
+        //   映到传感器系"; 这里对加速度做同一件事 (R^T × a)。⚠ 别另发明一个变换。
+        double Rm[9];
+        TcpCalibration::rpyToMatrix(poseRxyz[3], poseRxyz[4], poseRxyz[5], Rm);
+        double aS[3];
+        aS[0] = Rm[0]*acc[0] + Rm[3]*acc[1] + Rm[6]*acc[2];   // R^T × acc (R 行主序)
+        aS[1] = Rm[1]*acc[0] + Rm[4]*acc[1] + Rm[7]*acc[2];
+        aS[2] = Rm[2]*acc[0] + Rm[5]*acc[1] + Rm[8]*acc[2];
+
+        const double iSign = Config::FORCE_INERTIA_SIGN;
+        Fi[0] = iSign * mass * aS[0];
+        Fi[1] = iSign * mass * aS[1];
+        Fi[2] = iSign * mass * aS[2];
     }
 
-    // 7. Compensate: compensated = sixForceRaw − bias − gravity 【+】inertia
-    //    ★ 2026-09-21: 末项从 `− Fi` 改成 `+ Fi` —— 惯量项在 @1304 里【已经带一个负号】,
-    //      必须加回去才剥得出外力 (推导见 Config::FORCE_INERTIA_SIGN)。
-    //      从前那个 `−` 让惯量被加了两倍 ⇒ 运动时手上有一股"阻力"。
+    // 7. Compensate: compensated = sixForceRaw − bias − gravity + inertia
+    //    ⚠ 末项是 `+ Fi`, 而 Fi 里【带着符号】Config::FORCE_INERTIA_SIGN ∈ {−1, 0, +1}。
+    //      历史: 原来写 `− Fi` 且 `Fi = mass·acc` (等价于 标度 = −1); 我 2026-09-21 一度
+    //      按"@1304 里已含 −m·a"的推导把它改成 +1 —— **实机复测否定了那个前提**
+    //      (现场"阻力变大"), 所以现在的默认值回到了原行为, 并把标度做成可取 0。
+    //      完整经过与教训见 Config::FORCE_INERTIA_SIGN 那一大段。
     //    ⚠ 先算进【局部变量】, 不直接写 fd —— 闸门要在数据出门之前判。
     double comp[6];
     comp[0] = fd.sixForceRaw[0] - bF[0] - Fg[0] + Fi[0];

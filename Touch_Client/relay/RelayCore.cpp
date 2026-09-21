@@ -866,12 +866,39 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
 
         Vec3 current(stylusRx, stylusRy, stylusRz);
 
-        // Compute incremental delta from stylus rotation change
-        double drx = current.x - m_lastStylusOrient.x;
-        double dry = current.y - m_lastStylusOrient.y;
-        double drz = current.z - m_lastStylusOrient.z;
+        // ★★★ 2026-09-21: 从【累加式】改成【参照式】(相对按下点的绝对偏移)。
+        //
+        // 【为什么 —— 用户的话说得对】只要目标是"把逐帧增量累加起来", 手抖 (永远非零、而且
+        //   因人而异) 就一定会被积进去 ⇒ **死区调多大都只是把漂移调慢, 治不了它**;
+        //   而"去标定每个人的抖动"既不可靠也不该做。
+        //   现场实测印证了量级问题: 移动手写笔时笔杆朝向只差 0.9°, 机器人姿态却转了 10.4° ——
+        //   方向对得上轴重映射 (笔杆 Rz → 机器人 Ry, 见下面那段), 所以【映射没错】;
+        //   错的是【量级】: 手一动笔杆就抖, 而抖动被"三轴一起放行 + 无界累加"放大了。
+        //
+        // 【现在】 目标 = 【按下按钮2时的机器人姿态】 + R×(K × (笔杆现在 − 笔杆按下时))
+        //   · 抖动 ⇒ 目标只【颤动】(有界、自回), **与抖动大小无关 ⇒ 不漂** ✓
+        //   · 手腕转到底 ⇒ 【松手再按 = 重新索引】 (onButton2Press 已经重设这组参照 ✓)
+        //   · 死区从此只是"笔杆要转多少机器人才开始跟"的【响应门限】, 不再是防漂的关键参数
+        //     ⇒ **不再需要按每个人的抖动去标定它** ✓
+        //
+        // ⚠ 这组参照 (m_orientRefStylus / m_orientRefRobot) 【本来就有】—— 它的原注释写着
+        //   "stored for diagnostics/re-sync and logged on press — they are NOT used in the
+        //    per-frame delta computation"。**本改动就是把它们从"只存着"变成"真的在用"。**
+        double offx = current.x - m_orientRefStylus.x;
+        double offy = current.y - m_orientRefStylus.y;
+        double offz = current.z - m_orientRefStylus.z;
 
-        // Update reference for next frame
+        // 逐轴响应门限 (低于它本帧这一轴不动; 只影响颤动幅度, 不影响漂移)
+        const double dz = Config::ORIENT_DEADZONE_DEG;
+        auto axisGate = [dz](double d) -> double {
+            return (fabs(d) >= dz) ? d : 0.0;
+        };
+        double drx = axisGate(offx);
+        double dry = axisGate(offy);
+        double drz = axisGate(offz);
+
+        // ⚠ m_lastStylusOrient 从本改动起【只用于诊断】(记录最近一次原始读到的笔杆姿态),
+        //   控制回路不再读它 —— 别再把它当成"增量式参照"。
         m_lastStylusOrient = current;
 
         // NaN/Inf guard: skip this frame's orientation delta (don't increment nan counter)
@@ -879,23 +906,22 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
             std::isinf(drx) || std::isinf(dry) || std::isinf(drz)) {
             // orientation delta skipped for this frame only
         } else {
-        // Deadzone filter
-        if (fabs(drx) >= Config::ORIENT_DEADZONE_DEG ||
-            fabs(dry) >= Config::ORIENT_DEADZONE_DEG ||
-            fabs(drz) >= Config::ORIENT_DEADZONE_DEG) {
+        // ★ 死区已经在上面【逐轴】判过了 (drx/dry/drz 不是 0 就是已过门限的值)。
+        //   从前这里是一个【三轴 OR 的门】—— 那正是"只有一轴动、另两轴噪声也放行"的来源。
+        //   ⇒ 现在只问一句: 这一帧有没有任何一轴真的用掉了增量?
+        if (drx != 0.0 || dry != 0.0 || drz != 0.0) {
 
             // Apply gain
             drx *= Config::ORIENT_GAIN;
             dry *= Config::ORIENT_GAIN;
             drz *= Config::ORIENT_GAIN;
 
-            // Step cap
-            if (drx > Config::ORIENT_MAX_STEP_DEG) drx = Config::ORIENT_MAX_STEP_DEG;
-            if (drx < -Config::ORIENT_MAX_STEP_DEG) drx = -Config::ORIENT_MAX_STEP_DEG;
-            if (dry > Config::ORIENT_MAX_STEP_DEG) dry = Config::ORIENT_MAX_STEP_DEG;
-            if (dry < -Config::ORIENT_MAX_STEP_DEG) dry = -Config::ORIENT_MAX_STEP_DEG;
-            if (drz > Config::ORIENT_MAX_STEP_DEG) drz = Config::ORIENT_MAX_STEP_DEG;
-            if (drz < -Config::ORIENT_MAX_STEP_DEG) drz = -Config::ORIENT_MAX_STEP_DEG;
+            // ★ 单帧限幅【不在这里】(2026-09-21 参照式改造)。
+            //   参照式下 drx/dry/drz 是"相对按下按钮2那一点的偏移"——**可以很大, 而且那是对的**:
+            //   操作员转了 30°, 就该给 30°。从前这里限的是【偏移】, 那是累加式时代的写法,
+            //   会把大转动【永久截断】掉。
+            //   ⇒ 限幅改到【目标姿态每帧的变化】上 (见下面 wx/wy/wz 那一段) —— 那才是"手一甩
+            //     不让机器人跟着猛转"要限的量。
 
             // ★★ 逐轴符号 (2026-09-21 改)。从前这里是【无条件三轴取负】, 注释的理由是
             //   "Touch Euler (ZYX intrinsic) 沿正轴看逆时针增大, 而 Dobot RPY 相反"。
@@ -928,7 +954,28 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
             double robot_dRy = R10*drx + R11*dry + R12*drz;
             double robot_dRz = R20*drx + R21*dry + R22*drz;
 
-            Vec3 robotDelta(robot_dRx, robot_dRy, robot_dRz);
+            // ★★★ 期望目标 = 【按下按钮2时的机器人姿态】+ 映射后的偏移 —— 【不是累加】。
+            //   `m_orientRefRobot` 是 onButton2Press 时抓的那一份机器人姿态, 在整个按住期间不变。
+            //   ⇒ 抖动只让 desired 在参照附近【颤动】, 手一回它自己就回去 ⇒【不漂】,
+            //     而且与抖动多大无关 (这就是这套改法的全部意义)。
+            const Vec3 desired(m_orientRefRobot.x + robot_dRx,
+                               m_orientRefRobot.y + robot_dRy,
+                               m_orientRefRobot.z + robot_dRz);
+
+            // 本帧要走的量 = 期望 − 当前目标, 再【逐轴限幅】。
+            // 保护的是"手一甩不会让机器人跟着猛转"; 因为目标是朝 desired 收敛的,
+            // 限幅只会让它【慢慢跟上】, 不会像从前那样把量永久截断掉。
+            double wx = desired.x - m_targetOrient.x;
+            double wy = desired.y - m_targetOrient.y;
+            double wz = desired.z - m_targetOrient.z;
+            if (wx >  Config::ORIENT_MAX_STEP_DEG) wx =  Config::ORIENT_MAX_STEP_DEG;
+            if (wx < -Config::ORIENT_MAX_STEP_DEG) wx = -Config::ORIENT_MAX_STEP_DEG;
+            if (wy >  Config::ORIENT_MAX_STEP_DEG) wy =  Config::ORIENT_MAX_STEP_DEG;
+            if (wy < -Config::ORIENT_MAX_STEP_DEG) wy = -Config::ORIENT_MAX_STEP_DEG;
+            if (wz >  Config::ORIENT_MAX_STEP_DEG) wz =  Config::ORIENT_MAX_STEP_DEG;
+            if (wz < -Config::ORIENT_MAX_STEP_DEG) wz = -Config::ORIENT_MAX_STEP_DEG;
+
+            Vec3 robotDelta(wx, wy, wz);
 
             // Get current joints for avoidance computation
             double curJoints[6];
