@@ -1027,24 +1027,34 @@ void step(AppState::ForceData& fd, const double poseRxyz[6]) {
     g_lastFg[0] = Fg[0]; g_lastFg[1] = Fg[1]; g_lastFg[2] = Fg[2];
     g_lastMg[0] = Mg[0]; g_lastMg[1] = Mg[1]; g_lastMg[2] = Mg[2];
 
-    // 6. Inertia force (only if moving) —— 语义、时机、系数一字未改 (仍是 mass·a);
-    //    mass 现在取自全量模型的质量尺度 |det A|^(1/3) (见 currentMassKg)。
+    // 6. Inertia force (only if moving) —— ★ 2026-09-21 符号改了, 见 Config::FORCE_INERTIA_SIGN。
+    //    从前这里是 `Fi = mass·acc` 而第 7 步写的是 `− Fi` ⇒ 等价于 −(mass·acc) ⇒
+    //    **惯量不但没被抵掉、反而被加了两倍** ⇒ 运动时手上出现一股"阻力"(现场实测)。
+    //    推导 (写在该常数处, 一句话版): @1304 − bF − A·g 里【已经带着 −m·a】⇒
+    //    要剥出外力, 必须把它【加】回去。
+    //    ⚠ 与调零那个 bug 同一类: 残余模型时代 mass 是【可带符号的】, 全量模型下
+    //      mass = |det A|^(1/3) 恒正 ⇒ 那个符号没地方来了, 而公式没跟着改。
+    //    mass 仍然取自全量模型的质量尺度 (见 currentMassKg)。
     const double mass = massScaleOf(A);
     double Fi[3] = {0, 0, 0};
     if (!g_motion.isStill()) {
         double vel[3], acc[3];
         g_motion.getState(vel, acc);
-        Fi[0] = mass * acc[0];
-        Fi[1] = mass * acc[1];
-        Fi[2] = mass * acc[2];
+        const double iSign = Config::FORCE_INERTIA_SIGN;   // +1 = 加回去 (物理推导要求)
+        Fi[0] = iSign * mass * acc[0];
+        Fi[1] = iSign * mass * acc[1];
+        Fi[2] = iSign * mass * acc[2];
     }
 
-    // 7. Compensate: compensated = sixForceRaw − bias − gravity − inertia
+    // 7. Compensate: compensated = sixForceRaw − bias − gravity 【+】inertia
+    //    ★ 2026-09-21: 末项从 `− Fi` 改成 `+ Fi` —— 惯量项在 @1304 里【已经带一个负号】,
+    //      必须加回去才剥得出外力 (推导见 Config::FORCE_INERTIA_SIGN)。
+    //      从前那个 `−` 让惯量被加了两倍 ⇒ 运动时手上有一股"阻力"。
     //    ⚠ 先算进【局部变量】, 不直接写 fd —— 闸门要在数据出门之前判。
     double comp[6];
-    comp[0] = fd.sixForceRaw[0] - bF[0] - Fg[0] - Fi[0];
-    comp[1] = fd.sixForceRaw[1] - bF[1] - Fg[1] - Fi[1];
-    comp[2] = fd.sixForceRaw[2] - bF[2] - Fg[2] - Fi[2];
+    comp[0] = fd.sixForceRaw[0] - bF[0] - Fg[0] + Fi[0];
+    comp[1] = fd.sixForceRaw[1] - bF[1] - Fg[1] + Fi[1];
+    comp[2] = fd.sixForceRaw[2] - bF[2] - Fg[2] + Fi[2];
     comp[3] = fd.sixForceRaw[3] - bM[0] - Mg[0];
     comp[4] = fd.sixForceRaw[4] - bM[1] - Mg[1];
     comp[5] = fd.sixForceRaw[5] - bM[2] - Mg[2];
