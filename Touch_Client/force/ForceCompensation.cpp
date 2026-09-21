@@ -114,6 +114,10 @@ static bool   g_guardSeeded  = false;    // EMA 是否已用第一帧播种
 static long   g_guardFrames  = 0;
 static ForceCompensation::GuardState g_guardState = ForceCompensation::GuardState::UNCALIBRATED;
 static DWORD  g_guardReportMs = 0;       // 上次打印/上报的时刻
+// 【上一次打整块】的时刻 (2026-09-21 收口)。与 g_guardReportMs 分开的理由: 那一份在【放行】
+// 时每帧都被刷新, 而放行是常态 ⇒ 拿它当"整块的节流"会让"长时间正常之后的第一声拒绝"
+// 被误当成"刚打过整块"而压掉。这一份只在【真的打出整块】时写。
+static DWORD  g_guardFullBlockMs = 0;
 
 // ===== 【哪些通道参与判决】—— 本数组是掩码的【唯一一份实现】 =====
 //   index:      0    1    2     3     4     5
@@ -353,11 +357,71 @@ bool MotionEstimator::isStill() const {
 
 // ===== 闸门的报告 =====
 
+// 【一行式】的拒绝读数 —— "仍在拒绝"的复报与"被节流掉整块的状态跃迁"共用这一份实现。
+// transition: true = 刚刚变成这个状态 (整块被节流掉了), false = 状态没变、复报。
+// ⚠ 它【不是"无需解释"】: 整块 (原因 + 处置 + 本帧姿态 + 逐通道表) 会在
+//   FORCE_GUARD_REPORT_MS 到点后补出来。这一行只是把这段时间里的状态与理由留下一句话。
+// ⚠ 三种原因的措辞【不许合并】: 处置各不相同 (去标定 / 去查下发 / 去查这一路的数据),
+//   而这一行往往是操作员【第一眼】看到的东西。
+static void printCompactRefusal(ForceCompensation::GuardState st, bool transition) {
+    static const char* NM[6] = { "Fx(N)", "Fy(N)", "Fz(N)", "Mx(Nm)", "My(Nm)", "Mz(Nm)" };
+    const char* lead = transition ? "刚变成拒绝, 解析从略" : "仍在拒绝";
+
+    if (st == ForceCompensation::GuardState::UNCALIBRATED) {
+        // 配置态: 原因一句话说得完 (逐通道表与它无关 —— 那时 compensated 恒为 0)。
+        fprintf(stderr, "[Force] !! (%s) 【没有可用模型】—— 本地补偿未启用,"
+                        " 不是\"标定与机械臂不符\"。\n"
+                        "[Force] !!   处理: 按 'm' 采多姿态 -> 's' 解出 A, 再按 'z' 调零。\n",
+                lead);
+        fflush(stderr);
+        return;
+    }
+    if (st == ForceCompensation::GuardState::REFERENCE_UNAVAILABLE) {
+        // ★ 这一路【不能】用下面那行逐通道读数: 那些差是拿"参考量"当被减数算出来的, 而这一路
+        //   【没有数据】⇒ 那六个数不是任何一次比较的结果。所以这行只说状态 + 为什么。
+        // ⚠ 这两个数【一定是本帧的】: 能进入本状态的 setGuardState 调用全程序只有一处, 就在
+        //   写下这两个数的那几行下面 (step() 第 7b 步); 而 resetGuard() 把它们复位时状态同时
+        //   被置回 UNCALIBRATED ⇒ "本状态成立"与"没有本帧"不会同时发生。
+        fprintf(stderr, "[Force] !! (%s) 参考量不可用 —— 判据那一侧没有数据"
+                        " (六维力在线状态 @1037 = %d, 只有 1 算在线; 帧陈旧 = %d)。"
+                        "逐通道对比表不适用: 没有第二个读数, 没有比过。\n"
+                        "[Force] !!   处理: 把参考量这一路的数据找回来 (30004 帧 / 六维力在线状态),"
+                        " 然后等它恢复 —— 本闸门会自动放行。\n",
+                lead, g_refOnlineLast, g_refStaleLast ? 1 : 0);
+        fflush(stderr);
+        return;
+    }
+
+    // INCONSISTENT: 那一行"判据差 / 诊断差"并排读数就是这条复报要带的全部增量。
+    // ⚠ 前一半是【判据】的差 (对参考量), 后一半是【诊断】的差 (对 @576) —— 谁是谁由
+    //   guardReferenceValue 那一处定义决定, 这里不许再抄通道号。
+    char line[384];
+    int off = snprintf(line, sizeof(line),
+                       "[Force] !! (%s) 仍在拒绝  [判据(与参考量) / 诊断(与 @576)]:", lead);
+    if (off < 0) off = 0;   // snprintf 可返回负值; 不管的话下面 (size_t)off 会回绕
+    for (int i = 0; i < 6; i++) {
+        if ((size_t)off + 40 >= sizeof(line)) break;   // 余量不足就停, 不越界
+        const int w = snprintf(line + off, sizeof(line) - (size_t)off, " %s%+.3f/%+.4f",
+                               NM[i], g_guardEma[i], g_guardEmaDiag[i]);
+        if (w > 0) off += w;
+    }
+    if ((size_t)off < sizeof(line))
+        snprintf(line + off, sizeof(line) - (size_t)off, "\n");
+    fprintf(stderr, "%s", line);
+    fflush(stderr);
+}
+
 // 闸门状态迁移 + 响亮地报出【逐通道】的比较结果。
 // 只在【状态变化】时立刻打印; 状态不变时按 FORCE_GUARD_REPORT_MS 复报一次 ——
 // 闸门每帧都判 (30Hz), 每帧都印会把控制台冲掉, 而"看不过来"与"没报"在操作上是一回事。
 // ⚠ 复报【只对"拒绝"那一侧】: 放行是常态, 每 5 s 印一行"放行"同样是噪音
 //   (而且会把真正要紧的那段挤出可视区)。放行只在它【刚刚恢复】时印一次。
+// ★ 2026-09-21 收口 (最终复审 2b): 【状态跃迁也按同一个间隔节流整块】。
+//   从前"一变就整块": 边缘链路上参考量一会儿有一会儿没, 状态来回跳, 于是每跳一次
+//   就是一整块 —— 控制台被冲掉 (而这一屏本来是要在现场读的), 被冲掉的正是更能说明
+//   问题的那几行。现在: 距上次整块不足一个 FORCE_GUARD_REPORT_MS 时, 跃迁只出一行
+//   (见 printCompactRefusal) —— 【不是静默】, 状态、原因、处置都在那一行里, 整块到点补出。
+//   ⚠ 判据取自【既有常量】(那一个间隔本来就是这个机制的时间尺度), 没有新造门限。
 static void setGuardState(ForceCompensation::GuardState st) {
     const DWORD now = GetTickCount();
     const bool changed = (st != g_guardState);
@@ -394,63 +458,36 @@ static void setGuardState(ForceCompensation::GuardState st) {
     if (!changed) {
         if (uncal) return;
         if ((now - g_guardReportMs) < static_cast<DWORD>(Config::FORCE_GUARD_REPORT_MS)) return;
-    }
-    g_guardReportMs = now;
-
-    // 【复报只打一行】(2026-09-20)。全表只在【状态跃迁】时打。
-    // 为什么: 拒绝是常态, 每 5 s 一次那 9 行解释 + 6 行表 + 姿态行会把控制台全冲掉 ——
-    //   而现场要读的恰恰是【别的】输出: 's' 的那一屏、'p' 的确认提示、'y' 的逐条回执。
-    //   实测代价 (2026-09-20 现场): 因为这条复报, 操作员【看不到 'p' 打了什么】, 于是
-    //   无法判定"发送被拒"与"按键根本没收到" —— 一套诊断被彻底淹没。
-    //   这与刚被取消的 UNCALIBRATED 复报是【同一个病】: 复报的内容与上次逐字相同。
-    // 复报仍然出声 (拒绝没变这件事还得让人看见), 只是不再重抄整块; 哪几个通道超限直接
-    //   写在那一行里 —— 那正是复报该带的唯一增量。
-    // (走到这里且 !changed 只可能是 INCONSISTENT 或 REFERENCE_UNAVAILABLE:
-    //  !changed && uncal 在上面已经 return 了。)
-    static const char* NM[6] = { "Fx(N)", "Fy(N)", "Fz(N)", "Mx(Nm)", "My(Nm)", "Mz(Nm)" };
-    if (!changed) {
-        // ★ REFERENCE_UNAVAILABLE 的复报【不能】用下面那行逐通道读数: 那些差是拿
-        //   "参考量"当被减数算出来的, 而这一路【没有数据】⇒ 那六个数不是任何一次比较的
-        //   结果。复报仍然出声 (还得让人看见它没恢复), 但只说状态 + 为什么。
-        if (!compared) {
-            // ⚠ 这两个数【一定是本帧的】(2026-09-21 复审): 这里从前分两支 —— "有本帧"与
-            //   "没有本帧, 照实说没有" —— 而后者【到不了】: 能进入 REFERENCE_UNAVAILABLE 的
-            //   setGuardState 调用全程序只有一处, 就在写下这两个数的那几行下面 (step() 第 7b
-            //   步); 而 resetGuard() 把它们复位时, 状态同时被置回 UNCALIBRATED ⇒ "本状态成立"
-            //   与"没有本帧"不会同时发生。留着那一支等于留一段【读起来像活路、实际走不到】的
-            //   文字 (这个项目记过账: 加枚举值时编译器不会替我们发现漏配, 是同一类问题)。
-            //   所以那一支连同它的标志一起去掉了, 判据没变: 打出来的永远是触发本状态的那一帧。
-            fprintf(stderr, "[Force] !! (复报) 仍在拒绝: 参考量【不可用】—— 判据那一侧没有数据"
-                            " (六维力在线状态 @1037 = %d, 只有 1 算在线; 帧陈旧 = %d)。"
-                            "逐通道对比表不适用: 没有第二个读数, 没有比过。\n",
-                    g_refOnlineLast, g_refStaleLast ? 1 : 0);
-            fflush(stderr);
-            return;
-        }
-
-        // 【复报把六个通道【两个对照量】都报出来】(2026-09-20 修订; 2026-09-21 角色互换)。
-        // 原来只报超限的那几个通道的值 —— 但真正要看的是【两个对照量哪个更接近 0】,
-        // 而那只在【全表】里有, 全表又只在状态跃迁时打 ⇒ 操作员每次重启才看得到一次。
-        // 现在这行就是一份【随时可读】的紧凑读数: 每个通道 "判据差 / 诊断差" 并排。
-        // ⚠ 前一半是【判据】的差 (对参考量), 后一半是【诊断】的差 (对 @576)—— 谁是谁
-        //   由 guardReferenceValue 那一处定义决定, 这里不许再抄通道号。
-        // 一行约 130 字符、每 5 s 一次 —— 比原来那 14 行的块省得多, 而信息更全。
-        char line[384];
-        int off = snprintf(line, sizeof(line),
-                           "[Force] !! (复报) 仍在拒绝  [判据(与参考量) / 诊断(与 @576)]:");
-        if (off < 0) off = 0;   // snprintf 可返回负值; 不管的话下面 (size_t)off 会回绕
-        for (int i = 0; i < 6; i++) {
-            if ((size_t)off + 40 >= sizeof(line)) break;   // 余量不足就停, 不越界
-            const int w = snprintf(line + off, sizeof(line) - (size_t)off, " %s%+.3f/%+.4f",
-                                   NM[i], g_guardEma[i], g_guardEmaDiag[i]);
-            if (w > 0) off += w;
-        }
-        if ((size_t)off < sizeof(line))
-            snprintf(line + off, sizeof(line) - (size_t)off, "\n");
-        fprintf(stderr, "%s", line);
-        fflush(stderr);
+        g_guardReportMs = now;
+        // 【复报只打一行】(2026-09-20)。全表只在【状态跃迁】时打。
+        // 为什么: 拒绝是常态, 每 5 s 一次那 9 行解释 + 6 行表 + 姿态行会把控制台全冲掉 ——
+        //   而现场要读的恰恰是【别的】输出: 's' 的那一屏、'p' 的确认提示、'y' 的逐条回执。
+        //   实测代价 (2026-09-20 现场): 因为这条复报, 操作员【看不到 'p' 打了什么】, 于是
+        //   无法判定"发送被拒"与"按键根本没收到" —— 一套诊断被彻底淹没。
+        //   这与刚被取消的 UNCALIBRATED 复报是【同一个病】: 复报的内容与上次逐字相同。
+        // 复报仍然出声 (拒绝没变这件事还得让人看见), 只是不再重抄整块; 哪几个通道超限直接
+        //   写在那一行里 —— 那正是复报该带的唯一增量。
+        // (走到这里且 !changed 只可能是 INCONSISTENT 或 REFERENCE_UNAVAILABLE:
+        //  !changed && uncal 在上面已经 return 了。)
+        printCompactRefusal(st, false);
         return;
     }
+
+    // ★ 2026-09-21 收口 (2b): 状态【跃迁】也要按同一个既有间隔节流整块。理由见函数头上那段。
+    //   ⚠ 节流掉的是【整块的形态】, 不是"报告"这件事: 下面这一行仍然出声, 状态、原因、
+    //     处置都在里面, 与复报共用同一份实现。
+    if (g_guardFullBlockMs != 0 &&
+        (now - g_guardFullBlockMs) < static_cast<DWORD>(Config::FORCE_GUARD_REPORT_MS)) {
+        g_guardReportMs = now;
+        printCompactRefusal(st, true);
+        return;
+    }
+    g_guardReportMs = now;
+    g_guardFullBlockMs = now;
+
+    // 逐通道表的标签 (与 printCompactRefusal 里那一份同名同序 —— 两处的下标含义由
+    // guardReferenceValue / g_guardVote 那两个唯一定义决定, 各自都不许再抄通道号)。
+    static const char* NM[6] = { "Fx(N)", "Fy(N)", "Fz(N)", "Mx(Nm)", "My(Nm)", "Mz(Nm)" };
 
     // 【三种原因, 三句不同的话】(2026-09-21 Task 7 起; 从前这里是两元的三目运算符)。
     // ⚠ 原因文字与处置指引【必须成对】(见 .h 的三种拒绝原因): 报错了原因而没错处置,
@@ -586,6 +623,9 @@ static void resetGuard() {
     g_guardFrames = 0;
     g_guardState  = ForceCompensation::GuardState::UNCALIBRATED;
     g_guardReportMs = 0;
+    // 整块的节流也一起复位: 复位之后是"一套新的判据状态", 它的第一次拒绝【必须】打整块
+    // (拿上一套判据刚打过整块当理由压掉它, 会让操作员看不到新状态的原因与处置)。
+    g_guardFullBlockMs = 0;
     // 参考量可用性的"本帧证据"一起复位: 复位之后就没有"本帧"了。状态在这里同时被置回
     // UNCALIBRATED ⇒ "参考量不可用"那两处打印不会拿复位后的值当事实 (见 g_refOnlineLast 处)。
     g_refOnlineLast = -1;
@@ -934,12 +974,25 @@ void step(AppState::ForceData& fd, const double poseRxyz[6]) {
         // 判据的对照量【只在这里取】, 且取自 guardReferenceValue —— 判据看的是哪一路,
         // 全程序只有那一处定义。别再把这个下标换成字面通道。
         const double d = comp[i] - guardReferenceValue(fd, i);
-        if (!g_guardSeeded) g_guardEma[i] = d;
+        // ★ 非有限值的【有界恢复】(2026-09-21 收口)。这条递推式自己【留不住】非有限值:
+        //   `NaN + α·(有限值 − NaN)` 恒为 NaN ⇒ 一旦某帧喂进 NaN/Inf, 这个槽位会【永久】
+        //   非有限, 于是闸门从此每帧都拒, 直到有人重新标定 —— 一条坏帧掐死一条路, 那是
+        //   【对功能的拒绝】, 不是"保守"。处置: 递推的载体一旦不是有限值就【重新播种】
+        //   (直接取本帧的 d, 不做平滑):
+        //     · 喂进非有限值的那一帧: 播种成非有限 ⇒ 本帧照旧被 isfinite 那一关拒 (fail-closed 不变);
+        //     · 之后【第一帧】好读数: 载体已经是有限的 d ⇒ 立刻回到正常比较 (不多拒一帧);
+        //     · 若 d 本身一直非有限 (参考量那一侧坏了): 每帧播种成非有限 ⇒ 每帧都拒 ——
+        //       拒绝的依据仍是【本帧的 d】, 与状态里的残留值无关, 参考量一恢复就自己回来。
+        const bool reseed = !g_guardSeeded || !std::isfinite(g_guardEma[i]);
+        if (reseed) g_guardEma[i] = d;
         else g_guardEma[i] += Config::FORCE_GUARD_EMA_ALPHA * (d - g_guardEma[i]);
         // 诊断侧: 与 @576 (fd.raw) 的差。同一个 α、同一帧、同一次 comp —— 只换对照量。
         // 【只报不判】, 见 g_guardEmaDiag 的说明: 它不参与任何容差比较。
+        // ⚠ 同上做有界恢复: 这一路不进判决, 但它【是印出来的】—— 永久 NaN 会让现场
+        //   每一屏都读到一个不是读数的数。
         const double dDiag = comp[i] - fd.raw[i];
-        if (!g_guardSeededDiag) g_guardEmaDiag[i] = dDiag;
+        const bool reseedDiag = !g_guardSeededDiag || !std::isfinite(g_guardEmaDiag[i]);
+        if (reseedDiag) g_guardEmaDiag[i] = dDiag;
         else g_guardEmaDiag[i] += Config::FORCE_GUARD_EMA_ALPHA * (dDiag - g_guardEmaDiag[i]);
     }
     g_guardSeeded = true;

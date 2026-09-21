@@ -870,6 +870,146 @@ static void test_guard_nonfinite_refuses_even_on_nonvoting_channel() {
     PASS();
 }
 
+// ★ 非有限值【不再永久掐死力路】(2026-09-21 收口, 最终复审 2a)。
+//   EMA 那条递推式自己留不住非有限值: `NaN + α·(有限 − NaN)` 恒为 NaN ⇒ 一次坏读数会让
+//   这个槽位【永久】非有限, 于是闸门从此每帧都拒 —— 一条坏帧把"传感器力那一条路"掐到
+//   有人重新标定为止。fail-closed 是对的, 【永久】不是。
+//   本用例钉三件事: (a) 坏那一帧照旧拒; (b) 紧接着的好帧必须【恢复】(不是继续拒);
+//   (c) 源头一直坏则【每帧都拒】—— 恢复不等于放行一个一直坏的源。
+static void test_guard_recovers_after_a_nonfinite_frame() {
+    TEST(guard_recovers_after_a_nonfinite_frame);
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    double pose[6] = {0, 0, 0, 0, 0, 0};
+
+    ForceCompensation::init();
+    double A[9]; diagA(1.0, A);
+    double com[3] = {0, 0, 0};
+    double bF[3] = {0, 0, 0}, bM[3] = {0, 0, 0};
+    ForceCompensation::setCalibration(A, bF, bM, com);
+
+    // 一帧共同的构造: 本地算出 compensated = (0.5, 0, 0), 参考量前三通道对齐。
+    // 单把 refNow[ch] 改成坏值 —— 于是"拒/放行"只可能来自那一帧的参考量。
+    const int CH = 1;                 // 用【投票】通道, 让 (a) 的拒绝与投票无关地也成立
+    AppState::ForceData fd = gateVisibleFrame();
+    fd.sixForceRaw[2] = 9.81;
+    fd.sixForceRaw[0] = 0.5;
+    fd.tcpForce[0] = 0.5;
+    fd.tcpForce[CH] = nan;            // (a) 坏帧
+    ForceCompensation::step(fd, pose);
+    CHECK(ForceCompensation::guardState() == ForceCompensation::GuardState::INCONSISTENT);
+    CHECK(fd.compensated[0] == 0.0);  // 全或无: 力通道跟着断
+
+    // (b) 下一帧恢复正常 -> 必须【同一帧就回到正常比较】, 不是"再拒几帧"、更不是"永远拒"
+    AppState::ForceData good = gateVisibleFrame();
+    good.sixForceRaw[2] = 9.81;
+    good.sixForceRaw[0] = 0.5;
+    good.tcpForce[0] = 0.5;           // tcpForce[CH] 保持初值 0
+    ForceCompensation::step(good, pose);
+    CHECK(ForceCompensation::guardState() == ForceCompensation::GuardState::OK);
+    CHECK(fabs(good.compensated[0] - 0.5) < 1e-9);   // 数据真的又过去了
+
+    // (c) 源头一直坏 -> 每帧都拒 (恢复的判据是【本帧的差】, 不是"曾经坏过/曾经好过")
+    for (int f = 0; f < 3; f++) {
+        AppState::ForceData bad = gateVisibleFrame();
+        bad.sixForceRaw[2] = 9.81;
+        bad.sixForceRaw[0] = 0.5;
+        bad.tcpForce[0] = 0.5;
+        bad.tcpForce[CH] = nan;
+        ForceCompensation::step(bad, pose);
+        CHECK(ForceCompensation::guardState() == ForceCompensation::GuardState::INCONSISTENT);
+        CHECK(bad.compensated[0] == 0.0);
+    }
+    PASS();
+}
+
+// ★★ 状态【跃迁的整块打印】按既有间隔节流 (2026-09-21 收口, 最终复审 2b)。
+//   要钉住的病: 从前"一变就打整块", 而边缘链路上参考量一会儿有一会儿没、状态来回跳 ⇒
+//   每跳一次就是那一整块, 控制台被冲掉 (现场要读的偏偏是别的输出)。而这是"看不过来"，
+//   与"没报"在操作上是一回事的另一面。
+//   本用例驱动【两次】进入同一个拒绝状态, 中间不重新 init (那样会复位节流):
+//     · 第一次: 必须打整块 (它就是"第一次拒绝"该有的样子);
+//     · 第二次 (在同一个复报间隔内): 【不许】再打整块, 但【必须】出声 —— 走一行式的紧凑读数。
+//   ⚠ 两次都靠 GetTickCount 的真实时间: 本用例跑完远快于节流间隔, 所以"第二次被节流"是
+//     确定性的, 不是碰运气。
+static void test_guard_transition_block_is_throttled_but_never_silent() {
+    TEST(guard_transition_block_is_throttled_but_never_silent);
+    const char* capPath = "gate_transition_capture.tmp";
+    double pose[6] = {0, 0, 0, 0, 0, 0};
+
+    ForceCompensation::init();
+    double A[9]; diagA(1.0, A);
+    double com[3] = {0, 0, 0};
+    double bF[3] = {0, 0, 0}, bM[3] = {0, 0, 0};
+    ForceCompensation::setCalibration(A, bF, bM, com);
+
+    // 一帧"参考量不可用"(六维力自报不在线), 与一帧"一切正常"—— 交替它们就能制造跃迁。
+    AppState::ForceData bad = gateVisibleFrame();
+    bad.sixForceOnline = 0;
+    AppState::ForceData good = gateVisibleFrame();
+
+    // 整块的判据 (整块才有这句) 与紧凑行的判据 (节流后走的那条)。
+    const std::string fullMark = "============ 一致性闸门: 拒绝传递数据 ============";
+    const std::string compactMark = "刚变成拒绝, 解析从略";
+
+    // ---- 第 1 次跃迁: 必须打整块 ----
+    if (!capBegin(capPath)) {
+        std::cout << std::endl << "    FAIL (捕获窗口没搭起来): 本条打印没有被钉住。" << std::endl;
+        g_failed++;
+        return;
+    }
+    ForceCompensation::step(bad, pose);       // OK/初始 -> REFERENCE_UNAVAILABLE
+    capEnd();
+    const std::string t1 = capRead(capPath);
+    remove(capPath);
+
+    if (t1.find(fullMark) == std::string::npos) {
+        std::cout << std::endl << "    FAIL: 第一次拒绝没有打整块 (找不到整块的判据句) ——"
+                  << " 那么下面那条【第二次被节流】就无从谈起。" << std::endl;
+        g_failed++;
+        return;
+    }
+    // ---- 回到放行 ----
+    ForceCompensation::step(good, pose);
+    CHECK(ForceCompensation::guardState() == ForceCompensation::GuardState::OK);
+
+    // ---- 第 2 次跃迁 (同一个复报间隔内): 不许打整块, 但必须出声 ----
+    if (!capBegin(capPath)) {
+        std::cout << std::endl << "    FAIL (捕获窗口没搭起来): 本条打印没有被钉住。" << std::endl;
+        g_failed++;
+        return;
+    }
+    ForceCompensation::step(bad, pose);       // OK -> REFERENCE_UNAVAILABLE (第二次)
+    capEnd();
+    const std::string t2 = capRead(capPath);
+    remove(capPath);
+
+    CHECK(ForceCompensation::guardState() == ForceCompensation::GuardState::REFERENCE_UNAVAILABLE);
+    if (t2.find(fullMark) != std::string::npos) {
+        std::cout << std::endl << "    FAIL: 第二次跃迁又打了一整块 —— 状态来回跳时控制台"
+                  << "就是被这个冲掉的 (本节流机制的整条理由)。" << std::endl;
+        g_failed++;
+        return;
+    }
+    // 【不是静默】: 一行里要有状态、原因、以及本帧那两个可用性读数。
+    if (t2.find(compactMark) == std::string::npos || t2.empty()) {
+        std::cout << std::endl << "    FAIL: 第二次跃迁被节流之后【什么都没说】—— 节流掉的"
+                  << "只能是【整块的形态】, 不许把【报告】这件事一起节流掉。" << std::endl;
+        g_failed++;
+        return;
+    }
+    char wantOnline[64];
+    snprintf(wantOnline, sizeof(wantOnline), "@1037 = %d", bad.sixForceOnline);
+    if (t2.find("参考量不可用") == std::string::npos ||
+        t2.find(wantOnline) == std::string::npos) {
+        std::cout << std::endl << "    FAIL: 被节流后的那一行没有说清状态/原因"
+                  << " (要么没有\"参考量不可用\", 要么没有 \"" << wantOnline << "\")。"
+                  << std::endl;
+        g_failed++;
+        return;
+    }
+    PASS();
+}
+
 // 默认构造的 GuardReport 【不许】声称任何一份掩码: 类型自己的初值无法引用 .cpp 里的
 // static 掩码, 任何抄在那里的字面量都会漂 —— 于是"改一处忘一处"会让一份默认构造的报告
 // 对外报出与实际生效不同的掩码。填真值由 guardReport() 负责; 初值一律 false = "尚未填充"。
@@ -1548,6 +1688,8 @@ int main() {
     test_guard_moment_channel_reports_but_does_not_vote();
     test_guard_force_channels_still_vote();
     test_guard_nonfinite_refuses_even_on_nonvoting_channel();
+    test_guard_recovers_after_a_nonfinite_frame();
+    test_guard_transition_block_is_throttled_but_never_silent();
     test_guard_default_report_claims_no_mask();
     test_guard_ema_needs_sustained_mismatch();
     test_zero_only_no_motion();

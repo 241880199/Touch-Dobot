@@ -170,7 +170,8 @@ namespace Config {
     //             就是【真正的余量】, 不再有第二层水分。那次改口径时容差的【数值】一个都没动。
     //
     // (乙) 参考量【自带】的力偏置, 以及它跨轮次的漂移  (2026-09-21 加入):
-    //      出处: Docs/superpowers/specs/2026-09-21-gate-reference-prereq.md §3.3 / §3.4;
+    //      出处: Docs/superpowers/specs/2026-09-21-gate-reference-prereq.md
+    //      §3.3 / **§3.3.1 (行集 + 算式 —— 第三方照它可逐位复现)** / §3.4;
     //      原始数据: 三段带力参考量那一列的采集 —— 引它的【冻结快照】
     //      Touch_Client/tests/fixtures/calib_poses_2026-09-20_frozen.txt
     //      ⚠ 不引 CalibStore 运行时可写目录下的那份活文件: 它在那里【只追加、永不截断】,
