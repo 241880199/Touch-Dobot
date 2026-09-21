@@ -72,15 +72,25 @@ static long   g_guardFrames  = 0;
 static ForceCompensation::GuardState g_guardState = ForceCompensation::GuardState::UNCALIBRATED;
 static DWORD  g_guardReportMs = 0;       // 上次打印/上报的时刻
 
-// 【哪些通道参与判决】。Fz 【不投票】—— 理由写在报告与 .h 里, 一行摘要:
+// ===== 【哪些通道参与判决】—— 本数组是掩码的【唯一一份实现】 =====
+//   index:      0    1    2     3     4     5
+//             Fx   Fy   Fz    Mx    My    Mz
+// ⚠ 头文件里 GuardReport::voted 的类内初值【不是】掩码的第二份实现: 它一律 false, 语义是
+//   "尚未填充" (给一份默认构造的报告一个不会撒谎的初值 —— 它引不到这里的 static, 任何
+//   字面量都会漂)。真值由 guardReport() 从本数组填入。
+// ⚠ 测试里【也不许再抄一份字面量】: 要判掩码就读 guardReport().voted (生产 API 里的那一份)。
+//
+// ----- Fz 【不投票】----- 依据与它的【现状标记】:
 //   ⚠ 这条取舍是【参考量还是 @576 的时候】定下的, 依据是那一侧的 z 通道响应实测秩 2
 //   (奇异值 [0.212 0.201 0.008], 第三行比另两行小 8~15 倍,
 //   Docs/superpowers/plans/2026-09-19-raw-channel-calibration.md:268-274), 它在【我们唯一
 //   有的激励 (重力方向)】上不动。一个动不了的对照量既证不了"一致", 也证不了"不一致"。
-//   ⚠ 参考量换到【通过关节电流计算】的那一路之后, 这一条依据【没有跟着复测】——
-//     新参考量的 z 通道响应是好是坏, 仓库里没有实测。掩码本身的取舍不在本次改动内,
-//     但这个前提的现状必须留在这里, 否则它会被读成"已经验过"。
-//     开放项见 Config.h 里 FORCE_GUARD_TOL_FORCE_N 上方的 z 缺口段。
+//   ⚠⚠ 【未复测 —— 这一条到现在仍然是"未验", 不许读成"已验"】: 参考量换到
+//     【通过关节电流计算】的那一路之后, 上面那条秩 2 依据【没有跟着复测】——
+//     新参考量的 z 通道响应是好是坏, 仓库里没有实测。掩码本身的取舍不在换参考量那次
+//     改动内, 但这个前提的现状必须留在这里 (把这段删掉或说成"已验"就是让后人照着一个
+//     未复测的前提去改掩码)。
+//     开放项见 Config.h 里 FORCE_GUARD_TOL_FORCE_N 上方那段 (开放项 C: z 轴缺口)。
 //   · 让它投票不会让闸门永远通过 (Fx/Fy 在, 现在是 1.7~2.2 N 量级的拒绝);
 //   · 却会让闸门【永远拒绝】: 若它对外力也不响应, 则一旦有真实 z 接触, compensated_z
 //     有值而对照量_z 恒 ~0 (旧参考量上的实测如此), 差值直接超限 —— 那就是用户明确
@@ -100,7 +110,30 @@ static DWORD  g_guardReportMs = 0;       // 上次打印/上报的时刻
 //   本闸门实际上【看不见 z 方向的力模型错误】。这是本次改动里【最大的一处已知漏洞】,
 //   明确交给用户定夺 (是补一个 z 的独立判据, 还是接受这个洞), 不是可以靠调容差解决的。
 //   (数字来源: 同一份测试打印的两列 —— 逐份 |c_s_横向| 与 tol_M/|c_s_横向|。)
-static const bool g_guardVote[6] = { true, true, false, true, true, true };
+//   ⚠ 2026-09-21 补充: 上面那个"力矩兜得住 z"的假设【现在连假设都不是了】—— 力矩三个
+//     分量已经【不投票】(理由见下面那一段), 所以它连"顶超限"这一步都不再参与判决。
+//     数字一个都没变 (它是"力矩门若有, 要多大的 z 差才看得见"), 变的只是: 现在【没有】
+//     这道门。⇒ 几十牛那个洞【比原来更大了一点】, 开放项 C 的处置因此更紧, 不是更松。
+static const bool g_guardVote[6] = { true, true, false, false, false, false };
+
+// ----- 力矩三个分量 【不投票】(2026-09-21 起) —— 依据与【代价】 -----
+//   实测 (run-004 §4.5): 参考量换成"通过关节电流计算"的那一路 (@720) 之后, 力矩仍然差
+//   Mx +0.061 / My +1.147 / Mz +1.316, 而声明的力矩容差是 0.03。
+//   该差距【不是负载效应】: 约 90% 是姿态无关的偏置, 而负载误差产生的残差【必然随姿态变】;
+//   且该偏置【在漂】(Mx 20 分钟漂 0.55 N·m) ⇒ 既改不动、也不能标定掉。
+//   同姿态秒级复采的重复性本身就有 0.06~0.13 N·m, 比 0.03 的容差还大 2~4 倍 ——
+//   连"重复性"这一关都过不去, 更谈不上"一致"。
+//   => 力矩与参考量之间【不存在"一致"态】, 强行投票会让整个闸门永远拒绝,
+//      而判决是【全或无】-> compensated[] 全置零 -> 【力通道也一起断】。
+//      触觉那一条路只消费【三个力分量】(F| 帧与 Touch 反射力都由 compensated 的前三个推),
+//      所以力矩投票一票【换不到任何东西】, 只换来力通道的死。
+//   ⚠ 力矩【不是被删掉】: 照算、照报、照给 MATLAB 的 F| 帧 —— guardReport() 的 ema[]、
+//     拒绝时那张逐通道表、复报行里都还在。它仍是【质心与惯量的唯一测量窗口】
+//     (负载的 I 只能从力矩通道辨识), 只是不再投票。
+//   ⚠ 代价【必须记账 —— 写在这里是为了后人不要改回去】: Fz 早已不投票, 力矩原本【在名义上】
+//     兜着 A 的第三行 -> 现在无人兜。上面那段"几十牛"的洞因此【没有任何替补】: 若日后要
+//     把 z 方向的力模型错误管起来, 只能补一个【独立的 z 判据】(开放项 C), 不能靠"把力矩
+//     的票加回来" —— 那一步已经被实测否掉了 (它连重复性都不够)。
 
 // A 的可用性判据 —— 见头文件声明。|det| / ||A||_F³ 对"标量质量 × 正交"这一族恒为
 // 1/(3√3) = 0.19245, 而秩亏时趋于 0。
@@ -273,7 +306,7 @@ static void setGuardState(ForceCompensation::GuardState st) {
 
     if (st == ForceCompensation::GuardState::OK) {
         if (changed) {
-            fprintf(stderr, "[Force] 一致性闸门: 放行 (本地全量模型与【参考量】逐通道一致)\n");
+            fprintf(stderr, "[Force] 一致性闸门: 放行 (本地全量模型与【参考量】在【投票通道】上一致)\n");
             fflush(stderr);
         }
         g_guardReportMs = now;
@@ -366,7 +399,9 @@ static void setGuardState(ForceCompensation::GuardState st) {
         fflush(stderr);
         return;
     }
-    fprintf(stderr, "[Force] !! 逐通道结果 (EMA 差 = compensated − 【参考量】; 单位见各行标签):\n");
+    fprintf(stderr, "[Force] !! 逐通道结果 (EMA 差 = compensated − 【参考量】; 单位见各行标签)\n"
+                    "[Force] !!   ⚠ 只有【投票通道】参与判决; 标着【不投票】的那四行【照报但不算】\n"
+                    "[Force] !!     (依据见 g_guardVote 段: Fz 的秩 2 依据未复测; 力矩无一致态)。\n");
     // 【每行末尾那一列是什么】(2026-09-20 加, 2026-09-21 角色互换): 它原来是"与 @720",
     // 而 @720 现在是判据看的参考量 ⇒ 这一列换成 @576 —— 【只报不判】的诊断侧。
     //   作用: 判据只看得出"对不上", 看不出"是哪一路偏了"; 把另一路并排报出来, 现场才能
@@ -376,8 +411,10 @@ static void setGuardState(ForceCompensation::GuardState st) {
     for (int i = 0; i < 6; i++) {
         const bool ex = (g_guardTol[i] > 0.0) && (fabs(g_guardEma[i]) > g_guardTol[i]);
         if (!g_guardVote[i]) {
+            // ⚠ 这四行【不投票】(Fz + 力矩三个分量), 但它们的结果照样印出来 —— "不投票"不等于
+            //   "不检查、不显示"。不在这里复述理由: 理由的唯一出处是 g_guardVote 段。
             fprintf(stderr, "[Force] !!   %-6s %+10.4f  容差 %.4f  【不投票】"
-                            "z 通道的判据缺口未查清 (依据与开放项见 g_guardVote 段)\n",
+                            " (照报不判; 依据与代价见 g_guardVote 段)\n",
                     NM[i], g_guardEma[i], g_guardTol[i]);
         } else {
             fprintf(stderr, "[Force] !!   %-6s %+10.4f  容差 %.4f  %-16s └ 与 @576: %+9.4f"
@@ -736,7 +773,7 @@ void step(AppState::ForceData& fd, const double poseRxyz[6]) {
 
     bool inconsistent = false;
     for (int i = 0; i < 6; i++) {
-        if (!g_guardVote[i]) continue;               // Fz 不投票, 但照报 (见上面的说明)
+        if (!g_guardVote[i]) continue;   // Fz 与力矩三个分量不投票, 但照报 (见 g_guardVote 段)
         if (!std::isfinite(g_guardEma[i])) { inconsistent = true; break; }  // NaN 也算不一致
         if (fabs(g_guardEma[i]) > g_guardTol[i]) { inconsistent = true; break; }
     }

@@ -3165,8 +3165,16 @@ static void test_runtime_consistency_guard_replay() {
 
     const double tolF = Config::FORCE_GUARD_TOL_FORCE_N;
     const double tolM = Config::FORCE_GUARD_TOL_MOMENT_NM;
-    const bool vote[6] = { true, true, false, true, true, true };   // Fz 不投票 (秩 2)
-    const double tol[6] = { tolF, tolF, tolF, tolM, tolM, tolM };
+    // ⚠ 【掩码与逐通道容差都不在这份测试里再写一份】—— 从生产 API 读生效值。
+    //   从前这里是两份字面量 (掩码 {true,true,false,true,true,true} 与一份 tol 映射), 于是
+    //   生产里改了掩码而这里没改时, 这份回放会【安静地继续按旧闸门建模】: 它照样全绿,
+    //   报出来的每一列却与生产对不上 —— 而这份回放的全部价值就是"报告得与生产一致"。
+    //   guardReport() 填的就是生产里那份 g_guardVote / g_guardTol (掩码的唯一一份实现),
+    //   所以读它不可能漂; 引用绑定 (加 &) 是为了【不复制】, 复制就又成了第二份实现。
+    ForceCompensation::GuardReport maskRep;
+    ForceCompensation::guardReport(maskRep);
+    const bool   (&vote)[6] = maskRep.voted;
+    const double (&tol)[6]  = maskRep.tol;
 
     std::cout << std::endl;
     std::cout << "    容差: 力 " << tolF << " N / 力矩 " << tolM
@@ -3175,6 +3183,12 @@ static void test_runtime_consistency_guard_replay() {
                  " —— 它的比较结果照样报出来。"
                  " (⚠ 这条秩 2 是在【旧判据通道】上实测的, 换到参考量之后【未重测】)"
               << std::endl;
+    std::cout << "    力矩 Mx/My/Mz 【同样不投票】(2026-09-21 起): 换参考量后力矩仍差"
+                 " Mx +0.061 / My +1.147 / Mz +1.316, 而其差距约 90% 是【姿态无关且在漂】"
+                 " 的偏置 ⇒ 与参考量之间不存在\"一致\"态。它们照算照报 (理由与代价见"
+                 " ForceCompensation.cpp 的 g_guardVote 段)。" << std::endl;
+    std::cout << "    ⇒ 生效掩码由生产 API 读出 (guardReport().voted), 本用例【不抄它】;"
+                 " 本行以下凡写\"投票通道\"处, 指的就是那份掩码选中的通道。" << std::endl;
 
     // ===== 容差的量级依据: 【四份夹具的前置遍历】(2026-09-21 复审 Important 1) =====
     //   eps_F = rmsForceN(本地模型自己的失拟) + dist_to_scalar·9.81(机械臂那一侧的模型类差)
@@ -3330,7 +3344,9 @@ static void test_runtime_consistency_guard_replay() {
                 int off = snprintf(line, sizeof(line), "      pose 1 逐通道 (EMA 差, 超限倍数):");
                 for (int a = 0; a < 6; a++) {
                     if (!vote[a]) {
-                        off += snprintf(line + off, sizeof(line) - off, "  %s=不投票(秩2)", NM[a]);
+                        // 不投票的原因【不在这里再抄一遍】(Fz 是"秩 2 依据未复测", 力矩是
+                        // "与参考量之间没有一致态" —— 两件事, 混成一句就是另一份会漂的文字)。
+                        off += snprintf(line + off, sizeof(line) - off, "  %s=不投票", NM[a]);
                     } else {
                         off += snprintf(line + off, sizeof(line) - off, "  %s %+.3f(%.1fx)",
                                         NM[a], rep.ema[a], fabs(rep.ema[a]) / tol[a]);
@@ -3391,15 +3407,19 @@ static void test_runtime_consistency_guard_replay() {
     std::cout << "    => 真实夹具: " << refused << " / " << poses << " 个姿态【拒绝】"
               << "    反面对照 (参考量与本地一致): " << passedCtrl << " / " << poses << " 个姿态放行"
               << std::endl;
-    // ⚠ 【z 力漏洞的尺寸】(复审 Important 2): Fz 不投票, 力矩通道是它唯一可能的替补,
-    //   而替补的门槛 = tol_M / |c_s_横向|。四份实测的 |c_s_横向| 范围决定这个洞有多大 ——
-    //   下面这行把它印出来, 免得"少一道闸门"这种话盖住了一个几十牛的孔。
+    // ⚠ 【z 力漏洞的尺寸】(复审 Important 2): Fz 不投票, 而【力矩通道原本是它唯一可能的
+    //   替补】—— 那个替补的门槛 = tol_M / |c_s_横向|。四份实测的 |c_s_横向| 范围决定
+    //   "力矩门若在"这个洞有多大; 下面这行把它印出来, 免得"少一道闸门"这种话盖住一个几十
+    //   牛的孔。
+    //   ⚠ 2026-09-21: 力矩三个分量【已经不再投票】(见上面那段), 所以下面这个门槛现在算的是
+    //     【一道不存在的门】—— 数字一个没变 (它量的是"要多大 z 差才顶得动 tol_M"), 变的是
+    //     现在【连这道门都没有】。这个洞因此比原来更大一点, 不是更小。
     std::cout << "    => z 力方向【没有闸门】: |c_s_横向| 四份范围 [" << csLatMin << ", " << csLatMax
-              << "] m ⇒ 力矩通道要看见 z 力模型误差, 它得大到 "
-              << tolM / csLatMax << " ~ " << tolM / csLatMin << " N (即几十牛)。"
-              << std::endl;
+              << "] m ⇒ 力矩通道【若投票】要看见 z 力模型误差, 它得大到 "
+              << tolM / csLatMax << " ~ " << tolM / csLatMin << " N (即几十牛);"
+              << " 而力矩【也不投票】⇒ 本闸门对这个方向没有判据。" << std::endl;
     std::cout << "       Fz 不投票这一点本身由复审判定可接受, 但这个洞的大小必须写明"
-                 " —— 见报告里的未决项。" << std::endl;
+                 " —— 见报告里的未决项与 Config.h 的开放项 C。" << std::endl;
 
     // 四份采集、【每一个】姿态都必须拒绝。若某一份里有一个姿态放行, 说明闸门在那个姿态上
     // 看不见差异 —— 那是"闸门有洞", 必须先查清楚再放行, 不能把断言放宽。

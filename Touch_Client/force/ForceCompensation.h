@@ -56,7 +56,9 @@ namespace ForceCompensation {
                         const double biasTorque[3], const double comSensor[3]);
 
     // ===== 运行时一致性闸门 (2026-09-19) =====
-    // 判据: 【本地全量模型的输出】与【机械臂自报的参考量】逐通道比较。
+    // 判据: 【本地全量模型的输出】与【机械臂自报的参考量】在【投票通道】上逐通道比较。
+    //   ⚠ 【投票通道】是哪几个由 .cpp 的 g_guardVote 一处定义 (掩码的唯一一份实现);
+    //     当前是 Fx/Fy —— Fz 与力矩三个分量【算出来、报出来, 但不投票】(理由与代价见那一段)。
     //   · @1304 (fd.sixForceRaw) 是原始读数; 本地模型给出 compensated = @1304 − b_F − A·g,
     //     是【外力】的一个估计。
     //   · 参考量是机械臂用【它自己的】负载模型减掉重力之后的估计 —— 同一个外力。
@@ -83,19 +85,23 @@ namespace ForceCompensation {
     //   UNCALIBRATED -> 去标定 (按 'm' 采多姿态 + 's' 解 A, 再 'z' 调零);
     //   INCONSISTENT -> 去查负载参数有没有真的发进机械臂 (Task 8), 或重跑离线一致性检查。
     enum class GuardState {
-        OK = 0,             // 模型在, 且逐通道一致 -> 数据放行
+        OK = 0,             // 模型在, 且【投票通道】与参考量一致 -> 数据放行
         UNCALIBRATED = 1,   // 没有可用模型 (未标定 / A 全零 / A 退化) -> 拒绝
-        INCONSISTENT = 2    // 模型在, 但与【参考量】对不上 -> 拒绝 (参考量 = .cpp 的
-                            //   guardReferenceValue, 判据的唯一一份定义)
+        INCONSISTENT = 2    // 模型在, 但与【参考量】在某个【投票通道】上对不上 -> 拒绝
+                            //   (参考量 = .cpp 的 guardReferenceValue, 判据的唯一一份定义;
+                            //    投票通道 = .cpp 的 g_guardVote, 掩码的唯一一份定义 ——
+                            //    当前是 Fx/Fy 两个; Fz 与力矩三个分量【照报不判】,
+                            //    理由是它们与参考量之间没有"一致"态, 见 g_guardVote 段)
     };
     struct GuardReport {
         GuardState state = GuardState::UNCALIBRATED;
         long   frames = 0;
-        // ⚠ 默认值必须与 ForceCompensation.cpp 里真正生效的 g_guardVote 逐位一致
-        //   ({true,true,false,true,true,true} —— Fz 不投票)。写成"前三个 false"会让一个
-        //   默认构造的 GuardReport 声称 Fx/Fy 不投票, 那是把通道掩码说了两遍、还说反了。
-        //   掩码的【唯一一份实现】是 .cpp 里的 g_guardVote; 这里只是同一份东西的初值。
-        bool   voted[6]    = {true, true, false, true, true, true};
+        // ⚠ 这里是【尚未填充】的默认值, 不是掩码。掩码的唯一一份实现是 .cpp 里的 g_guardVote。
+        //   从前这里抄了一份字面量, 于是"改一处忘一处"会让一份默认构造的报告对外撒谎
+        //   (它声称的掩码与实际生效的不是同一份) —— 而类内初值【引不到】.cpp 里的 static,
+        //   任何抄在这里的字面量都注定会漂。全 false 不可能被误读成一份真实的掩码,
+        //   所以它就是这里的正确初值。真实掩码由 guardReport() 填 (它已经在填)。
+        bool   voted[6]    = {false, false, false, false, false, false};
         bool   exceeded[6] = {false, false, false, false, false, false};
         double ema[6] = {0, 0, 0, 0, 0, 0};   // compensated − 【参考量】的 EMA (N / N·m)
         double tol[6] = {0, 0, 0, 0, 0, 0};

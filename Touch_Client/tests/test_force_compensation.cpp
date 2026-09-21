@@ -405,15 +405,60 @@ static void test_guard_fz_reported_but_not_voted() {
     ForceCompensation::guardReport(rep);
     CHECK(rep.voted[0] == true && rep.voted[1] == true);
     CHECK(rep.voted[2] == false);                                             // Fz 不投票
-    CHECK(rep.voted[3] == true && rep.voted[4] == true && rep.voted[5] == true);
+    // ⚠ 力矩三个通道【也不投票】(2026-09-21, 理由见 .cpp 的 g_guardVote 段) —— 这一条与
+    //   下面两条一起把【生效掩码】钉成 Fx/Fy 两个 true、其余四个 false。名字里只说 Fz 是
+    //   因为本用例喂的是 z 那一侧的差; 掩码本身的完整形状由这三条 CHECK 负责。
+    CHECK(rep.voted[3] == false && rep.voted[4] == false && rep.voted[5] == false);
     CHECK(fabs(rep.ema[2] - (-3.0)) < 1e-9);                                  // (b) 照报
     CHECK(rep.exceeded[2] == false);          // 不投票的通道不算"超限"
     PASS();
 }
 
-// 力矩通道同样投票: 力矩对不上 -> 拒绝。
-static void test_guard_moment_channel_votes() {
-    TEST(guard_moment_channel_votes);
+// ★ 力矩通道【不投票】(2026-09-21): 力矩严重不符也【必须放行】—— 但那一半仍要照实报出来。
+//   理由与实测出处写在 ForceCompensation.cpp 的 g_guardVote 段 (力矩与参考量之间不存在
+//   "一致"态: 约 90% 是姿态无关、且在漂的偏置)。本用例钉住两件事:
+//     (a) 力矩差得再多也不拦 (否则闸门永远拒绝 -> 判决是全或无 -> 力通道一起断);
+//     (b) 那一半仍然被算出来、被报出来 (「不投票」不等于「不检查、不显示」)。
+//   ⚠ 所以力矩差【必须】喂到参考量那一侧 (fd.tcpForce): 喂到 fd.raw (@576) 那一侧它就
+//     退化成一条恒真的空用例 —— 无论掩码怎么变都绿, 却什么都没钉住。
+static void test_guard_moment_channel_reports_but_does_not_vote() {
+    TEST(guard_moment_channel_reports_but_does_not_vote);
+    ForceCompensation::init();
+    double A[9]; diagA(1.0, A);
+    double com[3] = {0, 0, 0};
+    double bF[3] = {0, 0, 0}, bM[3] = {0, 0, 0};
+    ForceCompensation::setCalibration(A, bF, bM, com);
+
+    double pose[6] = {0, 0, 0, 0, 0, 0};
+    AppState::ForceData fd;
+    fd.sixForceRaw[2] = 9.81;      // 本地算出 compensated_z = 0 (重力被减掉)
+    fd.sixForceRaw[0] = 1.05;      // 一个【真实】外力 —— 用来证明力通道的数据真的出门了
+    fd.tcpForce[0] = 1.10;         // 力: 参考量只差 0.05, 在限内 (< 力通道容差)
+    fd.tcpForce[1] = 0.05;
+    fd.tcpForce[3] = 1.20;         // 力矩: 远超声明的力矩容差 (1.20 >> 0.03)
+    // ⚠ "在限内 / 超限"这两个说法【在这里被机器检查】: 容差若被抬到 0.05 以上 (或力矩容差
+    //   被抬到 1.20 以上), 本条用例会先红, 而不是安静地退化成"两个方向都放行"的空壳。
+    CHECK(0.05 < Config::FORCE_GUARD_TOL_FORCE_N);
+    CHECK(1.20 > Config::FORCE_GUARD_TOL_MOMENT_NM);
+    ForceCompensation::step(fd, pose);
+
+    // (a) 不投票 -> 放行, 且【力通道的数据真的过去了】(被拒的话 compensated 是全 0,
+    //     所以这一条能分辨"放行"与"拒绝": 拒绝时它必定是 0)。
+    CHECK(ForceCompensation::guardState() == ForceCompensation::GuardState::OK);
+    CHECK(fabs(fd.compensated[0] - 1.05) < 1e-9);
+    // (b) 但必须照实报 —— "不投票"不等于"不检查、不显示"
+    ForceCompensation::GuardReport rep;
+    ForceCompensation::guardReport(rep);
+    CHECK(rep.voted[3] == false);
+    CHECK(fabs(rep.ema[0] - (-0.05)) < 1e-9);   // 力通道也在照实报
+    CHECK(fabs(rep.ema[3] - (-1.20)) < 1e-9);   // 力矩那一半照样算出来、报出来
+    CHECK(rep.exceeded[3] == false);            // 不投票的通道不算"超限"
+    PASS();
+}
+
+// 力通道必须【仍然】投票 —— 防止掩码被改过头 (全 false 就再也没有闸门了)。
+static void test_guard_force_channels_still_vote() {
+    TEST(guard_force_channels_still_vote);
     ForceCompensation::init();
     double A[9]; diagA(1.0, A);
     double com[3] = {0, 0, 0};
@@ -423,21 +468,21 @@ static void test_guard_moment_channel_votes() {
     double pose[6] = {0, 0, 0, 0, 0, 0};
     AppState::ForceData fd;
     fd.sixForceRaw[2] = 9.81;
-    fd.sixForceRaw[3] = 0.20;                 // 本地 compensated[3] = 0.20
-    fd.tcpForce[3] = 0.20;                    // 力矩在限内 -> 先放行
+    fd.tcpForce[0] = 5.00;         // 力严重不符 (5.00 > 力通道容差)
+    CHECK(5.00 > Config::FORCE_GUARD_TOL_FORCE_N);
     ForceCompensation::step(fd, pose);
-    CHECK(ForceCompensation::guardState() == ForceCompensation::GuardState::OK);
 
-    // 重新装一次模型 = 清掉上一帧的 EMA (否则判决里混着上一段的平均值)。
-    ForceCompensation::init();
-    ForceCompensation::setCalibration(A, bF, bM, com);
-    AppState::ForceData fd2;
-    fd2.sixForceRaw[2] = 9.81;
-    fd2.sixForceRaw[3] = 0.20;
-    fd2.tcpForce[3] = 0.20 - 0.12;            // 差 0.12 > 容差 0.03 -> 拒绝
-    ForceCompensation::step(fd2, pose);
     CHECK(ForceCompensation::guardState() == ForceCompensation::GuardState::INCONSISTENT);
-    for (int i = 0; i < 6; i++) CHECK(fabs(fd2.compensated[i]) < 1e-12);
+    PASS();
+}
+
+// 默认构造的 GuardReport 【不许】声称任何一份掩码: 类型自己的初值无法引用 .cpp 里的
+// static 掩码, 任何抄在那里的字面量都会漂 —— 于是"改一处忘一处"会让一份默认构造的报告
+// 对外报出与实际生效不同的掩码。填真值由 guardReport() 负责; 初值一律 false = "尚未填充"。
+static void test_guard_default_report_claims_no_mask() {
+    TEST(guard_default_report_claims_no_mask);
+    ForceCompensation::GuardReport rep;
+    for (int i = 0; i < 6; i++) CHECK(rep.voted[i] == false);
     PASS();
 }
 
@@ -953,7 +998,9 @@ int main() {
     test_guard_two_causes_are_distinguishable();
     test_guard_error_code_mapping();
     test_guard_fz_reported_but_not_voted();
-    test_guard_moment_channel_votes();
+    test_guard_moment_channel_reports_but_does_not_vote();
+    test_guard_force_channels_still_vote();
+    test_guard_default_report_claims_no_mask();
     test_guard_ema_needs_sustained_mismatch();
     test_zero_only_no_motion();
     test_zero_abort_not_applied();
