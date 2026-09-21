@@ -1605,6 +1605,29 @@ void RelayCore::reportPosition() {
     //     隐晦地暗示 —— 那正是"安静地错"的形状)。
     //   返回值已无人消费 (reportCommand / reportFeedback 一直就忽略它), 所以不接。
     (void)sendRelayUpdate(buf);
+
+    // ===== ★★ 触觉安全提示已关闭 —— 持续重发 MATLAB 警告 (2026-09-21) =====
+    // 关掉的是哪三组力、为什么关、代价与补偿: 见 Config::FORCE_CONSTRAINT_FORCES_ENABLED。
+    // 这里只负责【把代价兑现成看得见的东西】。本函数是 33ms 节流 (30Hz), 而 relay_gui 的刷新
+    // 是 0.05s (20Hz) 且【每个周期把 warn_max_level 清零】⇒ 30Hz 重发足以让它常亮。
+    // ⚠ 控制台的横幅【不在这里打】: 本函数跑在触觉实时线程上 (HapticCallback → 1kHz 节流到
+    //   33ms), 往控制台写会干扰它。横幅在主线程打, 见 main.cpp 的 runConstraintDisableNotice()。
+    if (!Config::FORCE_CONSTRAINT_FORCES_ENABLED) {
+        reportWarning(2, "S",
+                      "触觉安全提示已关闭",
+                      "虚拟约束力(边界·奇异·工作空间·报警历史)已全部停用 ⇒ 靠近危险区不会有推力 请靠视觉与报警指示灯",
+                      0.0, 0.0);
+    }
+}
+
+// 线上格式的【唯一一份定义】—— 声明与约束 (不许含逗号 / 必须重复发) 见 RelayCore.h。
+void RelayCore::reportWarning(int level, const char* type, const char* message,
+                              const char* suggestion, double param1, double param2) {
+    if (!type || !message || !suggestion) return;
+    char wbuf[320];
+    snprintf(wbuf, sizeof(wbuf), "W|%d,%s,%s,%s,%.1f,%.1f",
+             level, type, message, suggestion, param1, param2);
+    sendRelayUpdate(wbuf);
 }
 
 void RelayCore::reportCommand(const char* cmd) {

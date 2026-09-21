@@ -2483,6 +2483,40 @@ static const DWORD ZERO_CHECK_GUARD_WAIT_MS = 60000;
 // 启动加载 force_calib.json 是否成功 (成功才有"存储零偏"可比, 否则无可查)
 static bool g_hasStoredZeroCalib = false;
 
+// ===== ★★ 触觉安全提示已关闭 —— 控制台横幅 (2026-09-21) =====
+// 【为什么必须由代码打出来】Config::FORCE_CONSTRAINT_FORCES_ENABLED = false 让操作员
+//   失去了【全部】触觉安全提示 (靠近安全边界 / 圆柱奇异 / 工作空间边缘 / 历史报警点时不再有推力)。
+//   那是一个【代价】, 而"代价只写在注释里"等于没有兑现 —— 注释不会出现在操作员眼前。
+//   ⇒ 启动时打一段显眼的横幅, 之后每 60 秒复报一次 (只打一次会被后续输出滚掉)。
+// ⚠ 放在主线程 (与 runZeroDriftCheck 同一个调用点): 【不能】放在 RelayCore::reportPosition,
+//   那跑在触觉实时线程上 (HapticCallback → 1kHz 节流 33ms), 往控制台写会干扰它。
+// ⚠ 这与 MATLAB 端那条 W| 是【两回事】: relay_gui 每个刷新周期 (0.05s) 会把 warn_max_level
+//   清零, 所以那边由 reportPosition 以 30Hz【重发】(见 RelayCore::reportPosition 的说明);
+//   这一条是给人看控制台用的。
+// ⚠ 开关翻回 true 时本函数什么都不做 (含静默恢复)。
+static const DWORD CONSTRAINT_NOTICE_REPEAT_MS = 60000;
+
+static void runConstraintDisableNotice() {
+    if (Config::FORCE_CONSTRAINT_FORCES_ENABLED) return;
+    static DWORD lastMs = 0;
+    const DWORD now = GetTickCount();
+    if (lastMs != 0 && (now - lastMs) < CONSTRAINT_NOTICE_REPEAT_MS) return;
+    lastMs = now;
+    std::cout << "\n"
+              << "############################################################\n"
+              << "##  \xe2\x9a\xa0\xe2\x9a\xa0  触觉安全提示已关闭  (Config::FORCE_CONSTRAINT_FORCES_ENABLED = false)\n"
+              << "##   虚拟约束力已【全部】停用 —— 现在【没有任何】推力提示:\n"
+              << "##     · 靠近安全边界 (SAFE_X/Y/Z)\n"
+              << "##     · 靠近圆柱奇异 (半径 < 80mm)\n"
+              << "##     · 靠近工作空间边缘 (半径 > 550mm)\n"
+              << "##     · 靠近历史报警点 (真报过警的位置)\n"
+              << "##   ⇒ 请靠【视觉】与【报警指示灯】判断危险。\n"
+              << "##   (机械臂自身的碰撞检测与安全皮肤由机械臂侧做, 不受本开关影响。)\n"
+              << "##   本横幅每 60 秒复报一次。\n"
+              << "############################################################\n"
+              << std::endl;
+}
+
 static void runZeroDriftCheck(bool hasStoredZero) {
     if (g_zeroCheckDone) return;
 
@@ -2694,6 +2728,10 @@ void idle() {
 
             // 启动零偏漂移检查 (一次性, 只查零偏, 不阻断)
             runZeroDriftCheck(g_hasStoredZeroCalib);
+
+            // ★ 触觉安全提示已关闭的横幅 (主线程; 理由与分工见该函数说明)。
+            //   MATLAB 端那一条由 RelayCore::reportPosition 以 30Hz 重发, 不在这里。
+            runConstraintDisableNotice();
 
             // 启动运动检测器诊断 (一次性 30 行, 一个力帧一行 — 见定义处注释)
             runMotionProbe();

@@ -153,42 +153,64 @@ HDCallbackCode HDCALLBACK hapticCallback(void* pUserData) {
             }
             LeaveCriticalSection(&app.forceDataMutex);
 
-            // 8b. 虚拟约束力 — 距离驱动: 越靠近危险区域力越大
-            // 位置模式: 基于 Touch 笔尖位置
-            // 姿态模式: 基于机器人实际 TCP 位置
-            double constraint[3] = {0};
-            {
-                Vec3 forceRef = robotPos;
-                if (!button1 && button2) {
-                    // Orientation-only: use robot actual TCP for constraint reference
-                    EnterCriticalSection(&app.robotPoseMutex);
-                    forceRef = Vec3(app.robotActualPose.x, app.robotActualPose.y, app.robotActualPose.z);
-                    LeaveCriticalSection(&app.robotPoseMutex);
+            // ===== ★★ 8b/8c/8d 虚拟约束力（触觉安全提示）—— 2026-09-21 由用户拍板【全部关闭】=====
+            // 关掉的是哪三组、为什么关、以及【代价与补偿措施】, 全部写在
+            //   Config::FORCE_CONSTRAINT_FORCES_ENABLED 那一大段里 —— 这里不复述。
+            // 一句话: 操作员从此失去全部触觉安全提示 ⇒ 已用 client 横幅 + MATLAB 的 W| 警告补偿。
+            // ⚠ 代码保留而不删: 开关翻回 true 即恢复; 两个用例测的是【计算】本身, 仍有覆盖。
+            if (Config::FORCE_CONSTRAINT_FORCES_ENABLED) {
+                // 8b. 虚拟约束力 — 距离驱动: 越靠近危险区域力越大
+                // 位置模式: 基于 Touch 笔尖位置
+                // 姿态模式: 基于机器人实际 TCP 位置
+                double constraint[3] = {0};
+                {
+                    Vec3 forceRef = robotPos;
+                    if (!button1 && button2) {
+                        // Orientation-only: use robot actual TCP for constraint reference
+                        EnterCriticalSection(&app.robotPoseMutex);
+                        forceRef = Vec3(app.robotActualPose.x, app.robotActualPose.y, app.robotActualPose.z);
+                        LeaveCriticalSection(&app.robotPoseMutex);
+                    }
+                    SafetyPredictor::instance().computeConstraintForce(forceRef, constraint);
                 }
-                SafetyPredictor::instance().computeConstraintForce(forceRef, constraint);
-            }
-            totalForce[0] += constraint[0];
-            totalForce[1] += constraint[1];
-            totalForce[2] += constraint[2];
+                totalForce[0] += constraint[0];
+                totalForce[1] += constraint[1];
+                totalForce[2] += constraint[2];
 
-            // 8c. Orient extra force (singularity avoidance constraint amplification)
-            if (appState.hasOrientExtraForce) {
-                EnterCriticalSection(&appState.orientForceMutex);
-                totalForce[0] += appState.orientExtraForce[0];
-                totalForce[1] += appState.orientExtraForce[1];
-                totalForce[2] += appState.orientExtraForce[2];
-                appState.hasOrientExtraForce = false;
-                LeaveCriticalSection(&appState.orientForceMutex);
-            }
+                // 8c. Orient extra force (singularity avoidance constraint amplification)
+                if (appState.hasOrientExtraForce) {
+                    EnterCriticalSection(&appState.orientForceMutex);
+                    totalForce[0] += appState.orientExtraForce[0];
+                    totalForce[1] += appState.orientExtraForce[1];
+                    totalForce[2] += appState.orientExtraForce[2];
+                    appState.hasOrientExtraForce = false;
+                    LeaveCriticalSection(&appState.orientForceMutex);
+                }
 
-            // 8d. Orient directional repulsion force (Phase 2: wrist alignment warning)
-            if (button2 && appState.hasOrientRepulsion) {
-                EnterCriticalSection(&appState.orientRepulsionMutex);
-                totalForce[0] += appState.orientRepulsionForce[0];
-                totalForce[1] += appState.orientRepulsionForce[1];
-                totalForce[2] += appState.orientRepulsionForce[2];
-                appState.hasOrientRepulsion = false;
-                LeaveCriticalSection(&appState.orientRepulsionMutex);
+                // 8d. Orient directional repulsion force (Phase 2: wrist alignment warning)
+                if (button2 && appState.hasOrientRepulsion) {
+                    EnterCriticalSection(&appState.orientRepulsionMutex);
+                    totalForce[0] += appState.orientRepulsionForce[0];
+                    totalForce[1] += appState.orientRepulsionForce[1];
+                    totalForce[2] += appState.orientRepulsionForce[2];
+                    appState.hasOrientRepulsion = false;
+                    LeaveCriticalSection(&appState.orientRepulsionMutex);
+                }
+            } else {
+                // ★ 关掉时【也要把两个"一次性"标志吃掉】—— 那两处是"写入方置位、这里消费并清零"
+                //   的协议。不清零的话: 标志一直挂着, 而 appState 里的力值是【当时那一刻】的 ——
+                //   万一开关翻回 true, 就会推出一股与当前状态无关的陈旧力。
+                //   (本项目记过"陈旧值被当成此刻的值"的账; 关掉不等于可以不管这个协议。)
+                if (appState.hasOrientExtraForce) {
+                    EnterCriticalSection(&appState.orientForceMutex);
+                    appState.hasOrientExtraForce = false;
+                    LeaveCriticalSection(&appState.orientForceMutex);
+                }
+                if (appState.hasOrientRepulsion) {
+                    EnterCriticalSection(&appState.orientRepulsionMutex);
+                    appState.hasOrientRepulsion = false;
+                    LeaveCriticalSection(&appState.orientRepulsionMutex);
+                }
             }
 
             // 8e. 总力 clamp

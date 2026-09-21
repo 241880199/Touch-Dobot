@@ -82,6 +82,18 @@ public:
     void shutdownRelayReporting();
     int  sendRelayUpdate(const char* msg);
     void reportPosition();
+
+    // 发一条 MATLAB 端的警告 (W| 协议) —— ★【这个线上格式的唯一一份定义】(2026-09-21)。
+    //   level      : 1 = 警告, 2 = 严重 (relay_gui 用它给顶栏染色并选显示方式)
+    //   type       : 单字符分类
+    //   message / suggestion : 文本
+    //   ⚠ 这两段文本【都不许含逗号】: 协议是逗号分隔的, 一个逗号会让后面所有字段整体错位。
+    //     要分隔就写 '；' 或 '·'。
+    //   ⚠ MATLAB 侧【每个刷新周期 (0.05s / 20Hz) 都会把 warn_max_level 清零】⇒ 调用方必须
+    //     【重复发】它才会常亮 (见 Relay_Station/relay_gui.m 的 "Decay warnings" 与
+    //     "Top-bar state override for warnings")。发一次就只能闪一下。
+    void reportWarning(int level, const char* type, const char* message,
+                       const char* suggestion, double param1, double param2);
     void reportCommand(const char* cmd);
     void reportFeedback(const char* fbText);
 

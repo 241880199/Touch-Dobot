@@ -339,6 +339,35 @@ namespace Config {
     const double SAFE_RZ_MIN = -180.0, SAFE_RZ_MAX = 180.0;  // Yaw 安全限位
 
     // ========== 虚拟约束力参数 ==========
+    // ★★★ 虚拟约束力（触觉安全提示）总开关 —— 2026-09-21 由用户拍板【全部关闭】。
+    //
+    // 【关掉的是哪些】它们都在 haptic/HapticCallback.cpp 的第 8b/8c/8d 段, 叠加到推给 Touch
+    //   的合力上（与 8a 的传感器力反馈相加）:
+    //     8b SafetyPredictor::computeConstraintForce = 四个力之和
+    //          ① 安全边界   (SAFE_X/Y/Z 内 50mm 起, 远离边界, 最大 2.0N)
+    //          ② 圆柱奇异   (半径 < 80mm, 径向向外, 最大 2.5N)
+    //          ③ 报警历史   (真报过警的位置 80mm 内, 远离它, 最大 1.5N)
+    //          ④ 工作空间边缘 (半径 > 550mm, 向心, 最大 1.0N)
+    //     8c Orient extra force        (奇异避免的约束放大)
+    //     8d Orient directional repulsion (Phase 2 腕部对齐斥力, 仅按钮2)
+    //
+    // 【为什么关】书写演示里它们干扰手感。⚠【具体是哪一路在推, 现场没有测出来】——
+    //   按实测的书写区域 (x,y 半径 ≈261mm、z 366~489mm) 只有 ① 够得到 (z 距 SAFE_Z_MAX=500
+    //   只剩 11mm, 而感应距离 50mm); ② 要半径 <80mm、④ 要半径 >550mm, 都够不到。
+    //   用户决定【全部关掉】。
+    //
+    // ★★ 【代价 —— 必须兑现, 不能只写在注释里】操作员从此【失去全部触觉安全提示】:
+    //    靠近安全边界 / 奇异 / 工作空间边缘 / 历史报警点时, 手上【不会有任何推力】。
+    //    ⇒ 补偿措施 (都已实现, 见 RelayCore::reportPosition 里那一段):
+    //      · client 控制台: 启动横幅 + 每 60s 复报一次 (单靠注释不算"警告")
+    //      · MATLAB 端: 走现成的 W| 通道每帧重发一条 level=2 的警告, 界面顶栏会被警告染色。
+    //        ⚠ 必须【重发】: relay_gui.m 每个刷新周期 (0.05s/20Hz) 会把 warn_max_level 清零。
+    // ⚠ 【不受影响】: 机械臂自己的碰撞检测与安全皮肤由机械臂侧做 (SetCollisionLevel/
+    //   SetSafeSkin), 与本开关无关 ⇒ 真会撞的时候机械臂仍会停。
+    // ⚠ 代码保留而不删: 翻回 true 即恢复; 且 test_constraint_force / test_singularity_avoidance
+    //   测的是【计算】本身 (不是"有没有叠加"), 所以它们仍然覆盖这些力。
+    const bool FORCE_CONSTRAINT_FORCES_ENABLED = false;
+
     const double CONSTRAINT_BOUNDARY_RANGE      = 50.0;   // 安全边界感应距离 (mm)
     const double CONSTRAINT_BOUNDARY_MAX_FORCE  = 2.0;    // 安全边界最大约束力 (N)
     const double CONSTRAINT_SINGULAR_RANGE      = 80.0;   // 圆柱奇异感应距离 (mm) — 提前预警

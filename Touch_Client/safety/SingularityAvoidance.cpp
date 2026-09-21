@@ -18,11 +18,11 @@ namespace SingularityAvoidance {
 #ifndef TEST_SINGAVOID
 void sendWarning(int level, const char* type, const char* message,
                  const char* suggestion, double param1, double param2) {
-    if (!message || !suggestion) return;
-    char buf[256];
-    snprintf(buf, sizeof(buf), "W|%d,%s,%s,%s,%.1f,%.1f",
-             level, type, message, suggestion, param1, param2);
-    RelayCore::instance().sendRelayUpdate(buf);
+    // ★ 2026-09-21: 改为【委托】RelayCore::reportWarning —— 那个 W| 格式从前在本文件里拼一遍,
+    //   而本趟新加的"触觉安全提示已关闭"那条也要发同一个格式。同一个线上格式两份实现,
+    //   就是会漂移的做法 (改了一处忘了另一处 ⇒ 界面收到的字段整体错位)。
+    //   拼法与约束 (不许含逗号 / 必须重复发) 现在只在 RelayCore.h 那一处写着。
+    RelayCore::instance().reportWarning(level, type, message, suggestion, param1, param2);
 }
 #else
 void sendWarning(int level, const char* type, const char* message,
