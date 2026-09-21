@@ -2906,9 +2906,12 @@ static double t6Spread(const double c[T6_MAXN][6], int n, int i0) {
 
 // 本地全量模型【应该】算出什么 —— 只给夹具重放用。
 //
-// 【为什么这里可以照写一遍公式】: 运行时一致性闸门 (2026-09-19) 要求 fd.raw (@576) 与
-// 本地模型算出来的东西一致才放行, 所以"想量模型输出"就必须先造一个一致的 @576。
-// 而闸门拒绝时 compensated 会被置零 —— 那量到的就不是模型输出, 而是 0。
+// 【为什么这里可以照写一遍公式】: 运行时一致性闸门 (2026-09-19) 要求【判据参考量】与
+// 本地模型算出来的东西一致才放行, 所以"想量模型输出"就必须先在参考量那一侧造一个一致的
+// 值。而闸门拒绝时 compensated 会被置零 —— 那量到的就不是模型输出, 而是 0。
+// ⚠ 参考量是哪一路由 ForceCompensation.cpp 的 guardReferenceValue 一处定义; 下面凡是要
+//   "让闸门放行"的地方, 喂的都必须【是那一侧】(现在的实现是 fd.tcpForce)。喂错边会让这些
+//   用例【照旧绿】但测的东西变成 0 与 0 相等 —— 空洞的绿, 比红更坏。
 //
 // 两处约定都【不在这里另立】:
 //   · 重力 → 共享实现 TcpCalibration::gravitySensorFrameAtYaw(pose, 0.0, g) (ψ 传 0,
@@ -2977,18 +2980,18 @@ static void test_runtime_compensation_pose_independence() {
                 fd.sixForceRaw[a]     = cap.F1304[i][a];   // 力 x,y,z
                 fd.sixForceRaw[3 + a] = cap.M1304[i][a];   // 力矩 x,y,z
             }
-            // ⚠ 【一致性闸门要求 fd.raw 与本地模型一致才放行】(2026-09-19)。本用例量的是
-            // 【模型输出】, 所以把 @576 喂成"模型说多少就是多少" (t6LocalModel) —— 直接喂
-            // 夹具里的 @576 会让闸门拒绝并把 compensated 置零, 那时量到的是 0, 而它会以
-            // "口径自校不过"的样子红掉, 看的却不是它要测的东西。
-            // 闸门在【真实夹具 @576】上的判决由 test_runtime_consistency_guard_replay 断言。
+            // ⚠ 【一致性闸门要求【参考量】与本地模型一致才放行】(2026-09-19)。本用例量的是
+            // 【模型输出】, 所以把【参考量那一侧】喂成"模型说多少就是多少" (t6LocalModel) ——
+            // 喂错边会让闸门读到 0, 那时量到的是 0 而不是模型输出, 而它会以"口径自校不过"
+            // 的样子红掉, 看的却不是它要测的东西。
+            // (夹具只有 @576 / @1304 两列, 没有参考量那一路的列 —— 所以这里只能现算。)
             double mdl[6];
             for (int a = 0; a < 3; a++) {
                 mdl[a]     = cap.F1304[i][a];
                 mdl[3 + a] = cap.M1304[i][a];
             }
             t6LocalModel(fit, cap.poses[i], mdl, mdl);
-            for (int a = 0; a < 6; a++) fd.raw[a] = mdl[a];
+            for (int a = 0; a < 6; a++) fd.tcpForce[a] = mdl[a];
             ForceCompensation::init();                       // 干净的估计器状态 (见文件头说明)
             ForceCompensation::setCalibration(fit.A, fit.bF, fit.bM, fit.cS);
             ForceCompensation::step(fd, cap.poses[i]);
@@ -3038,14 +3041,14 @@ static void test_runtime_compensation_pose_independence() {
                 fd.sixForceRaw[a]     = cap.F1304[i][a];
                 fd.sixForceRaw[3 + a] = cap.M1304[i][a];
             }
-            {   // 闸门的参照物: 由【留一那一次】的模型现算 (理由见 test_runtime_compensation_*)
+            {   // 闸门参考量那一侧的值: 由【留一那一次】的模型现算 (见 test_runtime_compensation_*)
                 double mdl[6];
                 for (int a = 0; a < 3; a++) {
                     mdl[a]     = cap.F1304[i][a];
                     mdl[3 + a] = cap.M1304[i][a];
                 }
                 t6LocalModel(f2, cap.poses[i], mdl, mdl);
-                for (int a = 0; a < 6; a++) fd.raw[a] = mdl[a];
+                for (int a = 0; a < 6; a++) fd.tcpForce[a] = mdl[a];
             }
             ForceCompensation::init();
             ForceCompensation::setCalibration(f2.A, f2.bF, f2.bM, f2.cS);
@@ -3245,6 +3248,20 @@ static void test_runtime_consistency_guard_replay() {
             }
 
             // (甲) 真实夹具: @576 用夹具里的那一列
+            //
+            // ⚠⚠ 【这一半自 2026-09-21 起是红的, 而且【不许】靠改它变绿】(判据参考量换到
+            //   另一路之后留下的事实, 不是笔误):
+            //   本行的 @576 现在是【诊断侧】, 判据不再看它 ⇒ 判据那一侧喂进去的是 0, 而
+            //   本地模型给出的外力 [就是拟合残差, 量级 ~0.02 N / ~0.001 N·m] 落在容差
+            //   (0.50 N / 0.03 N·m) 之内 ⇒ 闸门【放行】, 于是下面那句"每一帧都必须拒绝"
+            //   必然失败。也就是说: 【这份数据回答不了"真实夹具上判据会不会拒绝"】。
+            //   ⚠ 为什么不能就地修: 四份夹具的列是 F576/M576 与 F1304/M1304 —— 没有判据
+            //     参考量那一路的列, 所以它的真值【在这份数据里不存在】。把 @576 那两行删掉
+            //     并不改变它 (仍然是 0), 换成别的东西就是【凭空造数】(本项目最忌的一条)。
+            //   ⇒ 要它重新有判别力, 只有两条路 (都需要【新的采集】, 不在本计划内):
+            //     ① 重采一份【带参考量那一路的列】的夹具, 用真值喂 (甲);
+            //     ② 由所有者决定这一半改成测什么 (但【不许】把它删成一个绿的空壳)。
+            //   ⚠ 保留它【红着】是刻意的: 它是"这份数据不再支持旧结论"的唯一机器可见的记录。
             AppState::ForceData fd;
             for (int a = 0; a < 6; a++) fd.sixForceRaw[a] = six[a];
             fd.raw[0] = cap.F576[i][0]; fd.raw[1] = cap.F576[i][1]; fd.raw[2] = cap.F576[i][2];
@@ -3287,10 +3304,11 @@ static void test_runtime_consistency_guard_replay() {
                 return;
             }
 
-            // (乙) 反面对照: 把 @576 换成与本地模型一致的值 -> 必须放行。
+            // (乙) 反面对照: 把【参考量那一侧】换成与本地模型一致的值 -> 必须放行。
+            // (夹具没有参考量那一路的列 —— 所以用 t6LocalModel 现算, 理由同上面那条 ⚠。)
             // ⚠⚠ 【这条能证明什么、不能证明什么 —— 如实说 (复审 Important 4/§0)】:
             //   下面 mdl 是用 t6LocalModel 算的, 而 t6LocalModel 是 ForceCompensation::step()
-            //   那条公式的【逐字副本】。所以"@576 == 本地模型输出"这件事是【代数上恒真】的:
+            //   那条公式的【逐字副本】。所以"参考量 == 本地模型输出"这件事是【代数上恒真】的:
             //   d ≡ 0, 与容差是多少【完全无关】。因此这半边
             //     · 证明了: "放行"这条路是通的 (不是坏掉的闸门, 也不是一个恒 return false
             //       的桩就能让整个用例全绿);
@@ -3303,7 +3321,7 @@ static void test_runtime_consistency_guard_replay() {
             for (int a = 0; a < 6; a++) mdl[a] = six[a];
             t6LocalModel(fit, cap.poses[i], mdl, mdl);
             AppState::ForceData fd2;
-            for (int a = 0; a < 6; a++) { fd2.sixForceRaw[a] = six[a]; fd2.raw[a] = mdl[a]; }
+            for (int a = 0; a < 6; a++) { fd2.sixForceRaw[a] = six[a]; fd2.tcpForce[a] = mdl[a]; }
             ForceCompensation::init();
             ForceCompensation::setCalibration(fit.A, fit.bF, fit.bM, fit.cS);
             for (int f = 0; f < 8; f++) ForceCompensation::step(fd2, cap.poses[i]);
@@ -3321,7 +3339,7 @@ static void test_runtime_consistency_guard_replay() {
     }
 
     std::cout << "    => 真实夹具: " << refused << " / " << poses << " 个姿态【拒绝】"
-              << "    反面对照 (@576 与本地一致): " << passedCtrl << " / " << poses << " 个姿态放行"
+              << "    反面对照 (参考量与本地一致): " << passedCtrl << " / " << poses << " 个姿态放行"
               << std::endl;
     // ⚠ 【z 力漏洞的尺寸】(复审 Important 2): Fz 不投票, 力矩通道是它唯一可能的替补,
     //   而替补的门槛 = tol_M / |c_s_横向|。四份实测的 |c_s_横向| 范围决定这个洞有多大 ——

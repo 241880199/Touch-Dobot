@@ -35,20 +35,33 @@ static bool g_lastPoseValid = false;
 // ===== 运行时一致性闸门的状态 (2026-09-19) =====
 // 全部由 ForceReader/pollForce 线程访问 (step() 是唯一入口), 与 g_A 那些用 g_calibMutex
 // 保护的量不同 —— 这里不加锁, 与 g_motion 同理: 只有一个写者。
-static double g_guardEma[6]  = {0};      // compensated − @576 的逐通道 EMA
-// ===== 第二组 EMA: compensated − @720 (2026-09-20) —— 【只报不判】 =====
-// 为什么加: 厂商接口文档把两个 TCP 力分得很清楚 ——
-//     ActualTCPForce @576 = "TCP【传感器】力值"
-//     TCPForce       @720 = "TCP力值 (【通过关节电流计算】)"
-//   "通过关节电流算力"就必须知道负载 (重力矩 + 惯量矩) ⇒ @720 才反映控制器正在用的负载参数。
-//   而一致性闸门比的却是 @576 —— 且项目自己早有一条实测记录
-//   (relay/RelayCore.cpp): "改 EnableRobot 的负载, @576 纹丝不动, 为什么还不清楚"。
-// ⇒ 把两组差【并排放出来】, 就能直接看出闸门的参考量该是谁:
-//     若 (compensated − @720) 显著小于 (compensated − @576) ⇒ 该比 @720。
-// ⚠ 【只报不判】: 放行/拒绝的逻辑一个字没动, 也不参与任何容差比较 ——
-//   在看清它之前改判据, 就是拿一个没读过的数去改门。
-static double g_guardEma720[6] = {0};    // compensated − @720 的逐通道 EMA (只报不判)
-static bool   g_guardSeeded720 = false;  // 上面那一组的播种标志
+static double g_guardEma[6]  = {0};      // compensated − 【参考量】的逐通道 EMA (判据)
+
+// ===== 闸门判据的参考量: 全程序【唯一一份】定义 =====
+//
+// 厂商 30004 布局:
+//   @576 ActualTCPForce = "TCP【传感器】力值"      -> fd.raw[]
+//   @720 TCPForce       = "TCP力值(【通过关节电流计算】)" -> fd.tcpForce[]
+// 只有 @720 反映【控制器正在用的负载参数】(算它必须知道负载: 重力矩 + 惯量矩)。
+//
+// ⚠ 参考量本身也要被验证 (本项目记过: 一个通道"叫什么名字"不等于"它是什么")。
+//   实测依据: run-004 §4.5 —— @576 的重力系数跨轮次纹丝不动 (改负载 0.404->0.422 后
+//   仍是 0.206/0.208/0.211), 即它对"负载有没有被采纳"完全不响应。
+// ⚠ 打印端【不许】再抄一遍 @576 / @720 的字面量: 那份文字会在改参考量时撒谎。
+//   这条注释就是判据唯一的出处。
+static inline double guardReferenceValue(const AppState::ForceData& fd, int ch) {
+    return fd.tcpForce[ch];
+}
+
+// ===== 第二组 EMA: compensated − @576 (2026-09-20 并排报出 / 2026-09-21 角色互换) =====
+// 它原来是"compensated − @720", 与判据那一组【并排报出】, 用来裁决参考量该是谁
+//   (若某一路的差显著更小, 那一路才配当参考量)。裁决已有结论 —— 见上面
+//   guardReferenceValue 处的出处。⇒ 这一组就换到【判据原来用的那一路】(@576, 传感器侧)
+//   上, 于是"另一路差多少"照样随时看得见, 而判据不再看它。
+// ⚠ 【只报不判】的定位一个字没变: 它不参与任何容差比较, 只在拒绝时跟着打出来。
+// ⚠ 名字里【不许】再带 720 三个字: 它现在的含义与 720 正好相反, 留着就是埋雷。
+static double g_guardEmaDiag[6] = {0};   // compensated − @576 的逐通道 EMA (只报不判)
+static bool   g_guardSeededDiag = false; // 上面那一组的播种标志
 // 逐通道容差。⚠ 【在静态初始化时就填好】, 不留"init() 没跑就是 0"的空档 ——
 // 容差为 0 时 |EMA| > 0 都成立, 判决会退化, 而"退化"的方向必须是【拒绝】而不是放行。
 static double g_guardTol[6]  = { Config::FORCE_GUARD_TOL_FORCE_N,  Config::FORCE_GUARD_TOL_FORCE_N,
@@ -60,15 +73,22 @@ static ForceCompensation::GuardState g_guardState = ForceCompensation::GuardStat
 static DWORD  g_guardReportMs = 0;       // 上次打印/上报的时刻
 
 // 【哪些通道参与判决】。Fz 【不投票】—— 理由写在报告与 .h 里, 一行摘要:
-//   @576 的 z 通道响应实测秩 2 (奇异值 [0.212 0.201 0.008], 第三行比另两行小 8~15 倍,
+//   ⚠ 这条取舍是【参考量还是 @576 的时候】定下的, 依据是那一侧的 z 通道响应实测秩 2
+//   (奇异值 [0.212 0.201 0.008], 第三行比另两行小 8~15 倍,
 //   Docs/superpowers/plans/2026-09-19-raw-channel-calibration.md:268-274), 它在【我们唯一
-//   有的激励 (重力方向)】上不动。一个动不了的参考既证不了"一致", 也证不了"不一致"。
+//   有的激励 (重力方向)】上不动。一个动不了的对照量既证不了"一致", 也证不了"不一致"。
+//   ⚠ 参考量换到【通过关节电流计算】的那一路之后, 这一条依据【没有跟着复测】——
+//     新参考量的 z 通道响应是好是坏, 仓库里没有实测。掩码本身的取舍不在本次改动内,
+//     但这个前提的现状必须留在这里, 否则它会被读成"已经验过"。
+//     开放项见 Config.h 里 FORCE_GUARD_TOL_FORCE_N 上方的 z 缺口段。
 //   · 让它投票不会让闸门永远通过 (Fx/Fy 在, 现在是 1.7~2.2 N 量级的拒绝);
 //   · 却会让闸门【永远拒绝】: 若它对外力也不响应, 则一旦有真实 z 接触, compensated_z
-//     有值而 @576_z 恒 ~0, 差值直接超限 —— 那就是用户明确禁止的"永远不通过"。
+//     有值而对照量_z 恒 ~0 (旧参考量上的实测如此), 差值直接超限 —— 那就是用户明确
+//     禁止的"永远不通过"。
 //   所以处置是【每次都报出它的比较结果, 但不计票】, 不是"静默跳过"。
 //   ⚠ 这一列的证据到此为止: "是 @576 报得坏, 还是机械臂 z 补偿太强" 目前【没有分开】
-//     (计划书 :273-274 明说"不许猜")。分开之后应把它提升为投票通道。
+//     (计划书 :273-274 明说"不许猜")。分开之后【还得在新参考量上复测一遍】, 才谈得上
+//     把它提升为投票通道。
 //
 // ⚠⚠ 【这一列不投票代价有多大 —— 给出数, 不要只说"少一道闸门"】(2026-09-19 复审要求)。
 //   力矩门【理论上】能给 z 力当后盾: z 上的模型误差 ΔFz 会经 c_s 叉乘出一个力矩误差
@@ -253,7 +273,7 @@ static void setGuardState(ForceCompensation::GuardState st) {
 
     if (st == ForceCompensation::GuardState::OK) {
         if (changed) {
-            fprintf(stderr, "[Force] 一致性闸门: 放行 (本地全量模型与 @576 逐通道一致)\n");
+            fprintf(stderr, "[Force] 一致性闸门: 放行 (本地全量模型与【参考量】逐通道一致)\n");
             fflush(stderr);
         }
         g_guardReportMs = now;
@@ -285,19 +305,21 @@ static void setGuardState(ForceCompensation::GuardState st) {
     // (走到这里且 !changed 只可能是 INCONSISTENT: !changed && uncal 在上面已经 return 了。)
     static const char* NM[6] = { "Fx(N)", "Fy(N)", "Fz(N)", "Mx(Nm)", "My(Nm)", "Mz(Nm)" };
     if (!changed) {
-        // 【复报把六个通道【两个对照量】都报出来】(2026-09-20 修订)。
-        // 原来只报超限的那几个通道的 @576 值 —— 但真正要看的是【@576 与 @720 哪个更接近 0】,
+        // 【复报把六个通道【两个对照量】都报出来】(2026-09-20 修订; 2026-09-21 角色互换)。
+        // 原来只报超限的那几个通道的值 —— 但真正要看的是【两个对照量哪个更接近 0】,
         // 而那只在【全表】里有, 全表又只在状态跃迁时打 ⇒ 操作员每次重启才看得到一次。
-        // 现在这行就是一份【随时可读】的紧凑读数: 每个通道 "@576 / @720" 并排。
+        // 现在这行就是一份【随时可读】的紧凑读数: 每个通道 "判据差 / 诊断差" 并排。
+        // ⚠ 前一半是【判据】的差 (对参考量), 后一半是【诊断】的差 (对 @576)—— 谁是谁
+        //   由 guardReferenceValue 那一处定义决定, 这里不许再抄通道号。
         // 一行约 130 字符、每 5 s 一次 —— 比原来那 14 行的块省得多, 而信息更全。
         char line[384];
         int off = snprintf(line, sizeof(line),
-                           "[Force] !! (复报) 仍在拒绝  [@576 / @720]:");
+                           "[Force] !! (复报) 仍在拒绝  [判据(与参考量) / 诊断(与 @576)]:");
         if (off < 0) off = 0;   // snprintf 可返回负值; 不管的话下面 (size_t)off 会回绕
         for (int i = 0; i < 6; i++) {
             if ((size_t)off + 40 >= sizeof(line)) break;   // 余量不足就停, 不越界
             const int w = snprintf(line + off, sizeof(line) - (size_t)off, " %s%+.3f/%+.4f",
-                                   NM[i], g_guardEma[i], g_guardEma720[i]);
+                                   NM[i], g_guardEma[i], g_guardEmaDiag[i]);
             if (w > 0) off += w;
         }
         if ((size_t)off < sizeof(line))
@@ -344,23 +366,24 @@ static void setGuardState(ForceCompensation::GuardState st) {
         fflush(stderr);
         return;
     }
-    fprintf(stderr, "[Force] !! 逐通道结果 (EMA 差 = compensated − @576; 单位见各行标签):\n");
-    // 【为什么每行末尾多一个 @720】(2026-09-20): 厂商文档 —— @576 = "TCP传感器力值",
-    // @720 = "TCP力值 (通过关节电流计算)" ⇒ 后者才反映控制器用的负载参数, 而闸门比的是前者。
-    // 两组并排, 一眼就能看出参考量该是谁。⚠ 它【只报不判】, 不参与任何容差比较。
-    fprintf(stderr, "[Force] !!   行末的「与 @720」= compensated − @720 —— 只报不判,"
-                    " 用来判闸门的参考量该是谁\n");
+    fprintf(stderr, "[Force] !! 逐通道结果 (EMA 差 = compensated − 【参考量】; 单位见各行标签):\n");
+    // 【每行末尾那一列是什么】(2026-09-20 加, 2026-09-21 角色互换): 它原来是"与 @720",
+    // 而 @720 现在是判据看的参考量 ⇒ 这一列换成 @576 —— 【只报不判】的诊断侧。
+    //   作用: 判据只看得出"对不上", 看不出"是哪一路偏了"; 把另一路并排报出来, 现场才能
+    //   一次看全。⚠ 它不参与任何容差比较。
+    fprintf(stderr, "[Force] !!   行末的「与 @576」= compensated − @576 —— 只报不判"
+                    " (诊断侧, 判据不看它)\n");
     for (int i = 0; i < 6; i++) {
         const bool ex = (g_guardTol[i] > 0.0) && (fabs(g_guardEma[i]) > g_guardTol[i]);
         if (!g_guardVote[i]) {
             fprintf(stderr, "[Force] !!   %-6s %+10.4f  容差 %.4f  【不投票】"
-                            "@576 的 z 响应秩 2 (奇异值 0.212/0.201/0.008), 它动不了就证不了什么\n",
+                            "z 通道的判据缺口未查清 (依据与开放项见 g_guardVote 段)\n",
                     NM[i], g_guardEma[i], g_guardTol[i]);
         } else {
-            fprintf(stderr, "[Force] !!   %-6s %+10.4f  容差 %.4f  %-16s └ 与 @720: %+9.4f"
+            fprintf(stderr, "[Force] !!   %-6s %+10.4f  容差 %.4f  %-16s └ 与 @576: %+9.4f"
                             " (只报不判)\n",
                     NM[i], g_guardEma[i], g_guardTol[i], ex ? "超限  <== 触发" : "在限内",
-                    g_guardEma720[i]);
+                    g_guardEmaDiag[i]);
         }
     }
     // (走到这里只可能是 INCONSISTENT —— UNCALIBRATED 上面已经 return 了)
@@ -373,8 +396,8 @@ static void setGuardState(ForceCompensation::GuardState st) {
 static void resetGuard() {
     for (int i = 0; i < 6; i++) g_guardEma[i] = 0.0;
     g_guardSeeded = false;
-    for (int i = 0; i < 6; i++) g_guardEma720[i] = 0.0;
-    g_guardSeeded720 = false;
+    for (int i = 0; i < 6; i++) g_guardEmaDiag[i] = 0.0;
+    g_guardSeededDiag = false;
     g_guardFrames = 0;
     g_guardState  = ForceCompensation::GuardState::UNCALIBRATED;
     g_guardReportMs = 0;
@@ -690,20 +713,23 @@ void step(AppState::ForceData& fd, const double poseRxyz[6]) {
 
     // ===== 7b. 运行时一致性闸门 (用户指令 1/2) =====
     // 判据与两个原因的分辨写在 .h 里; 这里只做: 更新逐通道 EMA -> 投票 -> 放行或拒绝。
+    // 参考量【不在这里写死】: 它是 guardReferenceValue, 判据的唯一一份定义。
     // 【EMA 无条件更新】(包括正在拒绝的时候): 否则闸门一旦拒绝就再也回不来, 而 Task 8
     //  "把负载发进去 -> 看它放行" 正是靠它回来的。
     for (int i = 0; i < 6; i++) {
-        const double d = comp[i] - fd.raw[i];
+        // 判据的对照量【只在这里取】, 且取自 guardReferenceValue —— 判据看的是哪一路,
+        // 全程序只有那一处定义。别再把这个下标换成字面通道。
+        const double d = comp[i] - guardReferenceValue(fd, i);
         if (!g_guardSeeded) g_guardEma[i] = d;
         else g_guardEma[i] += Config::FORCE_GUARD_EMA_ALPHA * (d - g_guardEma[i]);
-        // 第二组: 与 @720 的差。同一个 α、同一帧、同一次 comp —— 只换对照量。
-        // 【只报不判】, 见 g_guardEma720 的说明: 它不参与任何容差比较。
-        const double d720 = comp[i] - fd.tcpForce[i];
-        if (!g_guardSeeded720) g_guardEma720[i] = d720;
-        else g_guardEma720[i] += Config::FORCE_GUARD_EMA_ALPHA * (d720 - g_guardEma720[i]);
+        // 诊断侧: 与 @576 (fd.raw) 的差。同一个 α、同一帧、同一次 comp —— 只换对照量。
+        // 【只报不判】, 见 g_guardEmaDiag 的说明: 它不参与任何容差比较。
+        const double dDiag = comp[i] - fd.raw[i];
+        if (!g_guardSeededDiag) g_guardEmaDiag[i] = dDiag;
+        else g_guardEmaDiag[i] += Config::FORCE_GUARD_EMA_ALPHA * (dDiag - g_guardEmaDiag[i]);
     }
     g_guardSeeded = true;
-    g_guardSeeded720 = true;
+    g_guardSeededDiag = true;
     g_guardFrames++;
 
     bool inconsistent = false;
@@ -727,7 +753,7 @@ void step(AppState::ForceData& fd, const double poseRxyz[6]) {
     //    跟着换成了 @1304。零偏是【这个通道】的零偏: 拿 @576 去更新它, 就是给另一路量的
     //    零偏做 EMA —— 两路的零偏不是一回事。实测出处: tests/fixtures/calib_poses_2026-09-19.txt
     //    7 个姿态的逐通道均值差 (@1304 − @576) = 19.8 / 1.6 / 1.7 N (x/y/z)。
-    //    ⚠ 【新增】只在与 @576 一致时才更新。不一致时继续在线学零偏, 等于闸门一边拒它、
+    //    ⚠ 【新增】只在与【参考量】一致时才更新。不一致时继续在线学零偏, 等于闸门一边拒它、
     //      一边把同样的数据学进 b_F (而 b_F 的 EMA 目标正是把 compensated 拉向 0) ——
     //      那会让不一致自我掩盖, 而"安静地学错"正是这条闸门要防的东西。
     //      代价: 拒绝期间零偏不再自跟踪; 闸门放行后自动恢复。

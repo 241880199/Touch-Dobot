@@ -38,7 +38,8 @@ enum class RobotErrorCode {
     // 它们要做的事不同 —— 前者去按 'm'+'s' 重标模型, 后者去查负载参数有没有真的发进机械臂。
     // 合成一句话会让操作员在两个完全不同的动作之间乱猜。
     ERR_FORCE_UNCALIBRATED,     // 【没有可用模型】: 未标定 / A 全零 / A 数值退化 -> 拒绝传数据
-    ERR_FORCE_INCONSISTENT,     // 有模型, 但与机械臂自报的 @576 逐通道对不上 -> 拒绝传数据
+    ERR_FORCE_INCONSISTENT,     // 有模型, 但与机械臂自报的【参考量】逐通道对不上 -> 拒绝传数据
+                                // (参考量是哪一路: ForceCompensation.cpp 的 guardReferenceValue)
 
     OK = -1                     // 无错误
 };

@@ -184,9 +184,10 @@ static void test_comp_moment_is_cross_of_Ag() {
     ForceCompensation::setCalibration(A, bF, bM, cS_z);
     AppState::ForceData fd;
     fd.sixForceRaw[4] = 0.4905;
-    // 一致性闸门要求 fd.raw (@576) 与本地模型给的是同一个数 —— 这一帧给它们相等,
+    // 一致性闸门要求【参考量】与本地模型给的是同一个数 —— 这一帧给它们相等,
     // 于是闸门放行, 下面量的才是【补偿结果】本身, 而不是被闸门置零的 0。
-    fd.raw[4] = 0.4905;
+    // (喂到参考量那一侧: fd.tcpForce —— 见本节顶上的说明。)
+    fd.tcpForce[4] = 0.4905;
     ForceCompensation::step(fd, pose);
     CHECK(fabs(fd.compensated[4] - 0.4905) < 1e-9);
 
@@ -206,9 +207,34 @@ static void test_comp_moment_is_cross_of_Ag() {
 
 // ===== 运行时一致性闸门 (2026-09-19, 用户指令 1/2/3) =====
 //
-// 判据: 本地全量模型的输出 compensated 与机械臂自报的 @576 (fd.raw) 逐通道比较。
+// 判据: 本地全量模型的输出 compensated 与机械臂自报的【参考量】逐通道比较。
 // 两个模型都对时它们估计的是同一个量 (外力), 所以应当一致; 不一致 ⇒ 至少一个错 ⇒
 // compensated 全 6 个分量置零 + 报错。未标定/模型不可用 ⇒ 同一处置, 但报的是另一个原因。
+// ⚠ 【参考量是哪一路】不在这份测试里记: 它由 ForceCompensation.cpp 的 guardReferenceValue
+//   一处定义。下面凡是要"让闸门放行"或"让闸门拒绝"的地方, 喂的都是【参考量那一侧】
+//   (fd.tcpForce), 而 fd.raw (@576) 是与它并排报出的诊断侧 —— 放错边会得到一个【空洞
+//   的】用例: 它仍然绿, 但测的不再是它名字说的那件事。
+
+// 判据参考量必须是机械臂【通过关节电流算】的那一路 (@720)，不是传感器侧 (@576)。
+// 构造: 让 @720 与本地一致, 而 @576 严重不符 -> 必须【放行】。
+static void test_guard_reference_is_the_current_derived_channel() {
+    TEST(guard_reference_is_the_current_derived_channel);
+    ForceCompensation::init();
+    double A[9]; diagA(1.0, A);
+    double com[3] = {0, 0, 0};
+    double bF[3] = {0, 0, 0}, bM[3] = {0, 0, 0};
+    ForceCompensation::setCalibration(A, bF, bM, com);
+
+    double pose[6] = {0, 0, 0, 0, 0, 0};
+    AppState::ForceData fd;
+    fd.sixForceRaw[2] = 9.81;   // 本地算出 compensated = (0,0,0)
+    fd.tcpForce[0]    = 0.05;   // @720 说 x 上几乎没外力      <- 判据该看这个
+    fd.raw[0]         = 0.90;   // @576 说 x 上有 0.9 N         <- 不该再看这个
+    ForceCompensation::step(fd, pose);
+
+    CHECK(ForceCompensation::guardState() == ForceCompensation::GuardState::OK);
+    PASS();
+}
 
 // 一致 -> 放行: compensated 就是模型算出来的值 (不被置零), 状态 OK。
 static void test_guard_passes_when_consistent() {
@@ -222,9 +248,9 @@ static void test_guard_passes_when_consistent() {
     double pose[6] = {0, 0, 0, 0, 0, 0};       // g = (0,0,9.81) -> Fg = (0,0,9.81)
     AppState::ForceData fd;
     fd.sixForceRaw[2] = 9.81;                  // 读数 = 重力 -> compensated 应为 0
-    fd.raw[2] = 0.0;                           // @576 也说是 0 (两边一致)
+    fd.tcpForce[2] = 0.0;                      // 参考量也说是 0 (两边一致)
     fd.sixForceRaw[0] = 1.25;                  // 再叠一个真实外力: 两边都必须看到它
-    fd.raw[0] = 1.25;
+    fd.tcpForce[0] = 1.25;
     ForceCompensation::step(fd, pose);
 
     CHECK(ForceCompensation::guardState() == ForceCompensation::GuardState::OK);
@@ -247,8 +273,8 @@ static void test_guard_refuses_when_inconsistent() {
     double pose[6] = {0, 0, 0, 0, 0, 0};
     AppState::ForceData fd;
     fd.sixForceRaw[2] = 9.81;                  // 本地算出 compensated = (0,0,0)
-    fd.raw[0] = 0.90;                          // @576 说 x 上有 0.9 N 的外力 (容差 0.5)
-    fd.raw[1] = 0.05;                          // y 在限内
+    fd.tcpForce[0] = 0.90;                     // 参考量说 x 上有 0.9 N 的外力 (容差 0.5)
+    fd.tcpForce[1] = 0.05;                     // y 在限内
     ForceCompensation::step(fd, pose);
 
     CHECK(ForceCompensation::guardState() == ForceCompensation::GuardState::INCONSISTENT);
@@ -286,7 +312,7 @@ static void test_guard_two_causes_are_distinguishable() {
     double bF[3] = {0, 0, 0}, bM[3] = {0, 0, 0};
     ForceCompensation::setCalibration(A, bF, bM, com);
     AppState::ForceData fd2;
-    fd2.raw[0] = 5.0;
+    fd2.tcpForce[0] = 5.0;   // 参考量那一侧严重不符 -> INCONSISTENT
     ForceCompensation::step(fd2, pose);
     const ForceCompensation::GuardState stB = ForceCompensation::guardState();
 
@@ -341,9 +367,12 @@ static void test_guard_error_code_mapping() {
     PASS();
 }
 
-// ★ Fz 【不投票】但【照报】—— @576 的 z 响应实测秩 2, 它动不了就证不了"一致"。
-//   本用例钉住两件事: (a) 巨大 z 差不会让闸门拒绝 (不然就是"永远不通过");
-//   (b) 它的比较结果仍然读得出来 (不然就是"静默"跳过, 简报明令禁止)。
+// ★ Fz 【不投票】但【照报】—— 这条取舍的依据写在 ForceCompensation.cpp 的 g_guardVote 段
+//   (它是【参考量还是 @576 的时候】定下的; 换成新参考量之后那条依据没有跟着复测, 掩码
+//   本身的取舍不在本次改动内)。本用例钉住两件事: (a) 巨大 z 差不会让闸门拒绝
+//   (不然就是"永远不通过"); (b) 它的比较结果仍然读得出来 (不然就是"静默"跳过, 明令禁止)。
+//   ⚠ 所以 z 差【必须】喂到参考量那一侧: 喂到 @576 (诊断侧) 它就退化成一条恒真的空用例
+//     —— 无论判据看哪一路都绿, 却什么都没钉住。
 static void test_guard_fz_reported_but_not_voted() {
     TEST(guard_fz_reported_but_not_voted);
     ForceCompensation::init();
@@ -355,7 +384,7 @@ static void test_guard_fz_reported_but_not_voted() {
     double pose[6] = {0, 0, 0, 0, 0, 0};
     AppState::ForceData fd;
     fd.sixForceRaw[2] = 9.81;                 // compensated = (0,0,0)
-    fd.raw[2] = 3.0;                          // @576 的 z 报 3 N —— 远超容差 0.5
+    fd.tcpForce[2] = 3.0;                     // 参考量的 z 报 3 N —— 远超容差 0.5
     ForceCompensation::step(fd, pose);
 
     CHECK(ForceCompensation::guardState() == ForceCompensation::GuardState::OK);  // (a)
@@ -382,7 +411,7 @@ static void test_guard_moment_channel_votes() {
     AppState::ForceData fd;
     fd.sixForceRaw[2] = 9.81;
     fd.sixForceRaw[3] = 0.20;                 // 本地 compensated[3] = 0.20
-    fd.raw[3] = 0.20;                         // 力矩在限内 -> 先放行
+    fd.tcpForce[3] = 0.20;                    // 力矩在限内 -> 先放行
     ForceCompensation::step(fd, pose);
     CHECK(ForceCompensation::guardState() == ForceCompensation::GuardState::OK);
 
@@ -392,7 +421,7 @@ static void test_guard_moment_channel_votes() {
     AppState::ForceData fd2;
     fd2.sixForceRaw[2] = 9.81;
     fd2.sixForceRaw[3] = 0.20;
-    fd2.raw[3] = 0.20 - 0.12;                 // 差 0.12 > 容差 0.03 -> 拒绝
+    fd2.tcpForce[3] = 0.20 - 0.12;            // 差 0.12 > 容差 0.03 -> 拒绝
     ForceCompensation::step(fd2, pose);
     CHECK(ForceCompensation::guardState() == ForceCompensation::GuardState::INCONSISTENT);
     for (int i = 0; i < 6; i++) CHECK(fabs(fd2.compensated[i]) < 1e-12);
@@ -415,12 +444,12 @@ static void test_guard_ema_needs_sustained_mismatch() {
     fd.sixForceRaw[2] = 9.81;
 
     // 第 1 帧: 瞬时差 0.30 N, 在容差 0.50 之内 -> 放行 (EMA 由第 1 帧播种)。
-    fd.raw[0] = -0.30;
+    fd.tcpForce[0] = -0.30;
     ForceCompensation::step(fd, pose);
     CHECK(ForceCompensation::guardState() == ForceCompensation::GuardState::OK);
 
     // 之后持续 0.90 N: EMA 从 0.30 爬向 0.90, alpha = 0.02 —— 第 5 帧还不够, 第 40 帧够了。
-    fd.raw[0] = -0.90;
+    fd.tcpForce[0] = -0.90;
     for (int k = 0; k < 4; k++) ForceCompensation::step(fd, pose);
     CHECK(ForceCompensation::guardState() == ForceCompensation::GuardState::OK);
     for (int k = 0; k < 36; k++) ForceCompensation::step(fd, pose);
@@ -476,7 +505,8 @@ static void test_zero_only_no_motion() {
     for (int i = 0; i < 3; i++) CHECK(fabs(cS2[i] - cS[i]) < 1e-15);
 
     // 零偏已生效。pose 全 0 → 重力项 A·g 只在 Z 轴 (A 是对角), X/Y 纯看零偏。
-    // fd.raw (@576) 填成"机械臂也给出同一个外力"的样子 —— 闸门放行才量得到补偿结果。
+    // 参考量那一侧 (fd.tcpForce) 填成"机械臂也给出同一个外力"的样子 —— 闸门放行才量得到
+    // 补偿结果。(@576 那一路现在是诊断侧, 闸门不看它, 所以这里不必再喂。)
     // 期望值 (A = 0.42·I, g = (0,0,9.81) -> Fg = (0,0,4.1202), c_s 沿 z -> Mg = 0):
     //   x: 5 − (−0.48)          = 5.48
     //   y: 5 − (−1.35)          = 6.35
@@ -484,8 +514,8 @@ static void test_zero_only_no_motion() {
     //   M: 5 − (0.010, −0.020, 0.005)
     AppState::ForceData fd;
     for (int i = 0; i < 6; i++) fd.sixForceRaw[i] = 5.0;
-    fd.raw[0] = 5.48; fd.raw[1] = 6.35; fd.raw[2] = 0.90;
-    fd.raw[3] = 4.99; fd.raw[4] = 5.02; fd.raw[5] = 4.995;
+    fd.tcpForce[0] = 5.48; fd.tcpForce[1] = 6.35; fd.tcpForce[2] = 0.90;
+    fd.tcpForce[3] = 4.99; fd.tcpForce[4] = 5.02; fd.tcpForce[5] = 4.995;
     ForceCompensation::step(fd, pose);
     CHECK(ForceCompensation::guardState() == ForceCompensation::GuardState::OK);
     CHECK(fabs(fd.compensated[0] - (5.0 - (-0.48))) < 0.02);
@@ -533,8 +563,8 @@ static void test_zero_abort_not_applied() {
     // 补偿结果里用的仍是旧零偏: x = 5 − 1.0 = 4.0 (不是 5 − (−0.48) = 5.48)。
     AppState::ForceData fd;
     for (int i = 0; i < 6; i++) fd.sixForceRaw[i] = 5.0;
-    fd.raw[0] = 4.0; fd.raw[1] = 3.0; fd.raw[2] = 5.0 - 3.0 - 4.1202;
-    fd.raw[3] = 4.9; fd.raw[4] = 4.8; fd.raw[5] = 4.7;
+    fd.tcpForce[0] = 4.0; fd.tcpForce[1] = 3.0; fd.tcpForce[2] = 5.0 - 3.0 - 4.1202;
+    fd.tcpForce[3] = 4.9; fd.tcpForce[4] = 4.8; fd.tcpForce[5] = 4.7;
     ForceCompensation::step(fd, pose);
     CHECK(ForceCompensation::guardState() == ForceCompensation::GuardState::OK);
     CHECK(fabs(fd.compensated[0] - 4.0) < 0.02);   // 旧零偏 (1.0), 不是新的 (−0.48)
@@ -900,6 +930,7 @@ int main() {
     test_comp_gravity_only();
     test_comp_gravity_goes_through_A();
     test_comp_moment_is_cross_of_Ag();
+    test_guard_reference_is_the_current_derived_channel();
     test_guard_passes_when_consistent();
     test_guard_refuses_when_inconsistent();
     test_guard_two_causes_are_distinguishable();

@@ -32,9 +32,11 @@ namespace ForceCompensation {
     // fd.sixForceRaw[] (@1304, 原始读数) must be fresh; poseRxyz = {X,Y,Z,Rx,Ry,Rz} in mm & deg
     // from GetPose(). Writes fd.compensated[] (6-axis compensated force).
     // ⚠ 输入通道是 @1304, 【不是】@576 (fd.raw) —— 见下面全量模型的说明。
-    // ⚠ 【fd.raw[] (@576) 也必须是同一帧的】: 一致性闸门拿它当参照物
-    //   (RelayCore 的 ForceReader 在【同一次 30004 收帧】里同时填 raw 与 sixForceRaw,
-    //    所以两者天然时间对齐, 不需要再对时)。填不上 (全 0) 会被判成不一致。
+    // ⚠ 【两个对照量都必须是同一帧的】: 一致性闸门拿【参考量】当判据 (哪一路是参考量见
+    //   .cpp 里 guardReferenceValue —— 那是判据的唯一一份定义), 而 fd.raw[] (@576) 是
+    //   与它并排报出的诊断侧。
+    //   (RelayCore 的 ForceReader 在【同一次 30004 收帧】里同时填 raw / tcpForce /
+    //    sixForceRaw, 所以三者天然时间对齐, 不需要再对时)。填不上 (全 0) 会被判成不一致。
     // ⚠ 闸门拒绝时 fd.compensated[] 全 6 个分量为 0 (不再透传 @1304)。
     void step(AppState::ForceData& fd, const double poseRxyz[6]);
 
@@ -54,13 +56,17 @@ namespace ForceCompensation {
                         const double biasTorque[3], const double comSensor[3]);
 
     // ===== 运行时一致性闸门 (2026-09-19) =====
-    // 判据: 【本地全量模型的输出】与【机械臂自报的 @576 (fd.raw)】逐通道比较。
+    // 判据: 【本地全量模型的输出】与【机械臂自报的参考量】逐通道比较。
     //   · @1304 (fd.sixForceRaw) 是原始读数; 本地模型给出 compensated = @1304 − b_F − A·g,
     //     是【外力】的一个估计。
-    //   · @576 (fd.raw) 是机械臂用【它自己的】负载模型减掉重力之后的估计 —— 同一个外力。
+    //   · 参考量是机械臂用【它自己的】负载模型减掉重力之后的估计 —— 同一个外力。
     //   ⇒ 两个模型都对时两者应当一致; 不一致 ⇒ 至少一个错 ⇒ 拒绝把数据往下传。
+    // ⚠ 【是哪一路当参考量, 全程序只有一处定义】: .cpp 里紧挨 g_guardVote 的
+    //   guardReferenceValue —— 那里写了它为什么是那一路 (实测出处) 以及"打印端不许再抄
+    //   通道号"这条规矩。要换参考量就改那一处, 别在这里再记一份。
+    //   · 另一路 (fd.raw[], 传感器侧) 仍在同一屏上报出, 但【只报不判】—— 判据不看它。
     // 这就是用户指令 1/2 的机制: 未标定或与标定不符 ⇒ 拒绝 + 报错; 而"标定后 @1304 与
-    // @576 应当一致"正是判据 (Task 8 下发正确负载之后它们才应当收敛)。
+    // 参考量应当一致"正是判据 (Task 8 下发正确负载之后它们才应当收敛)。
     //
     // 不一致 ⇒ 【compensated 全 6 个分量置零】(不是只置 haptic): 下游
     //   ForcePipeline::step 从 compensated 推 filtered/hapticOut/F| 帧 —— 所以断掉的是
@@ -79,7 +85,8 @@ namespace ForceCompensation {
     enum class GuardState {
         OK = 0,             // 模型在, 且逐通道一致 -> 数据放行
         UNCALIBRATED = 1,   // 没有可用模型 (未标定 / A 全零 / A 退化) -> 拒绝
-        INCONSISTENT = 2    // 模型在, 但与 @576 对不上 -> 拒绝
+        INCONSISTENT = 2    // 模型在, 但与【参考量】对不上 -> 拒绝 (参考量 = .cpp 的
+                            //   guardReferenceValue, 判据的唯一一份定义)
     };
     struct GuardReport {
         GuardState state = GuardState::UNCALIBRATED;
@@ -90,7 +97,7 @@ namespace ForceCompensation {
         //   掩码的【唯一一份实现】是 .cpp 里的 g_guardVote; 这里只是同一份东西的初值。
         bool   voted[6]    = {true, true, false, true, true, true};
         bool   exceeded[6] = {false, false, false, false, false, false};
-        double ema[6] = {0, 0, 0, 0, 0, 0};   // compensated − @576 的 EMA (N / N·m)
+        double ema[6] = {0, 0, 0, 0, 0, 0};   // compensated − 【参考量】的 EMA (N / N·m)
         double tol[6] = {0, 0, 0, 0, 0, 0};
     };
     GuardState  guardState();

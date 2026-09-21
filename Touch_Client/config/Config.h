@@ -126,9 +126,12 @@ namespace Config {
     const double FORCE_ACC_FILTER_CUTOFF_HZ = 10.0;       // 加速度估计低通截止 (Hz)
 
     // ========== 运行时一致性闸门 (2026-09-19) ==========
-    // 逐通道比较【本地全量模型的输出 compensated】与【机械臂自报的 @576 (fd.raw)】:
+    // 逐通道比较【本地全量模型的输出 compensated】与【机械臂自报的参考量】:
     // 两个模型都对时它们估计的是同一个量 (外力), 所以应当一致; 不一致 ⇒ 至少一个错 ⇒
     // 拒绝把数据往下传 (compensated 置零)。
+    // ⚠ 参考量【是哪一路】不在这里写死: 它由 ForceCompensation.cpp 的 guardReferenceValue
+    //   一处定义 (那里也有"为什么是那一路"的实测出处)。换参考量就改那一处。
+    //   @576 (fd.raw) 是同屏并排报出的诊断侧, 【只报不判】—— 下面的容差不比它。
     //
     // 容差【由实测导出】, 不是猜的。量级依据 (推导见 .superpowers/sdd/runtime-guard-report.md;
     // 全部数字由 tests/test_payload_calibration.cpp 的 test_runtime_consistency_guard_replay
