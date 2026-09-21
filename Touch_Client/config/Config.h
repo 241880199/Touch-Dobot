@@ -130,6 +130,30 @@ namespace Config {
     //   ⚠ 安全性不变: 力在 mapForceToTouch 里先 clamp 到 FORCE_MAX_TOUCH_N, hapticCallback
     //     里还有一道 ⇒ 净比例 ~1 时 3.3 N 的笔尖力即撞上限。
     const double FORCE_REFLECTION_GAIN = 60.0;   // 力反射增益 (净比例 ≈1:1, 对着毛笔 0.3~0.6N)
+
+    // ★★★ 垂直分量的反馈符号 —— 2026-09-21 新增, 修"笔接触时是斥力/把 touch 推开"。
+    //
+    // 【原来是什么】ForcePipeline 第 4 步把工具系的力映到 Touch 系, 三行里只有垂直那项带负号:
+    //     hapticOut[0] =  fx;
+    //     hapticOut[1] = -fz;      ← 只有这一项
+    //     hapticOut[2] =  fy;
+    //   而那一行自己的注释举的例子是: "When robot is pushed UP (+Fz), Touch pushes DOWN (-Y)
+    //   to resist"。**这个例子自相矛盾**: 工具被往上推 (+Fz) 意味着【操作员正在往下压纸】,
+    //   此时把 Touch 再往下推是【帮忙】, 不是抵抗。⇒ 符号应是反的。
+    //   现场实测相符 (2026-09-21): 笔接触时手上感到"斥力"、被推开, 而写字要的是"阻力"。
+    //
+    // 【原则】操作员的运动造成工具受力; 要【抵抗】那个运动, 触觉就该把【工具受到的力】按同方向
+    //   施加到手上 —— 工具的受力本来就是对操作员那一推的反作用。
+    //   ⇒ 压下去 ⇒ 工具受到向上的力 ⇒ 手上应当被【往上推】。
+    // ⇒ 取 +1 (等价于把那个负号去掉)。⚠ 从前是 -1。
+    //
+    // ⚠ 【只动了这一项】: 另两项 (fx→X, fy→Z) 本来就原样映射, 与同一个原则一致, 未动。
+    // ⚠ 【保留成常数】: Touch 三个轴的方向不对称 (设备坐标), 而"哪个 Touch 轴是'上'"是硬件
+    //   事实、从代码定不了 ⇒ 若实测方向不对, 改这一个符号即可。
+    // ⚠ 另一层【尚未验证】: 第 4 步的轴对应 (Fx→X / Fz→Y / Fy→Z) 从未被独立验证过。
+    //   若实测是"力出现在【错的轴】上"(而不是方向反), 那是轴映射问题、与符号无关 ——
+    //   实验: 笔尖【垂直】压纸, 看 comp 的三个分量落在哪个轴上, 再看手上被推向哪个轴。
+    const double FORCE_FEEDBACK_Z_SIGN = +1.0;
     const double FORCE_GRADIENT_LIMIT = 50.0;    // 梯度限幅 (N/frame)
     const int FORCE_RECONNECT_INTERVAL = 2000;   // 断线重试间隔 (ms)
 
@@ -334,6 +358,30 @@ namespace Config {
     const double ORIENT_MAX_STEP_DEG = 3.0;          // 单步最大角度增量 (degrees)
     const double ORIENT_DEADZONE_DEG = 0.05;         // 姿态死区 (degrees)
     const double ORIENT_GAIN = 1.0;                  // 姿态增益 (可调灵敏度)
+
+    // ★★★ 姿态增量的【逐轴符号】(每个取 +1 或 -1) —— 2026-09-21 新增, 用来修"按钮2 转向反了"。
+    //
+    // 【原来是什么】RelayCore 里对三个轴做了一次【无条件的取负】:
+    //     drx = -drx; dry = -dry; drz = -drz;
+    //   注释写的理由是: "Touch Euler (ZYX intrinsic) 沿正轴看逆时针增大, 而 Dobot RPY 相反"。
+    //
+    // 【那个理由与仓库里的两份实现都不符】
+    //   · Touch 侧: stylusOrient = 设备变换的 ZYX 内旋 Euler (R = Rz·Ry·Rx) ——
+    //     见 HapticCallback 的提取 (sy = -R[2][0]; rx = atan2(R[2][1], R[2][2]);
+    //     rz = atan2(R[1][0], R[0][0])) —— 这正是 Rz·Ry·Rx 的标准提取式。
+    //   · Dobot 侧: RPY 由 TcpCalibration::rpyToMatrix 建 R = Rz·Ry·Rx
+    //     (R[6] = -sry; R[7] = cry·srx; R[8] = cry·crx) —— **同一个约定**。
+    //   ⇒ 两边同源 ⇒ 同一个角度增量应当产生【同向】的旋转 ⇒ **不该再取负**。
+    //   ⇒ 现场实测相符: 绕一个轴转手写笔, 机械臂往【反】方向转 (2026-09-21)。
+    //
+    // ⇒ 默认全部 +1 (即不翻转)。⚠ 保留成可配置而【不是】直接删掉那次取负, 是因为还有另一种
+    //   可能: "只有某些轴反" —— 那不是这里的事, 而是下面那段【轴重映射】的事
+    //   (relay/RelayCore.cpp 里, Calibration::enabled 为假时用的硬编码置换
+    //    robot_X=touch_X / robot_Y=-touch_Z / robot_Z=touch_Y 从未被验证过)。
+    //   ⚠ 若实测是"某个轴反、另一个轴向错", 请把【对调的轴】记下来 —— 那是置换问题。
+    const double ORIENT_FLIP_RX = +1.0;
+    const double ORIENT_FLIP_RY = +1.0;
+    const double ORIENT_FLIP_RZ = +1.0;
     const double SAFE_RX_MIN = -180.0, SAFE_RX_MAX = 180.0;  // Roll 安全限位
     const double SAFE_RY_MIN = -90.0,  SAFE_RY_MAX = 90.0;   // Pitch 安全限位
     const double SAFE_RZ_MIN = -180.0, SAFE_RZ_MAX = 180.0;  // Yaw 安全限位

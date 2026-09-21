@@ -112,12 +112,14 @@ void step(AppState::ForceData& fd) {
     double fz = mapForceToTouch(fd.filtered[2]);
 
     // 4. Coordinate transform: Robot tool frame -> Touch device frame
-    //    Reaction force must OPPOSE operator's hand motion:
-    //    - When robot is pushed UP (+Fz), Touch pushes DOWN (-Y) to resist
-    //    - When robot is pushed SIDEWAYS (+Fy), Touch pushes OPPOSITE (+Z)
-    fd.hapticOut[0] =  fx;   // Robot Fx -> Touch X
-    fd.hapticOut[1] = -fz;   // Robot -Fz -> Touch Y (resist vertical motion)
-    fd.hapticOut[2] =  fy;   // Robot +Fy -> Touch Z (resist lateral motion)
+    //    ★ 2026-09-21: 反馈应当是【阻力】—— 操作员压下去 ⇒ 工具受到向上的反作用 ⇒ 手上被往上推。
+    //      ⇒ 垂直项改用 +fz (从前是 -fz, 那会【帮忙】往下推, 现场感受就是"斥力/被推开")。
+    //      依据 (含"原来那行注释举的例子自相矛盾")见 Config::FORCE_FEEDBACK_Z_SIGN 那一大段。
+    //    ⚠ 另两项本来就原样映射 (fx→X, fy→Z), 与同一个原则一致, 未动。
+    //    ⚠ 第 4 步的【轴对应】本身尚未被独立验证 —— 若实测是"力出现在错的轴上", 那是另一件事。
+    fd.hapticOut[0] =  fx;                                  // Robot Fx -> Touch X
+    fd.hapticOut[1] =  fz * Config::FORCE_FEEDBACK_Z_SIGN;   // Robot Fz -> Touch Y (阻力, 见上)
+    fd.hapticOut[2] =  fy;                                  // Robot Fy -> Touch Z
 
     // 5. Apply reflection gain (amplify for human perception)
     //    Typical contact forces (5-30N) → clearly perceptible (0.4-2.5N at Touch)

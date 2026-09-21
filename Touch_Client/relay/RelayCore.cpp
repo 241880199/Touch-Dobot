@@ -897,12 +897,15 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
             if (drz > Config::ORIENT_MAX_STEP_DEG) drz = Config::ORIENT_MAX_STEP_DEG;
             if (drz < -Config::ORIENT_MAX_STEP_DEG) drz = -Config::ORIENT_MAX_STEP_DEG;
 
-            // Flip rotation sign: Touch stylus rotation direction → Dobot RPY convention.
-            // Touch Euler angles (ZYX intrinsic) increase counter-clockwise looking
-            // along the positive axis, but Dobot RPY follows the opposite convention.
-            drx = -drx;
-            dry = -dry;
-            drz = -drz;
+            // ★★ 逐轴符号 (2026-09-21 改)。从前这里是【无条件三轴取负】, 注释的理由是
+            //   "Touch Euler (ZYX intrinsic) 沿正轴看逆时针增大, 而 Dobot RPY 相反"。
+            //   那个理由与仓库里的两份实现都不符 —— Touch 侧的 Euler 提取与 Dobot 侧的
+            //   TcpCalibration::rpyToMatrix **都是 Rz·Ry·Rx**; 而现场实测也是"转向反了"。
+            //   ⇒ 默认改为【不翻转】。完整依据、以及"若只有某些轴反而是置换问题"的处置,
+            //     见 Config::ORIENT_FLIP_RX 那一大段。
+            drx *= Config::ORIENT_FLIP_RX;
+            dry *= Config::ORIENT_FLIP_RY;
+            drz *= Config::ORIENT_FLIP_RZ;
 
             // ---- Axis remap: stylus frame → robot frame ----
             // Build 3×3 rotation that maps Touch rotation axes to robot rotation axes.

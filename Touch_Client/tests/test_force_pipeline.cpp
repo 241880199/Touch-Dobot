@@ -64,15 +64,20 @@ static void test_coord_transform() {
         ForcePipeline::step(fd);
     }
 
-    // hapticOut: Fx→X, -Fz→Y, +Fy→Z, scaled by FORCE_REFLECTION_GAIN
-    // After convergence: hapticOut[0] = 10 * (3.3/200) * 5.0 = 0.825
+    // hapticOut 的映射: Fx→X, +Fz→Y, +Fy→Z, 各自乘净比例 (ratio × gain)。
+    // ★ 2026-09-21 垂直项【从 -Fz 改成 +Fz】—— 本用例原来把 -Fz 钉死 (旧断言:
+    //   `fd.hapticOut[1] < -0.01`, 注释 "should be from -Fz = -30")。
+    //   改的理由【不是调参】: 反馈要的是【阻力】, 而 -Fz 的语义是"操作员压下去、触觉也往下推"
+    //   —— 那是帮忙不是抵抗 (那行代码自己的注释举的例子就自相矛盾)。依据与现场实测见
+    //   Config::FORCE_FEEDBACK_Z_SIGN 那一大段。
+    //   ⚠ 这条断言【当初钉住的是一件错的东西】—— 一次正确的修法在这种用例下会【看起来像回归】。
+    //     保留这段说明, 免得下一个人以为符号是随手改的。
+    // 三个轴都按【带符号的精确值】检查 (不只查方向): 方向对而幅值错同样是错的。
     double ratio = Config::FORCE_MAX_TOUCH_N / Config::FORCE_MAX_SENSOR_N;
     double gain = Config::FORCE_REFLECTION_GAIN;
-    CHECK(fabs(fd.hapticOut[0] - ratio * 10.0 * gain) < 0.01);
-    // hapticOut[1] should be from -Fz = -30 (negative Touch Y)
-    CHECK(fd.hapticOut[1] < -0.01); // -Fz=30 maps negative to Touch Y
-    // hapticOut[2] should be from +Fy = +20 (positive Touch Z)
-    CHECK(fd.hapticOut[2] > 0.01);  // +Fy maps positive to Touch Z
+    CHECK(fabs(fd.hapticOut[0] - ratio * 10.0 * gain) < 0.01);   // 来自 +Fx = +10
+    CHECK(fabs(fd.hapticOut[1] - ratio * 30.0 * gain) < 0.01);   // 来自 +Fz = +30 ⇒ 正
+    CHECK(fabs(fd.hapticOut[2] - ratio * 20.0 * gain) < 0.01);   // 来自 +Fy = +20
     PASS();
 }
 
