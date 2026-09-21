@@ -10,6 +10,7 @@
 #include <cassert>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 #include <string>
 #include <windows.h>
 #include "../force/ForceCompensation.h"
@@ -473,6 +474,93 @@ static void test_guard_force_channels_still_vote() {
     ForceCompensation::step(fd, pose);
 
     CHECK(ForceCompensation::guardState() == ForceCompensation::GuardState::INCONSISTENT);
+    PASS();
+}
+
+// ★ 非有限值【先判, 再问投不投票】(2026-09-21 复审 Important)。
+//   "不投票"说的是"这一路的差【不参与容差比较】", 不是"这一路可以是 NaN"。NaN/Inf 不是
+//   "差多少"的问题, 而是"这个数根本不是个读数"的问题 —— 没有任何容差能容纳它, 所以它必须
+//   拒绝, 且与投票与否无关。
+//   ⚠ 这条钉的是【曾经真的漏掉】的那条路: 判决循环里 isfinite 原来排在
+//     `if (!g_guardVote[i]) continue;` 之下, 于是不投票通道上的非有限值直接放行, 原样进
+//     fd.compensated[3..5], 经 ForcePipeline 的梯度限幅器 (NaN 与任何数比较都为假) 打到
+//     F| 帧上。"力矩不再投票"这次改动把这个漏法扩到了【所有】不投票的通道 —— 补上之后
+//     Fz (它在力矩之前就已经不投票) 那个【既有】缺口也一并关上。
+//   ⚠ 本用例必须【同时】喂"极大但有限"的同一个通道, 否则它会退化成恒真: 若哪天该通道被
+//     改成投票通道, 只喂 NaN 时两条分支都拒绝, 用例绿着什么都没测到。下面 (a) 是这个对照 ——
+//     它证明该通道【确实不投票】(极大的有限差照样放行), 于是 (b) 的拒绝只可能来自"非有限"。
+static void test_guard_nonfinite_refuses_even_on_nonvoting_channel() {
+    TEST(guard_nonfinite_refuses_even_on_nonvoting_channel);
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    double pose[6] = {0, 0, 0, 0, 0, 0};
+
+    // (a) 对照: 同一个通道上一个【极大但有限】的差 -> 不投票 => 放行, 且数据真的过去了。
+    {
+        ForceCompensation::init();
+        double A[9]; diagA(1.0, A);
+        double com[3] = {0, 0, 0};
+        double bF[3] = {0, 0, 0}, bM[3] = {0, 0, 0};
+        ForceCompensation::setCalibration(A, bF, bM, com);
+
+        AppState::ForceData fd;
+        fd.sixForceRaw[2] = 9.81;      // compensated = (0,0,0) (重力被减掉)
+        fd.sixForceRaw[0] = 0.5;       // 一个真实外力 —— 分辨"放行"与"拒绝" (拒绝时它必是 0)
+        fd.tcpForce[0] = 0.5;          // 力通道一致
+        fd.tcpForce[3] = 1.20;         // 力矩通道: 远超声明的力矩容差
+        CHECK(1.20 > Config::FORCE_GUARD_TOL_MOMENT_NM);
+        ForceCompensation::step(fd, pose);
+
+        ForceCompensation::GuardReport rep;
+        ForceCompensation::guardReport(rep);
+        CHECK(rep.voted[3] == false);  // 掩码从生产 API 读, 不在这里抄一份字面量
+        CHECK(ForceCompensation::guardState() == ForceCompensation::GuardState::OK);
+        CHECK(fabs(fd.compensated[0] - 0.5) < 1e-9);   // 没被置零 = 真的放行了
+    }
+
+    // (b) 同一个通道换成 NaN -> 必须拒绝, 哪怕它不投票。
+    {
+        ForceCompensation::init();
+        double A[9]; diagA(1.0, A);
+        double com[3] = {0, 0, 0};
+        double bF[3] = {0, 0, 0}, bM[3] = {0, 0, 0};
+        ForceCompensation::setCalibration(A, bF, bM, com);
+
+        AppState::ForceData fd;
+        fd.sixForceRaw[2] = 9.81;
+        fd.sixForceRaw[0] = 0.5;
+        fd.tcpForce[0] = 0.5;          // 投票通道完全正常 —— 拒绝只可能来自那个 NaN
+        fd.tcpForce[3] = nan;
+        ForceCompensation::step(fd, pose);
+
+        ForceCompensation::GuardReport rep;
+        ForceCompensation::guardReport(rep);
+        CHECK(rep.voted[3] == false);  // 它仍然不投票: 拒绝不是因为"它把票投出来了"
+        CHECK(ForceCompensation::guardState() == ForceCompensation::GuardState::INCONSISTENT);
+        CHECK(fd.compensated[0] == 0.0);   // 判决全或无: 力通道跟着一起断
+    }
+
+    // (c) 同上, 换成 Fz —— 它在力矩之前就已经不投票, 所以这是那个【既有】缺口。
+    //     与 (b) 同一个形状: 投票通道正常, 只把非有限值喂到不投票的 z 那一侧。
+    {
+        ForceCompensation::init();
+        double A[9]; diagA(1.0, A);
+        double com[3] = {0, 0, 0};
+        double bF[3] = {0, 0, 0}, bM[3] = {0, 0, 0};
+        ForceCompensation::setCalibration(A, bF, bM, com);
+
+        AppState::ForceData fd;
+        fd.sixForceRaw[2] = 9.81;
+        fd.sixForceRaw[0] = 0.5;
+        fd.tcpForce[0] = 0.5;
+        fd.tcpForce[2] = nan;
+        ForceCompensation::step(fd, pose);
+
+        ForceCompensation::GuardReport rep;
+        ForceCompensation::guardReport(rep);
+        CHECK(rep.voted[2] == false);
+        CHECK(ForceCompensation::guardState() == ForceCompensation::GuardState::INCONSISTENT);
+        CHECK(fd.compensated[0] == 0.0);
+    }
     PASS();
 }
 
@@ -1000,6 +1088,7 @@ int main() {
     test_guard_fz_reported_but_not_voted();
     test_guard_moment_channel_reports_but_does_not_vote();
     test_guard_force_channels_still_vote();
+    test_guard_nonfinite_refuses_even_on_nonvoting_channel();
     test_guard_default_report_claims_no_mask();
     test_guard_ema_needs_sustained_mismatch();
     test_zero_only_no_motion();

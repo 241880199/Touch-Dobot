@@ -125,8 +125,11 @@ static const bool g_guardVote[6] = { true, true, false, false, false, false };
 //   连"重复性"这一关都过不去, 更谈不上"一致"。
 //   => 力矩与参考量之间【不存在"一致"态】, 强行投票会让整个闸门永远拒绝,
 //      而判决是【全或无】-> compensated[] 全置零 -> 【力通道也一起断】。
-//      触觉那一条路只消费【三个力分量】(F| 帧与 Touch 反射力都由 compensated 的前三个推),
+//      触觉那一条路只消费【三个力分量】(Touch 反射力由 compensated 的前三个推),
 //      所以力矩投票一票【换不到任何东西】, 只换来力通道的死。
+//      ⚠ 注意【只有触觉那一路】是这样: F| 帧【六个分量全带】(RelayCore 取 filtered[0..5]),
+//        力矩照样由 compensated 出门。把上面那句读成"MATLAB 收不到力矩"就会得出
+//        "力矩那一段可以删"的错误结论 —— 而它是质心与惯量的唯一测量窗口 (见下)。
 //   ⚠ 力矩【不是被删掉】: 照算、照报、照给 MATLAB 的 F| 帧 —— guardReport() 的 ema[]、
 //     拒绝时那张逐通道表、复报行里都还在。它仍是【质心与惯量的唯一测量窗口】
 //     (负载的 I 只能从力矩通道辨识), 只是不再投票。
@@ -411,8 +414,9 @@ static void setGuardState(ForceCompensation::GuardState st) {
     for (int i = 0; i < 6; i++) {
         const bool ex = (g_guardTol[i] > 0.0) && (fabs(g_guardEma[i]) > g_guardTol[i]);
         if (!g_guardVote[i]) {
-            // ⚠ 这四行【不投票】(Fz + 力矩三个分量), 但它们的结果照样印出来 —— "不投票"不等于
-            //   "不检查、不显示"。不在这里复述理由: 理由的唯一出处是 g_guardVote 段。
+            // ⚠ 本行【不投票】, 但结果照样印出来 —— "不投票"不等于"不检查、不显示"。
+            //   谁不投票【不在这里复述】: 掩码的唯一出处是 g_guardVote 段 (抄一份列在这里
+            //   就是第二份实现, 掩码一变它就变成假话)。
             fprintf(stderr, "[Force] !!   %-6s %+10.4f  容差 %.4f  【不投票】"
                             " (照报不判; 依据与代价见 g_guardVote 段)\n",
                     NM[i], g_guardEma[i], g_guardTol[i]);
@@ -773,8 +777,15 @@ void step(AppState::ForceData& fd, const double poseRxyz[6]) {
 
     bool inconsistent = false;
     for (int i = 0; i < 6; i++) {
-        if (!g_guardVote[i]) continue;   // Fz 与力矩三个分量不投票, 但照报 (见 g_guardVote 段)
-        if (!std::isfinite(g_guardEma[i])) { inconsistent = true; break; }  // NaN 也算不一致
+        // ⚠ 【非有限值先判, 再问投不投票】—— 顺序不能换: 不投票说的是"这一路的差【不参与
+        //   容差比较】", 不是"这一路可以是 NaN"。NaN/Inf 不是"差多少"的问题, 是"这个数根本
+        //   不是个读数"的问题, 它没有任何容差能容纳它。
+        //   放在 continue 之下会漏掉: 非有限值不再被拦 -> 原样传进 fd.compensated[3..5] ->
+        //   经 ForcePipeline 的梯度限幅器 (NaN 与任何数比较都为假) 一路漏到 F| 帧上打出 nan。
+        //   ⚠ Fz 在本次改动之前就是这个漏法 (它更早就已经不投票了), 所以这一改动把 Fz 的洞
+        //     一并补上 —— 是顺带修好的既有缺口, 不是新引入的行为。
+        if (!std::isfinite(g_guardEma[i])) { inconsistent = true; break; }  // NaN/Inf 也算不一致
+        if (!g_guardVote[i]) continue;   // 不投票的通道到此为止, 但照报 (见 g_guardVote 段)
         if (fabs(g_guardEma[i]) > g_guardTol[i]) { inconsistent = true; break; }
     }
     if (inconsistent) {

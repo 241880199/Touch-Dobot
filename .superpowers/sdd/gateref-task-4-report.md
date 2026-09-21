@@ -246,3 +246,93 @@ Task 2 已明说它没有跟着复测 —— 本次**没有在新参考量上复
    会自动跟着变** —— 这是要的效果, 但也意味着它不再能"独立地"发现掩码被改错了。这是简报
    明确选择的取舍 (第三份字面量会安静地建模旧闸门, 那更坏)。
 5. `Touch_Client.exe` 在本次全程**没有在运行**, 构建未报"文件被占用", 没有杀任何进程。
+
+---
+
+# 附: 复审修复 (2026-09-21, 同一任务的收尾)
+
+复审结论是"逻辑正确" (一份掩码、一个判决循环、没有影子投票路径、全或无置零完好),
+但点出 1 条 Important + 3 条 Minor。**掩码、容差常量、判决语义一个字都没动**。
+
+## A. 改了什么
+
+| # | 文件 | 改动 |
+|---|---|---|
+| 1 (Important) | `force/ForceCompensation.cpp` | 力矩那段注释里的假话: 原文称触觉与 F 帧 (F 竖线帧) 都只消费前三个分量。F 帧那一半是假的 —— `RelayCore` 把 `filtered[0..5]` 全格式化进去, 而 `ForcePipeline` 每个 `filtered[i]` 都取自 `compensated[i]`; 只有 `hapticOut` 是前三个推的。删掉"F 帧与"这半句, 并把"只有触觉那一路如此"写明白。 |
+| 2 (Minor) | `force/ForceCompensation.cpp` | 判决循环里 `std::isfinite` 移到 `if (!g_guardVote[i]) continue;` **之上** —— 非有限值与投不投票无关。 |
+| 3 (Minor) | `config/Config.h` | 闸门段开头那句从"逐通道比较 … ⇒ 不一致就拒绝"改成明确"只有投票通道进判决", 指向 `g_guardVote` 那一处实现, 不在那里复述掩码 (下文那段 `⚠ 2026-09-21 起力矩…` 保持不动)。 |
+| 4 (Minor) | `force/ForceCompensation.cpp` | 逐通道表的说明行不再用散文复述掩码 (原来写着"这四行【不投票】(Fz + 力矩三个分量)", 是硬编码的份数与名单, 会随掩码漂)。改成指向 `g_guardVote`。 |
+| 5 | `tests/test_force_compensation.cpp` | 新用例 `test_guard_nonfinite_refuses_even_on_nonvoting_channel`, **已注册进 `main()` 的显式调用表**。 |
+
+**没有改**: `g_guardVote[6]` 的字面量 (逐字符相同)、`FORCE_GUARD_TOL_FORCE_N` = 1.2464、
+`FORCE_GUARD_TOL_MOMENT_NM` = 0.03、`g_guardTol` 的填法、判决的"全或无"语义。
+`git diff` 里对这三行的改动数为 **0** (用 `grep -E "^[+-].*(g_guardVote\[6\]|FORCE_GUARD_TOL_)"`
+在整份 diff 上筛过, 零命中)。
+
+那处**重复的容差映射** (`g_guardTol` 静态初值 + `init()` 里重填) 复审判为可接受,
+**按简报要求没有动**。我也认为该保持现状: 静态初值在 `init()` 之前让闸门 fail closed,
+而不是拿 0 当容差去比较 —— 这个作用 `init()` 的重填替代不了。
+
+## B. 新用例的 RED / GREEN (TDD)
+
+用例形状 (非空壳的理由): 它**同时**喂"极大但有限"的同一个通道当对照 —— 若哪天该通道被改成
+投票通道, 只喂 NaN 时两条分支都会拒绝, 用例会绿着什么都没测到。三条支路:
+
+- (a) 对照 —— 同一通道喂**极大但有限**的差 (1.20, 是 `tol_M` 的 40 倍) ⇒ **放行**,
+  且 `compensated[0] == 0.5` (没被置零)。这一条证明该通道**确实不投票**;
+- (b) 同一通道换成 `NaN` ⇒ 必须 `INCONSISTENT` (投票通道 Fx 完全正常, 拒绝只可能来自那个 NaN);
+- (c) 同 (b) 换成 `Fz` —— 它在力矩之前就已经不投票, 所以这是那个**既有**缺口。
+
+### RED (把 `isfinite` 临时挪回 `continue` 之下 = 改动前的顺序)
+
+构建: 同下, `BUILD_EXIT=0`。执行 `test_force_compensation.exe`:
+
+```
+  guard_nonfinite_refuses_even_on_nonvoting_channel... FAIL: ForceCompensation::guardState() == ForceCompensation::GuardState::INCONSISTENT
+Results: 28 passed, 1 failed
+```
+
+**恰好一处失败, 且落在 (b) 的 `INCONSISTENT` 断言上** —— 即旧顺序确实把一个不投票通道上的
+NaN 放行了 (它没有退化成"两条路径都因无关理由拒绝"的空壳: (a) 的放行断言在 RED 下也是过的)。
+
+### GREEN (恢复 `isfinite` 在 `continue` 之上)
+
+```
+  guard_nonfinite_refuses_even_on_nonvoting_channel... PASS
+Results: 29 passed, 0 failed
+```
+
+## C. 两个套件的计数 (构建后**分别执行** `.exe`)
+
+| 套件 | 改动前 | 改动后 |
+|---|---|---|
+| `test_force_compensation.exe` | 28 passed / 0 failed | **29 passed / 0 failed** (新用例 +1, 是预期内的) |
+| `test_payload_calibration.exe` | 69 passed / 1 failed | **69 passed / 1 failed** (那条**故意红着**的断言与它的 ⚠ 注一字未动) |
+
+`test_payload_calibration` 那一条失败在改动前后**是同一条**:
+`FAIL: 12:38 pose 1 竟然放行了 (state=OK)`。**不称这两个套件"全绿"** —— 它不成立。
+
+全量构建: `cmd.exe //c "D:\Projects\Touch\Touch_Client\build.bat"` ⇒ **`Build OK.`**
+(`Touch_Client.exe` 全程未在运行, 构建未报占用, 没有杀任何进程)。
+
+## D. Fix 2 带来的一处**故意的行为变更**: `Fz` 那半边也被一并修好
+
+`Fz` 在这次任务之前就**已经不投票**, 而 `isfinite` 一直排在 `continue` 之下 ⇒ **`Fz` 上的
+非有限值原本就是放行的**。把那两行对调, 等于把 `Fz` 这个**既有**缺口一并关上了。
+
+- 力矩三个分量: 本次任务把 `isfinite` 的漏法从 1 个通道**扩到了 4 个**, 修复把它们收回去;
+- `Fz`: **不是本次任务引入的**, 是顺带修好的旧缺口。
+- 方向上两边都是**收紧** (更多数据被拒), 与"安全起见不符合时还是要拒绝"一致;
+  它**不影响**任何投票通道的容差比较, 也不改变放行时 `compensated` 的取值。
+
+## E. 遗留 / 顾虑
+
+1. `F|` 帧那条假话的**根因**是"引用另一个模块的行为却凭记忆写" (与记忆中
+   `verify-premises-at-the-source` 那条同源)。我这次按 `RelayCore.cpp` / `ForcePipeline.cpp`
+   的实际代码核过才落笔, 并在注释里点明了"说成 MATLAB 收不到力矩 ⇒ 下一步就会删掉力矩那一段"
+   这条**错误结论是怎么来的**, 免得它再被写回去。
+2. `test_payload_calibration` 里那条**故意红着**的断言仍在 (属于该套件的既有状态, 简报明令不动)。
+3. 测试运行会写 `calib/force_calib.json` (工作目录相关, `CalibStore::fileFor`)。**该文件未被
+   纳入本次提交** (它是未被跟踪的 `calib/`, 提交里只有本任务有意改的 3 个文件)。
+4. 未解项与本次修复无关, 不因本次改动而变化: `@720` 与 `@1304` 反相关的符号约定、
+   `c_s` 可信度边界、开放项 C (z 轴缺口)。
