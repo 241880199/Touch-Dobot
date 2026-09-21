@@ -2843,6 +2843,142 @@ static bool t6Load(T6Capture& cap) {
     return cap.n >= 4;   // 少于 4 个姿态连 12 个参数都定不下来
 }
 
+// 从【多块】采集文件里只取一块 —— 按 `# attempt <时间戳>` 头定位 (t6Load 是整份文件读一份,
+// 它读不了这一份: 块一多, 两者都不是同一个采集, 而且会撞 T6_MAXN)。
+//
+// 【为什么需要它 —— 这不是顺手加的方便函数】: 入库的冻结快照
+//   fixtures/calib_poses_2026-09-20_frozen.txt 里 14 块, 只有【带末尾 6 列 @720 的
+//   三块】能回答判据那一侧的问题 (21:58:46 / 22:12:28 / 22:18:42, 各 10 行 = 5 对原地复采;
+//   其余 11 块是 18 / 25 列的老布局)。在本次改动之前【全仓库没有任何读取器加载这一份】——
+//   那才是"那条断言问了数据答不了的问题"的真正原因, 而不是"数据不存在"。
+//
+// 收下的每一行都必须是【刚好 MG_MAXCOLS (31) 列】, 否则返回 false —— 不许静默降级成
+// "没有参考量"。三条断言一起做:
+//   (1) 每行列数 == 31 (参考量那 6 列真的在);
+//   (2) 行数 == 该块头部自报的 poses=N (块没被截断);
+//   (3) 行数 ≤ T6_MAXN (装得下)。
+// 任何一条不成立都【不是】"这份快照坏了", 而是"本函数读错了" —— 所以都返回 false,
+// 由调用方响亮地记失败。
+static bool t6LoadAttempt(T6Capture& cap, const char* file, const char* stamp) {
+    static const char* DIRS[4] = { "fixtures/", "tests/fixtures/",
+                                   "Touch_Client/tests/fixtures/",
+                                   "../../Touch_Client/tests/fixtures/" };
+    FILE* fp = nullptr;
+    char path[512] = {0};
+    for (int i = 0; i < 4 && !fp; i++) {
+        snprintf(path, sizeof(path), "%s%s", DIRS[i], file);
+        fp = fopen(path, "r");
+    }
+    if (!fp) return false;
+
+    cap.n = 0;
+    cap.hasRef = false;
+    int declared = -1;      // 目标块头部自报的 poses=N
+    bool inBlock = false;
+    char line[1024];
+    while (fgets(line, sizeof(line), fp)) {
+        const char* q = line;
+        while (*q == ' ' || *q == '\t') q++;
+        if (*q != '#') {
+            if (!inBlock) continue;                 // 其他块的数据行: 不读, 也不因此报错
+            if (cap.n >= T6_MAXN) { fclose(fp); return false; }
+            double c[MG_COLSCAN];
+            const int nc = mgSplitRow(q, c, MG_COLSCAN);
+            if (nc != MG_MAXCOLS) {                 // 目标块里出现了不带参考量的行 ⇒ 拒
+                mgRejectColumns(path, nc, "31 列 (本块按头部自报带参考量列)");
+                fclose(fp);
+                return false;
+            }
+            cap.hasRef = true;
+            for (int a = 0; a < 3; a++) {
+                cap.F720[cap.n][a] = c[25 + a];
+                cap.M720[cap.n][a] = c[28 + a];
+            }
+            double src[6];
+            for (int a = 0; a < 6; a++) src[a] = c[a];
+            repackPoseRow(src, cap.poses[cap.n]);
+            for (int a = 0; a < 3; a++) {
+                cap.F576[cap.n][a]  = c[6 + a];
+                cap.M576[cap.n][a]  = c[9 + a];
+                cap.F1304[cap.n][a] = c[12 + a];
+                cap.M1304[cap.n][a] = c[15 + a];
+            }
+            cap.n++;
+            continue;
+        }
+        // 注释行。只有形如 `# attempt <stamp>  poses=N ...` 的才是块头 —— 列名行、说明行
+        // (`# repeat:` / `# rx,ry,rz,...`) 既不开块也不关块。
+        const char* at = strstr(q, "# attempt ");
+        if (!at) continue;
+        // ⚠ 时间戳里【有空格】("2026-09-20 21:58:46"), 所以必须按【两个记号】读再拼回来 ——
+        //   一个 %s 只会读到日期那一半, 于是每块都对不上、本函数恒返回 false。
+        char dpart[32] = {0}, tpart[32] = {0}, seen[80] = {0};
+        if (sscanf(at, "# attempt %31s %31s", dpart, tpart) == 2) {
+            snprintf(seen, sizeof(seen), "%s %s", dpart, tpart);
+        }
+        if (seen[0] != '\0' && strcmp(seen, stamp) == 0) {
+            const char* pp = strstr(at, "poses=");
+            declared = pp ? atoi(pp + 6) : -1;
+            inBlock = true;
+        } else {
+            inBlock = false;                        // 别的块开始 ⇒ 目标块到此为止
+        }
+    }
+    fclose(fp);
+    if (!inBlock && cap.n == 0) return false;       // 文件里根本没有这个时间戳
+    if (declared <= 0 || cap.n != declared) return false;
+    return cap.n >= 4;                              // 少于 4 个姿态连 12 个参数都定不下来
+}
+
+// 读冻结的【已装标定】—— fixtures/force_calib_2026-09-20_frozen.json (v3 布局, 四个数组)。
+//
+// 【为什么要读它, 而不是沿用"在夹具上现拟合"】: 判据比的是"【本地模型】的输出"与"机械臂
+//   自报的参考量", 而生产里那个本地模型就是【装进去的那份标定】。现拟合是另一回事 ——
+//   它在【被评估的同一轮数据】上解出来, 只会更贴合那一轮 ⇒ 量到的余量【偏乐观】。
+//   这份 JSON 是 Touch_Client/calib/force_calib.json 的冻结副本 (2026-09-21 冻的), 也就是
+//   2026-09-20 那一轮装机的那份 (见 fixtures/calib_log_2026-09-20_frozen.txt 的 INSTALLED 行)。
+//   只用四个字段 (A / bF / bM / cS), 与 setCalibration 的入参一一对应; 其余字段 (残差、
+//   σ(A)、物理量) 本用例【不消费】—— 它们不是这个用例要回答的问题。
+// ⚠ 解析【不校验这些数是否合理】: 它是一份入库的只读证据, 不是待检验的对象。读不出来
+//   (文件缺了 / 键改名了) 就返回 false, 由调用方记失败 —— 不静默退回现拟合。
+static bool t6LoadFrozenCalib(const char* file, PayloadCalibration::RawFit& fit) {
+    static const char* DIRS[4] = { "fixtures/", "tests/fixtures/",
+                                   "Touch_Client/tests/fixtures/",
+                                   "../../Touch_Client/tests/fixtures/" };
+    FILE* fp = nullptr;
+    for (int i = 0; i < 4 && !fp; i++) {
+        char path[512];
+        snprintf(path, sizeof(path), "%s%s", DIRS[i], file);
+        fp = fopen(path, "r");
+    }
+    if (!fp) return false;
+    char buf[8192] = {0};
+    const size_t got = fread(buf, 1, sizeof(buf) - 1, fp);
+    fclose(fp);
+    if (got == 0) return false;
+
+    static const char* KEYS[4] = { "\"a_matrix\"", "\"bias_force_n\"",
+                                   "\"bias_torque_nm\"", "\"com_sensor_m\"" };
+    static const int   CNT[4]  = { 9, 3, 3, 3 };
+    double* dst[4] = { fit.A, fit.bF, fit.bM, fit.cS };
+    for (int k = 0; k < 4; k++) {
+        const char* p = strstr(buf, KEYS[k]);
+        if (!p) return false;
+        p = strchr(p, '[');
+        if (!p) return false;
+        p++;
+        for (int i = 0; i < CNT[k]; i++) {
+            char* end = nullptr;
+            const double v = strtod(p, &end);
+            if (end == p) return false;
+            dst[k][i] = v;
+            p = end;
+            while (*p == ',' || *p == ' ' || *p == '\n' || *p == '\r' || *p == '\t') p++;
+        }
+    }
+    return true;
+}
+
 // ===== 参考量那一侧的数据是【实测】还是【现算】—— 必须每次都说清楚 (2026-09-21) =====
 //
 // 判据是 `compensated − 参考量`, 参考量取自 fd.tcpForce (定义在 ForceCompensation.cpp 的
@@ -3338,6 +3474,14 @@ static void test_runtime_compensation_pose_independence() {
 
 // ★★ 运行时一致性闸门在【四份实机采集】上怎么判 (2026-09-19, 用户指令 1/2)。
 //
+// ⚠ 这四份 (fixtures/calib_poses_2026-09-19*.txt) 的列布局里【没有参考量那一路】——
+//   所以本用例【现在还答不了】"闸门在真参考量上怎么判": 它跑出来的是【参考量不可用】,
+//   那一条断言按设计【红着】并在第一个姿态就 return (见下面 (甲) 那一段的 ⚠⚠)。
+//   ⇒ 要看闸门在【实测参考量】上的判决与逐通道余量, 看【前一条用例】
+//     test_runtime_consistency_guard_replay_ref_snapshot (它吃冻结快照里带 @720 的三块)。
+//   ⇒ 这一条【没有】因为多了一条而变绿、也没有被降级成 skip: 它仍然是"这四份数据不支持
+//     旧结论"的唯一机器可见记录 (用户明确要求它保持可见, 而不是被伪装成绿)。
+//
 // 判据 (ForceCompensation::step 的 7b): 逐通道比较【本地全量模型输出的外力】与
 // 【机械臂自报的参考量】(现为【通过关节电流计算】的那一路 —— 哪一路由 ForceCompensation.cpp
 // 的 guardReferenceValue 一处定义, 那里也写着"为什么是那一路")。
@@ -3385,6 +3529,242 @@ static void t6SigmaA(const double A[9], double sg[3]) {
     for (int i = 0; i < 3; i++) sg[i] = sqrt(M[i][i] > 0 ? M[i][i] : 0.0);
     for (int i = 0; i < 2; i++) for (int j = i + 1; j < 3; j++)
         if (sg[j] > sg[i]) { const double t = sg[i]; sg[i] = sg[j]; sg[j] = t; }
+}
+
+// =====================================================================================
+// ★ 2026-09-21: 回放用例【接上已入库的实测参考量】—— 让"闸门在真参考量上怎么判"
+//   第一次由数据回答, 而不是由"参考量不可用"回答。
+// =====================================================================================
+//
+// 【输入不是新采的, 是仓库里本来就有的】: tests/fixtures/calib_poses_2026-09-20_frozen.txt
+//   里 14 个 attempt 块中【带末尾 6 列 @720】的三块 —— 2026-09-20 的 21:58:46 / 22:12:28 /
+//   22:18:42, 各 10 行 (= 5 对原地复采)。其余 11 块是 18 / 25 列的老布局, 没有参考量那一列。
+//   ⚠ 这份快照在本次改动之前【全仓库没有任何读取器加载它】—— 那才是"那条断言至今仍问着
+//     数据答不了的问题"的真正原因, 而不是"数据不存在"。本用例按【时间戳】只取这三块
+//     (t6LoadAttempt), 一行都不掺其余块。
+//
+// 【它回答哪一问】: 把【实测的 @720】喂进判据那一侧 (而不是用本地模型现算一个与模型
+//   恒等的合成值 —— 那条路 d ≡ 0, 什么都验不了), 闸门在这些真数据上判什么, 逐通道余量
+//   是多少。这是"参考量那一侧"第一次被【有数据地】检验。
+//
+// ★★【必须打的折扣: 循环论证 —— 而且是真的, 不是形式上的】★★
+//   tol_F = 1.2464 N 的第二项 eps_乙 = 0.3361 N (参考量【自带】的力偏置及它跨轮的漂移)
+//   推导所用的原始数据【就是本用例加载的这三轮】: 见 Config.h 里 (乙) 那一段与
+//   Docs/superpowers/specs/2026-09-21-gate-reference-prereq.md §3.3 / §3.3.1。
+//   ⇒ 拿这三轮去检验"闸门在这三轮上放不放行", 其中一部分是【用同一份数据检验由它自己
+//     导出的门限】。所以本用例的结论是【部分循环】的: 它是"真结论"(既不是断言、也不是
+//     合成值), 但强度【弱于】用独立数据得到的同一个结论。
+//   ⚠ 这正是本项目记过账的那一条: 【验证手段与实现共享假设时, 全绿是零信息量】。
+//     所以本行的绿灯【不许】被读成"闸门被验证过了" —— 只能说"在这份数据上它放行了",
+//     而"它在这份数据上放行"与"容差被设成多宽"并不独立。
+//   ⇒ 要拿到【独立】的确认, 只能新采一份带 @720 六列的夹具 (上机清单 §1), 那才是收口项。
+//
+// 【它【不】证明什么 —— 同样必须写明, 免得下一行绿灯被读大】:
+//   · 全部姿态是【悬空静态】(笔尖不着物, 真值外力 ≈ 0), 所以它检验的是"零外力下判据是否
+//     在自己的容差内", 【不是】"有接触外力时闸门会不会正确地拒绝" —— 后一件在仓库里
+//     【没有任何文件验证过】(老遗留风险), 本用例也没有验证它。
+//   · 这是【离线重放】, 不是实机: 通信链路、30004 帧的时序、EMA 在真 30 Hz 上的收敛
+//     都不在内。本用例【不构成】对真机的验证。
+//   · 本地模型那一侧【两个都跑】, 因为生产是哪一个不能靠猜:
+//       ① 【已装冻结标定】(fixtures/force_calib_2026-09-20_frozen.json, 即当时装机的
+//          Touch_Client/calib/force_calib.json) —— 这是【生产口径】, 也是主断言用的那一个;
+//       ② 在【本轮的 @1304 上现拟合】(fitRawLinear) —— 与本文件另一条重放用例同口径,
+//          作为对照。⚠ 样本内拟合会让 compensated 更贴近本轮 ⇒ ② 的余量【偏乐观】,
+//          不许拿它当"生产会放行"的证据。两者的数都打出来, 差多少一眼可见。
+static void test_runtime_consistency_guard_replay_ref_snapshot() {
+    TEST(runtime_consistency_guard_replay_ref_snapshot);
+
+    static const char* SNAP  = "calib_poses_2026-09-20_frozen.txt";
+    static const char* CALIB = "force_calib_2026-09-20_frozen.json";
+    // 时间戳必须与快照头部的 `# attempt` 逐字相同 (含空格) —— 只取这三块。
+    static const char* STAMP[3] = { "2026-09-20 21:58:46",
+                                    "2026-09-20 22:12:28",
+                                    "2026-09-20 22:18:42" };
+    static const char* LABEL[3] = { "21:58", "22:12", "22:18" };
+    static const char* NM[6] = { "Fx", "Fy", "Fz", "Mx", "My", "Mz" };
+    static const int   ROWS_EACH = 10;    // 每块头部自报 poses=10 (= 5 对原地复采)
+
+    // ⚠ 掩码与逐通道容差【不在这份测试里再写一份】—— 同 test_runtime_consistency_guard_replay:
+    //   从生产 API (guardReport) 读生效值, 引用绑定以免复制出第二份实现。
+    ForceCompensation::GuardReport maskRep;
+    ForceCompensation::guardReport(maskRep);
+    const bool   (&vote)[6] = maskRep.voted;
+    const double (&tol)[6]  = maskRep.tol;
+
+    PayloadCalibration::RawFit installed;
+    if (!t6LoadFrozenCalib(CALIB, installed)) {
+        std::cout << "    FAIL: 已装冻结标定 " << CALIB << " 读不到 (入库的只读证据;"
+                     " 读不到就是读取器或检出坏了, 【不许】退回现拟合顶替)" << std::endl;
+        g_failed++;
+        return;
+    }
+
+    int poses = 0, okInstalled = 0, okInSample = 0, notCompared = 0;
+    double worst[6]    = {0, 0, 0, 0, 0, 0};   // ① 已装标定: 逐通道 max |EMA|/tol (全三轮)
+    double roundAbs[3] = {0, 0, 0};            // ① 已装标定: 逐轮 max |EMA| (N, 只算投票通道)
+    double roundIn[3]  = {0, 0, 0};            // ② 现拟合: 逐轮 max |EMA|/tol (只算投票通道)
+
+    std::cout << std::endl;
+    std::cout << "    输入: " << SNAP << " 里带 @720 六列的三块 attempt (其余块是 18/25 列,"
+                 " 没有参考量那一路, 一行都不取)。" << std::endl;
+    std::cout << "    ★ 参考量: 【实测列】(F720*/M720*), 三块合计 " << (3 * ROWS_EACH)
+              << " 个姿态全部喂实测值 —— 本用例不合成任何参考量。" << std::endl;
+    std::cout << "    本地模型 ①: 已装冻结标定 " << CALIB << " (生产口径, 主断言)"
+              << std::endl;
+    std::cout << "    本地模型 ②: 本轮 @1304 上现拟合 (对照; 样本内 ⇒ 余量偏乐观)"
+              << std::endl;
+
+    for (int k = 0; k < 3; k++) {
+        T6Capture cap;
+        cap.label = LABEL[k];
+        cap.file  = SNAP;
+        if (!t6LoadAttempt(cap, SNAP, STAMP[k])) {
+            std::cout << "    FAIL: 快照 " << SNAP << " 的 attempt " << STAMP[k]
+                      << " 读不到 (它是已入库的只读证据; 读不到就是读取器或检出坏了)"
+                      << std::endl;
+            g_failed++;
+            return;
+        }
+        // 读取器按【真实列数】置 hasRef。这两个数一旦不成立, 下面量的就不是"实测参考量",
+        // 本用例的全部结论都不作数 —— 所以先钉住, 再谈判决。
+        CHECK(cap.hasRef);
+        CHECK(cap.n == ROWS_EACH);
+
+        PayloadCalibration::RawFit inSample;
+        if (!PayloadCalibration::fitRawLinear(cap.poses, cap.F1304, cap.M1304, cap.n, inSample)) {
+            std::cout << "    FAIL: " << cap.label << " 的 @1304 线性拟合失败 (秩亏)" << std::endl;
+            g_failed++;
+            return;
+        }
+
+        std::cout << "    ---- " << cap.label << " (attempt " << STAMP[k] << ", n=" << cap.n
+                  << ") 逐姿态 EMA 差 (N / N·m) 与超限倍数 [模型 ①]" << std::endl;
+
+        for (int pass = 0; pass < 2; pass++) {
+            const PayloadCalibration::RawFit& fit = pass ? inSample : installed;
+            for (int i = 0; i < cap.n; i++) {
+                AppState::ForceData fd;
+                for (int a = 0; a < 3; a++) {
+                    fd.sixForceRaw[a]     = cap.F1304[i][a];   // 本地模型的输入 (@1304)
+                    fd.sixForceRaw[3 + a] = cap.M1304[i][a];
+                }
+                // fd.raw[] (@576) 不进判决 (判据只看 guardReferenceValue); 填它是为了让拒绝时
+                // 跟着打出来的那一列诊断 EMA 有真数, 而不是一串凭空造的零。
+                for (int a = 0; a < 3; a++) {
+                    fd.raw[a]     = cap.F576[i][a];
+                    fd.raw[3 + a] = cap.M576[i][a];
+                }
+                // ★ 判据那一侧 = 夹具里的【实测】@720, 并且必须同时声明"这一帧有读数"。
+                //   少了后半句, 闸门判的是【参考量不可用】(与那四份 09-19 夹具同一条路),
+                //   本用例就白做了。生产里这几件事由 RelayCore 在同一帧、同一把锁里一起做好。
+                for (int a = 0; a < 3; a++) {
+                    fd.tcpForce[a]     = cap.F720[i][a];
+                    fd.tcpForce[3 + a] = cap.M720[i][a];
+                }
+                fd.isStale = false;
+                fd.sixForceOnline = 1;
+
+                ForceCompensation::init();
+                ForceCompensation::setCalibration(fit.A, fit.bF, fit.bM, fit.cS);
+                // 连喂 8 帧同样的读数: 第一帧播种 EMA = d, 8 帧同值 ⇒ EMA 恒等于该姿态的差。
+                for (int f = 0; f < 8; f++) ForceCompensation::step(fd, cap.poses[i]);
+
+                ForceCompensation::GuardReport rep;
+                ForceCompensation::guardReport(rep);
+                const bool compared =
+                    (rep.state == ForceCompensation::GuardState::OK ||
+                     rep.state == ForceCompensation::GuardState::INCONSISTENT);
+                // ⚠ 只记一次: 参考量可用不可用【与本地模型无关】(它由 fd 决定, 两轮喂的
+                //   是同一份 fd), 两遍都记会把这个计数翻倍, 于是它就不再是"多少个姿态".
+                if (pass == 0 && !compared) notCompared++;
+
+                if (pass == 0) {
+                    // ===== 模型 ① 逐姿态明细 =====
+                    char line[640];
+                    int off = snprintf(line, sizeof(line), "      pose %d ", i + 1);
+                    if (!compared) {
+                        // ⚠ 只有【比过】才有逐通道结果: state 是权威, ema[] 不是 (参考量不可用
+                        //   时 ema[] 里留的是【上一次真实比较】的值, 见 GuardReport 的说明)。
+                        off += snprintf(line + off, sizeof(line) - off, "【没有比过】state=%s",
+                                        ForceCompensation::guardStateName(rep.state));
+                    } else {
+                        for (int a = 0; a < 6; a++) {
+                            const double r = fabs(rep.ema[a]) / tol[a];
+                            if (r > worst[a]) worst[a] = r;
+                            if (vote[a] && fabs(rep.ema[a]) > roundAbs[k])
+                                roundAbs[k] = fabs(rep.ema[a]);
+                            off += snprintf(line + off, sizeof(line) - off, "  %s %+.4f(%.3fx)",
+                                            NM[a], rep.ema[a], r);
+                        }
+                    }
+                    std::cout << line << std::endl;
+                    poses++;
+                    if (rep.state == ForceCompensation::GuardState::OK) okInstalled++;
+                } else if (compared) {
+                    // ===== 模型 ② 只打逐轮汇总 (逐姿态明细与 ① 同形, 打两份没人读) =====
+                    for (int a = 0; a < 6; a++)
+                        if (vote[a] && fabs(rep.ema[a]) / tol[a] > roundIn[k])
+                            roundIn[k] = fabs(rep.ema[a]) / tol[a];
+                    if (rep.state == ForceCompensation::GuardState::OK) okInSample++;
+                }
+
+                if (pass == 0 && rep.state != ForceCompensation::GuardState::OK) {
+                    std::cout << "      !! pose " << (i + 1) << " [模型 ①] 的闸门状态 = "
+                              << ForceCompensation::guardStateName(rep.state)
+                              << (rep.state == ForceCompensation::GuardState::REFERENCE_UNAVAILABLE
+                                      ? "  ⇒ 【喂进去的参考量被判不可用】: 那是本用例自己没喂对"
+                                        " (与数据无关), 不是发现。"
+                                      : "  ⇒ 【真发现】: 零外力静态下本地模型与实测参考量在"
+                                        " 投票通道上对不上。")
+                              << std::endl;
+                }
+            }
+        }
+        std::cout << "      [模型 ② 现拟合] 本轮的 max |EMA|/tol (只算投票通道) = "
+                  << roundIn[k] << "x" << std::endl;
+    }
+
+    std::cout << "    => 逐通道最大超限倍数 [模型 ① 已装标定] (" << poses << " 个姿态, "
+                 "投票通道才进判决; 不投票的照报):";
+    for (int a = 0; a < 6; a++)
+        std::cout << "  " << NM[a] << " " << worst[a] << "x" << (vote[a] ? "[判]" : "[不判]");
+    std::cout << std::endl;
+    std::cout << "       逐轮 max |EMA| (N, 只算投票通道, 模型 ①): 21:58 " << roundAbs[0]
+              << " / 22:12 " << roundAbs[1] << " / 22:18 " << roundAbs[2]
+              << "  —— 与容差 " << tol[0] << " N 的比值就是余量 (1.0 = 正好顶到容差)。"
+              << std::endl;
+    std::cout << "       ⚠ 这一行与 Spec §7.3 记的 [0.1775 / 0.1692 / 0.1741 N] 是【同一个量】"
+                 " (同一份快照 + 已装标定, 那边是独立重算的)。两者应当同量级 —— 本用例"
+                 " 量到的与它相差不多 (末位有 1e-3 量级的差, 来源未查明, 不在这里断言相等)。"
+                 " 若这里显著更大, 先查喂进去的是不是那两份入库证据, 而不是先怀疑那一边。"
+              << std::endl;
+    std::cout << "       ⚠ 这些余量【部分循环】: eps_乙 就是由这三轮推出来的 (见本用例头上"
+                 " 那段 ★★)。它们是真结论, 但强度弱于独立数据; 独立确认只能靠新采一份"
+                 " 带 @720 的夹具。" << std::endl;
+
+    // ★ 断言【闸门的真实判决】: 在这份实测参考量上, 每个姿态都【比过之后放行】。
+    //   ⚠ 这不是"必须放行"的口号, 而是一个【可以被数据推翻】的判断: 若它红了, 说明零外力
+    //     静态下本地模型与机械臂自报的参考量就已经对不上, 而容差是按 0.6232 N 的两倍定的
+    //     (1.2464 N) —— 那件事必须在今晚之前查清楚。★【不许】用改容差、改夹具或改数据的
+    //     方式让它变绿: 容差与掩码都不在本次改动内, 而这三样恰好是"把发现改成绿"的三种做法。
+    //   ⚠ "闸门放行"这件事本身【不是】新信息: 改动前用已装标定量到的三轮 max |差|
+    //     0.1775 N (容差/它 = 7.0x) 已经预示了它。这条断言钉的是"【在这份数据上真的比过、
+    //     并且真的放行】"—— 也就是"喂对了参考量那一侧"这件事本身, 而不是一个能推出必然
+    //     结果的量: 喂错侧 (合成值 / 缺列) 时它分别退化成恒放行与【参考量不可用】。
+    //   ⚠ 两个模型都断言: ① 是生产口径; ② 若反而拒绝, 说明这一轮【在它自己的数据上】
+    //     都拟合不过去 —— 那也是必须今晚知道的事。
+    if (notCompared > 0 || okInstalled != poses || okInSample != poses) {
+        std::cout << "    FAIL: 闸门在这份【实测参考量】上没有全部放行: 模型 ①" << okInstalled
+                  << " / " << poses << ", 模型 ②" << okInSample << " / " << poses
+                  << ", 其中【没有比过】的 " << notCompared << " 个。"
+                     " 逐通道余量已在上表 —— 这是真发现, 不是可以调容差过去的事。" << std::endl;
+        g_failed++;
+        return;
+    }
+    std::cout << "    => 闸门判决: 模型 ① 与 ② 各 " << poses
+              << " 个姿态【比过之后放行】 (实测 @720 参考量, 悬空静态重放;"
+                 " 实机仍未验证, 本轮也没有验证\"有外力时会不会拒绝\")。" << std::endl;
+    PASS();
 }
 
 static void test_runtime_consistency_guard_replay() {
@@ -3587,6 +3967,11 @@ static void test_runtime_consistency_guard_replay() {
             //       不再一律是"参考量不可用");
             //     · 不带 ⇒ 保持走上面那段 ⚠ 说的默认值 (isStale=true / sixForceOnline=-1),
             //       闸门判【参考量不可用】, 那条断言【照旧算失败】。
+            //   ⚠⚠ 本用例这四份【都是】"不带", 所以下面这个 `if (cap.hasRef)` 分支在这里
+            //     【仍然是死代码】, 别把它读成"重采那条路已经跑过了"。真正跑过"带参考量 ⇒
+            //     喂实测值"这个配置的, 是【前一条用例】(test_runtime_consistency_guard_
+            //     replay_ref_snapshot) —— 它读的是冻结快照里那三块, 走的是 t6LoadAttempt,
+            //     不是这里。这一条分支留着是为了"重采的夹具落到本文件时不用再改代码"。
             if (cap.hasRef) {
                 for (int a = 0; a < 3; a++) {
                     fd.tcpForce[a]     = cap.F720[i][a];
@@ -4315,8 +4700,17 @@ int main() {
     std::cout << "--- Task 6 acceptance: pose-independence of local compensation ---" << std::endl;
     test_runtime_compensation_pose_independence();
 
-    // ★★ 运行时一致性闸门 (2026-09-19, 用户指令 1/2) 在同样四份夹具上的离线重放。
-    std::cout << "--- runtime consistency guard (replay on the four captures) ---" << std::endl;
+    // ★★ 运行时一致性闸门 (2026-09-19, 用户指令 1/2) 的离线重放。【两条, 顺序【不能】换】:
+    //   (1) 先跑【带实测参考量】的那一条 (2026-09-21 加) —— 冻结快照里三块带 @720 的采集,
+    //       判据那一侧吃的是量出来的数, 所以它有真结论 (并附循环论证的折扣说明);
+    //   (2) 再跑四份 09-19 老夹具那一条 —— 它【按设计红着】并在第一个姿态就 return
+    //       (那四份没有参考量那一列, 闸门只能判"参考量不可用")。
+    //   ⚠ 顺序【必须】(1) 在前: 反过来的话 (2) 的 return 会让 (1) 变成死代码 —— 一条
+    //     刻意红着的断言不该顺带把新做的检验一起掐掉 (2026-09-21 复审点出过这一点)。
+    std::cout << "--- runtime consistency guard (replay, real @720 reference) ---" << std::endl;
+    test_runtime_consistency_guard_replay_ref_snapshot();
+    std::cout << "--- runtime consistency guard (replay on the four 09-19 captures) ---"
+              << std::endl;
     test_runtime_consistency_guard_replay();
 
     // ⚠ TODO (Task 8a-3) —— 覆盖缺口, 只记录, 本次不动 runner:
