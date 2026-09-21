@@ -24,7 +24,9 @@ Touch-Dobot/
 │   ├── render/          3D 渲染 (机械臂模型, 光点, HUD)
 │   ├── robot/           机械臂通信 + 运动学
 │   ├── safety/          安全系统 (状态机 + 错误处理 + 虚拟约束力 + 诊断日志)
-│   ├── tests/           单元测试 (7 套, 108 用例)
+│   ├── tests/           单元测试 (18 个 `test_*.cpp`; `run_tests.bat` 只跑其中 12 个)
+│   │                    ⚠ 2026-09-21: 原写"7 套, 108 用例", 那是 2026-07-25 的数。套数已核为 18;
+│   │                    **用例总数未复核** —— 引用前跑一次 `tests\run_tests.bat` + 各独立 exe。
 │   └── models/cr3/      CR3 STL 模型文件 (7 个连杆)
 ├── Relay_Station/       MATLAB 中继站 (TCP 服务器 + GUI 监控)
 │   ├── relay_main.m     主入口

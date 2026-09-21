@@ -654,6 +654,9 @@ tol_F = 2 × 0.6232 = 1.2464 N                             (余量 = 1.2464 / 0.
 - `test_force_compensation`：**35 passed / 0 failed**（原 29 + 新增 6）。
 - `test_payload_calibration`：**69 passed / 1 failed**（原样，那条断言按计划**故意红着**，
   归夹具重采，本任务未碰）。
+- ⚠ **计数口径（后加，2026-09-21 `54475de`）：** 上面两个数是**本任务当时**的记录，不是今天的现状。
+  今天：`test_force_compensation` = **39 passed / 0 failed**、`test_payload_calibration`
+  = **71 passed / 1 failed**（那 1 条仍是刻意留红）。用例会继续增减 ⇒ 引用前重跑。
 - 全量构建：`cmd.exe //c "D:\Projects\Touch\Touch_Client\build.bat"` ⇒ `Build OK.`
   （单测那套**不编译** `main.cpp`，所以全量构建是这次重构唯一的验证手段）。
 
@@ -735,6 +738,9 @@ tol_F = 2 × 0.6232 = 1.2464 N                             (余量 = 1.2464 / 0.
   （"参考量不可用【竟然放行了】"）⇒ 装上守卫后 **36 passed / 0 failed**。
 - `test_force_compensation`：**36 passed / 0 failed**（基线 35/0 + 新增 1）。
 - `test_payload_calibration`：**69 passed / 1 failed**（那条红线仍在，理由已改判）。
+- ⚠ **计数口径（后加，2026-09-21 `54475de`）：** 同上 —— 这两个数是**本任务当时**的记录。
+  今天：`test_force_compensation` = **39 passed / 0 failed**、`test_payload_calibration`
+  = **71 passed / 1 failed**（红线**仍在**，理由未再改判）。**不是"全绿"。**
 - 全量构建：`cmd.exe //c "D:\Projects\Touch\Touch_Client\build.bat"` ⇒ `Build OK.`
 
 ### 9.7 ⚠ 本节的边界
