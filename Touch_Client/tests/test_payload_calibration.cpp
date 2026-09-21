@@ -3109,6 +3109,101 @@ static T6FreshStatus t6TakeFreshCapture(const char* name, T6Capture& cap, T6Last
     return T6FreshStatus::Loaded;
 }
 
+// ===== 参考量【这一份到底有没有数】—— 判据与生产闸门【同一份定义】 =====
+//
+// 【出处】: 生产闸门 (ForceCompensation.cpp) 里"参考量可用不可用"【唯一一份】定义是
+//     guardReferenceAvailable(fd) = `!fd.isStale && fd.sixForceOnline == 1`
+//   本函数【不另立门限】: 它就是把同一条判据用在【夹具头自报的那一帧】上 —— isStale 按
+//   "录制下来的帧不陈旧"取 false (回放器 t6ReplayRealRef 也是这么喂的), sixForceOnline 取
+//   块头里的 `sixForceOnline=N`。所以这一维与生产是逐字的同一条判据, 不是新挑的一个数。
+//
+// ⚠ 【为什么非得在这里判】: 回放器给每一帧【写死了】 `fd.isStale = false;
+//   fd.sixForceOnline = 1;` —— 它自己声称"这一帧有读数"。生产里这两个数由 RelayCore 在同一帧
+//   同一把锁里从 30004 帧填; 回放里没有第二个来源, 只有块头。于是闸门那条判据在回放里
+//   【恒为真】, 它【看不见】块头自报的 sixForceOnline。实测过 (2026-09-21): 把一份末尾六列
+//   全 0、其余列照抄真实采集的夹具放进 fixtures/ 回放, 闸门印的是"放行 10 / 10, 没有比过
+//   0 / 10", 而本用例印的是 PASS —— 那正是"在一个不携带信息的通道上放行"这件事,
+//   在【负责检验它的那个工具里】又长了一遍。
+//
+// 【为什么还要看"列里有没有数"】: 判据是 `compensated − 参考量`。参考量恒为 0 时它退化成
+//   "本地输出是否在自己的容差内", 而按构造它总是在 ⇒ 印出"放行 N/N"而一次比较都没发生。
+//   生产那一侧靠 sixForceOnline 认这件事; 它【刻意不取数值门限】—— 依据写在
+//   guardReferenceAvailable 的注释里: "零附近多大算零"那种门限会把【真的没有外力】判成
+//   不可用。夹具这一侧多出一种生产里不可达的形态: 【块头自报在线、末尾六列却恒为 0】——
+//   记录程序写满了列却没写进读数。
+//   ⚠ 所以下面判的是【结构】, 不是【门限】: "末尾六列逐行逐通道都恰好是 0.0"与"出现了非有限
+//     值"都是【不可能是真读数】的事实 (真静止实测也是几十毫牛量级, 见 t6AnnounceRefSource
+//     那处的出处), 不需要挑一个数当"多大算零"。凡需要挑一个数的地方【都没有挑】—— 挑出来的
+//     那个数会同时把"真的没有外力"判成坏数据, 而那是生产判据明确拒绝做的事。
+enum class T6RefUsability { Usable, VoidOffline, VoidNonFinite, VoidAllZero };
+
+static T6RefUsability t6FreshRefUsability(const T6Capture& cap, int headerOnline) {
+    // (1) 生产判据那一维: sixForceOnline 必须 == 1 —— 取"正向确认"而不是"没说不在线就算
+    //     在线"。块头没写这个数时 t6ScanLastBlock 给的是 -99 (与生产里 -1"一帧都没收到"
+    //     同义) ⇒ 不算在线。
+    if (headerOnline != 1) return T6RefUsability::VoidOffline;
+    // (2) 数据那一维: 末尾六列是不是真的有数。
+    bool anyNonFinite = false, anyNonZero = false;
+    for (int i = 0; i < cap.n; i++) {
+        for (int a = 0; a < 3; a++) {
+            const double fv = cap.F720[i][a], mv = cap.M720[i][a];
+            if (!std::isfinite(fv) || !std::isfinite(mv)) anyNonFinite = true;
+            else if (fv != 0.0 || mv != 0.0) anyNonZero = true;
+        }
+    }
+    if (anyNonFinite) return T6RefUsability::VoidNonFinite;
+    if (cap.n > 0 && !anyNonZero) return T6RefUsability::VoidAllZero;
+    return T6RefUsability::Usable;
+}
+
+// 逐路"整块里恒为 0"的名单长度 —— 【只警告不判失败】。六路里死了一两路而其余有数时, 这一份
+// 仍然验得了东西 (六个通道一起死才是"这一路没有读数", 见 t6FreshRefUsability 第 (2) 条),
+// 所以那种情况维持警告: 这就是"参考量在、也可信"那一档要保留的那条警告。
+static int t6DeadRefChannels(const T6Capture& cap) {
+    if (cap.n <= 0) return 0;
+    int dead = 0;
+    for (int a = 0; a < 3; a++) {
+        bool fDead = true, mDead = true;
+        for (int i = 0; i < cap.n; i++) {
+            if (cap.F720[i][a] != 0.0) fDead = false;
+            if (cap.M720[i][a] != 0.0) mDead = false;
+        }
+        if (fDead) dead++;
+        if (mDead) dead++;
+    }
+    return dead;
+}
+
+// 参考量不可用 ⇒ 【响亮失败】那一段话。三件事必须说全: (a) 这一份没有可用的参考量、
+// 是哪一种不可用; (b) 因此回放【什么也没验证】, "放行 N/N"不能读成结论; (c) 处置 =
+// 回实机重采, 并点名最可能的原因 (记录程序没写末尾那六列)。
+static void t6PrintVoidRefFailure(const char* file, const T6LastBlock& blk,
+                                  const T6Capture& cap, T6RefUsability why) {
+    const char* reason = "";
+    switch (why) {
+        case T6RefUsability::VoidOffline:
+            reason = "块头自报 sixForceOnline≠1 ⇒ 采集时这一路不在线"
+                     " (生产判据 guardReferenceAvailable 要求它就等于 1)";
+            break;
+        case T6RefUsability::VoidNonFinite:
+            reason = "末尾六列里出现了非有限值 (NaN/Inf) ⇒ 那不是读数";
+            break;
+        case T6RefUsability::VoidAllZero:
+            reason = "末尾六列逐行逐通道恒为 0.0 ⇒ 这一路没有读数 (真静止也不是恒 0:"
+                     " 实测是几十毫牛量级)";
+            break;
+        default: break;
+    }
+    std::cout << "    FAIL: 新采集 " << file << " 的最后一块 attempt " << blk.stamp
+              << " 【参考量不可用】: " << reason << " (" << cap.n << " 行已读入)。" << std::endl;
+    std::cout << "       ⇒ 判据是【本地补偿 − 参考量】; 参考量没有数时它退化成「本地输出是否"
+                 "在自己的容差内」, 而按构造它总是在 —— 所以这一份回放下去一定会印出"
+                 "「放行 N/N」, 那【不是】比较的结果。" << std::endl;
+    std::cout << "       ⇒ 【这一份回放下去什么也没验证】, 不许读成「闸门在这份数据上放行了」。"
+                 "必须回实机重采: 最可能的原因是记录程序【没写末尾那六列】F720*/M720*"
+                 " (上机清单 §1 的陷阱 1)。" << std::endl;
+}
+
 // ===== 参考量那一侧的数据是【实测】还是【现算】—— 必须每次都说清楚 (2026-09-21) =====
 //
 // 判据是 `compensated − 参考量`, 参考量取自 fd.tcpForce (定义在 ForceCompensation.cpp 的
@@ -3365,6 +3460,140 @@ static void test_fresh_capture_pickup_is_wired() {
     CHECK(capB.n == 4);
     CHECK(refConsumed);          // ★ 非空性: 末尾那六列【参考量】真的被解析进内存了
     CHECK(st25 == T6FreshStatus::Broken);
+    PASS();
+}
+
+// =====================================================================================
+// ★★ 2026-09-21: 【空洞采集必须失败】—— 参考量全 0 / 非有限 / 不在线, 不许只警告。
+// =====================================================================================
+//
+// 【为什么单开一条】: 这是"检验工具自己在一个不携带信息的通道上放行"那个洞。实测过 (改动前
+//   那一版, 用一份末尾六列全 0、其余列逐列照抄真实采集的临时夹具): 闸门印
+//   「放行 10 / 10, 拒绝 0 / 10, 没有比过 0 / 10」, 本用例印 PASS —— 也就是说操作者今晚带回来
+//   一份"记录程序没写末尾那六列"的采集, 会拿到一句"放行了", 而【没有任何东西被验证】。
+//   ⇒ 这一支必须发生在【回放之前】, 而且必须失败。
+//
+// 【它验什么】: 都走【真的取用函数】(t6TakeFreshCapture) 装进真的 T6Capture, 再用【真的判据】
+//   (t6FreshRefUsability) 判 —— 不在这里抄第二份取用规则, 也不抄第二份判据:
+//   (甲) 31 列、块头 sixForceOnline=1、末尾六列【全 0】 ⇒ VoidAllZero (今晚最可能的那种);
+//   (乙) 31 列、块头 sixForceOnline=0            ⇒ VoidOffline (生产判据那一维);
+//   (丙) 31 列、末尾六列是 NaN                  ⇒ VoidNonFinite;
+//   (丁) 31 列、末尾六列有数 (mgSynthRow 的 35..40) ⇒ Usable —— 【不误伤】: 有数的采集照旧。
+//
+// 【非空性】: 把 t6FreshRefUsability 改成恒返回 Usable (也就是"只警告不失败"的旧行为),
+//   甲 / 乙 / 丙 三条当场变红。⚠ 这一条【不是】"诊断性改进": 它断的就是那一支判据本身。
+//   ⚠ 边界: 本用例证明的是【判据】会红, 不是"整条回放路径会红" —— 后者由
+//     test_runtime_consistency_guard_replay_fresh_capture 在判据非 Usable 时记失败来保证
+//     (那一支今天跑不到, 因为夹具不在; 它由本用例与取用规则那条用例守着)。
+//
+// 【它不碰任何已入库夹具】: 临时文件下划线开头、写完【在断言之前】删掉, 并断言它们已经不在了。
+// 31 列合成行: 前 25 列用 mgSynthRow 那套值 (10.0 起, 全是正数), 末尾六列由调用方给字面量 ——
+// "这一路没有数"的几种样子 (全 0 / nan) 就是这么造出来的。
+static void mgSynthRow31WithRef(char* dst, size_t cap, const char* refLiteral) {
+    int off = 0;
+    for (int c = 0; c < 25 && off < (int)cap - 1; c++)
+        off += snprintf(dst + off, cap - off, "%s%.1f", (c ? "," : ""), 10.0 + c);
+    for (int c = 0; c < 6 && off < (int)cap - 1; c++)
+        off += snprintf(dst + off, cap - off, ",%s", refLiteral);
+}
+
+// 写一份临时 31 列夹具 (块头自报 poses=4), 返回是否写成。名字由调用方给。
+static bool mgSynthWrite31(const char* path, const char* refLiteral, int online) {
+    char row[4096];
+    mgSynthRow31WithRef(row, sizeof(row), refLiteral);
+    FILE* f = fopen(path, "w");
+    if (!f) return false;
+    fprintf(f, "# attempt 2026-09-21 00:00:00  poses=4  sixForceOnline=%d\n", online);
+    fprintf(f, "# (空洞采集自测现合成的 31 列夹具; 写完即删)\n");
+    for (int i = 0; i < 4; i++) fprintf(f, "%s\n", row);
+    fclose(f);
+    return true;
+}
+
+static void test_fresh_capture_void_reference_fails_loudly() {
+    TEST(fresh_capture_void_reference_fails_loudly);
+
+    static const char* DIRS[4] = { "fixtures/", "tests/fixtures/",
+                                   "Touch_Client/tests/fixtures/",
+                                   "../../Touch_Client/tests/fixtures/" };
+    char dir[256] = {0};
+    for (int i = 0; i < 4 && dir[0] == '\0'; i++) {
+        char probe[512];
+        snprintf(probe, sizeof(probe), "%s_synth_probe_void.txt", DIRS[i]);
+        FILE* pf = fopen(probe, "w");
+        if (pf) { fclose(pf); remove(probe); snprintf(dir, sizeof(dir), "%s", DIRS[i]); }
+    }
+    if (dir[0] == '\0') {
+        std::cout << "FAIL: 四个候选夹具目录一个都写不进去 —— 本用例作不了数, 记失败不记通过"
+                  << std::endl;
+        g_failed++;
+        return;
+    }
+
+    static const char* F_ZERO = "_synth_void_allzero.txt";
+    static const char* F_OFF  = "_synth_void_offline.txt";
+    static const char* F_NAN  = "_synth_void_nonfinite.txt";
+    static const char* F_OK   = "_synth_void_usable.txt";
+    char pZero[512], pOff[512], pNan[512], pOk[512];
+    snprintf(pZero, sizeof(pZero), "%s%s", dir, F_ZERO);
+    snprintf(pOff,  sizeof(pOff),  "%s%s", dir, F_OFF);
+    snprintf(pNan,  sizeof(pNan),  "%s%s", dir, F_NAN);
+    snprintf(pOk,   sizeof(pOk),   "%s%s", dir, F_OK);
+    // ⚠ 上一次若是崩在中途, 残留会在这里; 先清掉, 免得"读出旧文件"顶掉本次的结论。
+    remove(pZero); remove(pOff); remove(pNan); remove(pOk);
+
+    std::cout << std::endl;
+    std::cout << "    自测: 四份【临时】夹具 (下划线开头、写完即删、与今晚的采集无关) 走真的取用"
+                 "规则 + 真的可用性判据: 全 0 / 不在线 / NaN 三种\"没有数\"必须判不可用,"
+                 " 有数的必须判可用。" << std::endl;
+
+    bool wrote = mgSynthWrite31(pZero, "0.000000", 1) &&
+                 mgSynthWrite31(pOff,  "35.000000", 0) &&
+                 mgSynthWrite31(pNan,  "nan",       1) &&
+                 mgSynthWrite31(pOk,   "35.000000", 1);
+
+    // 四份各自过一遍【真的取用函数】, 再交给【真的判据】。
+    T6Capture cZero, cOff, cNan, cOk;
+    T6LastBlock bZero, bOff, bNan, bOk;
+    T6FreshStatus sZero = T6FreshStatus::Broken, sOff = sZero, sNan = sZero, sOk = sZero;
+    T6RefUsability uZero = T6RefUsability::Usable, uOff = uZero, uNan = uZero, uOk = uZero;
+    if (wrote) {
+        cZero.label = "我-全0";   cZero.file = F_ZERO;
+        cOff.label  = "我-离线";  cOff.file  = F_OFF;
+        cNan.label  = "我-NaN";   cNan.file  = F_NAN;
+        cOk.label   = "我-有数";  cOk.file   = F_OK;
+        sZero = t6TakeFreshCapture(F_ZERO, cZero, &bZero);
+        sOff  = t6TakeFreshCapture(F_OFF,  cOff,  &bOff);
+        sNan  = t6TakeFreshCapture(F_NAN,  cNan,  &bNan);
+        sOk   = t6TakeFreshCapture(F_OK,   cOk,   &bOk);
+        uZero = t6FreshRefUsability(cZero, bZero.online);
+        uOff  = t6FreshRefUsability(cOff,  bOff.online);
+        uNan  = t6FreshRefUsability(cNan,  bNan.online);
+        uOk   = t6FreshRefUsability(cOk,   bOk.online);
+    }
+
+    // ===== 清理【先于断言】: 任何一条断言失败都会 return, 那样就把运行产物留下了 =====
+    remove(pZero); remove(pOff); remove(pNan); remove(pOk);
+    T6LastBlock after;
+    const bool gone = !t6ScanLastBlock(F_ZERO, after) && !t6ScanLastBlock(F_OFF, after) &&
+                      !t6ScanLastBlock(F_NAN, after)  && !t6ScanLastBlock(F_OK, after);
+
+    CHECK(gone);        // 临时夹具一份都没留下 (先做: 后面任何一条 return 都不留文件)
+    CHECK(wrote);
+    // (甲) 全 0 的参考量: 取用规则照收 (31 列、读得动), 但【判据】必须说不可用。
+    CHECK(sZero == T6FreshStatus::Loaded);
+    CHECK(uZero == T6RefUsability::VoidAllZero);
+    // (乙) 块头自报不在线: 生产判据那一维。
+    CHECK(sOff == T6FreshStatus::Loaded);
+    CHECK(uOff == T6RefUsability::VoidOffline);
+    // (丙) 非有限值。
+    CHECK(sNan == T6FreshStatus::Loaded);
+    CHECK(uNan == T6RefUsability::VoidNonFinite);
+    // (丁) 有数 ⇒ 可用 (不误伤)。⚠ 它同时是上面三条的【对照】: 判据不是"一律判不可用"。
+    CHECK(sOk == T6FreshStatus::Loaded);
+    CHECK(uOk == T6RefUsability::Usable);
+    CHECK(cOk.hasRef);
+    CHECK(fabs(cOk.F720[0][0] - 35.0) < 1e-9);   // 参考量那一路真的进了内存
     PASS();
 }
 
@@ -4090,11 +4319,16 @@ static void test_runtime_consistency_guard_replay_ref_snapshot() {
 //     30 Hz 上的收敛都不在内。
 //   · "本条绿了"只能说"闸门在这份独立数据上放行 (或拒绝)", 【不是】"闸门被验证过了"。
 //
-// 【判决只印不判 —— 这是刻意的, 不是漏了】: 闸门放行还是拒绝【不】决定本条的绿红。本条的
-//   判据只有一条: 【接线是否喂对了】(实测参考量真的进了内存、每个姿态都【比过】)。理由:
+// 【闸门放行还是拒绝: 只印不判 —— 这是刻意的, 不是漏了】: 本条的判据是【接线是否喂对了】
+//   (实测参考量真的进了内存、每个姿态都【比过】), 不是"闸门放不放行"。理由:
 //   本条是【上机清单 §1 的交付物读取器】—— 它要在今晚任何一份数据下都给出可读的结论, 而不是
 //   把"数据说了什么"变成套件里的一格计数。而"拒绝"在这里是【真发现】: 会连余量一起【响亮
 //   打印】, 并且明说它不是可以调容差过去的事。
+//   ★ 2026-09-21 【例外: 参考量不可用 ⇒ 失败】。上面那条"只印不判"说的是【闸门比完之后】
+//     的判决; 而"压根没有得比"是另一回事: 参考量没有数时判据退化成"本地输出是否在自己的
+//     容差内", 按构造它总是在 ⇒ 一定会印出"放行 N/N"而一次比较都没发生。那不是"数据说了
+//     话", 那是【这一份没有交出交付物】。所以那一支【必须失败】—— 判据与生产闸门同一份
+//     定义 (sixForceOnline==1) 加上"列里有没有数"这条结构事实, 见 t6FreshRefUsability。
 //   ⚠ 它【没有】动那条刻意红着的断言 (四条 09-19 夹具那一条): 那一条问的是这份数据答不了的
 //     问题, 照旧红着, 照旧是本套件【唯一】那条失败。
 static void test_runtime_consistency_guard_replay_fresh_capture() {
@@ -4131,26 +4365,29 @@ static void test_runtime_consistency_guard_replay_fresh_capture() {
               << std::endl;
     std::cout << "       ⚠ 采集文件是【追加】写的 ⇒ 里面可能有历次 attempt。上面那个时间戳就是"
                  "被判的那一次 —— 与刚才在实机上跑的那一次【核对一眼】。" << std::endl;
-    if (blk.online != 1) {
-        std::cout << "    ⚠⚠ 这一块头部自报 sixForceOnline=" << blk.online << " (≠1) ⇒ 采集时"
-                     "力帧【可能不在线】, 末尾那六列可能不是读数。下面仍按【有读数】喂"
-                     " (与冻结快照那条同一口径), 但余量要按这个前提读。" << std::endl;
+    // ★★ 参考量【到底能不能用】—— 闸门那一条判据在回放里看不见它 (回放器给每帧写死了
+    //    sixForceOnline=1), 所以必须在这里判: 见 t6FreshRefUsability 头上那两段。
+    //    ⚠ 不可用 ⇒ 【失败】而不是警告: 这一份回放下去会印出"放行 N/N"而一次比较都没发生,
+    //      那正是本用例存在的理由被反过来利用 (与闸门刚修掉的那个洞同源)。
+    //    ⚠ 判据【不在这里挑数】: 用的是生产那条判据 (sixForceOnline==1) 加上"列里有没有数"
+    //      这条结构事实。
+    const T6RefUsability refUse = t6FreshRefUsability(cap, blk.online);
+    if (refUse != T6RefUsability::Usable) {
+        t6PrintVoidRefFailure(T6_FRESH_CAPTURE, blk, cap, refUse);
+        g_failed++;
+        return;
     }
-    // 参考量那六列【是不是真的有数】: 全 0 是"这一路没有数"的典型样子 —— 真静止时它也不是
-    // 恒 0 (实测是几十毫牛量级)。⚠ 只报不判: 见本用例头上"判决只印不判"那段。
-    bool refAllZero = true;
-    for (int i = 0; i < cap.n && refAllZero; i++) {
-        for (int a = 0; a < 3; a++) {
-            if (cap.F720[i][a] != 0.0 || cap.M720[i][a] != 0.0) { refAllZero = false; break; }
-        }
-    }
-    if (refAllZero) {
-        std::cout << "    ★★ 这一块的 @720 六列【全 0】⇒ 那一侧没有读数 (恒 0 不是「真的没有"
-                     "外力」: 静止实测也是几十毫牛量级)。下面的余量与判决【不成立】, 别把它读成"
-                     "「闸门放行了」。" << std::endl;
-    }
+    // 可用 ⇒ 出声确认 (而不是"只不打警告") + 那几路恒 0 的【警告】: 见 t6DeadRefChannels。
     std::cout << "    ★ 参考量: 这一块的【实测列】(F720*/M720*), " << cap.n
-              << " 行全部喂实测值 —— 本用例不合成任何参考量。" << std::endl;
+              << " 行全部喂实测值 —— 本用例不合成任何参考量。块头 sixForceOnline="
+              << blk.online << " (= 生产判据要求的那一维, 本用例把它【真的判】了一次)。"
+              << std::endl;
+    const int deadCh = t6DeadRefChannels(cap);
+    if (deadCh > 0) {
+        std::cout << "    ⚠⚠ 其中 " << deadCh << " 路在整块里【恒为 0】(其余路有数) ⇒ 那几路"
+                     "没有读数, 逐通道余量里它们那几列不携带信息; 整块仍有数, 故本用例照判"
+                     " (判据与生产同一份定义, 不另立门限)。" << std::endl;
+    }
     std::cout << "    ★ 本地模型 ①: 已装冻结标定 " << CALIB << " (生产口径); ②: 本轮 @1304 上"
                  "现拟合 (对照; 样本内 ⇒ 余量偏乐观)。" << std::endl;
     std::cout << "    ⚠ 悬空静态、笔在空中的录像重放 ⇒ 【不验证接触行为】, 也【不构成】对闸门的"
@@ -4203,10 +4440,6 @@ static void test_runtime_consistency_guard_replay_fresh_capture() {
     if (r.notCompared > 0) {
         std::cout << "    ★★ 【没喂对】: " << r.notCompared << " 个姿态闸门判【没有比过】"
                      " (参考量被判不可用) ⇒ 喂进去的不是这一路的读数。" << std::endl;
-    }
-    if (refAllZero) {
-        std::cout << "    ★★ 再强调一次: 参考量那六列全 0 ⇒ 上面这张表【量不到东西】。"
-                  << std::endl;
     }
 
     // ===== 本条的判据: 【接线喂对了没有】, 不是闸门的判决 =====
@@ -5156,6 +5389,10 @@ int main() {
     // 【放在这里】: 与上面那条读取器用例同一族 (都问"夹具进得来吗"), 且都排在重放类用例之前。
     std::cout << "--- fresh capture pickup (pre-wired for tonight) ---" << std::endl;
     test_fresh_capture_pickup_is_wired();
+    // ★★ 2026-09-21: 空洞采集 (参考量全 0 / 非有限 / 不在线) 必须【失败】而不是只警告 ——
+    //   否则操作者会拿到一句"放行 N/N"而什么都没被验证。紧挨着上面那条 (同一族: 都问
+    //   "夹具进得来吗、进来的是不是有数的那一份")。
+    test_fresh_capture_void_reference_fails_loudly();
 
     // ★★★ Task 6 验收: 本地补偿的姿态无关性 (全量 vs 残余, 逐通道, 四份采集)。
     // 【放在最后】: 它要跑生产补偿代码 (ForceCompensation::step), 并且会打一张表。
