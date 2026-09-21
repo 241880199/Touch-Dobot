@@ -73,14 +73,27 @@ void init() {
     }
 }
 
-static inline double deadzone(double val, double threshold) {
-    if (fabs(val) < threshold) return 0.0;
-    return val;
+// ★★ 2026-09-21: 硬门 → 【软门】。
+// 【为什么改 —— 现场现象】静止时 FZ 的读数在 0 与 ~0.2 之间来回跳 (用户 2026-09-21 报)。
+//   原因不是"力在跳", 是【门限在跳】: 硬门 `if (|v| < dz) 0 else v` 在阈值处【不连续】,
+//   而静止残余恰好悬在 dz 附近 (实测 'z' 之后 comp_z ≈ −0.166, 而 dz = 0.20) ⇒
+//   它在 0.20 上下抖一点, 输出就在 0 与 ~0.2 之间整段跳。
+// 【软门】低于 dz 时按 (|v|/dz)² 平滑衰减到 0; **高于 dz 时仍是 v (1:1, 幅值不变)**。
+//   ⇒ 在 dz 处【值连续】(r=1 时 val·1² = val, 与上面那支接上) ⇒ 没有跳变 ⇒ 不抖 ✓
+//   ⇒ 而笔压 (0.3~0.6 N) 远在 dz 之上 ⇒ 幅值完全不受影响 ✓
+// ⚠ 性质如实说: 它是【C⁰】(值连续、斜率不连续) —— 而"值不连续"正是跳变的来源,
+//   所以 C⁰ 已经足以消掉这个现象。斜率在 dz 处有个折点, 量级很小。
+static inline double softDeadzone(double val, double threshold) {
+    if (threshold <= 0.0) return val;
+    const double a = fabs(val);
+    if (a >= threshold) return val;      // 门限以上: 原样 (不改幅值)
+    const double r = a / threshold;      // 0..1
+    return val * r * r;                  // 门限以下: 三次律平滑到 0
 }
 
 static inline double mapForceToTouch(double sensorForce) {
-    // Deadzone
-    double v = deadzone(sensorForce, Config::FORCE_RESIDUAL_DEADZONE_N);
+    // 软门 (见 softDeadzone 的说明 —— 硬门会在阈值处跳变, 现场表现为"读数在 0 与 0.2 之间跳")
+    double v = softDeadzone(sensorForce, Config::FORCE_RESIDUAL_DEADZONE_N);
     // Linear mapping: 200N sensor -> 3.3N Touch
     double ratio = Config::FORCE_MAX_TOUCH_N / Config::FORCE_MAX_SENSOR_N;
     double out = v * ratio;

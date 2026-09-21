@@ -20,15 +20,48 @@ static void test_residual_deadzone() {
     AppState::ForceData fd;
     ForcePipeline::init();
 
-    // Below residual deadzone (0.05N) → output zero
+    // 远低于门限 ⇒ 输出应当被压到基本为 0。
+    // ⚠ 这句注释从前写的是 "Below residual deadzone (0.05N)" —— 而常数是
+    //   Config::FORCE_RESIDUAL_DEADZONE_N = 0.20 ⇒ 数字过期了 (2026-09-21 改对)。
+    //   两个数的差别不影响这条断言 (0.03 在两个门限下都远低于), 但它会误导读者。
+    const double dz = Config::FORCE_RESIDUAL_DEADZONE_N;
+    CHECK(dz > 0.1);   // 钉住"门限是 0.2 那个量级", 免得将来它被改小到让上面那句又变成实话
     fd.compensated[0] = 0.03; fd.compensated[1] = -0.03; fd.compensated[2] = 0.0;
     fd.compensated[3] = 0.0; fd.compensated[4] = 0.0; fd.compensated[5] = 0.0;
     fd.lastUpdateMs = GetTickCount();
     ForcePipeline::step(fd);
 
-    CHECK(fabs(fd.hapticOut[0]) < 0.01); // deadzone suppressed
+    CHECK(fabs(fd.hapticOut[0]) < 0.01); // 软门把远低于门限的量压到基本为 0
     CHECK(fabs(fd.hapticOut[1]) < 0.01);
     CHECK(fabs(fd.hapticOut[2]) < 0.01);
+    PASS();
+}
+
+// ★ 2026-09-21 新增 —— 直接钉住软门【要治的那个现象】。
+// 【现象】现场: 静止时 FZ 读数在 0 与 ~0.2 之间来回跳。那不是力在跳, 是【硬门在阈值处跳变】:
+//   残余悬在 dz 附近 (实测 'z' 之后 comp_z ≈ −0.166, dz = 0.20) ⇒ 抖一点就整段跳。
+// 【这条断言测什么】取门限【两侧】各一个点, 输出必须几乎相等。
+//   硬门: 0 与 0.201×ratio×gain ≈ 0.199 N ⇒ 差一整个门限 ⇒ 手感上就是"在跳" ⇒ 本条会红。
+//   软门: 0.197 与 0.201 ⇒ 差 0.004 N×ratio×gain ⇒ 不跳。
+//   ⇒ 所以这条用例是【可证伪】的: 谁把软门改回硬门, 它会立刻红。
+static void test_soft_deadzone_no_jump() {
+    TEST(soft_deadzone_no_jump);
+    const double dz    = Config::FORCE_RESIDUAL_DEADZONE_N;
+    const double ratio = Config::FORCE_MAX_TOUCH_N / Config::FORCE_MAX_SENSOR_N;
+    const double gain  = Config::FORCE_REFLECTION_GAIN;
+
+    AppState::ForceData below, above;
+    ForcePipeline::init();
+    below.compensated[0] = dz * 0.995; below.lastUpdateMs = GetTickCount();
+    for (int i = 0; i < 200; i++) ForcePipeline::step(below);   // 让滤波收敛
+
+    ForcePipeline::init();
+    above.compensated[0] = dz * 1.005; above.lastUpdateMs = GetTickCount();
+    for (int i = 0; i < 200; i++) ForcePipeline::step(above);
+
+    const double jump = fabs(above.hapticOut[0] - below.hapticOut[0]);
+    (void)ratio; (void)gain;   // 只在下面那句注释里用来说明量级
+    CHECK(jump < 0.02);
     PASS();
 }
 
@@ -118,6 +151,7 @@ static void test_stale_detection() {
 int main() {
     std::cout << "=== ForcePipeline Unit Tests ===" << std::endl;
     test_residual_deadzone();
+    test_soft_deadzone_no_jump();
     test_saturation();
     test_coord_transform();
     test_filter_convergence();
