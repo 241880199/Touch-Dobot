@@ -231,22 +231,32 @@ test_noise_probe 正是那个受害者 —— 而它成为受害者恰恰因为�
 > 而原因换成了我们自己接进来的东西。**开工前先跑一遍那条 grep 确认它是 0。**
 > （Task 1 已把全部 22 个 `build_*.bat` 都加了守卫 ⇒ 现在最多真正调用一次。）
 
-**为什么**：这才是让那六个套件**变成可信证据**的那一步。
+**为什么**：这才是让那**五个**套件**变成可信证据**的那一步。
 今天它们"能构建"（Task 1 之外的事实）却**没有任何东西会重建它们**，而且第一段的 `[OK]`/`[FAIL]`
-**结构性地不携带退出码**（缺陷 A）。两件事一起解决：把六个套件挪进"先建再跑"，
-**第一段那个 `for` 循环就可以整个删掉** —— 缺陷 A 随之消失（"先建再跑"那些段落里的
-`if %ERRORLEVEL% EQU 0` 是**顶层**语句，不在括号里，没有延迟展开问题）。
+**结构性地不携带退出码**（缺陷 A）。两件事一起解决：把**五个**套件挪进"先建再跑"，
+**第一段那个 `for` 循环就可以整个删掉**。
+
+> ⚠★ **订正（2026-09-22 执行后 / 最终复审指出）**：上面原先接了一句
+> "缺陷 A 随之消失（'先建再跑'那些段落里的 `if %ERRORLEVEL% EQU 0` 是**顶层**语句，
+> 不在括号里，没有延迟展开问题）"。**那句话只有一半对**：
+> **外层**（判构建结果）确实是顶层 ⇒ 安全；而**内层**（判 exe 结果）**嵌在 `if (...)` 块里**
+> ⇒ 与那个被删掉的第一段**一样**在解析期冻结 ⇒ 一个返回 7 的 exe 照样打 `[OK]`。
+> **⇒ 见本文件 Task 4**（那一节把它改成了 `if !ERRORLEVEL! EQU 0` + 延迟展开）。
+> **照上面那句原话照抄模板，等于把本 Task 要消灭的沉默原样搬了个家。**
 
 **Files:**
-- Modify: `Touch_Client/tests/run_tests.bat`（删第一段循环；加六段"先建再跑"）
+- Modify: `Touch_Client/tests/run_tests.bat`（删第一段循环；加**五**段"先建再跑"；第六个留明标缺口）
 
 **Interfaces:**
-- Consumes: 六个既有脚本名 —— `build_force_pipeline_test.bat` / `build_constraint_test.bat` /
+- Consumes: **五个**既有脚本名 —— `build_force_pipeline_test.bat` /
   `build_feedback_parser_test.bat` / `build_escalation_test.bat` / `build_kinematics_test.bat` /
   `build_coord_safety_test.bat`，以及它们产出的 exe 名（`test_force_pipeline.exe` /
-  `test_constraint_force.exe` / `test_feedback_parser.exe` / `test_escalation.exe` /
-  `test_kinematics.exe` / `test_coord_safety.exe`）
-- Produces: 一个**每个套件都会被重建**的 `run_tests.bat`
+  `test_feedback_parser.exe` / `test_escalation.exe` / `test_kinematics.exe` /
+  `test_coord_safety.exe`）
+  ⚠ **`build_constraint_test.bat` / `test_constraint_force.exe` 不在名单里** ——
+  见本节开头的用户决定：那个套件**有意不接**（它的构建脚本被 `.gitignore` 忽略、不在 HEAD 里）。
+  **不要**照旧版的"六个"去接它。
+- Produces: 一个**每个（被接进来的）套件都会被重建**的 `run_tests.bat`
 
 - [ ] **Step 1: 先记录"改之前"的行为，作为对照**
 
@@ -260,7 +270,7 @@ grep -nE "^=== test_.*\.exe ===|^--- Building|^BUILD_EXIT" /tmp/before.log
 - [ ] **Step 2: 删掉第一段 `for` 循环**
 
 把 `run_tests.bat` 里那个 `for %%e in ( test_force_pipeline.exe ... test_coord_safety.exe ) do ( ... )`
-**整段删除**（连同它上面那句 `echo ===` 与下面的空行），把它的职责交给 Step 3 的六段。
+**整段删除**（连同它下面那些空行），把它的职责交给 Step 3 的**五**段（第六个由明标缺口那段说明承担）。
 
 - [ ] **Step 3: 加五段"先建再跑" + 一段明标缺口**
 
@@ -488,7 +498,10 @@ git commit -m "docs(tests): 修两处会误导人的构建配方 + 把测试基�
 >
 > 实现者在**唯一一处**偏离了 brief：五段新段落的内层判断改用 **`if errorlevel 1`**（**运行时**求值，
 > 嵌在块里也正确），并在文件里用 ASCII 注释写明为什么。控制方已核实并确认这个偏离是对的：
-> 五段新段落是 `if errorlevel 1`，而**仍有 19 处** `if %ERRORLEVEL% EQU 0 (`（其中 7 处是内层）。
+> 五段新段落是 `if errorlevel 1`，而**当时仍有 19 处** `if %ERRORLEVEL% EQU 0 (`（其中 7 处是内层）。
+> ⚠ **日期范围**：这是**那一刻**的计数。经过 Task 4 与最后的修法之后，现在是
+> **12 处外层 `if %ERRORLEVEL% EQU 0 (`（全在第 0 列）+ 12 处内层 `if !ERRORLEVEL! EQU 0 (`**，
+> 无守卫的 `if errorlevel` 一处不剩（最终复审逐行核过）。
 
 **为什么这个 Task 必须做（而不是"顺带"）**：那七段（force_comp / relay_command / force_logger /
 tcp_calibration / safety_core / session_report / noise_probe）的内层判断是死的
@@ -549,15 +562,19 @@ tcp_calibration / safety_core / session_report / noise_probe）的内层判断�
       ⚠ **不要用 `git checkout -- run_tests.bat`** —— 我（写计划的人）在 Task 2 的 Step 6 里正是这么写的，
       而那一步在 commit **之前**，会**删掉整个 Task 2 的工作**。实现者识破了并用仓库外的哈希备份绕过。
 - [ ] 提交（信息说明：其余七段的内层结果判定有与被删掉的第一段**同一个**解析期冻结缺陷
-      ⇒ 失败的套件会报 `[OK]`；已改成 `if errorlevel 1`；两段负对照；以及
+      ⇒ 失败的套件会报 `[OK]`；**已改成运行时求值的形式**；两段负对照；以及
       "顶层语句所以安全"这个前提是错的）。
+      ⚠ **订正**：这一轮先改成了 `if errorlevel 1`，**那个形式随后被证明也是错的**
+      （对崩溃的负退出码判通过）⇒ 最终用的是 `if !ERRORLEVEL! EQU 0` + 延迟展开
+      —— 见本文件 Task 4 里的"复审推翻了我给的第一版修法"那一节，以及 Task 5 的记录。
 
 ## 收尾
 
 - [ ] 全量跑一遍并把**逐套件**结果记进 `Docs/superpowers/specs/2026-09-22-test-harness-state.md`
       （这次每个套件都真的被重建了 —— 这是本计划存在的理由）。
 - [ ] **更新记忆**：`test-harness-stale-binaries.md` 补三个缺陷类别与 `J1_Z` 那条具体发现；
-      把"七个套件只跑不建"这条**事实本身**更新为"已修成先建再跑（13 个构建步）"。
+      把"七个套件只跑不建"这条**事实本身**更新为"已修成先建再跑（**12** 个构建步）"。
+      ⚠ 是 **12** 不是 13 —— 只接了五个（第六个有意排除）。动手前先数一遍。
 - [ ] 因为 `master` 落后 `origin/master` 300 个 commit 且未推送 ⇒ 与用户确认是否推送。
 - [ ] **不要**合并到 `master`、不要开 PR，除非用户明说。
 
