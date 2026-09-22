@@ -231,16 +231,24 @@ function relay_gui()
     pnlGainCtl.BackgroundColor = clr.bg_panel;
     pnlGainCtl.Layout.Row = 2;  pnlGainCtl.Layout.Column = 1;
 
-    % 上下限先随便给一个占位值, 但控件【禁用】—— 收到第一次 RG| 回读才用 C++ 给的
-    % 真实范围打开。不猜上下限。
-    sldGain = uislider(pnlGainCtl, 'Limits', [100 300], 'Value', 120, ...
-        'MajorTicks', [100 200 300], 'MajorTickLabels', {}, 'Enable', 'off', ...
+    % ★ 回读之前【屏幕上不许出现任何看着像增益的数】(2026-09-22 复审 Fix 2)。
+    %   原来这里写的是 'Value',120 + Limits [100 300] ⇒ 数值框明明读着 120, 而对面 C++ 可能
+    %   正跑在 force_tuning.json 的 200 上 —— 那是唯一一处"屏幕上的数不是正在用的数"。
+    %   ★ 实测 (R2025b, 本机): 数值框与滑条【都拒 NaN】—— 构造与赋值都报
+    %     ''Value' 必须为位于 'Limits' 的范围之内的双精度标量' ⇒ 提示里那条 NaN 方案不成立。
+    %   ⇒ 改用 numeric 编辑框的公开属性 AllowEmpty: 空值 + Placeholder 显示的是一句话, 不是数。
+    %     实测空值时框里是 '— 等待 C++ —'; 第一次回读时 AllowEmpty 置 false 并给真值。
+    % ⚠ 这里【一个占位魔数都不写】: 编辑框空着 (Limits 取默认 [-Inf Inf]), 滑条用 MATLAB 自己的
+    %   默认 Limits [0 100] / Value 0, 且明确把 MajorTickLabels 置空 ⇒ 滑条上也没有数字
+    %   (实测: 不置空的话默认刻度会打出一整排数 0/6/12/…/100, 那又是一排假数)。
+    %   占位范围只在"控件禁用、发不出去"这一档存在; 第一次 RG| 回读就用 C++ 的 min/max 顶掉它。
+    sldGain = uislider(pnlGainCtl, 'Enable', 'off', 'MajorTickLabels', {}, ...
         'ValueChangingFcn', @(s,e) onGainChanging(e.Value), ...
         'ValueChangedFcn',  @(s,e) onGainChanged(e.Value));
     sldGain.Layout.Row = 1;  sldGain.Layout.Column = 1;
 
-    edGain = uieditfield(pnlGainCtl, 'numeric', 'Value', 120, ...
-        'Limits', [100 300], 'Enable', 'off', ...
+    edGain = uieditfield(pnlGainCtl, 'numeric', 'Value', [], 'AllowEmpty', true, ...
+        'Placeholder', '— 等待 C++ —', 'Enable', 'off', ...
         'FontName', 'Consolas', 'FontSize', 10, ...
         'ValueChangedFcn', @(s,e) onGainChanged(e.Value));
     edGain.Layout.Row = 1;  edGain.Layout.Column = 2;
@@ -604,6 +612,9 @@ function relay_gui()
                     %   收包循环打断 (外层 try 兜住 ⇒ 那一拍的所有消息都丢)。
                     if numel(vals) >= 7 && all(~isnan(vals)) && vals(2) < vals(3)
                         wasKnown = S.tuning.known;
+                        % ★ 覆盖之前先留一份旧范围 —— 下面要靠它判断"声明变了没有"。
+                        prevMin  = S.tuning.min;
+                        prevMax  = S.tuning.max;
                         S.tuning.gain    = vals(1);
                         S.tuning.min     = vals(2);
                         S.tuning.max     = vals(3);
@@ -613,9 +624,22 @@ function relay_gui()
                         S.tuning.defGain = vals(7);
                         S.tuning.known   = true;
 
-                        if ~wasKnown
-                            % 第一次回读: 用 C++ 给的上下限把控件打开 —— 不猜
+                        % ★ 范围【跟着回读走】, 不是只在第一次认 (2026-09-22 复审 Fix 1)。
+                        %   原先只有 ~wasKnown 一条门 ⇒ C++ 重编/重启把 GAIN_MIN/GAIN_MAX 改了,
+                        %   而本窗口一直开着: 新的 min/max 存进了 S.tuning 却【永远贴不到控件上】,
+                        %   滑条此后一直给出 C++ 会拒的位置 —— "改 C++ 范围零 MATLAB 工作"这句
+                        %   就得靠【重启 MATLAB 窗口】兑现。现在声明一变就重贴。
+                        rangeChanged = wasKnown && ...
+                            (prevMin ~= S.tuning.min || prevMax ~= S.tuning.max);
+                        if ~wasKnown || rangeChanged
+                            % 第一次回读: 用 C++ 给的上下限把控件打开 —— 不猜。
+                            % 顺序【不能反】: 先 Limits 再(下面那段)Value。实测把 Limits 缩到
+                            %   不含当前 Value 时 MATLAB 只夹紧不抛错 (120 → 150);
+                            %   而上下限反了会让 uislider 直接抛错, 那条已在上面并进"可用"判据。
                             sldGain.Limits = [S.tuning.min S.tuning.max];
+                            % 空值只在"还没回读"那一档合法 ⇒ 真值到手就关掉 AllowEmpty,
+                            %   此后编辑框不可能为空 (实测置 false 本身不报错, 之后赋 [] 被拒)。
+                            edGain.AllowEmpty = false;
                             edGain.Limits  = [S.tuning.min S.tuning.max];
                             sldGain.MajorTicks = ...
                                 linspace(S.tuning.min, S.tuning.max, 5);
@@ -623,8 +647,27 @@ function relay_gui()
                             sldGain.Enable = 'on';
                             edGain.Enable  = 'on';
                             btnGainDefault.Enable = 'on';
-                            fprintf('[Relay] 增益控件已启用: 范围 [%.0f, %.0f], 当前 %.1f\n', ...
-                                S.tuning.min, S.tuning.max, S.tuning.gain);
+                            if ~wasKnown
+                                fprintf(['[Relay] 增益控件已启用: 范围 [%.0f, %.0f], ' ...
+                                         '当前 %.1f\n'], ...
+                                    S.tuning.min, S.tuning.max, S.tuning.gain);
+                            else
+                                % 不静默: 范围变了必须看得见, 否则操作员不知道滑条被重贴过
+                                fprintf(['[Relay] 增益范围已跟随 C++: [%.0f, %.0f] → ' ...
+                                         '[%.0f, %.0f], 当前 %.1f\n'], ...
+                                    prevMin, prevMax, S.tuning.min, S.tuning.max, ...
+                                    S.tuning.gain);
+                            end
+                            % 这条【不能静默】: 若 C++ 报的 gain 落在它自己声明的范围之外, 下面
+                            %   那段会给控件赋一个越界的 Value —— 而【给控件赋越界的 Value 是抛错,
+                            %   不是夹紧】(实测: Limits 赋值才会夹紧) ⇒ 那是收包循环里的一声炸,
+                            %   会把那一拍的所有消息一起带走。所以下面加了守门; 这里先喊出来。
+                            if S.tuning.gain < S.tuning.min || S.tuning.gain > S.tuning.max
+                                fprintf(['[Relay] ⚠ 回读自相矛盾: 回读的当前增益 %.1f 落在它' ...
+                                         '自己声明的范围 [%.0f, %.0f] 之外 —— 控件保留旧值, ' ...
+                                         '屏幕上的数将不等于 C++ 实际值\n'], ...
+                                    S.tuning.gain, S.tuning.min, S.tuning.max);
+                            end
                         end
 
                         % 拒收: 回读与我们刚发的不符 ⇒ 说清原因。
@@ -647,8 +690,13 @@ function relay_gui()
 
                         if ~S.tuningDragging
                             % 拖动中不动滑块 —— 否则回读会和手指打架
-                            sldGain.Value = S.tuning.gain;
-                            edGain.Value  = S.tuning.gain;
+                            % ⚠ 加了范围守卫 (Fix 1 之后才需要): 回读自相矛盾时 (gain 在它自己
+                            %   声明的范围之外), 这一句会【抛错】而不是把值夹紧 —— 上面已经喊过,
+                            %   这里就【不写】, 让控件停在旧值上, 不要把收包循环带崩。
+                            if S.tuning.gain >= S.tuning.min && S.tuning.gain <= S.tuning.max
+                                sldGain.Value = S.tuning.gain;
+                                edGain.Value  = S.tuning.gain;
+                            end
                         end
                     else
                         % 不静默: 回读坏了必须看得见 —— 否则界面会一直停在"等待 C++…",
