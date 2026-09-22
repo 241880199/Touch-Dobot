@@ -27,6 +27,16 @@ static int g_passed = 0, g_failed = 0;
 #define PASS() do { std::cout << "PASS" << std::endl; g_passed++; } while(0)
 #define CHECK(cond) do { if (!(cond)) { std::cout << "FAIL: " << #cond << std::endl; g_failed++; return; } } while(0)
 
+// ★★ 2026-09-22: 本文件从前五处都写死 `Sleep(60)`，而判据是 `elapsed >= Config::MIN_WARN_MS`(=50)，
+//   其中 elapsed 由 `GetTickCount()` 得到 —— **它的粒度是 15.6ms** ⇒ 真实睡了 60~78ms，
+//   但【量出来的差值可能只有 ~46ms】⇒ `shouldEscalate()` 返回 false ⇒ 状态停在 RUNNING
+//   ⇒ 用例随机变红。**实测：60 次里红 5 次（≈8%）**，且随机命中 `can_move_guard` 或 `speed_factor`。
+//   ⇒ 余量必须【显著大于时钟粒度】：4 × MIN_WARN_MS = 200ms ⇒ 余量 150ms ≫ 15.6ms。
+//   ⚠ 同目录的 `test_escalation.cpp` 用了更彻底的办法（直接 `et.m_firstErrorMs -= MIN_WARN_MS + 1`，
+//     把时间做成【确定的输入】）。这里用不了那一招：需要拿到 `EscalationTracker`，而
+//     `RobotStateMachine` 的 `m_escalation` 是私有的 ⇒ 只能用拉开余量。
+static const DWORD kSettleMs = static_cast<DWORD>(Config::MIN_WARN_MS) * 4;
+
 // ===== Test 1: State machine standard transition chain =====
 static void test_state_machine_transition_chain() {
     TEST(state_transition_chain);
@@ -51,7 +61,7 @@ static void test_state_machine_transition_chain() {
     warnErr.timestampMs = GetTickCount64();
 
     sm.onError(warnErr, delta);
-    Sleep(60);  // ensure MIN_WARN_MS (50ms) is satisfied after first error
+    Sleep(kSettleMs);  // 余量必须 ≫ GetTickCount 的 15.6ms 粒度 —— 见 kSettleMs 的说明
     sm.onError(warnErr, delta);
     sm.onError(warnErr, delta);
     CHECK(sm.currentState() == RobotState::DEGRADED);
@@ -111,7 +121,7 @@ static void test_can_move_guard() {
     warnErr.timestampMs = GetTickCount64();
 
     sm.onError(warnErr, delta);
-    Sleep(60);  // ensure MIN_WARN_MS (50ms) is satisfied after first error
+    Sleep(kSettleMs);  // 余量必须 ≫ GetTickCount 的 15.6ms 粒度 —— 见 kSettleMs 的说明
     sm.onError(warnErr, delta);
     sm.onError(warnErr, delta);
     CHECK(sm.currentState() == RobotState::DEGRADED);
@@ -141,7 +151,7 @@ static void test_speed_factor() {
     warnErr.timestampMs = GetTickCount64();
 
     sm.onError(warnErr, delta);
-    Sleep(60);  // ensure MIN_WARN_MS (50ms) is satisfied after first error
+    Sleep(kSettleMs);  // 余量必须 ≫ GetTickCount 的 15.6ms 粒度 —— 见 kSettleMs 的说明
     sm.onError(warnErr, delta);
     sm.onError(warnErr, delta);
     CHECK(fabs(sm.speedFactor() - 0.3) < 0.01);
@@ -169,8 +179,8 @@ static void test_escalation_warn_to_degrade() {
     et.recordError(RobotErrorCode::ERR_CYLINDRICAL_WARN, delta);
     CHECK(!et.shouldEscalate());  // 1 frame, not enough
 
-    // Sleep to satisfy MIN_WARN_MS
-    Sleep(60);
+    // 拉开余量以满足 MIN_WARN_MS —— 见 kSettleMs 的说明 (也是同一个 flake 的修法)
+    Sleep(kSettleMs);
 
     et.recordError(RobotErrorCode::ERR_CYLINDRICAL_WARN, delta);
     et.recordError(RobotErrorCode::ERR_CYLINDRICAL_WARN, delta);
@@ -208,7 +218,7 @@ static void test_deescalation_reverse_motion() {
 
     // Record an error to get escalated state
     et.recordError(RobotErrorCode::ERR_CYLINDRICAL_WARN, dangerDir);
-    Sleep(60);
+    Sleep(kSettleMs);   // 见 kSettleMs 的说明
     et.recordError(RobotErrorCode::ERR_CYLINDRICAL_WARN, dangerDir);
     et.recordError(RobotErrorCode::ERR_CYLINDRICAL_WARN, dangerDir);
     et.escalated = true;
