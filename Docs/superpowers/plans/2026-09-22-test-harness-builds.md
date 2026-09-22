@@ -617,6 +617,41 @@ Task 2 只把"让缺口可见"用在了 `test_constraint_force` 一个身上，�
 - [ ] 因为 `master` 落后 `origin/master` 300 个 commit 且未推送 ⇒ 与用户确认是否推送。
 - [ ] **不要**合并到 `master`、不要开 PR，除非用户明说。
 
+## ★ 下一个计划的待办（本计划查出来、**有意不做**的）
+
+1. ★ **`Summary` 里的 `20` / `8` 会【静默过期】—— 而它们比既有的 `12` 更脆。**
+   最终复审的原话：既有那个 `12` 是**断言的被操作数** ⇒ 加一段就**响亮地**报 MISMATCH + exit 1；
+   而**加一个没接进来的 `test_*.cpp` 则什么都不触发** ⇒ 日志会印 "12 of 20"（应为 12 of 21），
+   新套件从缺口披露里**凭空消失** —— **正是本 Task 要消灭的那类缺陷，上了一层楼。**
+   ⚠ 而且我在 Task 6 里写的"两个数字都是手维护的（与既有的 `12` 同性质）"**是错的**：
+   `12` 不是纯手维护的，它是断言的操作数。
+   **修法**：运行时数出来（`for %%F in ("%TESTDIR%\test_*.cpp") do set /a NTESTS+=1`），
+   让表头印一个**测出来的**总数，并**对它断言** —— 就像 `12` 那样。
+   （复审建议与"把六个套件接进来"一起做，因为那正好会改这两个数字。）
+2. **把六个"有构建脚本、从来没人接进来"的套件接进测试床** —— 已实测它们目前的状态：
+   `test_calibration` 3/0、`test_calib_store` 8/0、`test_frame_layout` 12/0、
+   `test_inertia_identification` 12/0、`test_self_collision` 6/0、`test_singularity_avoidance` 12/12。
+   （`test_payload_calibration` 是**有意留红**的 74/1，接进来前要先决定它怎么办。）
+3. **`test_constraint_force` 的构建脚本被 `tests/.gitignore:1` 忽略** —— 那条忽略**仍未决定**；
+   决定了以后补回测试床只是**一行**。它是目前唯一一个"仓里没有任何【已入库】的东西能构建它"的套件。
+4. `run_tests.bat:370` 的散文里硬编码了 "12"，而 `:338` 用的是 `%TOTAL%` —— 同一个理由没往下带。
+5. `run_tests.bat:39,41` 那段解释"假警报"的 rem **本身含两处字面 `echo   [FAIL]`** ⇒
+   将来有人 grep **源码**找那个标记会得到 14 处而非 12 处，可能误读成"泄漏还在"。
+6. `run_tests.bat:394` 的 `endlocal & exit /b %HARNESS_RC%` **不恢复 echo 状态** ⇒ 交互式调用方
+   会停在 echo off（既有问题，本计划的 `@echo off` 既不引起也不加重）。
+7. `_build_comp.bat`（**已入库**）是 `build_force_comp_test.bat` 的重复写入者 —— 连同一批源码、
+   写同一个 `/Fe:test_force_compensation.exe`，而且**无守卫**。测试床不调用它，所以目前无害；
+   建议删掉或改名。
+8. `SafetyBoundary.h:53` 引用 `test_coord_safety.cpp` 的**行号**已被 Task 3 的头部改动平移作废
+   （265/280/293/302/316 → 270/285/298/307/321）。**建议改成引符号名**而不是行号 ——
+   这个坑今天已经咬过一次。
+9. "cmd dies at ~8191" 是**代理量**（真正溢出的是 cmd 的环境块），而
+   `build_safety_core_test.bat` 把它误说成 "8191-char command-line limit" ——
+   那个误归因已被复制进 19 个文件。
+10. `test_safety_core` 的 ≈8% 时序 flake 只是**被余量掩盖**了（`Sleep(60)` → 200ms），
+    根因是 `GetTickCount` 的 15.6ms 粒度对 50ms 判据 ⇒ 负载重的机器上仍可能偶发。
+    ⚠ **要告诉操作员**：测试床现在会因它返回非零 ⇒ 偶发一次红**不要**当成回归。
+
 ## 明确【不要】做的
 
 - 不要改任何断言、任何容差/门限、任何生产 `.cpp`。若某个套件真构建之后变红 ⇒ **真发现**，停下来上报。
