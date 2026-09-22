@@ -78,8 +78,12 @@ static void test_saturation() {
     fd.compensated[3] = 0.0; fd.compensated[4] = 0.0; fd.compensated[5] = 0.0;
     fd.lastUpdateMs = GetTickCount();
 
-    // 200 步与 test_soft_deadzone_no_jump 同一惯例。梯度限幅 50 N/frame,
-    // 越过映射门限(需 filtered > 200N)只要 4 步, 200 步是充分收敛。
+    // 200 步与 test_soft_deadzone_no_jump 同一惯例 (≈10 个时间常数 ⇒ 充分收敛)。
+    // ★ 2026-09-22 订正(实测): 越过映射门限(需 filtered > 200N)是【第 6 步】才到的
+    //   (实测 filtered: 第 5 步 173N、第 6 步 223N)。约束它的是【滤波器自身的上升时间】,
+    //   不是梯度限幅: fc=5Hz/fs=125Hz 的 τ ≈ 4 个采样, 第 5/6 步的理论值 ≈177/223N,
+    //   与实测吻合。梯度限幅反而是【不生效】的 —— 因为单步滤波器输出只动 ~6.7N,
+    //   远在 50 N/frame 之下。(本处原写"200/50=4 步", 那是把梯度限幅当成了约束, 归因错了。)
     for (int i = 0; i < 200; i++) ForcePipeline::step(fd);
 
     // ★ 判据从"不超过夹子"改成"【正好落在夹子上】"—— 这才是饱和。
@@ -88,7 +92,13 @@ static void test_saturation() {
     //     = −396 = −FORCE_MAX_TOUCH_N × FORCE_REFLECTION_GAIN
     //   ⇒ 若谁把 mapForceToTouch 里的硬夹去掉, 输出会是 −8.25×(−1)×120 = −990 ⇒ 本条立刻红。
     double clampedMax = Config::FORCE_MAX_TOUCH_N * Config::FORCE_REFLECTION_GAIN;
+    // ★ 钉住"夹子是 396 那个量级" —— 因为上面那条期望值是从【流水线自己乘的】两个常数
+    //   (FORCE_MAX_TOUCH_N × FORCE_REFLECTION_GAIN) 推出来的, 那两个常数被重调时它会一直绿。
+    //   同形先例: test_residual_deadzone 的 `CHECK(dz > 0.1);`。
+    CHECK(clampedMax > 100.0);
     CHECK(fabs(fabs(fd.hapticOut[0]) - clampedMax) < 0.01);   // 正好在夹子上
+    // ⚠ 符号故意写死负号 (拿 Config 常数去算断言会对那些常数【恒真】),
+    //   完整论述见 test_coord_transform 的同段说明。
     CHECK(fd.hapticOut[0] < 0.0);   // 正输入 ⇒ 负输出 (横向映射 FORCE_FEEDBACK_LATERAL_SIGN = −1)
     PASS();
 }

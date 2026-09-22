@@ -5,6 +5,11 @@
 //        /I"..\..\OpenHaptics\Developer\3.5.0\utilities\include"
 //        /Fe:test_safety_core.exe
 //        /link /SUBSYSTEM:CONSOLE
+// ★ 2026-09-22: 【必须】加 /DTEST_NO_RELAY_CORE —— 缺了它会 LNK2019, 无法解析的外部符号
+//   RelayCore::instance / RelayCore::reportDiagnostic (RobotDiagnostics.cpp 里那条 D| 转发)。
+//   先例: test_singularity_avoidance.cpp:3 就是在测试源里写明了要 define TEST_SINGAVOID。
+//   ⚠ 正式构建脚本是 build_safety_core_test.bat (它带着这个宏); 上面这份手抄配方从前漏了它,
+//     照上面构建就会把那个洞重新打开一遍。
 // Run: test_safety_core.exe
 
 #include <iostream>

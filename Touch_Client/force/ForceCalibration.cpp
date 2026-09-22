@@ -19,6 +19,11 @@ static bool g_tareOnly = false;   // true = 仅调零流程: TARE 定稿后直�
 static double g_phaseTimer = 0.0;
 static double g_tareAccum[6] = {0};
 static int    g_tareCount = 0;
+// ★ 2026-09-22 (I1): "样本数不足"那条告警【每次 TARE 只喊一次】(否则每帧刷屏)。
+// ⚠ 它【不是】函数内的 static: 那样一次 TARE 喊过之后, 后面每一次按 'z' 都再也不吭声
+//   (轮询再停一次也无声) —— 那正好把本条要治的"静默地定稿"换个形式搬回来。
+//   ⇒ 复位点放在 start() / startZero() 里 (每启动一次调零就重新允许喊一次)。
+static bool   g_tareShortWarned = false;
 
 // MOTION — record F vs a during user movement
 static const int MAX_MOTION_SAMPLES = 300;  // ~10s at 30Hz
@@ -85,12 +90,19 @@ static double g_updateDtForTest = -1.0;
 //   计时器会停在【上一次运行】那一刻 ⇒ 下次启动的第一个 dt 是那之间的全部时间
 //   (可能是几分钟) ⇒ 一步跨过静默期与累计期, 而且不会报任何错。判据见 Task 1 Step 8。
 static double updateIntervalSec() {
-    if (g_updateDtForTest >= 0.0) return g_updateDtForTest;
-    static DWORD lastMs = 0;
-    const DWORD now = GetTickCount();
-    if (lastMs == 0) { lastMs = now; return 0.0; }
-    const double dt = (now - lastMs) / 1000.0;
-    lastMs = now;
+    double dt;
+    if (g_updateDtForTest >= 0.0) {
+        // 用例给定的值【也走下面那道守卫】—— 否则"不合理的间隔"这条路径无法被验。
+        dt = g_updateDtForTest;
+    } else {
+        static DWORD lastMs = 0;
+        const DWORD now = GetTickCount();
+        if (lastMs == 0) { lastMs = now; dt = 0.0; }
+        else { dt = (now - lastMs) / 1000.0; lastMs = now; }
+    }
+    // ★ 2026-09-22 (I1): 不合理的间隔当【没测到】—— 返回 0, 不让计时器跟着跳。
+    //   见 Config::FORCE_CALIB_MAX_INTERVAL_S 处的说明。
+    if (dt > Config::FORCE_CALIB_MAX_INTERVAL_S) return 0.0;
     return dt;
 }
 
@@ -144,6 +156,7 @@ bool start() {
     g_phaseTimer = 0.0;
     g_tareCount = 0;
     for (int i = 0; i < 6; i++) g_tareAccum[i] = 0.0;
+    g_tareShortWarned = false;   // ★ 2026-09-22 (I1): 每一次新的 TARE 都重新允许喊一次
 
     // ★ 2026-09-21: 这里从前硬写 "2s" —— 而 TARE 现在多了一段 0.5s 静默期 (见 update() 的 TARE 分支),
     //   总时长是 2.5s。跟上面那条一样: 时长写错会让操作员在静默期里就松手 ⇒ 又采到瞬态。
@@ -166,6 +179,7 @@ bool startZero() {
     g_phaseTimer = 0.0;
     g_tareCount = 0;
     for (int i = 0; i < 6; i++) g_tareAccum[i] = 0.0;
+    g_tareShortWarned = false;   // ★ 2026-09-22 (I1): 每一次新的 TARE 都重新允许喊一次
 
     // ★ 2026-09-21: 时长与分工要交代清楚 —— 前 0.5s 是【静默期】(不采样), 之后才累计。
     //   不写出来, 操作员会按旧的 2 秒去等, 然后在静默期里就松手/动臂 ⇒ 又采到瞬态。
@@ -244,6 +258,19 @@ bool update(const double raw[6], const double pose[6]) {
         for (int i = 0; i < 6; i++) g_tareAccum[i] += raw[i];
         g_tareCount++;
         if (g_phaseTimer >= Config::FORCE_CALIB_SETTLE_TIME_S + Config::FORCE_CALIB_STILL_COLLECT_S) {
+            // ★ 2026-09-22 (I1): 【样本数不足就不定稿】—— 继续收, 下一帧再判。
+            //   没有这一道: 一个 ≥2.5s 的 stall 会让上面的 timer 一步跨过阈值,
+            //   于是这里用【单样本】定稿并把零偏落盘 (finalizeBias 的 n = max(count,1))。
+            //   它比 gap 守卫更靠内: 即使计时器真的跳了, 垃圾零偏也写不进盘。
+            if (g_tareCount < Config::FORCE_CALIB_MIN_TARE_SAMPLES) {
+                if (!g_tareShortWarned) {   // 只喊一次, 别每帧刷屏 (复位点在 start/startZero)
+                    g_tareShortWarned = true;
+                    printf("[Force] WARNING: TARE 只收到 %d 帧 (< %d) —— 疑似轮询停过一段。\n"
+                           "        继续采集, 收够再定稿 (不拿单帧零偏落盘)。\n",
+                           g_tareCount, Config::FORCE_CALIB_MIN_TARE_SAMPLES);
+                }
+                break;   // 停在 TARE, 下一帧继续
+            }
             // Auto-complete tare after collection time
             finalizeBias();
             printf("[Force] TARE done: biasF=(%+.3f, %+.3f, %+.3f) N  biasM=(%+.4f, %+.4f, %+.4f) Nm\n",

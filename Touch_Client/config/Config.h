@@ -295,6 +295,17 @@ namespace Config {
     const double FORCE_CALIB_POSE_ANGLE_DEG = 15.0;      // 标定姿态偏角 (度)
     const int    FORCE_CALIB_NUM_POSES = 6;               // 标定姿态数
 
+    // ★★ 2026-09-22 (I1): 实测 dt 带出来的两个【合理性守卫】。都不是采样率 —— 别当采样率用。
+    //  FORCE_CALIB_MAX_INTERVAL_S: 两次轮询之间的间隔超过它 ⇒ 当作【没测到】(dt = 0),
+    //    而不是把它当成真的过了这么久。理由: TARE 的计时器一步跨过
+    //    SETTLE+COLLECT 就会用【单样本】定稿并把零偏【落盘】(见 finalizeBias 的 n)。
+    //    实测正常间隔 46~203ms, 它取 1.0s 是留了 ~5 倍余量。
+    const double FORCE_CALIB_MAX_INTERVAL_S = 1.0;
+    //  FORCE_CALIB_MIN_TARE_SAMPLES: 定稿前至少要收到这么多帧。
+    //    真实节拍 (~11Hz) 在 2.0s 的采集窗里应收到 ~22 帧 ⇒ 5 是"明显坏了"的下限,
+    //    不是质量门槛。不足就不定稿、继续收 (下一帧再判), 并【响亮地】说一次原因。
+    const int FORCE_CALIB_MIN_TARE_SAMPLES = 5;
+
     // ========== 力传感器安装偏转角 (重力模型) ==========
     // 力传感器相对法兰的安装偏转角 (度, 绕【工具 z】)。传感器实际测量的坐标系与 GetPose
     // 的 RPY 所描述的那个之间差这么一个角。

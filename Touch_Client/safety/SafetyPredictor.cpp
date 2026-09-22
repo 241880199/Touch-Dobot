@@ -62,11 +62,11 @@ SafetyVerdict SafetyPredictor::evaluate(const Vec3& target) {
 
     // 1c. safety boundary (reuse existing SafetyBoundary)
     clamped = SafetyBoundary::clampToBoundaryActive(target);
-    // ⚠★ 2026-09-22: 本谓词【可证恒为假】—— 喂进来的 target 已经是 :64 的 clamp 输出
-    //   (调用点只此一处: RelayCore.cpp:874, 实参就是 :871 的 clamped), 而 clampToBoundary
-    //   是幂等的 (逐轴各自夹到 [MIN,MAX] ⇒ clamp(clamp(x)) == clamp(x)) ⇒ 比较永远不成立。
-    //   【开关两种状态都死】: 开关关 == identity; 开关开 == 幂等。
-    //   保留它是为了"意图可读", 但别把它当保护 —— 真正的执行点是 :64 那次 clamp。
+    // ⚠★ 2026-09-22: 本谓词【可证恒为假】—— 喂进来的 target 在调用点就已经夹过 (调用点只此一处:
+    //   RelayCore.cpp:874, 实参就是 RelayCore.cpp:871 的 clamped ⇒ 【真正的执行点是 RelayCore.cpp:871】)。
+    //   上面那行 `clamped = ...` 只是重夹一遍: 它产生的是 clamped、并没有改 target, 且 clampToBoundary
+    //   幂等 (逐轴各自夹到 [MIN,MAX] ⇒ clamp(clamp(x)) == clamp(x)) ⇒ 比较永远不成立、本处不是执行点。
+    //   【开关两种状态都死】: 开关关 == identity; 开关开 == 幂等。保留它是为了"意图可读", 别当保护。
     if (clamped.x != target.x || clamped.y != target.y || clamped.z != target.z) {
         m_lastVerdict.action = SafetyVerdict::REJECT;
         m_lastVerdict.errorCode = RobotErrorCode::ERR_SAFETY_BOUNDARY;

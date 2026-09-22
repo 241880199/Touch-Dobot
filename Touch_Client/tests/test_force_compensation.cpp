@@ -1156,9 +1156,13 @@ static void test_zero_only_no_motion() {
     //     (0.90 是 2026-09-18 按旧语义写的, 而 0c45094 把重力项挪进了零偏 ⇒ 应为 5.02),
     //     那一半见下面 Step 3 —— 两半都做完这条断言才会绿。
     //   生产路径上 step() 每 8ms 跑一次刷新缓存 ⇒ 这是【测试隔离】问题, 不是生产 bug
-    //   (已用 git stash + 原样重建证明: HEAD 上一模一样 38/1)。
-    //   喂的帧必须让闸门【放行】, 否则 compensated 被置零 —— 但只要走完 setCalibration
-    //   与这一步, 缓存 g_lastFg 就会写成本用例的 A·g; 数值本身不参与后面的断言。
+    //   (已用 git stash + 原样重建证明: 开工时 HEAD 上一模一样 39/1 —— 那条红是旧账)。
+    //   ⚠★ 2026-09-22 订正(复审指出, 已核): 这一帧【不必】让闸门放行 —— 缓存 g_lastFg 是在
+    //     ForceCompensation.cpp:1057 写的, 【在】参考量可用性判定(:1119)与投票(:1136/:1186)
+    //     【之前】⇒ 即使这一帧被拒, 缓存照样刷新成本用例的 A·g。
+    //     (从前这里写的是"喂的帧必须让闸门放行, 否则 compensated 被置零" —— 那句话把
+    //      "compensated 会被置零" 与 "缓存不会刷新" 混成了一件因果, 是错的。)
+    //     喂的帧数值本身不参与后面的断言。
     {
         AppState::ForceData warm = gateVisibleFrame();
         double warmPose[6] = {0, 0, 0, 0, 0, 0};
@@ -1344,12 +1348,18 @@ static void test_zero_restartable() {
     PASS();
 }
 
-// ★ 2026-09-22: 钉住"dt 是实测/用例给定的，不是常数"。
+// ★ 2026-09-22: 钉住"dt 是用例给定的那个值，不是写死的常数"。
 // 【为什么需要这条】从前 RelayCore 传常数 0.033（名义节拍），而真实节拍是 46~203ms
 //   ⇒ 静默期 0.5s 在实际时间里是 ~1.35s。这条用例把时间变成【确定的输入】，
 //   于是"采够 2.5s 才定稿"这件事可以被验 —— 从前不可能验，因为没人能驱动时间。
-static void test_calib_tare_timing_follows_measured_dt() {
-    TEST(calib_tare_timing_follows_measured_dt);
+// ★★ 2026-09-22 (I3) 覆盖范围【如实声明】: 本用例走的是【用例给定 dt】那一支
+//   (setUpdateDtForTest 注入的 0.033，在守卫之前短路) —— 原名 ..._follows_measured_dt
+//   会让人误以为实测那一支被覆盖了: 把 updateIntervalSec() 里的实测那一支重新写回硬编码
+//   常数, 本条【仍然绿】⇒ 它抓不住它本来要防的那个回归。故改名成 ..._follows_injected_dt。
+//   ⚠ 实测那一支 (g_updateDtForTest < 0) 【没有任何用例覆盖】, 且生产调用点
+//     (RelayCore.cpp 的 pollForce) 不在单测构建源里 ⇒ 见 ledger 的待上机项。
+static void test_calib_tare_timing_follows_injected_dt() {
+    TEST(calib_tare_timing_follows_injected_dt);
     ForceCompensation::init();
     double A[9]; diagA(0.42, A);
     double cS[3] = {0, 0, 0.03};
@@ -1371,13 +1381,102 @@ static void test_calib_tare_timing_follows_measured_dt() {
     //     n = 76 ⇒ 2.508 >= 2.5 ⇒ 【必须 DONE】(累计从 n=16 越过 0.5 那步开始)
     //   ⇒ 这两句一起把"时长真的按 dt 走、且真的是 2.5s 而不是别的数"钉死了。
     for (int i = 0; i < 75; i++) ForceCalibration::update(raw, pose);
-    CHECK(!ForceCalibration::isDone());      // 75 × 0.033 = 2.475s < 2.5s
+    const bool notDoneAt75 = !ForceCalibration::isDone();
     ForceCalibration::update(raw, pose);
-    CHECK(ForceCalibration::isDone());       // 76 × 0.033 = 2.508s >= 2.5s
+    const bool doneAt76 = ForceCalibration::isDone();
+
+    // ⚠★ 2026-09-22: 还原【必须在第一条 CHECK 之前】—— CHECK 失败会 return,
+    //   放后面等于失败路径上不还原 (Task 1 复审 Minor 1)。
+    ForceCalibration::setUpdateDtForTest(-1.0);
+
+    CHECK(notDoneAt75);                      // 75 × 0.033 = 2.475s < 2.5s
+    CHECK(doneAt76);                         // 76 × 0.033 = 2.508s >= 2.5s
 
     // ⚠ 本用例【不断言零偏数值】⇒ 不依赖 currentGravityTerm 的缓存
     //   (那是 Task 2 那条红的成因); 别在这里照抄 Task 2 的热身, 那是另一件事。
-    ForceCalibration::setUpdateDtForTest(-1.0);   // 还原, 免得污染后面的用例
+    PASS();
+}
+
+// ★★ 2026-09-22 (I1) 用例 A —— gap 守卫: 不合理的间隔必须被当作【没测到】(dt = 0)。
+// 【它防的是什么】Task 1 把常数 dt 换成实测 dt 之后, 多了一条【新】路径: 若两次轮询之间
+//   隔了 ≥2.5s (SETTLE 0.5 + COLLECT 2.0), TARE 的计时器会【一步跨过】阈值 —— 于是用
+//   【一个样本】定稿、把那个零偏应用并写进 force_calib.json, 而且没有任何告警。
+// 【怎么可证伪】去掉 updateIntervalSec() 里那道 `dt > FORCE_CALIB_MAX_INTERVAL_S` 判断之后:
+//   dt = 3.0 直接进计时器 ⇒ 第 1 帧(若同时没有样本数守卫)或第 5 帧(有样本数守卫, 因为每帧
+//   只累到 1 个样本)就 isDone() ⇒ 下面 notDone / stillTare / biasUnchanged 至少两条立刻红。
+// 【为什么断言 bias 而不是只看状态】finalizeBias() 之后紧跟的就是"应用 + 落盘"
+//   (ForceCompensation::setCalibration + saveToFile), 而唯一能观察到的落点是 currentBias()
+//   ⇒ 零偏原样不动 = 没有拿垃圾零偏定稿落盘。
+static void test_calib_tare_gap_guard_no_finalize() {
+    TEST(calib_tare_gap_guard_no_finalize);
+    ForceCompensation::init();
+    double A[9]; diagA(0.42, A);
+    double cS[3] = {0, 0, 0.03};
+    double bF[3] = {0, 0, 0}, bM[3] = {0, 0, 0};
+    ForceCompensation::setCalibration(A, bF, bM, cS);
+
+    double raw[6] = {-0.48, -1.35, -0.02, 0.010, -0.020, 0.005};
+    double pose[6] = {0, 0, 0, 0, 0, 0};
+
+    CHECK(ForceCalibration::startZero());
+    // ★ 3.0 > Config::FORCE_CALIB_MAX_INTERVAL_S (1.0) ⇒ 每一帧都被当作【没测到】。
+    ForceCalibration::setUpdateDtForTest(3.0);
+    for (int i = 0; i < 10; i++) ForceCalibration::update(raw, pose);
+
+    const bool notDone = !ForceCalibration::isDone();
+    const bool stillTare = (ForceCalibration::currentState() == ForceCalibration::State::TARE);
+    double bf[3], bm[3];
+    ForceCompensation::currentBias(bf, bm);
+    const bool biasUnchanged = (bf[0] == 0.0 && bf[1] == 0.0 && bf[2] == 0.0 &&
+                                bm[0] == 0.0 && bm[1] == 0.0 && bm[2] == 0.0);
+
+    // ⚠★ 还原【必须在第一条 CHECK 之前】—— CHECK 失败会 return, 放后面等于失败路径上不还原。
+    ForceCalibration::setUpdateDtForTest(-1.0);
+    ForceCalibration::abort();   // 收尾: 别把 TARE 状态留给后面的用例
+
+    CHECK(notDone);         // 10 帧全被当成"没测到" ⇒ 计时器一直是 0 ⇒ 永远进不了累计期
+    CHECK(stillTare);
+    CHECK(biasUnchanged);   // 垃圾零偏没有落盘
+    PASS();
+}
+
+// ★★ 2026-09-22 (I1) 用例 B —— 最小样本数守卫: 计时器到了但样本不够 ⇒ 不定稿, 继续收。
+// 【它防的是什么】同一条路径的另一半: 计时器一步跨过阈值时只有【一个样本】。
+// 【怎么可证伪】去掉 TARE 分支里那道 `g_tareCount < FORCE_CALIB_MIN_TARE_SAMPLES` 判断之后:
+//   第 3 帧 (timer = 3.0 ≥ 2.5 而 tareCount = 3) 就会 isDone() ⇒ notDoneAt3 立刻红。
+// 【为什么 dt 用 1.0 而不是 3.0】1.0 【不】> FORCE_CALIB_MAX_INTERVAL_S ⇒ 它过得了 gap 守卫
+//   ⇒ 本条只可能被"最小样本数"那一道影响 —— 两条用例各钉一道守卫, 不会互相掩盖。
+static void test_calib_tare_min_samples_guard() {
+    TEST(calib_tare_min_samples_guard);
+    ForceCompensation::init();
+    double A[9]; diagA(0.42, A);
+    double cS[3] = {0, 0, 0.03};
+    double bF[3] = {0, 0, 0}, bM[3] = {0, 0, 0};
+    ForceCompensation::setCalibration(A, bF, bM, cS);
+
+    double raw[6] = {-0.48, -1.35, -0.02, 0.010, -0.020, 0.005};
+    double pose[6] = {0, 0, 0, 0, 0, 0};
+
+    CHECK(ForceCalibration::startZero());
+    ForceCalibration::setUpdateDtForTest(1.0);   // ≤ 上限 ⇒ 过 gap 守卫
+
+    ForceCalibration::update(raw, pose);   // 1: timer 1.0, count 1
+    ForceCalibration::update(raw, pose);   // 2: timer 2.0, count 2
+    ForceCalibration::update(raw, pose);   // 3: timer 3.0 ≥ 2.5 但 count 3 < 5 ⇒ 不定稿
+    const bool notDoneAt3 = !ForceCalibration::isDone();
+    const bool tareAt3 = (ForceCalibration::currentState() == ForceCalibration::State::TARE);
+    ForceCalibration::update(raw, pose);   // 4: timer 4.0, count 4 < 5 ⇒ 仍不定稿
+    const bool notDoneAt4 = !ForceCalibration::isDone();
+    ForceCalibration::update(raw, pose);   // 5: timer 5.0, count 5 ≥ 5 ⇒ 定稿
+    const bool doneAt5 = ForceCalibration::isDone();
+
+    // ⚠★ 还原【必须在第一条 CHECK 之前】—— CHECK 失败会 return, 放后面等于失败路径上不还原。
+    ForceCalibration::setUpdateDtForTest(-1.0);
+
+    CHECK(notDoneAt3);
+    CHECK(tareAt3);
+    CHECK(notDoneAt4);
+    CHECK(doneAt5);
     PASS();
 }
 
@@ -1852,7 +1951,9 @@ int main() {
     test_zero_abort_not_applied();
     test_sweep_still_enters_motion();
     test_zero_restartable();
-    test_calib_tare_timing_follows_measured_dt();
+    test_calib_tare_timing_follows_injected_dt();
+    test_calib_tare_gap_guard_no_finalize();
+    test_calib_tare_min_samples_guard();
     test_setcalib_rejects_zero_and_degenerate_A();
     test_calib_file_roundtrip();
     test_calib_file_rejects_old_format();
