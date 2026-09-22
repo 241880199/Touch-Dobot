@@ -135,6 +135,24 @@ public:
     // MATLAB → C++ 反向命令 (每帧调用, 非阻塞)
     void pollRelayCommands();
 
+    // ===== 力反射增益回读 (RG| 协议, 2026-09-22) =====
+    // 【唯一真值通道】两个方向都用 RG|: MATLAB 发 RG|<值> 设, C++ 在连接时、以及每收到
+    //   一条 RG| 之后【不论接受还是拒绝】都回一条
+    //     RG|<gain>,<min>,<max>,<ratio>,<deadN>,<satN>,<defGain>
+    //   ⇒ MATLAB 永远不需要"记住"自己设过什么, 它只显示这里说的数
+    //   ⇒"GUI 显示的值 ≠ 实际生效的值"这个状态【在结构上无法存在】。
+    // 报的是【目标值】, 不是斜坡的瞬时值 (见 ForceTuning.h 顶上那段)。
+    // 限频: force=false 时距上次 <100ms 只记下待发, 由 pollRelayCommands 每帧补发 —— 拖动
+    //   滑条几十条/秒, 全回会堆在 MATLAB 侧; 而"最后一条一定到"由补发保证。
+    void sendReflectionGain(bool force);
+
+    // 调零请求 (Z| 协议)。只置标志 —— 真正的处置在 main.cpp 的 requestForceZero(),
+    // 因为 g_noRobot / cancelOtherCaptureModes 都是那个文件的 file-static, 这里拿不到。
+    // 【为什么不让 RelayCore 自己判】复制一份"标定中/调零中"的守卫链就是本项目最忌讳的
+    //   两份实现; 而两条入口 (键盘 'z' / MATLAB) 共用同一个函数, 守卫链就只有一份。
+    // 返回 true 表示本次调用消费掉了一个待处理请求 (读到即清)。
+    bool consumeForceZeroRequest();
+
     // 状态查询（供 Render 层读取）
     bool isTransmitting() const { return m_transmitting; }
 
@@ -199,6 +217,8 @@ private:
     char m_relayRecvBuf[256];
     int  m_relayRecvLen = 0;
     void dispatchRelayCommand(const char* line);
+
+    std::atomic<bool> m_forceZeroRequested{false};   // MATLAB 的 Zero 按钮 (由 dispatchRelayCommand 置)
 
     DWORD m_lastRelayUpdate = 0;
     DWORD m_lastServoTime = 0;      // ServoP 发送频率控制

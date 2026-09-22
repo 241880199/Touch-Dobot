@@ -16,6 +16,7 @@
 #include "../safety/RobotDiagnostics.h"
 #include "../safety/SelfCollision.h"
 #include "../force/ForcePipeline.h"
+#include "../force/ForceTuning.h"
 #include "../force/ForceCompensation.h"
 #include "../force/ForceCalibration.h"
 #include "../force/ForceLogger.h"
@@ -1804,6 +1805,10 @@ void RelayCore::initRelayReporting() {
     if (connectRelaySocket()) {
         std::cout << "[Relay] GUI reporting connected to " << Config::RELAY_IP
                   << ":" << Config::RELAY_PORT << std::endl;
+        // ★ 2026-09-22: 连上就回读一次增益。必须有 —— 否则 MATLAB 在 C++ 启动时看到的
+        //   是滑条的初值 (它自己猜的), 而实际生效值可能来自 force_tuning.json。
+        //   那正是本设计要消灭的"GUI 显示的值 ≠ 实际生效的值"。
+        sendReflectionGain(true);
         return;
     }
     // ★ 失败必须出声 (2026-09-21)。从前这里是【静默 return】, 而整个程序里唯一会提到
@@ -1866,6 +1871,9 @@ bool RelayCore::ensureRelayConnected() {
     s_relayDownReported = false;
     std::cout << "[Relay] GUI reporting 【已重连】到 " << Config::RELAY_IP << ":"
               << Config::RELAY_PORT << std::endl;
+    // ★ 重连后同样要回读增益: MATLAB 可能是在 C++ 之后才起来的, 那条 RG| 从没送到过。
+    //   sendRelayUpdate 不调本函数 (它在 socket 无效时只返回 -1), 所以这里【不会递归】。
+    sendReflectionGain(true);
     return true;
 }
 
@@ -1978,9 +1986,52 @@ void RelayCore::reportFeedback(const char* fbText) {
     sendRelayUpdate(buf);
 }
 
+// 回读限频 (见 RelayCore.h 里的说明)。只由 GLUT idle 线程调 ⇒ 不需要原子。
+static DWORD s_lastGainReportMs = 0;
+static bool  s_gainReportPending = false;
+
+void RelayCore::sendReflectionGain(bool force) {
+    const DWORD now = GetTickCount();
+    if (!force && (now - s_lastGainReportMs) < 100) {
+        s_gainReportPending = true;   // 记下待发, 由 pollRelayCommands 补 —— 最后一条不丢
+        return;
+    }
+    s_gainReportPending = false;
+    s_lastGainReportMs = now;
+
+    const double g = ForceTuning::gain();
+    // ⚠ 载荷的 7 个字段【按位置】解析: RG| 是逗号分隔的定长字段 (C++→MATLAB 的其它线路
+    //   都是这个形状), 规格 §4 只定义了【顺序】, 字段没有名字。顺序必须与 §4 的字段表
+    //   逐字一致, 否则 MATLAB 侧会把每个数都读错位 —— 而本侧没有任何单测能发现这件事
+    //   (回读的消费方在 MATLAB, Task 6)。
+    //   依次是: 1 gain = 当前生效目标值       (ForceTuning::gain())
+    //           2 min  = 可取范围下限         (ForceTuning::GAIN_MIN, 唯一一份定义)
+    //           3 max  = 可取范围上限         (ForceTuning::GAIN_MAX, 唯一一份定义)
+    //           4 ratio = 净比例 = 逐单位比例×gain (ForcePipeline::netRatioPerGainUnit)
+    //           5 deadN = 死区                (Config::FORCE_RESIDUAL_DEADZONE_N, 唯一一份定义)
+    //           6 satN  = 该轴打顶阈值        (ForcePipeline::saturationSensorN, 唯一一份定义)
+    //           7 defGain = 出厂默认          (ForceTuning::defaultGain())
+    //   上述四个 ratio/deadN/satN 全部取自各自【唯一一份定义】, 本处一个数字都不写。
+    char buf[160];
+    snprintf(buf, sizeof(buf), "RG|%.6g,%.6g,%.6g,%.4f,%.6g,%.6g,%.6g",
+             g,
+             ForceTuning::GAIN_MIN,
+             ForceTuning::GAIN_MAX,
+             ForcePipeline::netRatioPerGainUnit() * g,   // ratio
+             Config::FORCE_RESIDUAL_DEADZONE_N,          // deadN
+             ForcePipeline::saturationSensorN(g),        // satN
+             ForceTuning::defaultGain());                // defGain
+    sendRelayUpdate(buf);
+}
+
+bool RelayCore::consumeForceZeroRequest() {
+    return m_forceZeroRequested.exchange(false);
+}
+
 void RelayCore::dispatchRelayCommand(const char* line) {
     using R = RelayCommandParser::Command;
-    switch (RelayCommandParser::parse(line)) {
+    double value = 0.0;
+    switch (RelayCommandParser::parse(line, &value)) {
     case R::ForceFeedbackOn:
         appState.forceFeedbackEnabled = true;
         std::cout << "[Relay] Force feedback ENABLED (MATLAB command)" << std::endl;
@@ -1989,13 +2040,49 @@ void RelayCore::dispatchRelayCommand(const char* line) {
         appState.forceFeedbackEnabled = false;
         std::cout << "[Relay] Force feedback DISABLED (MATLAB command)" << std::endl;
         break;
+    case R::SetReflectionGain:
+        if (ForceTuning::setGain(value)) {
+            std::cout << "[Tuning] 力反射增益 → " << value << " (MATLAB command)" << std::endl;
+        } else {
+            // 拒收必须出声, 而且要说清范围 —— 范围取自 ForceTuning 那一份定义, 不另写数字。
+            std::cout << "[Tuning] 增益 " << value << " 【被拒】: 可取范围 ["
+                      << ForceTuning::GAIN_MIN << ", " << ForceTuning::GAIN_MAX
+                      << "], 仍是 " << ForceTuning::gain() << std::endl;
+        }
+        // 【不论接受还是拒绝都回读】—— 回的是当前实际生效值。
+        // 于是被拒时 MATLAB 会把滑条弹回真值, 而不是让界面继续显示一个假的数。
+        sendReflectionGain(true);
+        break;
+    case R::ForceZero:
+        // 只置标志: 真正的处置在 main.cpp 的 requestForceZero() (与键盘 'z' 同一个函数)。
+        // 为什么不在这个线程直接做 —— 见 RelayCore.h 里 consumeForceZeroRequest 的说明。
+        m_forceZeroRequested.store(true);
+        std::cout << "[Tuning] 收到 MATLAB 的调零请求" << std::endl;
+        break;
     case R::None:
     default:
+        // 【这是决定, 不是遗漏】(2026-09-22 拍板): 形状坏掉的 RG| 行 (如 "RG|abc") 在
+        //   RelayCommandParser 里塌成 Command::None, 与未知命令无法区分 ⇒ 不回读。
+        //   · 规格 §4 的"不论接受还是拒绝"指的是【被 setGain 按范围拒收】, 那条路走上面的
+        //     SetReflectionGain 分支, 已覆盖; 解析器【故意】放行超范围的数值。
+        //   · 规格真正的不变量是"MATLAB 显示的值不可能与实际生效值分叉"。畸形命令下
+        //     MATLAB 自己也没改显示值 ⇒ 没有分叉 ⇒ 不变量成立。
+        //   · sprintf('RG|%.4f', v) 配上 Limits 约束的数值框, 产不出畸形行。
+        // ⇒ 【不要】在这里回头去判 "RG|" 前缀: 那是把协议知识搬回错误的层 (解析器已经在
+        //   那一层认识它了), 会变成第二份实现。
         break;
     }
 }
 
 void RelayCore::pollRelayCommands() {
+    // 力反射增益的两件家常事 (2026-09-22):
+    //   tick()      —— 防抖落盘 (值变过且静默 ≥1s 才写盘)。借本循环当心跳, 不新起线程/定时器。
+    //   补发待发的回读 —— 拖动滑条时被限频挡下的那一条, 在这里补上, 保证"最后一条一定到"。
+    // ⚠ 放在 socket 有效性检查【之前】: 这两件事与 relay socket 在不在无关 (tick 只管落盘),
+    //   放在后面会在 GUI 没连上时整个停掉。
+    ForceTuning::tick();
+    if (s_gainReportPending) sendReflectionGain(false);
+
     EnterCriticalSection(&m_relaySocketMutex);
     SOCKET sock = m_relaySocket;
     LeaveCriticalSection(&m_relaySocketMutex);
