@@ -1147,6 +1147,24 @@ static void test_zero_only_no_motion() {
     double bF[3] = {0, 0, 0}, bM[3] = {0, 0, 0};
     ForceCompensation::setCalibration(A, bF, bM, cS);
 
+    // ★ 2026-09-22: 必须【先让 step() 跑一帧】再开始调零。理由:
+    //   finalizeBias() 读的是 ForceCompensation::currentGravityTerm() —— 那是 step() 的缓存
+    //   (g_lastFg), 而本用例此前从没调过 step() ⇒ 它读到的是【同文件里更早某条用例
+    //   (用 diagA(1.0)) 留在那里的 g = (0,0,9.81)】⇒ 零偏被减掉 9.81 而不是 4.1202
+    //   ⇒ compensated[2] 的断言红 (实测 bias z = −9.83 就是证据)。
+    //   ⚠ 这条红有【两个独立成因】: 本处修的是缓存污染; 另一条是 z 的期望值本身陈旧
+    //     (0.90 是 2026-09-18 按旧语义写的, 而 0c45094 把重力项挪进了零偏 ⇒ 应为 5.02),
+    //     那一半见下面 Step 3 —— 两半都做完这条断言才会绿。
+    //   生产路径上 step() 每 8ms 跑一次刷新缓存 ⇒ 这是【测试隔离】问题, 不是生产 bug
+    //   (已用 git stash + 原样重建证明: HEAD 上一模一样 38/1)。
+    //   喂的帧必须让闸门【放行】, 否则 compensated 被置零 —— 但只要走完 setCalibration
+    //   与这一步, 缓存 g_lastFg 就会写成本用例的 A·g; 数值本身不参与后面的断言。
+    {
+        AppState::ForceData warm = gateVisibleFrame();
+        double warmPose[6] = {0, 0, 0, 0, 0, 0};
+        ForceCompensation::step(warm, warmPose);
+    }
+
     g_dragOnCalls = 0;
     ForceCalibration::setDragModeCallback(countDrag);
 
@@ -1179,18 +1197,26 @@ static void test_zero_only_no_motion() {
     // 期望值 (A = 0.42·I, g = (0,0,9.81) -> Fg = (0,0,4.1202), c_s 沿 z -> Mg = 0):
     //   x: 5 − (−0.48)          = 5.48
     //   y: 5 − (−1.35)          = 6.35
-    //   z: 5 − (−0.02) − 4.1202 = 0.8998
+    //   z: 5 − (−0.02)          = 5.02     ← ★ 三轴同一条规则: comp = raw − mean(raw_tare)
     //   M: 5 − (0.010, −0.020, 0.005)
+    // ★ 2026-09-22 订正: z 这里【从前写的是 `5 − (−0.02) − 4.1202 = 0.8998`】—— 那是陈旧的。
+    //   0c45094 (2026-09-21, "重力被减了两遍") 之后 finalizeBias 存的是 `mean(raw) − A·g`,
+    //   而 step() 里 comp 再减一次 Fg ⇒ A·g【总共只减一次】⇒ comp = raw − mean(raw_tare)。
+    //   代进去 = 5.0 + 0.02 = 5.02。(A 是对角阵且 pose 全 0 ⇒ 重力只在 z 轴上,
+    //   这正是只有 z 这一行破模式、x/y 本来就对的原因。)
+    //   ⚠ 若把 0.90 改回去, 等于要求 comp 把重力减【两遍】—— 那正是 0c45094 治的那个现场故障
+    //     (按 'z' 之后 comp = −A·g ≈ 4N ⇒ 闸门拒 ⇒ 一点力反馈都没有)。别改回去。
     AppState::ForceData fd = gateVisibleFrame();
     for (int i = 0; i < 6; i++) fd.sixForceRaw[i] = 5.0;
-    fd.tcpForce[0] = 5.48; fd.tcpForce[1] = 6.35; fd.tcpForce[2] = 0.90;
+    fd.tcpForce[0] = 5.48; fd.tcpForce[1] = 6.35; fd.tcpForce[2] = 5.02;
     fd.tcpForce[3] = 4.99; fd.tcpForce[4] = 5.02; fd.tcpForce[5] = 4.995;
     ForceCompensation::step(fd, pose);
     CHECK(ForceCompensation::guardState() == ForceCompensation::GuardState::OK);
     CHECK(fabs(fd.compensated[0] - (5.0 - (-0.48))) < 0.02);
     CHECK(fabs(fd.compensated[1] - (5.0 - (-1.35))) < 0.02);
-    // Z: 5.0 - (-0.02) - 0.42*9.81 ≈ 0.90 — 同时证明保留的 A 确实进了 setCalibration
-    CHECK(fabs(fd.compensated[2] - 0.90) < 0.05);
+    // Z: 5.0 - (-0.02) = 5.02 (comp = raw − mean(raw_tare); 见上面那条订正)
+    // — 同时证明保留的 A 确实进了 setCalibration
+    CHECK(fabs(fd.compensated[2] - 5.02) < 0.05);
     // 力矩零偏也已应用 (Mx 零偏 0.010); c_s 沿 z 与 A·g 平行 → 重力力矩为 0
     CHECK(fabs(fd.compensated[3] - (5.0 - 0.010)) < 0.02);
 
@@ -1223,6 +1249,12 @@ static void test_zero_abort_not_applied() {
     CHECK(!ForceCalibration::isRunning());
     CHECK(!ForceCalibration::isZeroing());
 
+    // ★ 2026-09-22 (Task 2): 本用例【不需要】零偏前那帧热身, 因为两处都够不着缓存:
+    //   ① 它在采满阈值之前就 abort() ⇒ finalizeBias() 根本没跑 ⇒ currentGravityTerm() 没被读;
+    //   ② 它断言的零偏是【自己直接 setCalibration 装进去的】bF=(1,2,3) / bM, 逐位比的是
+    //      "没被新调零覆盖", 与 A·g 无关; 下面那条 compensated 断言取的是 x 分量, 而 A 是对角、
+    //      pose 全 0 ⇒ 重力项只在 z ⇒ x 本来就不含 A·g。
+    //   对照: test_zero_only_no_motion 是真调零(会调 finalizeBias)所以必须热身。
     // 零偏【逐位】没动 —— 这是这条用例真正要钉的东西。
     double bF2[3], bM2[3];
     ForceCompensation::currentBias(bF2, bM2);
@@ -1260,6 +1292,10 @@ static void test_sweep_still_enters_motion() {
         ForceCalibration::update(raw, pose);
     }
 
+    // ★ 2026-09-22 (Task 2): 本用例【不需要】零偏前那帧热身 —— 它【只断言状态机】
+    //   (TARE→MOTION / isRunning / 拖拽回调次数), 不断言零偏数值、也不断言 compensated
+    //   ⇒ 不依赖 currentGravityTerm() 的缓存。(全流程虽然也会走 finalizeBias, 但本用例
+    //   一个与 A·g 有关的数都不看, 所以缓存是别人的也无所谓。)
     CHECK(ForceCalibration::currentState() == ForceCalibration::State::MOTION);
     CHECK(ForceCalibration::isRunning());
     CHECK(g_dragOnCalls == 1);                      // 全流程开拖拽
@@ -1284,6 +1320,9 @@ static void test_zero_restartable() {
     double raw[6] = {0.1, 0.2, 0.3, 0, 0, 0};
     double pose[6] = {0, 0, 0, 0, 0, 0};
 
+    // ★ 2026-09-22 (Task 2): 本用例【不需要】零偏前那帧热身 —— 它钉的是"调零能再来一次"
+    //   (isDone / isZeroing / TARE→ABORTED 这些【状态】), 不断言零偏数值、也不断言
+    //   compensated ⇒ 不依赖 currentGravityTerm() 的缓存。
     CHECK(ForceCalibration::startZero());
     ForceCalibration::setUpdateDtForTest(0.5);      // 步长由用例给 (从前是传给 update 的实参)
     for (int i = 0; i < 5 && !ForceCalibration::isDone(); i++) {
