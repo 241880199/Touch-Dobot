@@ -554,12 +554,30 @@ function relay_gui()
     end
 
     function sendToClient(cmd)
+        % ⚠ 送不出去【必须出声】(2026-09-22 终审 Fix 1)。
+        %   从前的形状是一句无声的 return。于是 C++ 断线时操作员拖滑条 / 按 [Zero] /
+        %   扳 swFF, 屏幕上的意图照旧动, 而【一条都没发出去】—— 这是本功能的中心承诺
+        %   ("屏幕上的增益 = 机械臂在用的增益")唯一会失效的状态, 也是计划里那条
+        %   "不许静默"的 Global Constraint 唯一被破的地方。
+        % 【为什么不改成"断线就把控件禁用掉"】想过, 而且【刻意不做】:
+        %   打开这三个控件的只有【两处】—— processNetworkData 里
+        %   `~wasKnown || rangeChanged` 那一支, 以及"从【回读自相矛盾】状态恢复"那一支
+        %   (它自己带着 `if S.tuning.displayUnknown` 这道门)。
+        %   断线时禁用【不会】惊动其中任何一个: C++ 的范围若没在这期间变过, 重连后
+        %   到达的那条回读与上次同范围 (第一道不成立); 而 displayUnknown 仍是 false
+        %   —— "断线"这件事本身不会把它置 true (第二道也不成立) ⇒ 滑条 / 数值框 /
+        %   Default 永远灰着, 操作员再也动不了, 而屏幕上【没有一句话】说的是这件事
+        %   (控件为什么是灰的)。那正是本函数要消灭的那种静默。
+        %   ⇒ 出声 + 让人能原样重试, 比一个漂亮但会卡死的灰控件诚实。
         if ~isempty(S.server) && isvalid(S.server) && S.server.Connected
             try
                 write(S.server, uint8([cmd newline]), 'uint8');
             catch e
                 fprintf('[Relay] ERROR sending to client: %s\n', e.message);
             end
+        else
+            fprintf(['[Relay] ⚠ 未发送 (C++ 客户端未连接), 该命令已【丢弃】: %s ' ...
+                     '—— 连接恢复后请重做一次\n'], cmd);
         end
     end
 
@@ -666,6 +684,16 @@ function relay_gui()
                         rangeChanged = wasKnown && ...
                             (prevMin ~= S.tuning.min || prevMax ~= S.tuning.max);
                         if ~wasKnown || rangeChanged
+                            % ★ 【忘掉"我们上次发的是什么"】(2026-09-22 终审 Fix 4)。
+                            %   下面那道拒收判据的前提是"我们发的值落在【当前这条回读给出的】范围之外
+                            %   ⇒ C++ 拒了它"。而 S.tuningLastSent 可能来自【另一套范围】:
+                            %   C++ 被重编成更窄的 GAIN_MAX (比如 300 → 200) 而本窗口一直开着,
+                            %   当年被【接受】的 250 相对新范围就成了越界 ⇒ 判据成立, 打出一句
+                            %   「增益 250.0 被拒」—— 那是【假话】, 它当时是被接受的。
+                            %   ⇒ 范围一被重新声明, 那条"上次发了什么"就不再可比, 置回 NaN
+                            %     (= "没发过"), 判据自然不成立。只在【这一支】置: 范围没变时
+                            %     的越界回读仍然是真的拒收, 那条日志要留着。
+                            S.tuningLastSent = NaN;
                             % 第一次回读: 用 C++ 给的上下限把控件打开 —— 不猜。
                             % 顺序【不能反】: 先 Limits 再(下面那段)Value。实测把 Limits 缩到
                             %   不含当前 Value 时 MATLAB 只夹紧不抛错 (120 → 150);
