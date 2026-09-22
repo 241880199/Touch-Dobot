@@ -1993,6 +1993,12 @@ void RelayCore::reportFeedback(const char* fbText) {
 //   ② 距上次【发送】≥100ms —— 拖动滑条几十条/秒, 逐条回读会堆在 MATLAB 侧
 // 被挡下的那一条在这里只置标志, 由 pollRelayCommands 每帧补发 ⇒ 最后一条一定到。
 //
+// ⚠ 【调用点不是随便挑的】(2026-09-22 修正): 上面条件①是一道【过滤被拒回读】的闸 ——
+//   force=false 只能用于【接受】(拖动洪水) 与 pollRelayCommands 的补发;
+//   dispatchRelayCommand 的【拒绝】分支必须走 force=true。理由:
+//   被拒 = setGain 在 store 之前就返回 = 值按构造没变 ⇒ 条件①必然命中 ⇒ 一个字节都发不出去。
+//   按调用点逐个说明见 RelayCore.h 的 sendReflectionGain 文档块。
+//
 // s_lastSentGain 初值刻意选 0 —— 那是 setGain 不会接受的值 ⇒ 在第一次 force=true 之前
 //   若有人用 force=false 进来, 它一定发得出去 (保守方向)。
 static DWORD  s_lastGainReportMs = 0;
@@ -2064,23 +2070,36 @@ void RelayCore::dispatchRelayCommand(const char* line) {
         std::cout << "[Relay] Force feedback DISABLED (MATLAB command)" << std::endl;
         break;
     case R::SetReflectionGain:
+        // 【不论接受还是拒绝都回读】—— 回的都是当前实际生效值 (规格 §4)。
+        // 但两条路的形态【不同】, 而且必须不同 (2026-09-22 修正):
         if (ForceTuning::setGain(value)) {
             std::cout << "[Tuning] 力反射增益 → " << value << " (MATLAB command)" << std::endl;
+            // 【接受】⇒ 目标值真的变了 ⇒ 限频形态 (force=false)。
+            // 规格 §4 那两条条件 ("只在目标值真的变了、且距上次回读 ≥100ms") 写的正是
+            // 这条拖动路径: 拖动滑条每秒几十条 RG|, 逐条回读会堆在 MATLAB 侧。
+            // 被时间挡下的那条由 pollRelayCommands 补发, 最后一条一定到。
+            sendReflectionGain(false);
         } else {
             // 拒收必须出声, 而且要说清范围 —— 范围取自 ForceTuning 那一份定义, 不另写数字。
             std::cout << "[Tuning] 增益 " << value << " 【被拒】: 可取范围 ["
                       << ForceTuning::GAIN_MIN << ", " << ForceTuning::GAIN_MAX
                       << "], 仍是 " << ForceTuning::gain() << std::endl;
+            // 【拒绝】【必须无条件发】—— force=true。这就是 true 在本设计里的第三个用途
+            // (连接、重连之外的第三个):
+            //   · 被拒 ⇒ ForceTuning::setGain 在【任何 store 之前】就 return false
+            //     ⇒ 生效值【按构造】没有变。
+            //   · 而 force=false 的第一道闸就是 "g == s_lastSentGain ⇒ 不发"
+            //     ⇒ 那道闸在拒绝路径上【必然】命中 ⇒ 一个字节都发不出去。
+            //   · 偏偏这条恰恰是 MATLAB 最需要的一条: 它自己的滑条【已经动了】(到那个被拒的值),
+            //     正等着被纠正回真值 —— 规格 §4 的中心例子就是它:
+            //     "若它发了 500 被拒, 回读仍是 120, 滑条自己弹回 120"。
+            //   ⚠ 【不要把它"优化"成 false】。值没变对"拖动洪水"是对的判据 (那是为了限频),
+            //     但对"拒绝"是【反的】: 拒绝的定义就是值没变 ⇒ 拿值变没变当闸门, 恰好滤掉了
+            //     唯一一条必须发出去的回读 ⇒ MATLAB 会永远显示一个假数 (规格 §4 末尾那段:
+            //     滑条上限来自回读, GAIN_MAX 在 C++ 侧调低后 MATLAB 会一直发一个已被拒的值)。
+            //     合上这条闸只省下一次 160 字节的发送, 代价是那个不变量失效。
+            sendReflectionGain(true);
         }
-        // 【不论接受还是拒绝都回读】—— 回的是当前实际生效值。
-        // 于是被拒时 MATLAB 会把滑条弹回真值, 而不是让界面继续显示一个假的数。
-        // ⚠ 这里是【限频形态】(force=false), 依据是规格 §4:
-        //     "只在目标值真的变了、且距上次回读 ≥100ms"才回读 —— 拖动滑条每秒几十条 RG|,
-        //     逐条回读会堆在 MATLAB 侧; 被挡下的那条由 pollRelayCommands 补发, 最后一条一定到。
-        //   ⚠ 上一版这里传的是 true, 而本函数里那条"待发"分支只在 !force 且被时间挡下时才走到
-        //     ⇒ 标志 s_gainReportPending 永远是 false ⇒ 补发永不触发 ⇒ 限频整个是死代码,
-        //     且上面那句注释描述的是一个不存在的限频。true 只留给连接/重连 (下两处调用点)。
-        sendReflectionGain(false);
         break;
     case R::ForceZero:
         // 只置标志: 真正的处置在 main.cpp 的 requestForceZero() (与键盘 'z' 同一个函数)。
