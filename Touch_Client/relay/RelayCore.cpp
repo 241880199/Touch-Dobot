@@ -64,6 +64,55 @@ static Vec3 clampOrientToBounds(const Vec3& target) {
     return clamped;
 }
 
+// ★★ 2026-09-22 实验（见 Config::ORIENT_SEAM_FIX_ENABLED 那一大段）：把角度规范化到 [-180,180)。
+// 为什么用 fmod 而不是 while 循环：while 在病态输入 (inf/nan) 下会挂住整个下发线程。
+// 注意 180 会映射成 -180 —— 同一个朝向，且规范区间是半开，这是刻意的。
+static double normalizeDeg180(double deg) {
+    if (!(deg > -1e18 && deg < 1e18)) return 0.0;   // NaN/inf 兜底: 别把毒值发给机械臂
+    double r = fmod(deg + 180.0, 360.0);
+    if (r < 0.0) r += 360.0;
+    return r - 180.0;
+}
+
+// ★★ 2026-09-22 实验：钳【相对参照的偏移】，而不是绝对值。
+// 【为什么绝对值那条会抖】参照 `m_orientRefRobot` 抄自按下按钮2 那一刻的【实际姿态】
+//   (:1303)，它可能就坐在 ±180 上（现场 `R=(+176.1,…)` 距 +180 只有 3.9°）⇒ 往外多转一点点
+//   就撞墙 ⇒ 目标被钉死在该边界 ⇒ 手一抖就在墙上【逐帧来回】⇒ 指令以帧率往复 ⇒ 臂抖。
+// 【为什么相对钳位才对】这个钳位想防的是"**相对起始姿态**转太多"，不是"别过 180 这个数"。
+//   而且 ±180 只是 RPY 表示的接缝，J6 量程本来就是 ±360。
+static Vec3 clampOrientOffset(const Vec3& target, const Vec3& ref) {
+    const Vec3 raw(target.x - ref.x, target.y - ref.y, target.z - ref.z);
+    Vec3 off = raw;
+    bool warned = false;
+
+    if (off.x >  Config::ORIENT_MAX_OFFSET_DEG) { off.x =  Config::ORIENT_MAX_OFFSET_DEG; warned = true; }
+    if (off.x < -Config::ORIENT_MAX_OFFSET_DEG) { off.x = -Config::ORIENT_MAX_OFFSET_DEG; warned = true; }
+    if (off.y >  Config::ORIENT_MAX_OFFSET_DEG) { off.y =  Config::ORIENT_MAX_OFFSET_DEG; warned = true; }
+    if (off.y < -Config::ORIENT_MAX_OFFSET_DEG) { off.y = -Config::ORIENT_MAX_OFFSET_DEG; warned = true; }
+    if (off.z >  Config::ORIENT_MAX_OFFSET_DEG) { off.z =  Config::ORIENT_MAX_OFFSET_DEG; warned = true; }
+    if (off.z < -Config::ORIENT_MAX_OFFSET_DEG) { off.z = -Config::ORIENT_MAX_OFFSET_DEG; warned = true; }
+
+    if (warned) {
+        std::cerr << "[Safety] Orientation offset from press-time reference clamped to ±"
+                  << Config::ORIENT_MAX_OFFSET_DEG << " deg. Original offset: ("
+                  << raw.x << "," << raw.y << "," << raw.z << ")" << std::endl;
+    }
+    return Vec3(ref.x + off.x, ref.y + off.y, ref.z + off.z);
+}
+
+// ★★ 2026-09-22 实验之二（见 Config::ORIENT_STYLUS_LPF_ENABLED 那一大段）：
+// 笔杆姿态【偏移】的一阶低通状态。放文件作用域而不是成员，是为了不动 RelayCore.h ——
+// 生命周期与进程相同，而参照那一组是每次按下按钮2 重设的 ⇒ 必须配一个 reset（见 onButton2Press）。
+static double s_stylusOffFilt[3] = { 0.0, 0.0, 0.0 };
+static DWORD  s_stylusOffFiltLastMs = 0;
+static bool   s_stylusOffFiltReady = false;
+
+static void resetStylusOffsetFilter() {
+    s_stylusOffFilt[0] = s_stylusOffFilt[1] = s_stylusOffFilt[2] = 0.0;
+    s_stylusOffFiltLastMs = 0;
+    s_stylusOffFiltReady = false;
+}
+
 // ===== 帧率噪声探针的【环形缓冲】=====
 // 见 RelayCore.h 里那一段 (要回答什么问题) 与 force/NoiseProbe.h (统计量的判据)。
 // 【为什么在这里】本线程是【唯一】看得到 8 ms 那一档的地方: 力流水线当时跑在 pollForce 的
@@ -796,8 +845,15 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
     // ===== 安全守卫 =====
     if (!appState.isRobotBaseSet) return;
 
-    // 更新触觉线程心跳时间戳
-    m_lastHapticFrameMs = GetTickCount();
+    // ⛔ 2026-09-22 移走了: 这里从前写着 `m_lastHapticFrameMs = GetTickCount();`。
+    //   【为什么它在这里是错的】本行在守卫 `:843` 之后，而本函数【只在 isTransmitting() 为真时
+    //   才被调用】(HapticCallback.cpp:134) ⇒ 那个"心跳"实际是【正在下发】的心跳，
+    //   **不是触觉线程的心跳** —— 名字与事实不符。
+    //   【后果】一松手就停刷新 ⇒ 看门狗 (本文件 :309, 阈值 `WATCHDOG_TIMEOUT_MS*2`=400ms)
+    //   只要求 isTransmitting() 为真 ⇒ 第二次按下时读到的是【上一次下发时】那个陈旧时间戳
+    //   ⇒ 把"没有在下发"误判成"GLUT 死了" ⇒ EmergencyStop。
+    //   ★ 它同时是"分不清真假"的原因: 真实停摆与"没在下发"在同一个时间戳上长得一模一样。
+    //   ⇒ 心跳现在由 `markHapticFrame()` 在【触觉回调入口】无条件刷新 (见该函数)。
 
     // ===== ServoP 频率限制: 30Hz =====
     DWORD now = GetTickCount();
@@ -978,6 +1034,37 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
         double offy = current.y - m_orientRefStylus.y;
         double offz = current.z - m_orientRefStylus.z;
 
+        // ★★ 2026-09-22 实验之二：偏移的一阶低通（理由见 Config::ORIENT_STYLUS_LPF_ENABLED）。
+        // 【为什么滤的是"偏移"而不是"机器人目标"】抖动来自【输入】，在输入端压掉才不会
+        //   在机器人侧留下任何痕迹；滤目标等于在输出端追着改，永远慢一拍。
+        // ⚠ α 用【实测 dt】：本函数被 ServoP 的 30 Hz 节流着，但节流值会随改动漂，别写死 0.033。
+        if (Config::ORIENT_STYLUS_LPF_ENABLED) {
+            const DWORD nowMs = GetTickCount();
+            if (!s_stylusOffFiltReady) {
+                // 按下按钮2 后的第一帧：直接把滤值对齐到当前偏移（不从 0 慢慢爬）
+                s_stylusOffFilt[0] = offx; s_stylusOffFilt[1] = offy; s_stylusOffFilt[2] = offz;
+                s_stylusOffFiltLastMs = nowMs;
+                s_stylusOffFiltReady = true;
+            } else {
+                const double dt = (double)(nowMs - s_stylusOffFiltLastMs) / 1000.0;
+                s_stylusOffFiltLastMs = nowMs;
+                if (dt <= 0.0) {
+                    // 同一 tick 内重复调用（节流本该挡住）—— 不推进相位，避免 α=0 的除零/停滞
+                } else if (dt > Config::ORIENT_STYLUS_LPF_MAX_GAP_S) {
+                    // 隔了很久（卡顿/断连恢复）：重新对齐，别把陈旧姿态当增量补进来
+                    s_stylusOffFilt[0] = offx; s_stylusOffFilt[1] = offy; s_stylusOffFilt[2] = offz;
+                } else {
+                    const double a = dt / (Config::ORIENT_STYLUS_LPF_TAU_S + dt);
+                    s_stylusOffFilt[0] += a * (offx - s_stylusOffFilt[0]);
+                    s_stylusOffFilt[1] += a * (offy - s_stylusOffFilt[1]);
+                    s_stylusOffFilt[2] += a * (offz - s_stylusOffFilt[2]);
+                }
+            }
+            offx = s_stylusOffFilt[0];
+            offy = s_stylusOffFilt[1];
+            offz = s_stylusOffFilt[2];
+        }
+
         // 逐轴响应门限 (低于它本帧这一轴不动; 只影响颤动幅度, 不影响漂移)
         const double dz = Config::ORIENT_DEADZONE_DEG;
         auto axisGate = [dz](double d) -> double {
@@ -1090,7 +1177,13 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
             m_targetOrient.x += damped.x;
             m_targetOrient.y += damped.y;
             m_targetOrient.z += damped.z;
-            m_targetOrient = clampOrientToBounds(m_targetOrient);
+            // ★★ 2026-09-22 实验：钳位改成比【相对参照的偏移】(理由见 clampOrientOffset)。
+            //   翻回 false ⇒ 走原来的绝对值钳位 (那条会在参照贴着 ±180 时逐帧夹 ⇒ 手一抖就抖)。
+            if (Config::ORIENT_SEAM_FIX_ENABLED) {
+                m_targetOrient = clampOrientOffset(m_targetOrient, m_orientRefRobot);
+            } else {
+                m_targetOrient = clampOrientToBounds(m_targetOrient);
+            }
 
             // Apply TCP micro-adjust (position mode: locked; orient mode: micro-adjust)
             if (appState.lastButtonState && m_transmittingOrient) {
@@ -1207,6 +1300,19 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
     }
 
     // ===== 构造并发送 ServoP =====
+    // ★★ 2026-09-22 实验：下发前把三个角规范化到 [-180,180)（见 Config::ORIENT_SEAM_FIX_ENABLED）。
+    // 【为什么必须要这一步】上一步把钳位改成了"相对参照"，于是 `m_targetOrient` 现在是
+    //   **连续累加、会越过 ±180** 的量（那是刻意的：工具确实在连续滚）—— 而它直接发给 ServoP
+    //   就会送出 `183` 这种数。规范化是**等价的朝向**（183 ≡ −177），按矩阵做 IK 的控制器得到同解。
+    // ⚠ 对 Mode 1/3 那几条路是**无操作**：它们的值来自 `robotActualPose` 或 IK 解，本就在范围内。
+    // ⚠ 就地改 `targetRx` 而不是只用副本：下面 :1223 的日志行与 :1247 的 `robotTargetPose`
+    //   都要跟着走 —— 否则界面会显示"目标 183 / 实际 −177"，看的人以为出错了。
+    if (Config::ORIENT_SEAM_FIX_ENABLED) {
+        targetRx = normalizeDeg180(targetRx);
+        targetRy = normalizeDeg180(targetRy);
+        targetRz = normalizeDeg180(targetRz);
+    }
+
     char cmd[256];
     snprintf(cmd, sizeof(cmd), "ServoP(%.2f,%.2f,%.2f,%.2f,%.2f,%.2f)",
         servoCmdX, servoCmdY, servoCmdZ,
@@ -1294,6 +1400,9 @@ void RelayCore::onButton2Press(const Vec3& stylusOrient) {
     // NOT used in the per-frame delta computation. The per-frame tracking uses
     // m_lastStylusOrient (incremental delta) in sendPosition().
     m_orientRefStylus = stylusOrient;
+    // ★★ 2026-09-22: 参照重设 ⇒ 那个低通【必须同时重置】（见 Config::ORIENT_STYLUS_LPF_ENABLED）。
+    //   否则上一次按住期间的滤值会留到这一次，表现为"刚按下就有一小段残余姿态"。
+    resetStylusOffsetFilter();
 
     // Capture robot current orientation
     double curRx, curRy, curRz;
@@ -1548,6 +1657,20 @@ void RelayCore::queryJointAngles() {
         }
     }
     m_lastHeartbeatMs = GetTickCount();
+}
+
+// ★★ 2026-09-22 新增: 【触觉帧】心跳 —— 由触觉回调入口无条件调用 (HapticCallback.cpp)。
+// 【为什么必须有这个函数，而不是让 sendPosition 去刷】
+//   看门狗 (本文件 :309) 想查的是"**触觉回调**还活着吗"，可它读的那个时间戳从前是
+//   `sendPosition` 刷的 —— 而 `sendPosition` 只在 `isTransmitting()` 为真时才被调用
+//   (HapticCallback.cpp:134) ⇒ 那个数实际表达的是"**上一次下发**"，不是"上一帧回调"。
+//   ⇒ 两种完全不同的状态 (回调真的停了 / 只是没在下发) 共用一个数 ⇒ **分不开**。
+//   现场 2026-09-22 撞上的就是它: `ForceReader WATCHDOG ... 1078ms since last haptic frame`
+//   —— 而操作员说空闲很短，两边对不上，正是因为那个数根本不是触觉帧的年龄。
+//   ⇒ 放到这里以后: 再报 1078ms **一定**是回调真的停了 (那时查 GLUT / 控制台阻塞)。
+// ⚠ 无条件刷新是对的: 本函数就是"回调跑过一帧"这一件事的记录，与按钮状态无关。
+void RelayCore::markHapticFrame() {
+    m_lastHapticFrameMs.store(GetTickCount());
 }
 
 void RelayCore::checkHapticWatchdog() {

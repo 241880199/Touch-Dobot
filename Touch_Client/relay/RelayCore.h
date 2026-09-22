@@ -140,6 +140,11 @@ public:
 
     // 看门狗状态查询
     DWORD lastHapticFrameMs() const { return m_lastHapticFrameMs.load(); }
+    // ★★ 2026-09-22: 由【触觉回调入口】无条件调用 —— 见 RelayCore.cpp 该函数的说明。
+    // 从前这个时间戳是 `sendPosition` 刷的，而它只在 transmitting 时才跑 ⇒
+    // 那个数表达的是"上一次下发"，不是"上一帧触觉回调" ⇒ 看门狗分不开
+    // "回调停了"与"没在下发"两种状态。现场 2026-09-22 即栽在这里。
+    void markHapticFrame();
     void checkHapticWatchdog();
 
     // 状态机 (供 HUD / 外部读取)

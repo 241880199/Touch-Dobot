@@ -17,6 +17,17 @@ HDCallbackCode HDCALLBACK hapticCallback(void* pUserData) {
 
     if (app.isClosing) return HD_CALLBACK_DONE;
 
+    // ★★ 2026-09-22: 【触觉帧心跳 —— 无条件、每次回调都刷】。
+    //   从前它写在 RelayCore::sendPosition 里，而那一行在守卫之后、且 sendPosition
+    //  【只在 isTransmitting() 时才被调用】(本文件 :134) ⇒ 那个"心跳"其实是
+    //   "上一次下发"的时间戳，**不是触觉线程的心跳** ⇒ 看门狗 (RelayCore.cpp :309,
+    //   阈值 200*2=400ms) 在第二次按下时会读到一松手就冻住的旧值 ⇒ 把"没在下发"
+    //   误判成"GLUT 死了" ⇒ EmergencyStop。现场 2026-09-22 的 `1078ms since last haptic frame`
+    //   就是它，而操作员说空闲很短 —— 两边对不上正是因为那个数根本不是触觉帧的年龄。
+    //   ⇒ 放在这里以后，再报 1078ms **一定**是回调真的停了 (那时查 GLUT / 控制台阻塞)。
+    // ⚠ 必须在 isClosing 守卫【之后】: 关闭中不该再刷心跳，否则要退出的那一下会被当成"还活着"。
+    relay.markHapticFrame();
+
     hdBeginFrame(app.hHD);
 
     // ===== 1. 读取位置 =====
