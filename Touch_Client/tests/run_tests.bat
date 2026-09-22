@@ -9,6 +9,21 @@ echo   Touch-Dobot Unit Tests
 echo ================================================
 echo.
 
+rem ============================================================
+rem EVERY inner (test-result) check in this file uses "if errorlevel 1",
+rem NOT "if %ERRORLEVEL% EQU 0". Reason: a %ERRORLEVEL% inside a
+rem parenthesised block is expanded when the block is PARSED -- i.e. BEFORE
+rem the test exe has run -- so it can only ever see the BUILD's exit code
+rem and would print [OK] for any test result whatsoever. "if errorlevel 1"
+rem is evaluated at RUN time, so it is correct inside a block.
+rem The OUTER (build-exit) checks are top-level statements and are NOT
+rem affected -- those are correct as they are.
+rem Full explanation + the measurement: see the note further down, just
+rem before "Building test_force_pipeline". Do NOT change these back
+rem without re-measuring.
+rem ============================================================
+echo.
+
 echo ================================================
 echo   Force Compensation Tests
 echo ================================================
@@ -20,12 +35,12 @@ if %ERRORLEVEL% EQU 0 (
     echo.
     echo === test_force_compensation.exe ===
     "%TESTDIR%\test_force_compensation.exe"
-    if %ERRORLEVEL% EQU 0 (
-        set /a PASSED+=1
-        echo   [OK]
-    ) else (
+    if errorlevel 1 (
         set /a FAILED+=1
         echo   [FAIL]
+    ) else (
+        set /a PASSED+=1
+        echo   [OK]
     )
 ) else (
     echo   [FAIL: build error]
@@ -44,12 +59,12 @@ if %ERRORLEVEL% EQU 0 (
     echo.
     echo === test_relay_command_parser.exe ===
     "%TESTDIR%\test_relay_command_parser.exe"
-    if %ERRORLEVEL% EQU 0 (
-        set /a PASSED+=1
-        echo   [OK]
-    ) else (
+    if errorlevel 1 (
         set /a FAILED+=1
         echo   [FAIL]
+    ) else (
+        set /a PASSED+=1
+        echo   [OK]
     )
 ) else (
     echo   [FAIL: build error]
@@ -63,12 +78,12 @@ if %ERRORLEVEL% EQU 0 (
     echo.
     echo === test_force_logger.exe ===
     "%TESTDIR%\test_force_logger.exe"
-    if %ERRORLEVEL% EQU 0 (
-        set /a PASSED+=1
-        echo   [OK]
-    ) else (
+    if errorlevel 1 (
         set /a FAILED+=1
         echo   [FAIL]
+    ) else (
+        set /a PASSED+=1
+        echo   [OK]
     )
 ) else (
     echo   [FAIL: build error]
@@ -82,12 +97,12 @@ if %ERRORLEVEL% EQU 0 (
     echo.
     echo === test_tcp_calibration.exe ===
     "%TESTDIR%\test_tcp_calibration.exe"
-    if %ERRORLEVEL% EQU 0 (
-        set /a PASSED+=1
-        echo   [OK]
-    ) else (
+    if errorlevel 1 (
         set /a FAILED+=1
         echo   [FAIL]
+    ) else (
+        set /a PASSED+=1
+        echo   [OK]
     )
 ) else (
     echo   [FAIL: build error]
@@ -231,12 +246,12 @@ if %ERRORLEVEL% EQU 0 (
     echo.
     echo === test_safety_core.exe ===
     "%TESTDIR%\test_safety_core.exe"
-    if %ERRORLEVEL% EQU 0 (
-        set /a PASSED+=1
-        echo   [OK]
-    ) else (
+    if errorlevel 1 (
         set /a FAILED+=1
         echo   [FAIL]
+    ) else (
+        set /a PASSED+=1
+        echo   [OK]
     )
 ) else (
     echo   [FAIL: build error]
@@ -251,12 +266,12 @@ if %ERRORLEVEL% EQU 0 (
     echo.
     echo === test_session_report.exe ===
     "%TESTDIR%\test_session_report.exe"
-    if %ERRORLEVEL% EQU 0 (
-        set /a PASSED+=1
-        echo   [OK]
-    ) else (
+    if errorlevel 1 (
         set /a FAILED+=1
         echo   [FAIL]
+    ) else (
+        set /a PASSED+=1
+        echo   [OK]
     )
 ) else (
     echo   [FAIL: build error]
@@ -271,12 +286,12 @@ if %ERRORLEVEL% EQU 0 (
     echo.
     echo === test_noise_probe.exe ===
     "%TESTDIR%\test_noise_probe.exe"
-    if %ERRORLEVEL% EQU 0 (
-        set /a PASSED+=1
-        echo   [OK]
-    ) else (
+    if errorlevel 1 (
         set /a FAILED+=1
         echo   [FAIL]
+    ) else (
+        set /a PASSED+=1
+        echo   [OK]
     )
 ) else (
     echo   [FAIL: build error]
