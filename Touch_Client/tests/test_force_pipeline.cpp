@@ -1,5 +1,9 @@
 // Standalone test: ForcePipeline filter + mapping + transform
-// Build: see task-10-brief for exact command (add -I paths for OpenHaptics SDK)
+// Build: call .\build_force_pipeline_test.bat (in this directory) -- it carries the exact cl line.
+//   ⚠ .\ 【不能省】—— 从 bash 经 cmd 调用时 NoDefaultCurrentDirectoryInExePath=1, 裸名字 call 会 not recognized (2026-09-22 实测)。
+//   ⚠ 从前这里指向 .superpowers/sdd/task-10-brief.md 里的"exact command"，而那个文件
+//     (a) 被 gitignore(盘上存在但不在仓里)、(b) 里面根本没有 cl /Fe: 也不提本用例
+//     ⇒ 那是一根死指针 (2026-09-22 核过)。
 // Run: test_force_pipeline.exe
 
 #include <iostream>

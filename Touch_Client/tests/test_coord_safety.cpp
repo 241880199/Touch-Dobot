@@ -2,7 +2,12 @@
 // Build: cl /EHsc /std:c++17 /I"D:\Projects\Touch\OpenHaptics\Developer\3.5.0\include"
 //        /I"D:\Projects\Touch\OpenHaptics\Developer\3.5.0\utilities\include"
 //        /DWIN32 /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS
-//        test_coord_safety.cpp /Fe:test_coord_safety.exe
+//        test_coord_safety.cpp ../calibration/CalibrationIO.cpp /Fe:test_coord_safety.exe
+//   ★ 2026-09-22: ../calibration/CalibrationIO.cpp 【不能省】—— CoordinateTransform.h 把
+//     Calibration::enabled / R / t 声明为 extern, 而它们的【定义】在那个 .cpp 里
+//     (namespace Calibration, 第 8 行)。少它 ⇒ LNK2019 三个符号(实测复现)。
+//     本文件调用 convertTouchToRobot ⇒ 实例化那个 inline 函数 ⇒ 拉进这三个 extern。
+//     或直接 call .\build_coord_safety_test.bat (它的配方是对的; .\ 不能省 —— 见 test_force_pipeline.cpp 头部)。
 // Run: test_coord_safety.exe
 
 #include <iostream>
