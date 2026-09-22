@@ -330,12 +330,37 @@ if %ERRORLEVEL% EQU 0 (
 echo.
 
 echo ================================================
+echo   Force Tuning Tests
+echo ================================================
+echo.
+echo --- Building test_force_tuning ---
+call "%TESTDIR%\build_force_tuning_test.bat"
+@echo off
+if %ERRORLEVEL% EQU 0 (
+    echo   Build OK
+    echo.
+    echo === test_force_tuning.exe ===
+    "%TESTDIR%\test_force_tuning.exe"
+    if !ERRORLEVEL! EQU 0 (
+        set /a PASSED+=1
+        echo   [OK]
+    ) else (
+        set /a FAILED+=1
+        echo   [FAIL]
+    )
+) else (
+    echo   [FAIL: build error]
+    set /a FAILED+=1
+)
+echo.
+
+echo ================================================
 echo   Tests complete
 echo ================================================
 echo ================================================
 set /a TOTAL=PASSED+FAILED
 echo ================================================
-echo   Summary: %TOTAL% of 20 suites run - %PASSED% OK, %FAILED% FAILED
+echo   Summary: %TOTAL% of 21 suites run - %PASSED% OK, %FAILED% FAILED
 echo ================================================
 echo.
 rem ------------------------------------------------------------
@@ -343,12 +368,12 @@ rem [NOT RUN] -- the suites this harness does NOT build or run. Kept in the RUN
 rem   LOG (not only in the source) so that a green run cannot be misread as
 rem   "every suite in this repository is green".
 rem
-rem   The "20" and the "8" below are HAND-MAINTAINED -- nothing computes them.
-rem   To recompute: test_*.cpp in the repo = 20; sections wired in below = 12;
-rem   20 - 12 = 8 not run. If you wire one in, update BOTH numbers here AND the
-rem   "12" that the MISMATCH check further down asserts.
+rem   The "21" and the "8" below are HAND-MAINTAINED -- nothing computes them.
+rem   To recompute: test_*.cpp in the repo = 21; sections wired in below = 13;
+rem   21 - 13 = 8 not run. If you wire one in, update BOTH numbers here AND the
+rem   "13" that the MISMATCH check further down asserts.
 rem ------------------------------------------------------------
-echo   [NOT RUN] 8 of the 20 test_*.cpp in this repo are not built or run here:
+echo   [NOT RUN] 8 of the 21 test_*.cpp in this repo are not built or run here:
 echo.
 echo     test_constraint_force
 echo       Its build script is ignored by Touch_Client/tests/.gitignore line 1, so
@@ -367,7 +392,7 @@ echo       These six have WORKING build scripts and currently pass; nothing ever
 echo       wired them in. Same orphan defect class this harness just fixed for
 echo       five other suites -- they belong in the next plan, not silently absent.
 echo.
-echo   A green line above therefore means "the 12 suites that ran all passed".
+echo   A green line above therefore means "the 13 suites that ran all passed".
 echo   It does NOT mean every suite in this repository is green.
 echo ================================================
 echo.
@@ -375,16 +400,16 @@ echo.
 rem ------------------------------------------------------------
 rem Report the result to the CALLER, not only to stdout.
 rem  * Every suite must be counted exactly once, so PASSED+FAILED must equal
-rem    the number of build sections (12). If it does not, a section was
+rem    the number of build sections (13). If it does not, a section was
 rem    silently skipped and the Summary above cannot be trusted.
 rem  * The script must exit NON-ZERO when anything failed. Without this, cmd
 rem    returns 0 after a failing command and the harness always looks green
 rem    to whatever ran it (CI, another script, a human checking the code).
 rem ------------------------------------------------------------
 set "HARNESS_RC=%FAILED%"
-if %TOTAL% NEQ 12 (
+if %TOTAL% NEQ 13 (
     echo ================================================
-    echo   MISMATCH: expected 12 counted suites, but counted %TOTAL%
+    echo   MISMATCH: expected 13 counted suites, but counted %TOTAL%
     echo   A section was skipped -- the Summary above is NOT trustworthy.
     echo ================================================
     set "HARNESS_RC=1"
