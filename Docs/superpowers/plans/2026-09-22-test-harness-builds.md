@@ -207,14 +207,29 @@ test_noise_probe 正是那个受害者 —— 而它成为受害者恰恰因为�
 
 ---
 
-### Task 2: 把六个孤儿接进"先建再跑"，并删掉第一段"只跑不建"
+### Task 2: 把五个孤儿接进"先建再跑"，删掉第一段"只跑不建"，并**明标**第六个的缺口
+
+> **★★ 2026-09-22 用户决定：只接五个。** 原始的"六个"里，`test_constraint_force` 的构建脚本
+> `build_constraint_test.bat` **被 `Touch_Client/tests/.gitignore:1` 忽略**（裸文件名，无注释）
+> ⇒ 它**不在 HEAD 里**，新克隆上不存在 ⇒ 把它写进 tracked 的 `run_tests.bat` 会让那句 `call`
+> **在任何别的机器上指向不存在的路径**。
+> ⇒ **本 Task 只接五个**（force_pipeline / feedback_parser / escalation / kinematics / coord_safety），
+> 并给第六个留一段**醒目的注释缺口**，而不是假装它被验过。**是否取消那条忽略，是一个尚未作出的决定**
+> （用户要说来由后再定）。等它定了，补回去只是**一行**。
+>
+> **为什么去掉它比留着它更诚实**：今天那个套件是**由一个"仓里没有任何东西会重建"的二进制跑着**的
+> —— 它的绿是假证据。把它从跑列表里去掉并写明原因，比留着一个假来源好。
+>
+> ⚠ **不要**在 `run_tests.bat` 里写 `call build_constraint_test.bat`（那会不可移植），
+> **也不要**碰 `build_constraint_test.bat` 与 `.gitignore` 本身。
 
 > **★ 前置条件（Task 1 的修正带来的）**：本 Task **必须**在 Task 1 的"全目录不变量"成立之后做 ——
 > 即 `tests/` 下无守卫的 `call .*vcvarsall` 计数为 **0**。
-> **否则本 Task 会把溢出重新引爆**：它要接进来六个**无守卫**的孤儿脚本
-> （外加受害者 `build_noise_probe_test.bat` 本来也没守卫）⇒ 一共 7 次真实调用
-> ⇒ `1917 + 7×1349 = 11360 > 8191` ⇒ cmd 在第 5 次中止，**看到的现象与本 Task 要修的一模一样**，
+> **否则本 Task 会把溢出重新引爆**：它要接进来五个**无守卫**的孤儿脚本
+> （外加受害者 `build_noise_probe_test.bat` 本来也没守卫）⇒ 一共 6 次真实调用
+> ⇒ `1917 + 6×1349 ≈ 10011 > 8191` ⇒ cmd 在第 5 次中止，**看到的现象与本 Task 要修的一模一样**，
 > 而原因换成了我们自己接进来的东西。**开工前先跑一遍那条 grep 确认它是 0。**
+> （Task 1 已把全部 22 个 `build_*.bat` 都加了守卫 ⇒ 现在最多真正调用一次。）
 
 **为什么**：这才是让那六个套件**变成可信证据**的那一步。
 今天它们"能构建"（Task 1 之外的事实）却**没有任何东西会重建它们**，而且第一段的 `[OK]`/`[FAIL]`
@@ -247,7 +262,7 @@ grep -nE "^=== test_.*\.exe ===|^--- Building|^BUILD_EXIT" /tmp/before.log
 把 `run_tests.bat` 里那个 `for %%e in ( test_force_pipeline.exe ... test_coord_safety.exe ) do ( ... )`
 **整段删除**（连同它上面那句 `echo ===` 与下面的空行），把它的职责交给 Step 3 的六段。
 
-- [ ] **Step 3: 加六段"先建再跑"**
+- [ ] **Step 3: 加五段"先建再跑" + 一段明标缺口**
 
 在已有的 `test_tcp_calibration` 那一段之后、`test_session_report` 之前（或任何位置 —— 但**保持与既有段落同形**），
 各加一段，形状**逐字**照现有段落：
@@ -272,8 +287,29 @@ if %ERRORLEVEL% EQU 0 (
 )
 echo.
 ```
-六个套件各一段（换成对应的脚本名/exe 名）。⚠ **纯 ASCII**。
+**五个**套件各一段（换成对应的脚本名/exe 名）：
+`force_pipeline` / `feedback_parser` / `escalation` / `kinematics` / `coord_safety`。
+⚠ **纯 ASCII**。
 ⚠ 注意 `set /a PASSED+=1` 在括号块里**不受**延迟展开影响（`+=` 不是 `%VAR%` 读取）—— 照抄即可。
+
+**★ 然后在这五段之后，加一段【明标缺口】的注释**（纯 ASCII），就放在它本该在的位置上：
+```bat
+rem ============================================================
+rem test_constraint_force: NOT BUILT AND NOT RUN BY THIS HARNESS.
+rem   Its build script (build_constraint_test.bat) is excluded by
+rem   Touch_Client/tests/.gitignore line 1, so it is NOT in HEAD and
+rem   does not exist on a fresh clone. Nothing in the tree can build
+rem   this suite's exe, so running the exe here would present a stale
+rem   binary as evidence -- the exact failure mode this harness was
+rem   fixed to remove. Pending a decision on that .gitignore line.
+rem   (Previously this suite WAS run here, from a prebuilt binary that
+rem    nothing rebuilt. Removing it makes the gap visible instead of
+rem    silently producing false evidence.)
+rem ============================================================
+```
+⚠ 这段**不是**"可选的礼仪" —— 它是本 Task 的交付物之一：**让缺口可见**。
+判据：`run_tests.bat` 里搜 `constraint` 只有这一段注释，**没有** `call build_constraint*.bat`、
+也**没有** `test_constraint_force.exe` 作为被执行对象。
 
 **顺带修掉那两个死计数器**：`PASSED` / `FAILED` 是**死代码** —— 脚本从头到尾**从没打印过它们**，
 最后一句是 `endlocal` 把它们的值直接扔掉。既然本 Task 的题目就是"让测试床真的**报告**"，
@@ -287,30 +323,34 @@ endlocal
 ⚠ 必须放在**顶层**（不在任何括号块里）—— `%PASSED%` 在顶层是按执行时的值展开的。
 ⚠ 把这一段的**行数与位置**保持在原来的 `endlocal` 处即可。
 ⚠ 判据：Step 4 跑完后，日志末尾应当出现 `Summary: N suite(s) OK, M suite(s) FAILED`，
-且 **N + M = 13**（本计划之后的构建步数）。若 N+M ≠ 13 ⇒ 【有一个套件既没记 OK 也没记 FAILED】
-⇒ 查是哪一段没走到。
+且 **N + M = 12**（本计划之后的构建步数 = 原 7 + 新 5）。若 N+M ≠ 12 ⇒
+【有一个套件既没记 OK 也没记 FAILED】⇒ 查是哪一段没走到。
 
-- [ ] **Step 4: 跑全量，确认构建次数从 7 变成 13**
+- [ ] **Step 4: 跑全量，确认构建次数从 7 变成 12**
 
 ```bash
 cmd //c "D:\Projects\Touch\Touch_Client\tests\run_tests.bat" > /tmp/after.log 2>&1; echo "exit=$?"
-echo "build steps: $(grep -cE '^--- Building' /tmp/after.log)"      # 期望 13 = 7 + 6
-grep -nE "^=== test_.*\.exe ===|^BUILD_EXIT|passed" /tmp/after.log
+echo "build steps: $(grep -cE '^--- Building' /tmp/after.log)"      # 期望 12 = 7 + 5
+grep -nE "^=== test_.*\.exe ===|^BUILD_EXIT|passed|Summary:" /tmp/after.log
 ```
-判据：**六个套件各自出现 `--- Building ... ---` + `BUILD_EXIT=0` + 自己的 `=== test_X.exe ===`**，
-且它们的结果与侦察记录一致（7/0、7/0、28/0、15/0、18/0、27/0）。
+判据：**五个套件各自出现 `--- Building ... ---` + `BUILD_EXIT=0` + 自己的 `=== test_X.exe ===`**，
+且它们的结果与侦察记录一致：`force_pipeline` 7/0、`feedback_parser` 28/0、`escalation` 15/0、
+`kinematics` 18/0、`coord_safety` 27/0。
 ⚠ 若某个套件在**真构建**之后**红了** ⇒ **真发现**，停下来照实上报（见 Global Constraints）。
+⚠ `test_noise_probe` **应当第一次在全量跑里真的跑成**（它卡的就是 PATH 溢出）⇒
+若它这次出现了 `BUILD_EXIT=0` 与 `5 passed`，那是 Task 1 那个修复的**端到端证据**，抄进报告。
 
 - [ ] **Step 5: 确认每个 exe 的 mtime 都被刷新了**
 
 ```bash
 cd /d/Projects/Touch/Touch_Client/tests
-for t in test_force_pipeline test_constraint_force test_feedback_parser test_escalation test_kinematics test_coord_safety; do
+for t in test_force_pipeline test_feedback_parser test_escalation test_kinematics test_coord_safety; do
   printf "%-26s %s\n" "$t" "$(date -r $t.exe '+%m-%d %H:%M:%S')"
 done
 ```
-判据：**六个 mtime 都是"刚刚"** ⇒ 证明真的重建了，而不是复用了旧二进制。
+判据：**五个 mtime 都是"刚刚"** ⇒ 证明真的重建了，而不是复用了旧二进制。
 （这一步是必须的：本项目吃过"跑它等于什么都没验"的亏，而那时**唯一**能分辨的办法就是看 mtime。）
+⚠ `test_constraint_force.exe` **不在这份名单里**（它在按本 Task 的决定**不跑**）。
 
 - [ ] **Step 6: 加一个【负对照】—— 证明新的报告机制真的会报失败**
 
@@ -329,11 +369,11 @@ done
 
 ```bash
 git add Touch_Client/tests/run_tests.bat
-git commit -m "build(tests): 六个孤儿套件接进'先建再跑', 并删掉第一段'只跑不建'的循环
+git commit -m "build(tests): 五个孤儿套件接进'先建再跑' + 删掉第一段'只跑不建'的循环
 
 两个缺陷一起解决:
-① 六个 build 脚本(force_pipeline/constraint/feedback_parser/escalation/kinematics/
-   coord_safety)run_tests.bat 一次都没调用过 ⇒ 它们的 exe 几个月没被重建。
+① 五个 build 脚本(force_pipeline/feedback_parser/escalation/kinematics/coord_safety)
+   run_tests.bat 一次都没调用过 ⇒ 它们的 exe 几个月没被重建。
    实测: 只 force_pipeline 是当前的; escalation 陈旧约两个月; kinematics 的 exe 里
    编进去的还是 J1_Z = 128.3(实际已改成 136.0 实机标定)。
 ② 第一段那个 for 循环的判定标记是【结构性死的】: if %ERRORLEVEL% EQU 0 写在带括号的
@@ -341,7 +381,10 @@ git commit -m "build(tests): 六个孤儿套件接进'先建再跑', 并删掉�
    每次循环都在测循环前那个值 ⇒ 一个真的返回 1 的 exe 照样打 [OK](已用替身证明)。
    删掉第一段 ⇒ 该缺陷随之消失(新段落里的 ERRORLEVEL 判断是顶层语句, 没有这个问题)。
 
-六个套件的断言、容差、生产代码一个字都没动。"
+⚠ test_constraint_force 【不接进来】, 并留了一段明标缺口的注释: 它的构建脚本
+  build_constraint_test.bat 被 tests/.gitignore:1 忽略 ⇒ 不在 HEAD 里 ⇒ 新克隆上不存在。
+  与其继续拿一个'仓里没有任何东西会重建'的二进制冒充证据, 不如把缺口写出来。
+  (是否取消那条忽略, 是一个尚未作出的决定。)"
 ```
 
 ---
