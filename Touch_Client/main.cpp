@@ -19,6 +19,7 @@
 #include "calibration/TcpCalibration.h"
 #include "force/ForceCalibration.h"
 #include "force/ForceCompensation.h"
+#include "force/ForceTuning.h"       // 力反射增益的运行时值 (MATLAB 可调, 落盘在 calib/force_tuning.json)
 #include "force/NoiseProbe.h"        // 帧率噪声探针 ('n') 的统计量 (唯一一份定义, 有单测)
 #include "force/ZeroDriftCheck.h"
 #include "force/PayloadCalibration.h"
@@ -2808,6 +2809,48 @@ static void cancelOtherCaptureModes(char keep) {
     }
 }
 
+// 力传感器调零 —— 【全程序唯一一份守卫链】。键盘 'z' 与 MATLAB 的 Zero 按钮【都走这里】。
+//
+// 【为什么不把守卫链放到 RelayCore】g_noRobot 与 cancelOtherCaptureModes 都是本文件的
+//   file-static, RelayCore 拿不到; 而在那里复制一份"标定中/调零中"的判断, 就是本项目最
+//   忌讳的"同一个规则两份实现, 改一份忘一份"(成文教训见 force/ForcePipeline.h)。
+//   ⇒ 让 RelayCore 只置一个标志, 由本函数在 GLUT 线程上统一处置。
+//
+// src: 标明是谁触发的, 写进日志 (两条入口的日志必须能分辨)。
+static void requestForceZero(const char* src) {
+    auto& relay = RelayCore::instance();
+    char msg[192];
+
+    if (relay.isForceZeroing()) {
+        relay.abortForceCalibration();
+        snprintf(msg, sizeof(msg), "[Force] 调零【已中止】 (来自 %s)", src);
+        std::cout << msg << std::endl;
+        relay.reportCommand(msg);
+        return;
+    }
+    if (relay.isForceCalibrating()) {
+        snprintf(msg, sizeof(msg),
+                 "[Force] 力标定进行中 — 等它结束, 或按 'k' 中止 (来自 %s)", src);
+        std::cout << msg << std::endl;
+        relay.reportCommand(msg);
+        return;
+    }
+    if (g_noRobot) {
+        snprintf(msg, sizeof(msg), "[Force] --no-robot 模式下无法调零 (来自 %s)", src);
+        std::cout << msg << std::endl;
+        relay.reportCommand(msg);
+        return;
+    }
+
+    cancelOtherCaptureModes('z');
+    if (relay.startForceZeroing()) {
+        snprintf(msg, sizeof(msg),
+                 "[Force] 调零中: 保持机械臂静止, 采集完成后自动应用并存盘 (来自 %s)", src);
+        std::cout << msg << std::endl;
+        relay.reportCommand(msg);
+    }
+}
+
 // ===== GLUT 回调 =====
 
 void keyboard(unsigned char key, int, int);  // forward decl for console polling in idle()
@@ -2824,8 +2867,15 @@ void idle() {
     if (!appState.isClosing) {
         glutPostRedisplay();
 
-        // MATLAB → C++ 反向命令轮询 (力反馈开关等)
+        // MATLAB → C++ 反向命令轮询 (力反馈开关 / 反射增益 / 调零请求)
         RelayCore::instance().pollRelayCommands();
+
+        // MATLAB 的 Zero 按钮: 在这里 (GLUT 线程) 消费, 走与键盘 'z' 完全同一个函数。
+        // 为什么不在 pollRelayCommands 里直接做: g_noRobot / cancelOtherCaptureModes 是
+        // 本文件的 file-static (见 requestForceZero 顶上的说明)。
+        if (RelayCore::instance().consumeForceZeroRequest()) {
+            requestForceZero("MATLAB");
+        }
 
         // 控制台键盘轮询 (标定模式等操作不依赖 GLUT 窗口焦点)
         if (_kbhit()) {
@@ -3105,25 +3155,9 @@ void keyboard(unsigned char key, int, int) {
     // ===== 力传感器调零 ('z' key) =====
     // 'z': 静置采集零偏 → 直接应用+存盘。不进 MOTION 相、不开拖拽模式。再按一次中止。
     //      换装工具 (笔夹/笔) 后重新调零用这个。
+    // ★ 2026-09-22: 守卫链抽进 requestForceZero() —— MATLAB 的 Zero 按钮走【同一个函数】。
     if (key == 'z' || key == 'Z') {
-        auto& relay = RelayCore::instance();
-        if (relay.isForceZeroing()) {
-            relay.abortForceCalibration();
-            return;
-        }
-        if (relay.isForceCalibrating()) {
-            std::cout << "[Force] 力标定进行中 — 等它结束, 或按 'k' 中止" << std::endl;
-            return;
-        }
-        if (g_noRobot) {
-            std::cout << "[Force] --no-robot 模式下无法调零" << std::endl;
-            return;
-        }
-        cancelOtherCaptureModes('z');
-        if (relay.startForceZeroing()) {
-            std::cout << "[Force] 调零中: 保持机械臂静止, 采集完成后自动应用并存盘"
-                      << std::endl;
-        }
+        requestForceZero("键盘");
         return;
     }
 
@@ -3703,6 +3737,22 @@ int main(int argc, char* argv[]) {
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    // 1.5 加载力反射增益 (calib/force_tuning.json; 没有就用 Config.h 的默认值)
+    // ★★ 【必须在 initRelayReporting 之前】—— 那一步连上 MATLAB 后会立刻回读一次增益。
+    //   若在它之后加载, 回读报的是旧值而实际生效的是文件里的值, 且之后【没有任何事件】
+    //   会纠正它 ⇒ 界面显示 120、手上是 300, 无声地不一致。这正是本设计要消灭的状态。
+    // ★★ 而且它必须比"initRelayReporting 之前"更早 —— 真正【最先】回读的那一次不在 main()
+    //   里: 下面第 2 步的 initHapticDevice() → hdStartScheduler() 已经把【触觉实时线程】
+    //   起了起来, 那个线程每 Config::RELAY_UPDATE_INTERVAL 调一次 reportPosition() →
+    //   ensureRelayConnected(), 而那个函数的节流守卫 (lastTryMs != 0 && …) 对【首次】调用
+    //   必然放行 (lastTryMs 初值为 0) ⇒ 它一连上就会在触觉线程上发一条
+    //   sendReflectionGain(true)。所以只排到 initRelayReporting 前面是不够的, 必须早到
+    //   【触觉线程可能连上】之前 —— 也就是要排在 initHapticDevice() 前面, 即本步。
+    //   (同一条事实在 RelayCore.cpp 的 sendReflectionGain 文档块里也记着, 两处互为佐证。)
+    // ★ 也必须在 initForceReader 之前 —— 那里的 ForcePipeline::init() 会把增益斜坡就位;
+    //   晚了那 0.25 秒里增益是错的 (不会失控, 总夹还在, 但没必要)。
+    ForceTuning::loadOnStartup();
 
     // 2. 初始化 Touch 设备 (--no-touch 时跳过)
     if (g_noTouch) {
