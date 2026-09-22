@@ -269,6 +269,9 @@ namespace Config {
     //   净比例 = (3.3/200) × 运行时增益 = 0.0165 × gain (逐轴, 先过死区)。
     //   ⚠★ 那个增益【2026-09-22 起不是本文件的 FORCE_REFLECTION_GAIN】—— 流水线乘的是
     //     ForceTuning::gain() (force/ForceTuning.h), 本常数只剩"出厂默认/兜底"这一个角色。
+    //     ⚠ 严格说相乘的也不是 `gain()` 本身: 是 ForcePipeline::step 里那道斜坡变量 g_gainRamp,
+    //       它每帧朝 `gain()` 走最多 FORCE_GAIN_SLEW_PER_S / FORCE_FILTER_FS_HZ 个增益单位
+    //       ⇒ 只有【稳态】两者才相等, 别把上式读成"乘是瞬时的"。
     //     ⇒ 本行从前写的是 "(3.3/200) × FORCE_REFLECTION_GAIN = 0.0165 × 120 ≈ 1.98",
     //       那个 1.98 只是【默认档】的值, 不是流水线此刻在用的比例。
     //   把 ForceTuning 的范围 [GAIN_MIN, GAIN_MAX] 代进来 (范围的定义只有那一份, 本处不复述字面值):

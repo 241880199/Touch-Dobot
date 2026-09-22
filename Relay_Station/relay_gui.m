@@ -69,6 +69,13 @@ function relay_gui()
     %   不是回读本身, 所以标题行也拿它当判据 (见 updateTextPanels)。
     S.tuningDragging = false;   % 拖动中禁止回读移动滑块 (否则和手指打架)
     S.tuningLastSent = NaN;     % 最近一次发出去的值, 用于判断回读是否与请求不符 (拒收)
+    % ===== 断线丢弃的【报数限幅】(2026-09-22) =====
+    % 送不出去必须出声 (见 sendToClient), 但 ValueChangingFcn 拖动时每秒几十条 ⇒ 逐条出声
+    %   等于刷屏, 而本项目有成文教训: **被刷屏的控制台就是看不见的控制台**
+    %   (C++ → MATLAB 那条回读方向当初正是为这个才做了限频)。
+    % 这一对字段就是那个限幅的状态: 报过【第一声】之后同类命令只计数, 等连接状态一变再补报条数。
+    S.dropNotifiedKey = '';     % 已经报过"丢弃"的那【一类】命令 ('|' 前面那一段: RG / Z / FF)
+    S.dropQuiet       = struct();  % 类别 -> 被【压下去、没有逐条报】的条数 (等连接状态一变补报)
     % 3D 场景对象 (Task 7)
     S.linkMesh     = {};    S.linkPatch = gobjects(1,0);  S.linkHg = gobjects(1,0);
     S.stlLoaded    = false;
@@ -471,6 +478,9 @@ function relay_gui()
     end
 
     function onServerConnection(src, ~)
+        % 连接状态一变就是"上一段断线到此为止": 把被压下的丢弃条数补报出来并复位
+        % (无事时空操作)。⇒ 重连之后的第一条命令【一定】会重新出声, 不会被上一段压掉。
+        flushDropNotice();
         if src.Connected
             fprintf('[Relay] Touch client connected\n');
             lblConn.Text = 'C++ Client: CONNECTED';
@@ -572,13 +582,64 @@ function relay_gui()
         if ~isempty(S.server) && isvalid(S.server) && S.server.Connected
             try
                 write(S.server, uint8([cmd newline]), 'uint8');
+                flushDropNotice();   % 真的送出去了 ⇒ 断线那一段到此为止 (无事时是空操作)
             catch e
                 fprintf('[Relay] ERROR sending to client: %s\n', e.message);
             end
         else
-            fprintf(['[Relay] ⚠ 未发送 (C++ 客户端未连接), 该命令已【丢弃】: %s ' ...
-                     '—— 连接恢复后请重做一次\n'], cmd);
+            notifyDropped(cmd);
         end
+    end
+
+    % ===== 断线丢弃: 出声一次 + 按类别限幅 (2026-09-22) =====
+    % 机制: 每一类命令在【一段断线】里报【第一声】之后就不再逐条出声, 只累加条数;
+    %   连接状态一变 (真的发出去一条, 或连接断开/重连) 就把每类的条数补报出来并复位。
+    %   ⇒ 一次拖动 (不论多长、多少个回调) = 恒定 1 行; 补报最多每类 1 行 (本协议只有 RG/Z/FF)。
+    % 为什么不选"每隔 N 秒重复报一次": 那仍随拖动【时长】线性增长 —— 拖 10 秒就是十几行,
+    %   而本机制与拖动时长、回调频率【都无关】。
+    % 为什么按【类别】分: 拖动 (RG|) / [Zero] (Z|) / swFF (FF|) 是操作员三个独立的意图,
+    %   压掉其中任何一类都是新的静默 ⇒ 换类别必须重新出声。
+    % ⚠ 计数【不按类别分别清零】: 换类别只是让新类别出声, 旧类别的条数留着等补报 ——
+    %   否则"恢复时补报条数"这句承诺在"拖完再按 Zero"这种次序下就成了一句空话。
+
+    function key = cmdKey(cmd)
+        % 类别 = '|' 前面那一段 (FF / RG / Z)。本协议的命令都带 '|';
+        %   万一没有, 整条当类别 —— 只是分得粗一点, 不影响"每类只出声一次"。
+        % makeValidName: 这个 key 要当 S.dropQuiet 的字段名, 非法字符会让【报数】这一步抛错,
+        %   而报数正是"不许静默"的落点 ⇒ 宁可把类别名规整一下, 也不让那条路有抛错的形状。
+        key = cmd;
+        p = find(cmd == '|', 1);
+        if ~isempty(p), key = cmd(1:p-1); end
+        key = matlab.lang.makeValidName(key);
+    end
+
+    function notifyDropped(cmd)
+        key = cmdKey(cmd);
+        if ~strcmp(key, S.dropNotifiedKey)
+            fprintf(['[Relay] ⚠ 未发送 (C++ 客户端未连接), 该命令已【丢弃】: %s ' ...
+                     '—— 连接恢复后请重做一次\n' ...
+                     '[Relay]    (断线期间同类命令不再逐条刷屏, 恢复时补报条数)\n'], cmd);
+            S.dropNotifiedKey = key;
+        else
+            if ~isfield(S.dropQuiet, key), S.dropQuiet.(key) = 0; end
+            S.dropQuiet.(key) = S.dropQuiet.(key) + 1;
+        end
+    end
+
+    function flushDropNotice()
+        % 连接状态变了 (或真发出去了一条): 该把【被压下去的条数】补报出来, 然后复位。
+        % ⚠ 【不补发】—— 一条都没缓存: 这句日志说的是"要重做一次", 不是"稍后会自动补上"。
+        if isempty(S.dropNotifiedKey), return; end
+        keys = fieldnames(S.dropQuiet);
+        for k = 1:numel(keys)
+            n = S.dropQuiet.(keys{k});
+            if n > 0
+                fprintf(['[Relay] 断线期间另有 %d 条 %s 类命令被【丢弃】(未逐条刷屏), ' ...
+                         '没有缓存、不会补发 —— 需要重做一次\n'], n, keys{k});
+            end
+        end
+        S.dropNotifiedKey = '';
+        S.dropQuiet       = struct();
     end
 
     % ===== 主更新循环 =====

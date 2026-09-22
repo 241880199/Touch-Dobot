@@ -49,9 +49,11 @@ namespace ForceTuning {
 }
 ```
 
-⚠ 启动装载器叫 **`loadOnStartup()`**（无参、自己解析 `CalibStore` 的路径）。
-   `loadFromFile(const char*, double*)` 是**另一个**符号 —— 显式路径版，给测试用的，
-   两者不是同一个东西（这份规格早先把它写成了 `loadFromFile()`，已按实际 API 订正）。
+⚠ 启动装载器叫 **`loadOnStartup()`**（无参、自己解析 `CalibStore` 的路径、**会写模块状态**）。
+   `loadFromFile(const char*, double*)` 是**另一个**符号 —— 显式路径版、**纯读取**
+   （只写调用方给的 `outGain`，不碰模块里那个静态值），给测试用的。两者不是同一个东西。
+   ⚠ 这份规格早先**三处**都写成了 `loadFromFile()`（本段、§3 的"测试不调…"、§3 的接入点表），
+   2026-09-22 逐处订正完毕。**权威出处是 `force/ForceTuning.h`** —— 规格与它不一致时以它为准。
 
 - 值是 `static std::atomic<double> s_gain{ Config::FORCE_REFLECTION_GAIN };`
   **静态初值直接来自 `Config.h`，不读文件。**
@@ -79,14 +81,17 @@ namespace ForceTuning {
 否则"昨天现场拖到 200"会让测试红绿漂移 —— 这个坑项目里已经有过一次同形态的
 （`test_force_pipeline.cpp:98` 那句注释："那两个常数被重调时它会一直绿"）。
 
-⇒ **测试不调 `loadFromFile()`。** 这条要写进测试文件顶部。
+⇒ **测试不调 `loadOnStartup()`。** 这条要写进测试文件顶部。
+   （别把 `loadFromFile()` 一起禁掉：它**不碰任何静态状态**，测试正是靠它跑"落盘 → 读回"的
+   往返用例、以及"缺文件"与"文件不可用"那两条回落用例 —— 两个符号一个是启动路径、一个是测试路径，
+   禁错那个会把用例一起禁掉。）
 
 ### 接入点（三行）
 
 | # | 位置 | 改动 |
 |---|---|---|
 | 1 | `ForcePipeline.cpp:133` | `Config::FORCE_REFLECTION_GAIN` → `ForceTuning::gain()` |
-| 2 | `main.cpp` 启动处 | `ForceTuning::loadFromFile();` |
+| 2 | `main.cpp` 启动处 | `ForceTuning::loadOnStartup();`（无参那个，不是显式路径版） |
 | 3 | `RelayCore::pollRelayCommands()` 开头 | `ForceTuning::tick();`（借现成的空闲循环当防抖心跳，不新起线程/定时器） |
 
 `Config::FORCE_REFLECTION_GAIN = 120.0` **保留不动**，语义改成"出厂默认 / 兜底值"，
