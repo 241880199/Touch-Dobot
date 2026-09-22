@@ -58,6 +58,13 @@ function relay_gui()
     S.viewSpanMax = 4000;
     S.server = [];
     S.ff_enabled = true;      % 力反馈开关状态 (A组=true / B组=false)
+    % ===== 力反射增益调参 (2026-09-22) =====
+    % 真值【只在 C++ 那一侧】。下面这些字段只是【显示缓存】, 全部由 RG| 回读刷新 ——
+    % 绝不当作"我设过什么"的记忆使用 (那正是无声不一致的入口)。
+    S.tuning = struct('gain', NaN, 'min', NaN, 'max', NaN, 'ratio', NaN, ...
+                      'deadN', NaN, 'satN', NaN, 'defGain', NaN, 'known', false);
+    S.tuningDragging = false;   % 拖动中禁止回读移动滑块 (否则和手指打架)
+    S.tuningLastSent = NaN;     % 最近一次发出去的值, 用于判断回读是否与请求不符 (拒收)
     % 3D 场景对象 (Task 7)
     S.linkMesh     = {};    S.linkPatch = gobjects(1,0);  S.linkHg = gobjects(1,0);
     S.stlLoaded    = false;
@@ -173,8 +180,8 @@ function relay_gui()
     lblForceRaw.Layout.Row = 2;  lblForceRaw.Layout.Column = 1;
 
     % -- Row 3: 滤波力 --
-    pnlFF = uigridlayout(glMid, [3 1]);
-    pnlFF.RowHeight = {22, 26, '1x'};
+    pnlFF = uigridlayout(glMid, [4 1]);
+    pnlFF.RowHeight = {22, 26, 40, '1x'};
     pnlFF.Padding = [4 0 4 2];  pnlFF.RowSpacing = 0;
     pnlFF.BackgroundColor = clr.bg_panel;
     pnlFF.Layout.Row = 3;  pnlFF.Layout.Column = 1;
@@ -202,7 +209,50 @@ function relay_gui()
         'Fx:   0.00 N   Fy:   0.00 N   Fz:   0.00 N'}, ...
         'FontColor', clr.text_dim, 'FontSize', 10, ...
         'VerticalAlignment', 'top', 'FontName', 'Consolas');
-    lblForceFilt.Layout.Row = 3;  lblForceFilt.Layout.Column = 1;
+    lblForceFilt.Layout.Row = 4;  lblForceFilt.Layout.Column = 1;
+
+    % -- 力反射增益调参 (2026-09-22) --
+    % 标题行显示【响应窗口】而不是单个饱和点 —— 只给上沿会把死区那个前提藏起来:
+    %   gain 300 时窗口是 0.20–0.67N, 死区占了 30%, 可区分的只剩一条缝。
+    % 窗口的两个数与比例全部来自 C++ 的 RG| 回读, 本文件【一个魔数都不写】。
+    pnlGain = uigridlayout(pnlFF, [2 1]);
+    pnlGain.RowHeight = {15, 25};
+    pnlGain.Padding = [0 0 0 0];  pnlGain.RowSpacing = 0;
+    pnlGain.BackgroundColor = clr.bg_panel;
+    pnlGain.Layout.Row = 3;  pnlGain.Layout.Column = 1;
+
+    lblGainTitle = uilabel(pnlGain, 'Text', 'Reflection Gain — 等待 C++…', ...
+        'FontColor', clr.text_dim, 'FontSize', 9, 'FontName', 'Consolas');
+    lblGainTitle.Layout.Row = 1;  lblGainTitle.Layout.Column = 1;
+
+    pnlGainCtl = uigridlayout(pnlGain, [1 4]);
+    pnlGainCtl.ColumnWidth = {'1x', 58, 58, 44};
+    pnlGainCtl.Padding = [0 0 0 0];  pnlGainCtl.RowSpacing = 0;  pnlGainCtl.ColumnSpacing = 3;
+    pnlGainCtl.BackgroundColor = clr.bg_panel;
+    pnlGainCtl.Layout.Row = 2;  pnlGainCtl.Layout.Column = 1;
+
+    % 上下限先随便给一个占位值, 但控件【禁用】—— 收到第一次 RG| 回读才用 C++ 给的
+    % 真实范围打开。不猜上下限。
+    sldGain = uislider(pnlGainCtl, 'Limits', [100 300], 'Value', 120, ...
+        'MajorTicks', [100 200 300], 'MajorTickLabels', {}, 'Enable', 'off', ...
+        'ValueChangingFcn', @(s,e) onGainChanging(e.Value), ...
+        'ValueChangedFcn',  @(s,e) onGainChanged(e.Value));
+    sldGain.Layout.Row = 1;  sldGain.Layout.Column = 1;
+
+    edGain = uieditfield(pnlGainCtl, 'numeric', 'Value', 120, ...
+        'Limits', [100 300], 'Enable', 'off', ...
+        'FontName', 'Consolas', 'FontSize', 10, ...
+        'ValueChangedFcn', @(s,e) onGainChanged(e.Value));
+    edGain.Layout.Row = 1;  edGain.Layout.Column = 2;
+
+    btnGainDefault = uibutton(pnlGainCtl, 'Text', 'Default', 'FontSize', 9, ...
+        'Enable', 'off', 'ButtonPushedFcn', @(~,~) onGainDefault());
+    btnGainDefault.Layout.Row = 1;  btnGainDefault.Layout.Column = 3;
+
+    % Zero 与键盘 'z' 【同语义】: 再按一次 = 中止。不在 GUI 里发明第二种语义。
+    btnZero = uibutton(pnlGainCtl, 'Text', 'Zero', 'FontSize', 9, ...
+        'ButtonPushedFcn', @(~,~) onZeroPressed());
+    btnZero.Layout.Row = 1;  btnZero.Layout.Column = 4;
 
     % -- Row 4: 力历史迷你图 --
     pnlFH = uigridlayout(glMid, [2 1]);
@@ -428,6 +478,39 @@ function relay_gui()
         end
     end
 
+    % ===== 力反射增益 (2026-09-22) =====
+    % 真值在 C++。这里只做两件事: 把用户意图发过去、把回读显示出来。
+
+    function onGainChanging(v)
+        % 拖动中: 实时下发 —— 拖的过程手上就能感觉到 (C++ 那道 0.25s 斜坡把它摊平)
+        S.tuningDragging = true;
+        S.tuningLastSent = v;
+        sendToClient(sprintf('RG|%.4f', v));
+    end
+
+    function onGainChanged(v)
+        % 松手 / 编辑框提交: 再发一次。幂等, 保证最后一条一定到
+        % (拖动中被 C++ 限频挡下的那条, 由它的补发机制兜住)。
+        S.tuningDragging = false;
+        S.tuningLastSent = v;
+        sendToClient(sprintf('RG|%.4f', v));
+    end
+
+    function onGainDefault()
+        % ★ 【不硬编码 120】—— 用 C++ 回读里的 defGain。
+        %   硬编码的话, Config.h 的默认值一改, 这个按钮就与"默认"无关了 ——
+        %   而它做的正是"送回默认值"这件事。
+        if ~S.tuning.known, return; end
+        S.tuningDragging = false;
+        S.tuningLastSent = S.tuning.defGain;
+        sendToClient(sprintf('RG|%.4f', S.tuning.defGain));
+    end
+
+    function onZeroPressed()
+        % 与键盘 'z' 同语义 (C++ 那边负责"再按一次 = 中止")
+        sendToClient('Z|1');
+    end
+
     function sendToClient(cmd)
         if ~isempty(S.server) && isvalid(S.server) && S.server.Connected
             try
@@ -510,6 +593,68 @@ function relay_gui()
                     vals = sscanf(msg(3:end), '%d,%f');
                     if length(vals) == 2
                         S.calib_enabled = (vals(1) == 1); S.calib_rms = vals(2);
+                    end
+                elseif startsWith(msg, 'RG|')
+                    % ★ 七个字段【按位置】解析 —— 线上没有字段名, 错一位就整排错。
+                    %   前缀 'RG|' 是【三个】字符 ⇒ 值从第 4 个字符起 (msg(4:end))。
+                    %   写成 msg(3:end) 会让第一个字段变成 '|120' ⇒ NaN, 整排跟着错位。
+                    vals = str2double(split(msg(4:end), ','));
+                    % 可用 = 字段数够 且 全是数 且 上下限真的构成一个区间。
+                    %   最后一条不能省: Limits 反了 uislider 会直接抛错, 而那会把整个
+                    %   收包循环打断 (外层 try 兜住 ⇒ 那一拍的所有消息都丢)。
+                    if numel(vals) >= 7 && all(~isnan(vals)) && vals(2) < vals(3)
+                        wasKnown = S.tuning.known;
+                        S.tuning.gain    = vals(1);
+                        S.tuning.min     = vals(2);
+                        S.tuning.max     = vals(3);
+                        S.tuning.ratio   = vals(4);
+                        S.tuning.deadN   = vals(5);
+                        S.tuning.satN    = vals(6);
+                        S.tuning.defGain = vals(7);
+                        S.tuning.known   = true;
+
+                        if ~wasKnown
+                            % 第一次回读: 用 C++ 给的上下限把控件打开 —— 不猜
+                            sldGain.Limits = [S.tuning.min S.tuning.max];
+                            edGain.Limits  = [S.tuning.min S.tuning.max];
+                            sldGain.MajorTicks = ...
+                                linspace(S.tuning.min, S.tuning.max, 5);
+                            sldGain.MajorTickLabels = {};
+                            sldGain.Enable = 'on';
+                            edGain.Enable  = 'on';
+                            btnGainDefault.Enable = 'on';
+                            fprintf('[Relay] 增益控件已启用: 范围 [%.0f, %.0f], 当前 %.1f\n', ...
+                                S.tuning.min, S.tuning.max, S.tuning.gain);
+                        end
+
+                        % 拒收: 回读与我们刚发的不符 ⇒ 说清原因。
+                        % 数字全部来自这条回读, 本文件不写 100/300。
+                        % ⚠ 只有"不符"【还不够】—— 回读是 C++ 限频发出来的 (≥100ms 一条),
+                        %   所以拖动中/刚松手时队列里躺着的那条报的是【几步之前】的值,
+                        %   它与"被拒"长得一模一样。再加两个前置条件:
+                        %     · 正在拖动 ⇒ 一律不判 (手指还在动, 回读必然滞后);
+                        %     · 我们发的那个值得【落在回读给出的范围之外】才可能被拒
+                        %       —— C++ 只按范围拒 (ForceTuning::setGain 校验 [min,max])。
+                        if ~S.tuningDragging && ~isnan(S.tuningLastSent) && ...
+                           (S.tuningLastSent < S.tuning.min || ...
+                            S.tuningLastSent > S.tuning.max) && ...
+                           abs(S.tuning.gain - S.tuningLastSent) > 1e-6
+                            fprintf(['[Relay] 增益 %.1f 被拒 —— 可取范围 ' ...
+                                     '[%.0f, %.0f], 仍是 %.1f\n'], ...
+                                S.tuningLastSent, S.tuning.min, ...
+                                S.tuning.max, S.tuning.gain);
+                        end
+
+                        if ~S.tuningDragging
+                            % 拖动中不动滑块 —— 否则回读会和手指打架
+                            sldGain.Value = S.tuning.gain;
+                            edGain.Value  = S.tuning.gain;
+                        end
+                    else
+                        % 不静默: 回读坏了必须看得见 —— 否则界面会一直停在"等待 C++…",
+                        %   而没人知道为什么。这正是本项目最忌的"无声失败"。
+                        fprintf(['[Relay] RG| 回读不可用 (字段数/数值/上下限 ' ...
+                                 '其一不对), 已忽略: %s\n'], msg);
                     end
                 elseif startsWith(msg, 'FB|')
                     S.fb_idx = mod(S.fb_idx, 50) + 1;
@@ -847,6 +992,17 @@ function relay_gui()
         S.warn_max_level = 0;
 
         lblSafety.Text = safetyLines;
+
+        % -- 力反射增益 (2026-09-22) --
+        % 把 C++ 回读的三个展示量写成一行 (净比例 + 响应窗口)。
+        % 显示【窗口】而不是单个饱和点 —— satN 单给一个数会把死区那个前提藏起来
+        % (gain 300 时窗口只有 0.20–0.67N, 死区占了 30%)。
+        % ⚠ "该轴分量"这句不能省: HapticCallback 是【三个轴各自夹】, 不是夹合力。
+        if S.tuning.known
+            lblGainTitle.Text = sprintf( ...
+                'Reflection Gain  ≈%.2f:1   响应窗口 %.2f – %.2f N (该轴分量)', ...
+                S.tuning.ratio, S.tuning.deadN, S.tuning.satN);
+        end
     end
 
     function updateForceHistory()
