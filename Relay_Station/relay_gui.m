@@ -47,7 +47,7 @@ function relay_gui()
     %   ⇒ 判不了就别猜, 给现场一个一行的判据: 改成 false 重跑一次 ——
     %     拖动能回来 ⇒ 就是它 (那时我换成别的方式做放缩);
     %     回不来     ⇒ 与它无关, 我从别处查 (那时请把"上一次能拖动是什么时候"告诉我)。
-    S.useWheelZoom = true;
+    S.useWheelZoom = false;   % ★ 2026-09-22 现场判定用: 见上面那三行 —— 这一趟跑完按结论定回来
     S.viewCenter  = [0 0 400];   % mm
     % 边长 1400 -> 1000 (2026-09-21 现场: "模型太小了")。等边长 + 中心 z=400 ⇒
     %   x/y ∈ [-500,500], z ∈ [-100,900] —— 纵向仍然盖得住 CR3 总高 795, 而模型在画面里大 1.4 倍。
@@ -726,11 +726,31 @@ function relay_gui()
         % -- Robot State --
         rp = S.robot_pos; rt = S.robot_target; ja = S.joint_angles;
         txActive = any(rt(1:3) ~= 0);
+
+        % -- 笔杆 (Touch) 姿态 --
+        % P| 那条消息【本来就】带这三个角: C++ 侧发的是 P|x,y,z,sx,sy,sz
+        % (RelayCore.cpp 的 sendRelayUpdate), 而这里从前只用 tp(1:3) 去画那支笔, 后三个一直没用。
+        % 2026-09-22 加: 现场判"按钮2 大幅晃动"的【Euler 退化】假设要用它 ——
+        %   C++ 侧姿态跟随用 Euler 角作差, 提取式 ry = asin(-R[2][0]), 在 ry ≈ ±90° 附近 rx/rz 退化
+        %   (奇点分支直接把 rz 定成 0) ⇒ 微小的物理转动会产出巨大的角度差 ⇒ 缓慢转动也大幅晃。
+        %   ⇒ 【Ry 接近 ±90° 就是那个假设成立的线索】。同一读数在 C++ 侧也能看: 'm' 模式按 SPACE
+        %     会打一行 "笔杆姿态 Rx=.. Ry=.. Rz=.." —— 但那是【快照】, 这里是【连续】的。
+        % ⚠ 注意这两组角是【两个不同的设备】: 上面 Orientation 是机械臂的 (来自 RP|),
+        %   这一行是手写笔的 (来自 P|) —— 别混着比。
+        tp = S.touch_pos;
+        stylusLine = sprintf('Stylus (deg):     Rx: %7.2f  Ry: %7.2f  Rz: %7.2f', ...
+            tp(4), tp(5), tp(6));
+        if abs(abs(tp(5)) - 90) <= 20            % |Ry| ∈ [70,110]: 判据取 ±20° 的环带
+            stylusLine = [stylusLine '  <== |Ry| near 90: Euler 退化'];
+        end
+
         lblCoord.Text = {
             sprintf('Position (mm):    X: %8.2f  (target: %8.2f)', rp(1), rt(1));
             sprintf('                   Y: %8.2f  (target: %8.2f)', rp(2), rt(2));
             sprintf('                   Z: %8.2f  (target: %8.2f)', rp(3), rt(3));
             sprintf('Orientation (deg): Rx: %7.2f  Ry: %7.2f  Rz: %7.2f', rp(4), rp(5), rp(6));
+            '';
+            stylusLine;
             '';
             sprintf('Joints (deg):  J1:%7.1f  J2:%7.1f  J3:%7.1f', ja(1:3));
             sprintf('               J4:%7.1f  J5:%7.1f  J6:%7.1f', ja(4:6));
