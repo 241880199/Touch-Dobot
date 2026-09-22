@@ -42,11 +42,27 @@ static void test_residual_deadzone() {
     PASS();
 }
 
+// 增益用例会改【全局】的 ForceTuning::gain(), 而 CHECK 失败会立刻 return ——
+//   ⇒ 若把复原写在用例末尾, 一条红会让后面【每个】用例都跟着红。
+//   【实测证据 (负对照, 2026-09-22)】把斜坡关掉 (step 里直接 snap) 那一版: 除了本条红,
+//     saturation 与 coord_transform 也红了 —— 它们期望的是默认增益 120, 而失败的斜坡用例
+//     提前 return 时 gain 还停在 300。那两条其实无辜, 却把"病因"指错了地方。
+//   ⇒ 把复原绑在作用域上: 无论正常走完还是中途 return 都会执行。
+struct GainScope {
+    const double saved;
+    GainScope() : saved(ForceTuning::gain()) {}
+    ~GainScope() {
+        ForceTuning::setGain(saved);
+        ForcePipeline::init();   // 顺带把斜坡与滤波器复位 (与旧用例的手工复原等价)
+    }
+};
+
 // 2026-09-22: 增益旋钮【真的接上了】的证据。
 // 【为什么必须有这条】只断言 ForceTuning::setGain 的返回值不构成证据 —— 那证明的是
 //   "模块内部一致", 不是"ForcePipeline 真的读它"。本项目踩过"先确认它真的被执行过"的亏。
 static void test_gain_actually_changes_output() {
     TEST(gain_actually_changes_output);
+    GainScope gainScope;   // 中途 CHECK 失败也要把增益复原 (见上面那段)
 
     AppState::ForceData fd;
     for (int i = 0; i < 6; i++) { fd.compensated[i] = 0.0; }
@@ -72,6 +88,7 @@ static void test_gain_actually_changes_output() {
 // 判据取一个区间而不是精确帧数 —— 精确值会随常数微调而红, 那不是缺陷。
 static void test_gain_ramp_is_gradual() {
     TEST(gain_ramp_is_gradual);
+    GainScope gainScope;   // 中途 CHECK 失败也要把增益复原 (见上面那段)
 
     AppState::ForceData fd;
     for (int i = 0; i < 6; i++) { fd.compensated[i] = 0.0; }
@@ -95,7 +112,7 @@ static void test_gain_ramp_is_gradual() {
     CHECK(frames >= 20);                         // 必须【不是一步到位】—— 否则斜坡是假的
     CHECK(frames <= 45);                         // 也别慢得离谱 (理论 31 帧)
 
-    ForceTuning::setGain(Config::FORCE_REFLECTION_GAIN);   // 复原, 免得污染后面的用例
+    ForceTuning::setGain(Config::FORCE_REFLECTION_GAIN);   // 复原 (GainScope 也会做一次; 这里显式写出来是为了读出意图)
     ForcePipeline::init();
     PASS();
 }
