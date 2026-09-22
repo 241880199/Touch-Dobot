@@ -32,6 +32,16 @@ rem   !ERRORLEVEL! is expanded at RUN time and compared numerically with
 rem   EQU, so it is correct for passing, failing AND crashing suites.
 rem   The OUTER (build-exit) checks are top-level statements, are NOT
 rem   affected by delayed expansion, and are correct as they are.
+rem
+rem WHY "@echo off" FOLLOWS EVERY "call" BELOW (do not delete those lines):
+rem   Each build script starts with "@echo on", and that switch is GLOBAL to
+rem   the cmd session, so it survives the call. Without restoring it, this
+rem   file's own lines get echoed into the output -- including "echo   [FAIL]"
+rem   from the branch that was NOT taken. A fully GREEN log would then contain
+rem   the literal text "echo   [FAIL]", a false alarm for anything scraping the
+rem   log for that marker. Restoring echo off never suppresses the markers
+rem   themselves: "echo x" still PRINTS x -- only the echoing of the command
+rem   line is suppressed.
 rem ============================================================
 
 echo ================================================
@@ -40,6 +50,7 @@ echo ================================================
 echo.
 echo --- Building test_force_compensation ---
 call "%TESTDIR%\build_force_comp_test.bat"
+@echo off
 if %ERRORLEVEL% EQU 0 (
     echo   Build OK
     echo.
@@ -64,6 +75,7 @@ echo ================================================
 echo.
 echo --- Building test_relay_command_parser ---
 call "%TESTDIR%\build_relay_command_test.bat"
+@echo off
 if %ERRORLEVEL% EQU 0 (
     echo   Build OK
     echo.
@@ -83,6 +95,7 @@ if %ERRORLEVEL% EQU 0 (
 echo.
 echo --- Building test_force_logger ---
 call "%TESTDIR%\build_force_logger_test.bat"
+@echo off
 if %ERRORLEVEL% EQU 0 (
     echo   Build OK
     echo.
@@ -102,6 +115,7 @@ if %ERRORLEVEL% EQU 0 (
 echo.
 echo --- Building test_tcp_calibration ---
 call "%TESTDIR%\build_tcp_calibration_test.bat"
+@echo off
 if %ERRORLEVEL% EQU 0 (
     echo   Build OK
     echo.
@@ -133,6 +147,7 @@ rem ============================================================
 
 echo --- Building test_force_pipeline ---
 call "%TESTDIR%\build_force_pipeline_test.bat"
+@echo off
 if %ERRORLEVEL% EQU 0 (
     echo   Build OK
     echo.
@@ -153,6 +168,7 @@ echo.
 
 echo --- Building test_feedback_parser ---
 call "%TESTDIR%\build_feedback_parser_test.bat"
+@echo off
 if %ERRORLEVEL% EQU 0 (
     echo   Build OK
     echo.
@@ -173,6 +189,7 @@ echo.
 
 echo --- Building test_escalation ---
 call "%TESTDIR%\build_escalation_test.bat"
+@echo off
 if %ERRORLEVEL% EQU 0 (
     echo   Build OK
     echo.
@@ -193,6 +210,7 @@ echo.
 
 echo --- Building test_kinematics ---
 call "%TESTDIR%\build_kinematics_test.bat"
+@echo off
 if %ERRORLEVEL% EQU 0 (
     echo   Build OK
     echo.
@@ -213,6 +231,7 @@ echo.
 
 echo --- Building test_coord_safety ---
 call "%TESTDIR%\build_coord_safety_test.bat"
+@echo off
 if %ERRORLEVEL% EQU 0 (
     echo   Build OK
     echo.
@@ -235,17 +254,21 @@ rem ============================================================
 rem test_constraint_force: NOT BUILT AND NOT RUN BY THIS HARNESS.
 rem   Its build script (build_constraint_test.bat) is excluded by
 rem   Touch_Client/tests/.gitignore line 1, so it is NOT in HEAD and does
-rem   not exist on a fresh clone. Nothing in the tree can build
-rem   this suite's exe, so running the exe here would present a stale
-rem   binary as evidence -- the exact failure mode this harness was
-rem   fixed to remove. Pending a decision on that .gitignore line.
+rem   not exist on a fresh clone. Nothing COMMITTED can build this suite's
+rem   exe. (The ignored script DOES exist locally and DOES work -- which is
+rem   exactly why this is a repository-hygiene gap, not a broken suite.)
+rem   Running the exe here would present a stale binary as evidence -- the
+rem   exact failure mode this harness was fixed to remove. Pending a
+rem   decision on that .gitignore line.
 rem   (Previously this suite WAS run here, from a prebuilt binary that
 rem    nothing rebuilt. Removing it makes the gap visible instead of
 rem    silently producing false evidence.)
+rem   See also the [NOT RUN] block printed at the end of each run.
 rem ============================================================
 
 echo --- Building test_safety_core ---
 call "%TESTDIR%\build_safety_core_test.bat"
+@echo off
 if %ERRORLEVEL% EQU 0 (
     echo   Build OK
     echo.
@@ -266,6 +289,7 @@ echo.
 
 echo --- Building test_session_report ---
 call "%TESTDIR%\build_session_report_test.bat"
+@echo off
 if %ERRORLEVEL% EQU 0 (
     echo   Build OK
     echo.
@@ -286,6 +310,7 @@ echo.
 
 echo --- Building test_noise_probe ---
 call "%TESTDIR%\build_noise_probe_test.bat"
+@echo off
 if %ERRORLEVEL% EQU 0 (
     echo   Build OK
     echo.
@@ -308,8 +333,44 @@ echo ================================================
 echo   Tests complete
 echo ================================================
 echo ================================================
-echo   Summary: %PASSED% suite(s) OK, %FAILED% suite(s) FAILED
+set /a TOTAL=PASSED+FAILED
 echo ================================================
+echo   Summary: %TOTAL% of 20 suites run - %PASSED% OK, %FAILED% FAILED
+echo ================================================
+echo.
+rem ------------------------------------------------------------
+rem [NOT RUN] -- the suites this harness does NOT build or run. Kept in the RUN
+rem   LOG (not only in the source) so that a green run cannot be misread as
+rem   "every suite in this repository is green".
+rem
+rem   The "20" and the "8" below are HAND-MAINTAINED -- nothing computes them.
+rem   To recompute: test_*.cpp in the repo = 20; sections wired in below = 12;
+rem   20 - 12 = 8 not run. If you wire one in, update BOTH numbers here AND the
+rem   "12" that the MISMATCH check further down asserts.
+rem ------------------------------------------------------------
+echo   [NOT RUN] 8 of the 20 test_*.cpp in this repo are not built or run here:
+echo.
+echo     test_constraint_force
+echo       Its build script is ignored by Touch_Client/tests/.gitignore line 1, so
+echo       it is NOT in HEAD -- nothing COMMITTED can build this suite's exe.
+echo       (Undecided; see the gap note further up this file.)
+echo.
+echo     test_payload_calibration
+echo       Has a DELIBERATELY RED assertion: its fixture carries no reference-
+echo       channel columns, so the case cannot be decided either way. Wiring it
+echo       in would make this harness exit non-zero forever. Known, not a bug.
+echo.
+echo     test_calib_store / test_calibration / test_frame_layout /
+echo     test_inertia_identification / test_self_collision /
+echo     test_singularity_avoidance
+echo       These six have WORKING build scripts and currently pass; nothing ever
+echo       wired them in. Same orphan defect class this harness just fixed for
+echo       five other suites -- they belong in the next plan, not silently absent.
+echo.
+echo   A green line above therefore means "the 12 suites that ran all passed".
+echo   It does NOT mean every suite in this repository is green.
+echo ================================================
+echo.
 
 rem ------------------------------------------------------------
 rem Report the result to the CALLER, not only to stdout.
@@ -320,7 +381,6 @@ rem  * The script must exit NON-ZERO when anything failed. Without this, cmd
 rem    returns 0 after a failing command and the harness always looks green
 rem    to whatever ran it (CI, another script, a human checking the code).
 rem ------------------------------------------------------------
-set /a TOTAL=PASSED+FAILED
 set "HARNESS_RC=%FAILED%"
 if %TOTAL% NEQ 12 (
     echo ================================================
