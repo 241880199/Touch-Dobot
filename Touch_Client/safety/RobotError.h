@@ -120,7 +120,7 @@ inline Severity getSeverity(RobotErrorCode code) {
         // 一致性闸门: 语义就是 REJECT 的字面意思 ——「拒绝该帧运动」。
         // ⚠ 2026-09-19 复审更正: 这里【现在根本不消费严重度】, 所以"为什么选 REJECT 而不是
         //   FATAL"这个问题在本轮【没有实际后果】, 写在前一版里的理由也就站不住 ——
-        //   事实是: 报错走的是 RobotDiagnostics::logError (RobotDiagnostics.cpp:94-110),
+        //   事实是: 报错走的是 RobotDiagnostics::logError (RobotDiagnostics.cpp:94-119),
         //   它只做两件事 —— 写日志 + RelayCore::reportDiagnostic 发一条 D| 帧给 MATLAB;
         //   它【不调用】RobotStateMachine::onError。也就是说这里填 FATAL 同样不会
         //   DisableRobot, 填 REJECT 也不会"拒绝该帧运动" —— 两条路的【效果】完全一样。
