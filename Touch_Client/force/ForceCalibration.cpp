@@ -529,7 +529,7 @@ bool saveToFile(const char* path, const double A[9], const double biasForce[3],
     return true;
 }
 
-// 读一个长度为 n 的浮点数组 (jsonFind 已定位到 '[' 之后的第一个字符)。
+// 读一个长度为 n 的浮点数组 (JsonLite::find 已定位到 '[' 之后的第一个字符)。
 static bool jsonReadArray(const char* p, double* out, int n) {
     if (!p) return false;
     if (*p == '[') p++;

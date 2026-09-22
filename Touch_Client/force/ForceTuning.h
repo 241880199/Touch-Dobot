@@ -17,7 +17,10 @@ namespace ForceTuning {
     // 代价如实说: 拖完立刻杀进程, 最后 1 秒的改动会丢。
     constexpr unsigned long TUNING_DEBOUNCE_MS = 1000;
 
-    // 出厂默认 = Config::FORCE_REFLECTION_GAIN (Config.h:223)。
+    // 出厂默认 = Config::FORCE_REFLECTION_GAIN (在 Touch_Client/config/Config.h 里)。
+    // ⚠ 【故意不写行号】—— 本文件诞生的那次提交就把那个行号推漂了 (223 → 229,
+    //   因为同一提交往 Config.h 加了注释)。这类引用一次一处地烂, 所以只给文件名与符号名,
+    //   要行号就现场 grep。本项目有成文教训: 常数与行号一样脆, 引用前回源头核。
     // ⚠ 【优先级】calib/force_tuning.json > Config.h 的默认值。
     //   改了 Config.h 却"没反应", 先看这一行和启动横幅打出的来源。
     double defaultGain();
