@@ -11,6 +11,7 @@
 #include <cmath>
 #include <windows.h>
 #include "../force/ForcePipeline.h"
+#include "../force/ForceTuning.h"
 #include "../config/Config.h"
 
 static int g_passed = 0, g_failed = 0;
@@ -38,6 +39,64 @@ static void test_residual_deadzone() {
     CHECK(fabs(fd.hapticOut[0]) < 0.01); // 软门把远低于门限的量压到基本为 0
     CHECK(fabs(fd.hapticOut[1]) < 0.01);
     CHECK(fabs(fd.hapticOut[2]) < 0.01);
+    PASS();
+}
+
+// 2026-09-22: 增益旋钮【真的接上了】的证据。
+// 【为什么必须有这条】只断言 ForceTuning::setGain 的返回值不构成证据 —— 那证明的是
+//   "模块内部一致", 不是"ForcePipeline 真的读它"。本项目踩过"先确认它真的被执行过"的亏。
+static void test_gain_actually_changes_output() {
+    TEST(gain_actually_changes_output);
+
+    AppState::ForceData fd;
+    for (int i = 0; i < 6; i++) { fd.compensated[i] = 0.0; }
+    fd.compensated[0] = 1.0;              // 1.0 N 远在死区 0.20 之上 ⇒ softDeadzone 原样返回
+    fd.lastUpdateMs = GetTickCount();
+
+    // gain = 300: 输出 = 1.0 × (3.3/200) × 300 = 4.95, 横向符号 −1 ⇒ −4.95
+    ForceTuning::setGain(300.0);
+    ForcePipeline::init();                // 让斜坡直接就位 (不然要等 0.25s)
+    for (int i = 0; i < 300; i++) ForcePipeline::step(fd);   // 让滤波器收敛
+    CHECK(fabs(fd.hapticOut[0] - (-4.95)) < 0.05);
+
+    // gain = 120: 同一个输入 ⇒ −1.98
+    ForceTuning::setGain(120.0);
+    ForcePipeline::init();
+    for (int i = 0; i < 300; i++) ForcePipeline::step(fd);
+    CHECK(fabs(fd.hapticOut[0] - (-1.98)) < 0.03);
+
+    PASS();
+}
+
+// 斜坡: 增益不是一步到位, 而是 800/秒 (⇒ 100→300 走 0.25s = 31 帧 @125Hz)。
+// 判据取一个区间而不是精确帧数 —— 精确值会随常数微调而红, 那不是缺陷。
+static void test_gain_ramp_is_gradual() {
+    TEST(gain_ramp_is_gradual);
+
+    AppState::ForceData fd;
+    for (int i = 0; i < 6; i++) { fd.compensated[i] = 0.0; }
+    fd.compensated[0] = 1.0;
+    fd.lastUpdateMs = GetTickCount();
+
+    ForceTuning::setGain(100.0);
+    ForcePipeline::init();                       // 斜坡就位在 100
+    for (int i = 0; i < 300; i++) ForcePipeline::step(fd);   // 先让滤波器收敛
+    const double at100 = fd.hapticOut[0];
+    CHECK(fabs(at100 - (-1.65)) < 0.03);         // 1.0 × 0.0165 × 100 = 1.65
+
+    // 跳到 300, 数多少帧才到位
+    ForceTuning::setGain(300.0);
+    int frames = 0;
+    while (fabs(fd.hapticOut[0] - (-4.95)) > 0.05 && frames < 200) {
+        ForcePipeline::step(fd);
+        frames++;
+    }
+    CHECK(frames < 200);                         // 必须【到达】—— 卡住说明斜坡没在动
+    CHECK(frames >= 20);                         // 必须【不是一步到位】—— 否则斜坡是假的
+    CHECK(frames <= 45);                         // 也别慢得离谱 (理论 31 帧)
+
+    ForceTuning::setGain(Config::FORCE_REFLECTION_GAIN);   // 复原, 免得污染后面的用例
+    ForcePipeline::init();
     PASS();
 }
 
@@ -208,6 +267,8 @@ static void test_soft_deadzone_shared_and_smooth() {
 int main() {
     std::cout << "=== ForcePipeline Unit Tests ===" << std::endl;
     test_residual_deadzone();
+    test_gain_actually_changes_output();
+    test_gain_ramp_is_gradual();
     test_soft_deadzone_no_jump();
     test_soft_deadzone_shared_and_smooth();
     test_saturation();

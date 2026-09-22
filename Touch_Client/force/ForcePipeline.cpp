@@ -1,6 +1,7 @@
 #define _USE_MATH_DEFINES
 #include "ForcePipeline.h"
 #include "../config/Config.h"
+#include "ForceTuning.h"
 #include <cmath>
 #include <algorithm>
 
@@ -49,6 +50,12 @@ double Butterworth2::step(double input) {
 static Butterworth2 g_filters[6];  // one per channel (Fx,Fy,Fz,Mx,My,Mz)
 static double g_prevFiltered[6] = {0};  // for gradient limiting
 
+// 增益斜坡的当前值 (向 ForceTuning::gain() 逼近)。
+// 【为什么状态在这里而不在 ForceTuning】斜坡是【信号处理】(与 FORCE_GRADIENT_LIMIT 同类),
+//   不是"参数" —— ForceTuning 只持有目标值。分开的直接好处: MATLAB 回读报的是目标值,
+//   界面上的数字不会自己动。
+static double g_gainRamp = 0.0;
+
 namespace ForcePipeline {
 
 void init() {
@@ -70,6 +77,9 @@ void init() {
         g_filters[i].reset();
         g_prevFiltered[i] = 0.0;
     }
+
+    // 让斜坡直接就位 —— 否则启动时增益会从 0 爬到目标值 (那 0.25 秒里手上力是错的)。
+    g_gainRamp = ForceTuning::gain();
 }
 
 // ★ 死区: 【唯一一份定义在 ForcePipeline.h】(softDeadzone) —— 别再在本文件里另写一份。
@@ -80,7 +90,9 @@ static inline double mapForceToTouch(double sensorForce) {
     // 软门 (见 softDeadzone 的说明 —— 硬门会在阈值处跳变, 现场表现为"读数在 0 与 0.2 之间跳")
     double v = softDeadzone(sensorForce, Config::FORCE_RESIDUAL_DEADZONE_N);
     // Linear mapping: 200N sensor -> 3.3N Touch
-    double ratio = Config::FORCE_MAX_TOUCH_N / Config::FORCE_MAX_SENSOR_N;
+    // ★ 2026-09-22: 改用 netRatioPerGainUnit() —— 3.3/200 这个比率【唯一一份定义】在
+    //   ForcePipeline.h (MATLAB 的 RG| 回读也要报它; 在这里再写一遍就是两份实现)。
+    const double ratio = netRatioPerGainUnit();
     double out = v * ratio;
     // Hard clamp
     if (out > Config::FORCE_MAX_TOUCH_N)  out = Config::FORCE_MAX_TOUCH_N;
@@ -130,9 +142,21 @@ void step(AppState::ForceData& fd) {
     // 5. Apply reflection gain (amplify for human perception)
     //    Typical contact forces (5-30N) → clearly perceptible (0.4-2.5N at Touch)
     //    Safety clamp at FORCE_MAX_TOUCH_N still applies in hapticCallback
-    double gain = Config::FORCE_REFLECTION_GAIN;
-    for (int i = 0; i < 3; i++) {
-        fd.hapticOut[i] *= gain;
+    //
+    //    ★ 2026-09-22: 增益来源从 Config 的编译期常量改成 ForceTuning 的运行时值,
+    //      并加一道斜坡 (见 Config::FORCE_GAIN_SLEW_PER_S)。
+    //      每帧最多动 (FORCE_GAIN_SLEW_PER_S / FORCE_FILTER_FS_HZ) 个增益单位。
+    {
+        const double target = ForceTuning::gain();
+        const double maxStep = Config::FORCE_GAIN_SLEW_PER_S / (double)Config::FORCE_FILTER_FS_HZ;
+        const double d = target - g_gainRamp;
+        if (d > maxStep)       g_gainRamp += maxStep;
+        else if (d < -maxStep) g_gainRamp -= maxStep;
+        else                   g_gainRamp = target;
+
+        for (int i = 0; i < 3; i++) {
+            fd.hapticOut[i] *= g_gainRamp;
+        }
     }
 }
 
@@ -140,6 +164,7 @@ void shutdown() {
     for (int i = 0; i < 6; i++) {
         g_filters[i].reset();
     }
+    g_gainRamp = 0.0;
 }
 
 } // namespace ForcePipeline

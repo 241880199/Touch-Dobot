@@ -1,5 +1,6 @@
 #pragma once
 #include "../core/AppState.h"
+#include "../config/Config.h"
 
 // 2nd-order Butterworth lowpass filter (biquad form)
 // One instance per channel, zero-phase initialization
@@ -38,6 +39,30 @@ namespace ForcePipeline {
         if (a >= threshold) return val;      // 门限以上: 原样 (不改幅值)
         const double r = a / threshold;      // 0..1
         return val * r * r;                  // 门限以下: 三次律平滑到 0
+    }
+
+    // ===== 净比例与打顶阈值 —— 【全程序唯一一份】=====
+    // 净比例 = FORCE_MAX_TOUCH_N / FORCE_MAX_SENSOR_N (逐单位增益)。现值 3.3/200 = 0.0165。
+    // 【为什么抽出来】MATLAB 的 RG| 回读要报 ratio 与 satN, 而这两个量都从 3.3/200 来。
+    //   若在 RelayCore 里再写一遍 3.3 和 200, 就是"同一个规则两份实现" ——
+    //   本项目有成文教训 (见上面 softDeadzone 那段)。
+    inline double netRatioPerGainUnit() {
+        return Config::FORCE_MAX_TOUCH_N / Config::FORCE_MAX_SENSOR_N;
+    }
+
+    // 该轴的打顶阈值 (传感器牛顿): 输出撞上 FORCE_MAX_TOUCH_N 那个夹子时的输入值。
+    //   = FORCE_MAX_TOUCH_N / (netRatioPerGainUnit() × gain) = 200/gain (gain=120 ⇒ 1.67N)
+    // ⚠ 两点前提, 界面上也要写:
+    //   (1) 【该轴分量】—— HapticCallback.cpp:228-234 是三个轴各自夹, 不是夹合力。
+    //   (2) 它依赖 FORCE_CONSTRAINT_FORCES_ENABLED = false。那个开关翻回 true
+    //       ⇒ totalForce 变成叠加值 ⇒ 夹点提前 ⇒ 这个数当场作废。
+    //       这是一句"当前状态"的结论, 不是恒等式。
+    //   ⚠ 本处【故意不写 Config.h 的行号】: 加这个常数的同一次提交就把它推漂了 (708 之后)。
+    //     要行号就现场 grep 符号名。本项目有成文教训: 常数与行号一样脆。
+    inline double saturationSensorN(double gain) {
+        const double ratio = netRatioPerGainUnit() * gain;
+        if (ratio <= 0.0) return 0.0;
+        return Config::FORCE_MAX_TOUCH_N / ratio;
     }
 
     // Call once: initialize filter coefficients

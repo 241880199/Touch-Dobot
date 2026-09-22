@@ -12,7 +12,10 @@ rem   That is exactly how a test rots: an .exe from July was sitting here with t
 rem   FORCE_REFLECTION_GAIN baked in, so running it would have verified nothing.
 rem   (Same class as the project's "what is not on disk does not exist".)
 rem Linked in on purpose: ForcePipeline.cpp is the unit under test.
+rem 2026-09-22: ForceTuning.cpp added (ForcePipeline now reads its gain from there);
+rem   CalibStore.cpp satisfies the linker for ForceTuning's CalibStore::fileFor references.
+rem   Without these two the link fails -- and a failed link must NOT be mistaken for a pass.
 rem NOTE: keep this file ASCII-only. Non-ASCII comments in a .bat get mis-decoded by
 rem cmd.exe under a non-UTF-8 codepage and can silently swallow the following line.
-cl /EHsc /std:c++17 /I"D:\Projects\Touch\OpenHaptics\Developer\3.5.0\include" /I"D:\Projects\Touch\OpenHaptics\Developer\3.5.0\utilities\include" /DWIN32 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /D_WINSOCK_DEPRECATED_NO_WARNINGS test_force_pipeline.cpp ..\force\ForcePipeline.cpp /Fe:test_force_pipeline.exe
+cl /EHsc /std:c++17 /I"D:\Projects\Touch\OpenHaptics\Developer\3.5.0\include" /I"D:\Projects\Touch\OpenHaptics\Developer\3.5.0\utilities\include" /DWIN32 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /D_WINSOCK_DEPRECATED_NO_WARNINGS test_force_pipeline.cpp ..\force\ForcePipeline.cpp ..\force\ForceTuning.cpp ..\core\CalibStore.cpp /Fe:test_force_pipeline.exe
 echo BUILD_EXIT=%ERRORLEVEL%

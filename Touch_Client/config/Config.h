@@ -289,6 +289,18 @@ namespace Config {
     //   (本次那份数据: 压纸时 comp 只有 z 显著动 (x −0.32 / y +0.05 / z −1.55) ⇒ 轴对应没露破绽。)
     const double FORCE_FEEDBACK_Z_SIGN = 0.0;
     const double FORCE_GRADIENT_LIMIT = 50.0;    // 梯度限幅 (N/frame)
+
+    // 力反射增益的【斜坡速率】(增益单位/秒)。2026-09-22 新增, 与 FORCE_GRADIENT_LIMIT 同类。
+    // 为什么要它: gain 从 120 拖到 300 时, 手上力会在一帧内变成 2.5 倍。
+    //   总夹 (±3.3N, HapticCallback.cpp:228) 一直在, 所以不会失控, 但那股突变是"没预备"的。
+    //   斜坡把它摊到 0.25 秒里 (800/秒 ⇒ 走完 100→300 的全程 200 个单位正好 0.25s)。
+    // ⚠ 与 FORCE_GRADIENT_LIMIT 的分工: 那个作用在 filtered[] 上, 【管不到增益之后】;
+    //   本常数作用在增益本身上。两者不重叠。
+    // ⚠ 每帧步长 = 本值 / FORCE_FILTER_FS_HZ (125) = 6.4, 而 FORCE_FILTER_FS_HZ 是
+    //   【流水线真实调用率】这个前提 ⇒ 换了调用率, 斜坡的实际时长跟着变 (0.25s 是
+    //   在 125 Hz 下算出来的)。见 ForcePipeline::step 第 5 步。
+    const double FORCE_GAIN_SLEW_PER_S = 800.0;
+
     const int FORCE_RECONNECT_INTERVAL = 2000;   // 断线重试间隔 (ms)
 
     // ========== 力传感器标定参数 ==========
