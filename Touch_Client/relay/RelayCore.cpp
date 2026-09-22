@@ -2004,6 +2004,8 @@ void RelayCore::reportFeedback(const char* fbText) {
 //     (lastTryMs != 0 && …) 对【首次】调用必然放行 ⇒ 连上就在【触觉线程上】调
 //     sendReflectionGain(true), 与 main() 自己在 initRelayReporting() 里的那一次重叠。
 //     ⇒ 这个调用点新加的状态同样要并发保护, 不能按"启动时是单线程"推断。
+//     （前提: 触觉设备已启用。`--no-touch` 下 initHapticDevice() 不跑 ⇒ 那条启动路径确实是
+//       单线程的; 上面的保守结论不受影响 —— 多一层原子没有代价。）
 //   ⇒ 下面三个状态必须是 atomic: 两个线程不同步地读写同一个非原子对象就是数据竞争 (UB)。
 //   残留的只是【次序】上的竞争, 而且无害 —— 这三个状态【不参与强制发送的决策】:
 //     · force=true 一个判断都不从它们取 (只写) ⇒ 交错最坏 = 多回一条、或晚回一条;
