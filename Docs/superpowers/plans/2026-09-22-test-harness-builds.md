@@ -568,6 +568,45 @@ tcp_calibration / safety_core / session_report / noise_probe）的内层判断�
       （对崩溃的负退出码判通过）⇒ 最终用的是 `if !ERRORLEVEL! EQU 0` + 延迟展开
       —— 见本文件 Task 4 里的"复审推翻了我给的第一版修法"那一节，以及 Task 5 的记录。
 
+---
+
+### Task 6（★ 最终复审的 Important，**用户 2026-09-22 批准**）：让"没跑的套件"在**日志里**可见
+
+**为什么**：`Summary: 12 suite(s) OK`，而仓里有 **20** 个 `test_*.cpp` —— **8 个根本没跑、
+只有 1 个有缺口注释** ⇒ 读日志的人可以把"12 OK"读成"套件都是绿的"。
+这正是本计划的主题在**另一处的同一个形状**：**测试床诚实地报告它跑了什么，但没说它没跑什么。**
+Task 2 只把"让缺口可见"用在了 `test_constraint_force` 一个身上，而且只做在**源码里**，
+**运行时日志里看不见**。
+
+**Files:** `Touch_Client/tests/run_tests.bat`（只这一个）
+
+- [ ] `Summary` 带上总数（例如 `12 of 20 suites run — 12 OK, 0 FAILED`）。
+      ⚠ **不要动 `TOTAL`/`MISMATCH` 断言**（它仍要断言 12 个被计数的段）。两个数字都是手维护的
+      （与既有的 `12` 同性质），在注释里写明。
+- [ ] 加一段 `[NOT RUN]`，**逐个点名**没跑的套件 + 一行原因。控制方数到 8 个：
+      `test_constraint_force`（构建脚本被 gitignore、不在 HEAD）、
+      `test_payload_calibration`（**有意留红** ⇒ 接进来会让测试床永远返回非零）、
+      以及 `test_calibration` / `test_calib_store` / `test_frame_layout` /
+      `test_inertia_identification` / `test_self_collision` / `test_singularity_avoidance`
+      —— **后六个有能用的构建脚本，只是从来没人把它们接进来**。
+      ⚠ **这就是本计划刚为五个套件修掉的那个"孤儿"缺陷类的同一形状** ⇒ **只做可见性，不要顺手接进来**；
+      它属于下一个计划。
+- [ ] `test_constraint_force` 缺口那句措辞："Nothing in the tree can build this suite's exe"
+      → "**nothing committed** can"（被忽略的那个脚本在本地确实存在、而且能用）。
+- [ ] （Minor，若与别的改动冲突可放弃）每个 build 脚本的 `@echo on` 会**穿过 `call`** ⇒
+      块体被回显进日志 ⇒ **全绿的日志里也含字面 `echo   [FAIL]`** ⇒ 文本抓取的消费者会**误报**
+      （朝安全方向错；锚定 grep 不受影响）。修法是每次 `call` 之后 `@echo off`。
+
+**验收（硬要求 —— 这个文件连续三轮复审每轮都查出新缺陷）**：
+- 正常跑：**12 个构建步**、12 × `BUILD_EXIT=0`、十二条 `Results:` 行**不变**、
+  `Summary` 显示总数、`[NOT RUN]` 恰好列出没跑的那些。
+- **负对照必须打在新增的文本上**：证明 `[NOT RUN]` 里**每一个名字确实没跑**、
+  而**每一个跑了的都出现在摘要里**。做法要说出来 —— ⚠ 而**"grep 返回 0 匹配"会让检查静默通过**
+  （今天我和实现者各被这个咬过一次）⇒ 用一个"匹配不到就响亮失败"的检查。
+- `TOTAL`/`MISMATCH` 控制仍会触发；**还原要无条件放在最前，不要挂在依赖 grep 的 `&&` 链后面**
+  （上一轮就是那样让文件一度处于"武装"状态）。
+- 纯 ASCII：不依赖 locale 的字节扫描 + **正对照**（否则扫描可能是瞎的）。
+
 ## 收尾
 
 - [ ] 全量跑一遍并把**逐套件**结果记进 `Docs/superpowers/specs/2026-09-22-test-harness-state.md`
