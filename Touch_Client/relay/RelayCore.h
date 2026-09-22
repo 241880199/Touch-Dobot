@@ -142,8 +142,12 @@ public:
     //   ⇒ MATLAB 永远不需要"记住"自己设过什么, 它只显示这里说的数
     //   ⇒"GUI 显示的值 ≠ 实际生效的值"这个状态【在结构上无法存在】。
     // 报的是【目标值】, 不是斜坡的瞬时值 (见 ForceTuning.h 顶上那段)。
-    // 限频: force=false 时距上次 <100ms 只记下待发, 由 pollRelayCommands 每帧补发 —— 拖动
-    //   滑条几十条/秒, 全回会堆在 MATLAB 侧; 而"最后一条一定到"由补发保证。
+    // 限频 (规格 §4): force=false 时【两条同时成立才发】——
+    //   ① 目标值相对上次真的发出去的那一条变了 (没变就没可报的), 且 ② 距上次发送 ≥100ms。
+    //   任一不满足就只记下待发 (值没变则把待发也清掉), 由 pollRelayCommands 每帧补发 ——
+    //   拖动滑条几十条/秒不会堆在 MATLAB 侧, 而"最后一条一定到"由补发保证。
+    //   force=true = 无条件发, 只用于连接 / 重连 —— 那两刻 MATLAB 手里什么都没有,
+    //   "值没变"在那里没有意义。
     void sendReflectionGain(bool force);
 
     // 调零请求 (Z| 协议)。只置标志 —— 真正的处置在 main.cpp 的 requestForceZero(),

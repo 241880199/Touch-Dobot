@@ -1986,20 +1986,43 @@ void RelayCore::reportFeedback(const char* fbText) {
     sendRelayUpdate(buf);
 }
 
-// 回读限频 (见 RelayCore.h 里的说明)。只由 GLUT idle 线程调 ⇒ 不需要原子。
-static DWORD s_lastGainReportMs = 0;
-static bool  s_gainReportPending = false;
+// 回读限频 (见 RelayCore.h 里的说明; 规格 §4 "回读限频")。只由 GLUT idle 线程调 ⇒ 不需要原子。
+//
+// force=false 时【两条都成立才发】(规格原文: "只在目标值真的变了、且距上次回读 ≥100ms"):
+//   ① 目标值相对【上次真的发出去的那一条】变了 —— 没变就没有可报的东西
+//   ② 距上次【发送】≥100ms —— 拖动滑条几十条/秒, 逐条回读会堆在 MATLAB 侧
+// 被挡下的那一条在这里只置标志, 由 pollRelayCommands 每帧补发 ⇒ 最后一条一定到。
+//
+// s_lastSentGain 初值刻意选 0 —— 那是 setGain 不会接受的值 ⇒ 在第一次 force=true 之前
+//   若有人用 force=false 进来, 它一定发得出去 (保守方向)。
+static DWORD  s_lastGainReportMs = 0;
+static double s_lastSentGain = 0.0;
+static bool   s_gainReportPending = false;
 
 void RelayCore::sendReflectionGain(bool force) {
     const DWORD now = GetTickCount();
-    if (!force && (now - s_lastGainReportMs) < 100) {
-        s_gainReportPending = true;   // 记下待发, 由 pollRelayCommands 补 —— 最后一条不丢
-        return;
+    const double g = ForceTuning::gain();
+    if (!force) {
+        // ① 值没变 ⇒ 不发。⚠ 这里必须【顺手清掉待发标志】: 一条被限频挡下的 A→B 之后值又变回 A,
+        //    此时"待发"已无事可做; 留着标志会让 pollRelayCommands 每帧都调进来、每帧都从这里
+        //    返回 ⇒ 标志卡在 true 再也不动 (无害, 但那个标志从此失去意义)。
+        if (g == s_lastSentGain) {
+            s_gainReportPending = false;
+            return;
+        }
+        // ② 距上次发送不足 100ms ⇒ 只记下待发。
+        //    ⚠ s_lastGainReportMs 【不】在这里更新: 它记的是"上次真的发出去"的时刻。若把被挡下的
+        //      时刻也写进去, 拖动期间每一条命令 (以及每帧的补发) 都会把期限往后推 ⇒ 只要命令
+        //      不停就永远发不出去, 限频变成饥饿。
+        if ((now - s_lastGainReportMs) < 100) {
+            s_gainReportPending = true;   // 记下待发, 由 pollRelayCommands 补 —— 最后一条不丢
+            return;
+        }
     }
     s_gainReportPending = false;
     s_lastGainReportMs = now;
+    s_lastSentGain = g;
 
-    const double g = ForceTuning::gain();
     // ⚠ 载荷的 7 个字段【按位置】解析: RG| 是逗号分隔的定长字段 (C++→MATLAB 的其它线路
     //   都是这个形状), 规格 §4 只定义了【顺序】, 字段没有名字。顺序必须与 §4 的字段表
     //   逐字一致, 否则 MATLAB 侧会把每个数都读错位 —— 而本侧没有任何单测能发现这件事
@@ -2051,7 +2074,13 @@ void RelayCore::dispatchRelayCommand(const char* line) {
         }
         // 【不论接受还是拒绝都回读】—— 回的是当前实际生效值。
         // 于是被拒时 MATLAB 会把滑条弹回真值, 而不是让界面继续显示一个假的数。
-        sendReflectionGain(true);
+        // ⚠ 这里是【限频形态】(force=false), 依据是规格 §4:
+        //     "只在目标值真的变了、且距上次回读 ≥100ms"才回读 —— 拖动滑条每秒几十条 RG|,
+        //     逐条回读会堆在 MATLAB 侧; 被挡下的那条由 pollRelayCommands 补发, 最后一条一定到。
+        //   ⚠ 上一版这里传的是 true, 而本函数里那条"待发"分支只在 !force 且被时间挡下时才走到
+        //     ⇒ 标志 s_gainReportPending 永远是 false ⇒ 补发永不触发 ⇒ 限频整个是死代码,
+        //     且上面那句注释描述的是一个不存在的限频。true 只留给连接/重连 (下两处调用点)。
+        sendReflectionGain(false);
         break;
     case R::ForceZero:
         // 只置标志: 真正的处置在 main.cpp 的 requestForceZero() (与键盘 'z' 同一个函数)。
@@ -2078,6 +2107,8 @@ void RelayCore::pollRelayCommands() {
     // 力反射增益的两件家常事 (2026-09-22):
     //   tick()      —— 防抖落盘 (值变过且静默 ≥1s 才写盘)。借本循环当心跳, 不新起线程/定时器。
     //   补发待发的回读 —— 拖动滑条时被限频挡下的那一条, 在这里补上, 保证"最后一条一定到"。
+    //   ⚠ 补发本身【仍然】受那两条条件管: 本循环每帧都跑, 若这一帧距上次发送仍不足 100ms,
+    //     补发会被再次挡下 (标志保持 true), 再过几帧才真的发出去 —— 这是有意的, 不是漏发。
     // ⚠ 放在 socket 有效性检查【之前】: 这两件事与 relay socket 在不在无关 (tick 只管落盘),
     //   放在后面会在 GUI 没连上时整个停掉。
     ForceTuning::tick();
