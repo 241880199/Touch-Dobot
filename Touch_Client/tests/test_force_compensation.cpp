@@ -1353,7 +1353,8 @@ static void test_zero_restartable() {
 //   ⇒ 静默期 0.5s 在实际时间里是 ~1.35s。这条用例把时间变成【确定的输入】，
 //   于是"采够 2.5s 才定稿"这件事可以被验 —— 从前不可能验，因为没人能驱动时间。
 // ★★ 2026-09-22 (I3) 覆盖范围【如实声明】: 本用例走的是【用例给定 dt】那一支
-//   (setUpdateDtForTest 注入的 0.033，在守卫之前短路) —— 原名 ..._follows_measured_dt
+//   (setUpdateDtForTest 注入的 0.033 —— 它绕开的是 GetTickCount 的【测量】, 不是守卫:
+//    注入值也走守卫, 见 updateIntervalSec) —— 原名 ..._follows_measured_dt
 //   会让人误以为实测那一支被覆盖了: 把 updateIntervalSec() 里的实测那一支重新写回硬编码
 //   常数, 本条【仍然绿】⇒ 它抓不住它本来要防的那个回归。故改名成 ..._follows_injected_dt。
 //   ⚠ 实测那一支 (g_updateDtForTest < 0) 【没有任何用例覆盖】, 且生产调用点

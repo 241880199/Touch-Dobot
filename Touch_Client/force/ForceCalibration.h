@@ -53,6 +53,11 @@ namespace ForceCalibration {
 
     // 用例专用: 把 dt 变成【确定的输入】(默认 -1 = 不干预, 走实测)。
     //   与 ForceCompensation::setStepDtForTest 同一个约定、同一条理由。
+    // ⚠ 2026-09-22: 这里的"确定的输入"【不是无条件的】: 注入值【也走 updateIntervalSec()
+    //   末尾那道 gap 守卫】⇒ 大于 Config::FORCE_CALIB_MAX_INTERVAL_S 的注入值照样被当作
+    //   【没测到】(dt = 0, 并喊一次警)。这是刻意的 —— 否则"不合理的间隔"那条路径没法被验。
+    //   ⇒ 注入【不合理】值的用例 (超限 dt 那条) 正是【依赖】这一行为; 想让 dt 逐字生效,
+    //     注入值必须 ≤ 上限 (如 0.033)。(ForceCompensation 那个钩子没有这道守卫。)
     void setUpdateDtForTest(double sec);
 
     // Persistence —— 全量模型的参数表 (version 3)。

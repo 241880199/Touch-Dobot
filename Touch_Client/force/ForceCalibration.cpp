@@ -25,6 +25,11 @@ static int    g_tareCount = 0;
 //   ⇒ 复位点放在 start() / startZero() 里 (每启动一次调零就重新允许喊一次)。
 static bool   g_tareShortWarned = false;
 
+// ★ 2026-09-22 (A): "两次轮询隔得太久"那条诊断【同样每次 TARE 只喊一次】——
+//   理由与上面那条逐字相同: 不节流就是每帧刷屏, 而它治的正是【同一类事件】
+//   (轮询停过一段 ⇒ 本帧的经过时间不算数, 见 updateIntervalSec)。
+static bool   g_tareGapWarned = false;
+
 // MOTION — record F vs a during user movement
 static const int MAX_MOTION_SAMPLES = 300;  // ~10s at 30Hz
 static int    g_motionCount = 0;
@@ -88,7 +93,10 @@ static double g_updateDtForTest = -1.0;
 // ★ 2026-09-22: 这就是从前写死在调用点上的那个 0.033 的替代。理由见头文件。
 // ⚠ 它靠"每次轮询都被调用"保持新鲜 —— 若调用点又加回 `if (isRunning())` 的门,
 //   计时器会停在【上一次运行】那一刻 ⇒ 下次启动的第一个 dt 是那之间的全部时间
-//   (可能是几分钟) ⇒ 一步跨过静默期与累计期, 而且不会报任何错。判据见 Task 1 Step 8。
+//   (可能是几分钟) ⇒ 一步跨过静默期与累计期, 从前【而且不报任何错】。
+//   ★★ 2026-09-22: 这个 hazard 现在【被本函数末尾那道 gap 守卫拦住】—— 那正是守卫存在的
+//   理由: 超限的间隔返回 0 ⇒ 计时器不跳; 并且守卫自己会喊一声 (见下, 那次改的)。
+//   判据见 Task 1 Step 8。
 static double updateIntervalSec() {
     double dt;
     if (g_updateDtForTest >= 0.0) {
@@ -102,7 +110,20 @@ static double updateIntervalSec() {
     }
     // ★ 2026-09-22 (I1): 不合理的间隔当【没测到】—— 返回 0, 不让计时器跟着跳。
     //   见 Config::FORCE_CALIB_MAX_INTERVAL_S 处的说明。
-    if (dt > Config::FORCE_CALIB_MAX_INTERVAL_S) return 0.0;
+    // ★ 2026-09-22 (A): 但【守卫自己必须出声】。它从前是静默的: 触发它的那个事件
+    //   (轮询停过一段 ⇒ 操作员眼里"TARE 怎么这么久") 在控制台上【不留任何痕迹】,
+    //   而下一条告警 (样本数不足) 嵌在 timer >= 2.5 里面, 这里刚把 dt 置 0 ⇒
+    //   计时器永远到不了那个分支 ⇒ 它【不可能】替这条路径喊。⇒ 加一行, 节流方式
+    //   与那条告警一致 (g_tareGapWarned, 每次 TARE 只喊一次; 复位点在 start/startZero)。
+    if (dt > Config::FORCE_CALIB_MAX_INTERVAL_S) {
+        if (!g_tareGapWarned) {
+            g_tareGapWarned = true;
+            printf("[Force] WARNING: 两次轮询间隔 %.2fs (> %.2fs) —— 疑似轮询停过一段。\n"
+                   "        本帧的经过时间当【没测到】(dt = 0), 相位计时器不跟着跳。\n",
+                   dt, Config::FORCE_CALIB_MAX_INTERVAL_S);
+        }
+        return 0.0;
+    }
     return dt;
 }
 
@@ -157,6 +178,7 @@ bool start() {
     g_tareCount = 0;
     for (int i = 0; i < 6; i++) g_tareAccum[i] = 0.0;
     g_tareShortWarned = false;   // ★ 2026-09-22 (I1): 每一次新的 TARE 都重新允许喊一次
+    g_tareGapWarned = false;     // ★ 2026-09-22 (A): 同上 —— 那条 gap 诊断也重新允许喊一次
 
     // ★ 2026-09-21: 这里从前硬写 "2s" —— 而 TARE 现在多了一段 0.5s 静默期 (见 update() 的 TARE 分支),
     //   总时长是 2.5s。跟上面那条一样: 时长写错会让操作员在静默期里就松手 ⇒ 又采到瞬态。
@@ -180,6 +202,7 @@ bool startZero() {
     g_tareCount = 0;
     for (int i = 0; i < 6; i++) g_tareAccum[i] = 0.0;
     g_tareShortWarned = false;   // ★ 2026-09-22 (I1): 每一次新的 TARE 都重新允许喊一次
+    g_tareGapWarned = false;     // ★ 2026-09-22 (A): 同上 —— 那条 gap 诊断也重新允许喊一次
 
     // ★ 2026-09-21: 时长与分工要交代清楚 —— 前 0.5s 是【静默期】(不采样), 之后才累计。
     //   不写出来, 操作员会按旧的 2 秒去等, 然后在静默期里就松手/动臂 ⇒ 又采到瞬态。
