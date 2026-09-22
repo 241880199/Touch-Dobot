@@ -70,24 +70,26 @@ static void test_saturation() {
     AppState::ForceData fd;
     ForcePipeline::init();
 
-    // Way above full scale → clamp (gain is applied post-mapping, so check final hapticOut)
+    // 远高于满量程 ⇒ 映射后必然打到夹子。★ 2026-09-22: 【跑到收敛再断言】。
+    // 从前只调 1 次 step(): fc=5Hz/fs=125Hz 的二阶 Butterworth 一步只给
+    // b0·500 ≈ 6.7 N, 映射后 ≈13.3, 离夹子 396 差得远 ⇒ 那句 `<= clampedMax` 恒真,
+    // 用例名说 saturation 却什么都没验 (旧注释已照实承认, 本次做完)。
     fd.compensated[0] = 500.0; fd.compensated[1] = 0.0; fd.compensated[2] = 0.0;
     fd.compensated[3] = 0.0; fd.compensated[4] = 0.0; fd.compensated[5] = 0.0;
     fd.lastUpdateMs = GetTickCount();
-    ForcePipeline::step(fd);
 
+    // 200 步与 test_soft_deadzone_no_jump 同一惯例。梯度限幅 50 N/frame,
+    // 越过映射门限(需 filtered > 200N)只要 4 步, 200 步是充分收敛。
+    for (int i = 0; i < 200; i++) ForcePipeline::step(fd);
+
+    // ★ 判据从"不超过夹子"改成"【正好落在夹子上】"—— 这才是饱和。
+    //   算式 (逐环核过, 见 ForcePipeline.cpp:79-89 / :126 / :135):
+    //     softDeadzone(500)=500 → ×(3.3/200)=8.25 → 硬夹到 3.3 → ×SIGN(−1) → ×120
+    //     = −396 = −FORCE_MAX_TOUCH_N × FORCE_REFLECTION_GAIN
+    //   ⇒ 若谁把 mapForceToTouch 里的硬夹去掉, 输出会是 −8.25×(−1)×120 = −990 ⇒ 本条立刻红。
     double clampedMax = Config::FORCE_MAX_TOUCH_N * Config::FORCE_REFLECTION_GAIN;
-    CHECK(fabs(fd.hapticOut[0]) <= clampedMax + 0.01);
-    // ⚠ 2026-09-21: 这里从前写的是 `fd.hapticOut[0] > 0.0; // positive input → positive output`
-    //   —— 那句"正输入给正输出"随横向映射整体取 −1 而【过期】。它真正要说的是【符号跟着映射走】,
-    //   所以现在钉映射后的符号 (故意写死负号, 理由与 coord_transform 里那一段同: 拿 Config 的
-    //   常数算断言会让它对常数恒真)。
-    CHECK(fd.hapticOut[0] < 0.0); // 正输入 ⇒ 负输出 (横向映射 FORCE_FEEDBACK_LATERAL_SIGN = −1)
-    // ⚠ 【已知的弱点, 照实标出, 本次未改】本条用例叫 saturation, 但它【并没有验证饱和】:
-    //   只调了 1 次 step(), 而 fc=5Hz/fs=125Hz 的 Butterworth 一步只给 b0·x ≈ 0.013·500 ≈ 6.7 N,
-    //   离 3.3 N 的夹子(映射后)还差得远 ⇒ 上面那条 `<= clampedMax` 是【恒真】地通过的。
-    //   要真验证饱和得先跑到收敛 (像 coord_transform 那样 100 步)。没有顺手改: 那是另一件事,
-    //   而且改了它会从"恒真"变成"真的在判" ⇒ 得单独确认新断言是对的。
+    CHECK(fabs(fabs(fd.hapticOut[0]) - clampedMax) < 0.01);   // 正好在夹子上
+    CHECK(fd.hapticOut[0] < 0.0);   // 正输入 ⇒ 负输出 (横向映射 FORCE_FEEDBACK_LATERAL_SIGN = −1)
     PASS();
 }
 
