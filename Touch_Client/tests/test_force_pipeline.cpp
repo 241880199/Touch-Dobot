@@ -52,8 +52,20 @@ struct GainScope {
     const double saved;
     GainScope() : saved(ForceTuning::gain()) {}
     ~GainScope() {
-        ForceTuning::setGain(saved);
-        ForcePipeline::init();   // 顺带把斜坡与滤波器复位 (与旧用例的手工复原等价)
+        // ★ 复原的是【构造那一刻读到的值】(ForceTuning::gain()), 【不是】Config::FORCE_REFLECTION_GAIN。
+        //   今天两者相等 (静态初值就来自 Config, 且测试不读 force_tuning.json), 但这个区别是要紧的:
+        //   若某条用例之前已经有人改过增益, 本守卫把那个值原样放回去 —— 比"手工复原成默认值"是【更强】
+        //   的保证 (手工复原只在"用例之间增益总是回到默认值"这个前提下才等价, 而那个前提正是它要守的东西)。
+        //   ⇒ 所以别在这条注释里写"与旧用例的手工复原等价": 那句话把强保证说成了等号右边。
+        if (!ForceTuning::setGain(saved)) {
+            // ⚠ 不许静默失败: setGain 会做范围校验, saved 若落在 [GAIN_MIN, GAIN_MAX] 之外就【不改状态】
+            //   ⇒ 增益会被留在被测用例改过的值上, 后面每条用例都在错的增益下跑, 而红点会指向别处。
+            //   (saved 只可能来自 gain(), 它自己也是经校验写进去的 ⇒ 正常不会发生。) 同一条规矩见本文
+            //   其余 setGain 调用点: 返回值一律 CHECK。
+            std::cout << "  [GainScope] !! 复原失败: " << saved
+                      << " 不在 [ForceTuning::GAIN_MIN, GAIN_MAX] 内 —— 增益留在被改过的值上" << std::endl;
+        }
+        ForcePipeline::init();   // 顺带把斜坡与滤波器复位
     }
 };
 
@@ -70,13 +82,16 @@ static void test_gain_actually_changes_output() {
     fd.lastUpdateMs = GetTickCount();
 
     // gain = 300: 输出 = 1.0 × (3.3/200) × 300 = 4.95, 横向符号 −1 ⇒ −4.95
-    ForceTuning::setGain(300.0);
+    // ⚠ 300 是 ForceTuning::GAIN_MAX 的当前值 —— 范围若收窄, setGain 会【返回 false 且什么都不改】,
+    //   而下面那条断言只会在值对不上时红 ⇒ 病因看起来是"映射错了"。所以前置条件必须在这里
+    //   被【命名】: 这条 CHECK 红了就是"量程对不上", 不是"增益没生效"。
+    CHECK(ForceTuning::setGain(300.0));
     ForcePipeline::init();                // 让斜坡直接就位 (不然要等 0.25s)
     for (int i = 0; i < 300; i++) ForcePipeline::step(fd);   // 让滤波器收敛
     CHECK(fabs(fd.hapticOut[0] - (-4.95)) < 0.05);
 
     // gain = 120: 同一个输入 ⇒ −1.98
-    ForceTuning::setGain(120.0);
+    CHECK(ForceTuning::setGain(120.0));
     ForcePipeline::init();
     for (int i = 0; i < 300; i++) ForcePipeline::step(fd);
     CHECK(fabs(fd.hapticOut[0] - (-1.98)) < 0.03);
@@ -84,8 +99,54 @@ static void test_gain_actually_changes_output() {
     PASS();
 }
 
-// 斜坡: 增益不是一步到位, 而是 800/秒 (⇒ 100→300 走 0.25s = 31 帧 @125Hz)。
+// ★ 2026-09-22 (Fix round 1) 新增 —— ForcePipeline::saturationSensorN() 从前【既没有调用者也没有用例】,
+//   而它是后续 Task 要在 MATLAB 界面上显示的【那个数】: 公式错了就是界面在撒谎, 而且没人会发现。
+//
+// 【期望值怎么来的 —— 从代码现推, 不是抄注释里的 1.67】
+//   ForcePipeline.h 里那两行是:  净比例 = FORCE_MAX_TOUCH_N / FORCE_MAX_SENSOR_N
+//                               返回值 = FORCE_MAX_TOUCH_N / (净比例 × gain)
+//   把净比例代进去, FORCE_MAX_TOUCH_N 上下相消 ⇒ 返回值 ≡ FORCE_MAX_SENSOR_N / gain。
+//   ⇒ 本用例的期望值就写【化简后的那一支】。它是另一个算式, 所以能钉住实现:
+//     少乘/多乘一次 gain、比值写反、除数被当成被除数, 这里都会不等 (负对照实测见 task-2-report.md)。
+static void test_saturation_sensor_n() {
+    TEST(saturation_sensor_n);
+    // 本用例【不需要】GainScope: saturationSensorN 只吃参数, 不读 ForceTuning::gain() (纯函数)。
+
+    // (a) 出厂默认增益处钉住数值。期望值 = FORCE_MAX_SENSOR_N / 120 (= 当前 1.667 N ——
+    //     与 ForcePipeline.h 那段注释里写的 1.67 一致)。
+    //     ⚠ 120.0 写【字面值】是故意的: 它就是 Config::FORCE_REFLECTION_GAIN 的当前值
+    //     (已回核 config/Config.h, 不是凭记忆), 但本用例要测的是"gain = 120 时那个数是多少"。
+    //     若让它跟着那个常数漂, 常数一改这条就变成在测另一个增益, 而它自己不会说。
+    const double satAtDefault = ForcePipeline::saturationSensorN(120.0);
+    CHECK(fabs(satAtDefault - Config::FORCE_MAX_SENSOR_N / 120.0) < 1e-6);
+    // ★ 钉住"它是 1.6x 那个量级" —— 上面那条的期望值里只有 FORCE_MAX_SENSOR_N 与被测实现同源,
+    //   所以若有人把量程改成离谱的值 (而值的确会跟着变), 上面那条会一直绿。这一条补上"量级对不对"。
+    //   ⚠ 改量程而红是【故意的】: 逼人来读这段并确认界面上的数该是多少。
+    //   同形先例: test_residual_deadzone 的 `CHECK(dz > 0.1);` / test_saturation 的 `CHECK(clampedMax > 100.0);`。
+    CHECK(satAtDefault > 1.0 && satAtDefault < 3.0);
+
+    // (b) 量程上界处: 数值 + 【单调性】(增益越高 ⇒ 越早打顶 ⇒ 这个输入值越小)。
+    //     上界显式写成符号 —— 范围的【唯一一份定义】在 ForceTuning.h, 这里不重述它的数值。
+    CHECK(ForceTuning::GAIN_MAX > 120.0);   // 本用例的前提: 上界高于出厂默认, 否则下一步的比较没意义
+    const double satAtMax = ForcePipeline::saturationSensorN(ForceTuning::GAIN_MAX);
+    CHECK(fabs(satAtMax - Config::FORCE_MAX_SENSOR_N / ForceTuning::GAIN_MAX) < 1e-6);
+    CHECK(satAtMax < satAtDefault);         // 单调: 增益 300 > 120 ⇒ 打顶输入 0.667 < 1.667
+
+    // (c) 退化输入: gain <= 0 ⇒ 走实现里那道守卫, 返回 0 而【不是】inf/NaN。
+    //     (gain = 0 会让净比例为 0 ⇒ 除法会爆; 这道守卫就是防它。) 界面拿到的是 0, 不是 nan。
+    const double satZero = ForcePipeline::saturationSensorN(0.0);
+    CHECK(satZero == 0.0);
+    CHECK(satZero == satZero);              // 排除 NaN (NaN != NaN)
+    CHECK(ForcePipeline::saturationSensorN(-120.0) == 0.0);
+    PASS();
+}
+
+// 斜坡: 增益不是一步到位, 而是按 FORCE_GAIN_SLEW_PER_S 逐帧逼近 (⇒ 走完 GAIN_MIN→GAIN_MAX
+//   约 0.25s = 31 帧 @FORCE_FILTER_FS_HZ)。
 // 判据取一个区间而不是精确帧数 —— 精确值会随常数微调而红, 那不是缺陷。
+// ⚠ 本行的 0.25s / 31 帧是【当前常数下的算术】, 不是依据: 斜坡速率的定义在
+//   Config::FORCE_GAIN_SLEW_PER_S, 增益范围的唯一定义在 ForceTuning::GAIN_MIN / GAIN_MAX。
+//   改了它们, 本注释不会红 (下面那几个区间断言可能也不红) ⇒ 它只是读起来有用的算术。
 static void test_gain_ramp_is_gradual() {
     TEST(gain_ramp_is_gradual);
     GainScope gainScope;   // 中途 CHECK 失败也要把增益复原 (见上面那段)
@@ -95,14 +156,17 @@ static void test_gain_ramp_is_gradual() {
     fd.compensated[0] = 1.0;
     fd.lastUpdateMs = GetTickCount();
 
-    ForceTuning::setGain(100.0);
+    // ⚠ 100 / 300 是 ForceTuning::GAIN_MIN / GAIN_MAX 的当前值 (范围的唯一定义在 ForceTuning.h)。
+    //   前置条件必须【被命名】: 范围若收窄, setGain 返回 false 且【什么都不改】, 那么下面那些
+    //   数值断言会红成"斜坡错了/映射错了", 病因指错地方。这两条 CHECK 红了就是"量程对不上"。
+    CHECK(ForceTuning::setGain(100.0));
     ForcePipeline::init();                       // 斜坡就位在 100
     for (int i = 0; i < 300; i++) ForcePipeline::step(fd);   // 先让滤波器收敛
     const double at100 = fd.hapticOut[0];
     CHECK(fabs(at100 - (-1.65)) < 0.03);         // 1.0 × 0.0165 × 100 = 1.65
 
     // 跳到 300, 数多少帧才到位
-    ForceTuning::setGain(300.0);
+    CHECK(ForceTuning::setGain(300.0));
     int frames = 0;
     while (fabs(fd.hapticOut[0] - (-4.95)) > 0.05 && frames < 200) {
         ForcePipeline::step(fd);
@@ -112,8 +176,9 @@ static void test_gain_ramp_is_gradual() {
     CHECK(frames >= 20);                         // 必须【不是一步到位】—— 否则斜坡是假的
     CHECK(frames <= 45);                         // 也别慢得离谱 (理论 31 帧)
 
-    ForceTuning::setGain(Config::FORCE_REFLECTION_GAIN);   // 复原 (GainScope 也会做一次; 这里显式写出来是为了读出意图)
-    ForcePipeline::init();
+    // 复原【不在这里做】: GainScope 的析构是唯一权威 (它连中途 return 那条路都覆盖, 这里的手工
+    //   复原只覆盖"走到底"那一条)。★ 2026-09-22 (Fix round 1) 把原来那两行 (setGain + init)
+    //   删掉了 —— 它们是同一件事的第二份实现, 而本项目有成文教训: 同一规则两份实现, 改一份忘一份。
     PASS();
 }
 
@@ -128,7 +193,7 @@ static void test_soft_deadzone_no_jump() {
     TEST(soft_deadzone_no_jump);
     const double dz    = Config::FORCE_RESIDUAL_DEADZONE_N;
     const double ratio = Config::FORCE_MAX_TOUCH_N / Config::FORCE_MAX_SENSOR_N;
-    const double gain  = Config::FORCE_REFLECTION_GAIN;
+    const double gain  = ForceTuning::gain();   // 运行时值 —— 流水线乘的是它 (见本函数末尾的说明)
 
     AppState::ForceData below, above;
     ForcePipeline::init();
@@ -142,6 +207,9 @@ static void test_soft_deadzone_no_jump() {
     const double jump = fabs(above.hapticOut[0] - below.hapticOut[0]);
     (void)ratio; (void)gain;   // 只在下面那句注释里用来说明量级
     CHECK(jump < 0.02);
+    // ⚠ 上面两个量【不参与断言】(否则对本用例要测的东西恒真)。但 gain 读的是【运行时】值
+    //   (ForceTuning::gain()): 流水线乘的是它, 不是编译时的 Config::FORCE_REFLECTION_GAIN ——
+    //   注释里引用一个"流水线没在用的数"就是下一句假话的种子 (2026-09-22 Fix round 1)。
     PASS();
 }
 
@@ -168,12 +236,18 @@ static void test_saturation() {
 
     // ★ 判据从"不超过夹子"改成"【正好落在夹子上】"—— 这才是饱和。
     //   算式 (逐环核过, 见 ForcePipeline.cpp:79-89 / :126 / :135):
-    //     softDeadzone(500)=500 → ×(3.3/200)=8.25 → 硬夹到 3.3 → ×SIGN(−1) → ×120
-    //     = −396 = −FORCE_MAX_TOUCH_N × FORCE_REFLECTION_GAIN
-    //   ⇒ 若谁把 mapForceToTouch 里的硬夹去掉, 输出会是 −8.25×(−1)×120 = −990 ⇒ 本条立刻红。
-    double clampedMax = Config::FORCE_MAX_TOUCH_N * Config::FORCE_REFLECTION_GAIN;
-    // ★ 钉住"夹子是 396 那个量级" —— 因为上面那条期望值是从【流水线自己乘的】两个常数
-    //   (FORCE_MAX_TOUCH_N × FORCE_REFLECTION_GAIN) 推出来的, 那两个常数被重调时它会一直绿。
+    //     softDeadzone(500)=500 → ×(3.3/200)=8.25 → 硬夹到 3.3 → ×SIGN(−1) → ×gain
+    //     = −FORCE_MAX_TOUCH_N × gain
+    //   ⇒ 若谁把 mapForceToTouch 里的硬夹去掉, 输出会是 −8.25×(−1)×gain ⇒ 本条立刻红。
+    // ★★ 2026-09-22 (Fix round 1): 乘数从【编译时】Config::FORCE_REFLECTION_GAIN 改成
+    //   【运行时】ForceTuning::gain() —— 流水线现在乘的是后者 (见 ForcePipeline.cpp 的增益那一步),
+    //   而两个数【今天相等】只是因为本测试二进制从不加载 force_tuning.json (所以 gain() = 静态初值
+    //   = Config::FORCE_REFLECTION_GAIN)。用前者当期望值, 一旦有人给测试装上 tuning 文件,
+    //   这条断言就会拿一个【流水线没乘的数】去比 —— 而且它不会"响亮地红", 只会怪在别处。
+    double clampedMax = Config::FORCE_MAX_TOUCH_N * ForceTuning::gain();
+    // ★ 钉住"夹子是 396 那个量级" (396 = FORCE_MAX_TOUCH_N × ForceTuning::gain() 的当前值,
+    //   即 3.3 × 120) —— 因为上面那条期望值是从【流水线自己乘的那两个量】推出来的, 它们被重调时
+    //   它会一直绿 (期望值里的 gain 现在是运行时值, 量程与增益两者它都跟着漂)。
     //   同形先例: test_residual_deadzone 的 `CHECK(dz > 0.1);`。
     CHECK(clampedMax > 100.0);
     CHECK(fabs(fabs(fd.hapticOut[0]) - clampedMax) < 0.01);   // 正好在夹子上
@@ -218,8 +292,13 @@ static void test_coord_transform() {
     // ⚠ 输入故意给 fz = +30 (很大的值): 若垂直那轴还开着, 输出会是 ±0.99 N 量级, 0.01 的容差
     //   必然拦住 ⇒ 这条断言不会因为"输入太小"而恒真地通过。
     // 三个轴都按【带符号的精确值】检查 (不只查方向): 方向对而幅值错同样是错的。
+    // ★★ 2026-09-22 (Fix round 1): gain 必须读【运行时】的 ForceTuning::gain() —— 流水线乘的是它,
+    //   不是编译时的 Config::FORCE_REFLECTION_GAIN。两个数今天相等【只因为】本测试二进制从不加载
+    //   force_tuning.json (ForceTuning.cpp 的静态初值就取自 Config, 且测试不调 loadOnStartup)。
+    //   ⇒ 拿编译时常数当期望值 = 一条"只在测试环境成立"的断言: 它现在绿, 但它钉的不是流水线
+    //     真正用的那个数。上面 ratio 那两个常数【保留】是对的 —— 流水线确实读它们。
     double ratio = Config::FORCE_MAX_TOUCH_N / Config::FORCE_MAX_SENSOR_N;
-    double gain = Config::FORCE_REFLECTION_GAIN;
+    double gain = ForceTuning::gain();
     CHECK(fabs(fd.hapticOut[0] - (-ratio * 10.0 * gain)) < 0.01);     // 来自 +Fx = +10 ⇒ 【负】
     CHECK(fabs(fd.hapticOut[1]) < 0.01);                              // Fz→Y 已关 ⇒ 与 fz=+30 无关
     CHECK(fabs(fd.hapticOut[2] - (-ratio * 20.0 * gain)) < 0.01);     // 来自 +Fy = +20 ⇒ 【负】
@@ -286,6 +365,7 @@ int main() {
     test_residual_deadzone();
     test_gain_actually_changes_output();
     test_gain_ramp_is_gradual();
+    test_saturation_sensor_n();
     test_soft_deadzone_no_jump();
     test_soft_deadzone_shared_and_smooth();
     test_saturation();

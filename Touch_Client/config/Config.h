@@ -291,14 +291,24 @@ namespace Config {
     const double FORCE_GRADIENT_LIMIT = 50.0;    // 梯度限幅 (N/frame)
 
     // 力反射增益的【斜坡速率】(增益单位/秒)。2026-09-22 新增, 与 FORCE_GRADIENT_LIMIT 同类。
-    // 为什么要它: gain 从 120 拖到 300 时, 手上力会在一帧内变成 2.5 倍。
-    //   总夹 (±3.3N, HapticCallback.cpp:228) 一直在, 所以不会失控, 但那股突变是"没预备"的。
-    //   斜坡把它摊到 0.25 秒里 (800/秒 ⇒ 走完 100→300 的全程 200 个单位正好 0.25s)。
+    // 【为什么要它】增益现在是【运行时】可拖的 (MATLAB 滑条 ⇒ ForceTuning), 一次拖动就能把
+    //   目标值从默认值直接送到范围上界 ⇒ 不做斜坡, 手上力会在【一帧之内】翻上好几倍。
+    //   ⚠ 增益的范围与默认值【本注释不复述数值】—— 它们各有唯一一份定义:
+    //       范围: ForceTuning::GAIN_MIN / GAIN_MAX (force/ForceTuning.h);
+    //       默认: Config::FORCE_REFLECTION_GAIN (本文件, 且只是兜底, 运行时真值在 ForceTuning)。
+    //     这段从前写着"120 拖到 300"与"2.5 倍"—— 那两个数就是上面两个符号的【副本】,
+    //     范围一改就静默过期 (而读者会把它当依据)。2026-09-22 Fix round 1 改成引符号。
+    //   总夹那条一直在 (HapticCallback 里的 maxF = Config::FORCE_MAX_TOUCH_N, 逐轴夹),
+    //   所以不会失控, 但那股突变是"没预备"的。
+    //   ⇒ 斜坡把它摊开: 走完 GAIN_MIN→GAIN_MAX 的时长 = (GAIN_MAX − GAIN_MIN) / 本值,
+    //     当前 ≈ 0.25 s。⚠ 0.25 s 是这个算式【此刻】的结果, 不是设计目标 —— 本值或范围一变它就变。
     // ⚠ 与 FORCE_GRADIENT_LIMIT 的分工: 那个作用在 filtered[] 上, 【管不到增益之后】;
     //   本常数作用在增益本身上。两者不重叠。
-    // ⚠ 每帧步长 = 本值 / FORCE_FILTER_FS_HZ (125) = 6.4, 而 FORCE_FILTER_FS_HZ 是
-    //   【流水线真实调用率】这个前提 ⇒ 换了调用率, 斜坡的实际时长跟着变 (0.25s 是
-    //   在 125 Hz 下算出来的)。见 ForcePipeline::step 第 5 步。
+    // ⚠ 每帧步长 = 本值 / FORCE_FILTER_FS_HZ (实现见 ForcePipeline::step 第 5 步),
+    //   而 FORCE_FILTER_FS_HZ 是【流水线真实调用率】这个前提 ⇒ 换了调用率, 斜坡的实际时长
+    //   跟着变 (上面那个 0.25 s 就是在当前那个调用率下算出来的)。
+    //   ⚠ 本处【故意不写行号、也不写 HapticCallback.cpp 的行号】: 给到文件 + 符号名即可,
+    //     行号加一行注释就漂。本项目有成文教训: 常数与行号一样脆, 引用前回源头核。
     const double FORCE_GAIN_SLEW_PER_S = 800.0;
 
     const int FORCE_RECONNECT_INTERVAL = 2000;   // 断线重试间隔 (ms)
