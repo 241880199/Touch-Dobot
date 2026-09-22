@@ -1986,7 +1986,20 @@ void RelayCore::reportFeedback(const char* fbText) {
     sendRelayUpdate(buf);
 }
 
-// 回读限频 (见 RelayCore.h 里的说明; 规格 §4 "回读限频")。只由 GLUT idle 线程调 ⇒ 不需要原子。
+// 回读限频 (见 RelayCore.h 里的说明; 规格 §4 "回读限频")。
+//
+// ⚠ 【线程】(2026-09-22 修正): 从前这里写的是"只由 GLUT idle 线程调 ⇒ 不需要原子"。那句是
+//   错的, 而且与本文件上方 reportPosition 那一段 (那里明写"本函数跑在触觉实时线程上") 直接
+//   矛盾 —— 同一份文件里相隔三十来行, 两说的不是一回事。实际有【两个】线程调进来:
+//     · GLUT idle 线程 —— 派发与补发: idle() → pollRelayCommands() → dispatchRelayCommand()
+//       的【接受】/【拒绝】两个分支, 以及每帧那次 `if (s_gainReportPending)` 补发;
+//     · 【触觉实时线程】—— 重连那一条: HapticCallback 的 reportPosition() →
+//       ensureRelayConnected() → 重连成功时 sendReflectionGain(true)。
+//   (第三处 initRelayReporting() 在 GLUT 主循环【之前】由 main() 调, 那时还没有并发。)
+//   ⇒ 下面三个状态必须是 atomic: 两个线程不同步地读写同一个非原子对象就是数据竞争 (UB)。
+//   残留的只是【次序】上的竞争, 而且无害 —— 这三个状态【不参与强制发送的决策】:
+//     · force=true 一个判断都不从它们取 (只写) ⇒ 交错最坏 = 多回一条、或晚回一条;
+//     · s_gainReportPending 丢一次更新是【自愈】的 —— 那条强制发送本身已经带上了当前值。
 //
 // force=false 时【两条都成立才发】(规格原文: "只在目标值真的变了、且距上次回读 ≥100ms"):
 //   ① 目标值相对【上次真的发出去的那一条】变了 —— 没变就没有可报的东西
@@ -1999,11 +2012,17 @@ void RelayCore::reportFeedback(const char* fbText) {
 //   被拒 = setGain 在 store 之前就返回 = 值按构造没变 ⇒ 条件①必然命中 ⇒ 一个字节都发不出去。
 //   按调用点逐个说明见 RelayCore.h 的 sendReflectionGain 文档块。
 //
+// ⚠ ①②里的"上次真的发出去" = 【发送这一步】, 不是"确认送达": s_lastGainReportMs 与
+//   s_lastSentGain 都落笔在 sendRelayUpdate 调用【之前】(见下面的赋值), 所以 socket 恰在那一
+//   瞬间失效时, 这次算"发过了" —— 同一个值的重试会被条件①挡下。这是【已知且能收敛】的:
+//   重连成功时的强制回读 (force=true) 不看这两条闸, 会把当前值原样再送一条 ⇒ 值最终一定到
+//   MATLAB。⇒ 按这个定义读这两个名字, 别按"确认送达"读。
+//
 // s_lastSentGain 初值刻意选 0 —— 那是 setGain 不会接受的值 ⇒ 在第一次 force=true 之前
 //   若有人用 force=false 进来, 它一定发得出去 (保守方向)。
-static DWORD  s_lastGainReportMs = 0;
-static double s_lastSentGain = 0.0;
-static bool   s_gainReportPending = false;
+static std::atomic<DWORD>  s_lastGainReportMs{0};
+static std::atomic<double> s_lastSentGain{0.0};
+static std::atomic<bool>   s_gainReportPending{false};
 
 void RelayCore::sendReflectionGain(bool force) {
     const DWORD now = GetTickCount();
@@ -2012,22 +2031,23 @@ void RelayCore::sendReflectionGain(bool force) {
         // ① 值没变 ⇒ 不发。⚠ 这里必须【顺手清掉待发标志】: 一条被限频挡下的 A→B 之后值又变回 A,
         //    此时"待发"已无事可做; 留着标志会让 pollRelayCommands 每帧都调进来、每帧都从这里
         //    返回 ⇒ 标志卡在 true 再也不动 (无害, 但那个标志从此失去意义)。
-        if (g == s_lastSentGain) {
-            s_gainReportPending = false;
+        if (g == s_lastSentGain.load()) {
+            s_gainReportPending.store(false);
             return;
         }
         // ② 距上次发送不足 100ms ⇒ 只记下待发。
         //    ⚠ s_lastGainReportMs 【不】在这里更新: 它记的是"上次真的发出去"的时刻。若把被挡下的
         //      时刻也写进去, 拖动期间每一条命令 (以及每帧的补发) 都会把期限往后推 ⇒ 只要命令
         //      不停就永远发不出去, 限频变成饥饿。
-        if ((now - s_lastGainReportMs) < 100) {
-            s_gainReportPending = true;   // 记下待发, 由 pollRelayCommands 补 —— 最后一条不丢
+        const DWORD lastReportMs = s_lastGainReportMs.load();   // 先取, 再算差 (原子量不能直接参与算术)
+        if ((now - lastReportMs) < 100) {
+            s_gainReportPending.store(true);   // 记下待发, 由 pollRelayCommands 补 —— 最后一条不丢
             return;
         }
     }
-    s_gainReportPending = false;
-    s_lastGainReportMs = now;
-    s_lastSentGain = g;
+    s_gainReportPending.store(false);
+    s_lastGainReportMs.store(now);
+    s_lastSentGain.store(g);
 
     // ⚠ 载荷的 7 个字段【按位置】解析: RG| 是逗号分隔的定长字段 (C++→MATLAB 的其它线路
     //   都是这个形状), 规格 §4 只定义了【顺序】, 字段没有名字。顺序必须与 §4 的字段表
@@ -2131,7 +2151,7 @@ void RelayCore::pollRelayCommands() {
     // ⚠ 放在 socket 有效性检查【之前】: 这两件事与 relay socket 在不在无关 (tick 只管落盘),
     //   放在后面会在 GUI 没连上时整个停掉。
     ForceTuning::tick();
-    if (s_gainReportPending) sendReflectionGain(false);
+    if (s_gainReportPending.load()) sendReflectionGain(false);
 
     EnterCriticalSection(&m_relaySocketMutex);
     SOCKET sock = m_relaySocket;
