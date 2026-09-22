@@ -3,6 +3,7 @@
 #include "ForceCompensation.h"
 #include "../config/Config.h"
 #include "../core/CalibStore.h"
+#include "../core/JsonLite.h"
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -528,17 +529,6 @@ bool saveToFile(const char* path, const double A[9], const double biasForce[3],
     return true;
 }
 
-// Helper: find key in JSON buf, return pointer to first char after ':' (skipping whitespace)
-static const char* jsonFind(const char* buf, const char* key) {
-    const char* p = strstr(buf, key);
-    if (!p) return nullptr;
-    p += strlen(key);
-    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
-    if (*p == ':') p++;
-    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
-    return p;  // points to '[' or first digit/'-'
-}
-
 // 读一个长度为 n 的浮点数组 (jsonFind 已定位到 '[' 之后的第一个字符)。
 static bool jsonReadArray(const char* p, double* out, int n) {
     if (!p) return false;
@@ -587,7 +577,7 @@ bool loadFromFile(const char* path, double A[9], double biasForce[3],
 
     // ===== 先把版本号判掉, 再读任何一个参数 =====
     // 顺序是要紧的: 先读参数再判版本, 就会在返回 false 之前把半份数据写进调用方的数组里。
-    const char* pv = jsonFind(buf, "\"version\"");
+    const char* pv = JsonLite::find(buf, "\"version\"");
     if (!pv) {
         rejectOldFormat(path, "文件里没有 version 字段 (是 version 1 的旧文件, 或根本不是本文件)");
         return false;
@@ -601,25 +591,25 @@ bool loadFromFile(const char* path, double A[9], double biasForce[3],
         return false;
     }
 
-    const char* p = jsonFind(buf, "\"a_matrix\"");
+    const char* p = JsonLite::find(buf, "\"a_matrix\"");
     if (!jsonReadArray(p, A, 9)) {
         fprintf(stderr, "[Force] !! force_calib.json 写着 version=3, 但 a_matrix 读不出来 —— "
                         "文件被截断或改坏了。本地补偿【未启用】。\n");
         return false;
     }
-    p = jsonFind(buf, "\"bias_force_n\"");
+    p = JsonLite::find(buf, "\"bias_force_n\"");
     if (!jsonReadArray(p, biasForce, 3)) {
         fprintf(stderr, "[Force] !! force_calib.json 的 bias_force_n 读不出来 —— "
                         "文件被截断或改坏了。本地补偿【未启用】。\n");
         return false;
     }
-    p = jsonFind(buf, "\"bias_torque_nm\"");
+    p = JsonLite::find(buf, "\"bias_torque_nm\"");
     if (!jsonReadArray(p, biasTorque, 3)) {
         fprintf(stderr, "[Force] !! force_calib.json 的 bias_torque_nm 读不出来 —— "
                         "文件被截断或改坏了。本地补偿【未启用】。\n");
         return false;
     }
-    p = jsonFind(buf, "\"com_sensor_m\"");
+    p = JsonLite::find(buf, "\"com_sensor_m\"");
     if (!jsonReadArray(p, comSensor, 3)) {
         fprintf(stderr, "[Force] !! force_calib.json 的 com_sensor_m 读不出来 —— "
                         "文件被截断或改坏了。本地补偿【未启用】。\n");

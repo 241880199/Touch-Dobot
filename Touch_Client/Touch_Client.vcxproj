@@ -129,7 +129,10 @@
     <ClCompile Include="haptic\HapticCallback.cpp" />
     <!-- force -->
     <ClInclude Include="force\ForcePipeline.h" />
+    <ClInclude Include="core\JsonLite.h" />
+    <ClInclude Include="force\ForceTuning.h" />
     <ClCompile Include="force\ForcePipeline.cpp" />
+    <ClCompile Include="force\ForceTuning.cpp" />
     <ClInclude Include="force\ForceCompensation.h" />
     <ClCompile Include="force\ForceCompensation.cpp" />
     <ClInclude Include="force\ZeroDriftCheck.h" />
