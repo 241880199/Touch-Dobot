@@ -62,6 +62,11 @@ SafetyVerdict SafetyPredictor::evaluate(const Vec3& target) {
 
     // 1c. safety boundary (reuse existing SafetyBoundary)
     clamped = SafetyBoundary::clampToBoundaryActive(target);
+    // ⚠★ 2026-09-22: 本谓词【可证恒为假】—— 喂进来的 target 已经是 :64 的 clamp 输出
+    //   (调用点只此一处: RelayCore.cpp:874, 实参就是 :871 的 clamped), 而 clampToBoundary
+    //   是幂等的 (逐轴各自夹到 [MIN,MAX] ⇒ clamp(clamp(x)) == clamp(x)) ⇒ 比较永远不成立。
+    //   【开关两种状态都死】: 开关关 == identity; 开关开 == 幂等。
+    //   保留它是为了"意图可读", 但别把它当保护 —— 真正的执行点是 :64 那次 clamp。
     if (clamped.x != target.x || clamped.y != target.y || clamped.z != target.z) {
         m_lastVerdict.action = SafetyVerdict::REJECT;
         m_lastVerdict.errorCode = RobotErrorCode::ERR_SAFETY_BOUNDARY;
@@ -268,6 +273,18 @@ SafetyVerdict SafetyPredictor::evaluatePositionOnly(const Vec3& target) {
     // Safety boundary
     {
         Vec3 clamped = SafetyBoundary::clampToBoundaryActive(target);
+        // ⚠★ 2026-09-22: 本谓词【今天】恒为假, 但理由与上面 :70 那条【不同】, 别混为一谈。
+        //   这里拿到的 tcpCheck 来自 servoCmdX/Y/Z (:1142-1143), 而那三个抄自 :1136 的 clamped。
+        //   一般情况下那个 clamped 已被 :871 夹过 ⇒ 幂等 ⇒ 死。但有一条例外:
+        //   :871 那次钳位在 `if (appState.lastButtonState)` 里 (:828) —— 纯姿态模式(只按按钮2)
+        //   会跳过它, 于是 clamped 保持 m_targetPos, 随后 :1100-1102 又被 tcpAdj (≤5mm 的
+        //   奇异避让调整, 上限 SINGAVOID_MAX_POS_ADJUST) 【推到夹紧之后】。此时若 m_targetPos
+        //   贴在盒面上 5mm 以内 (实测 pose_y 到过 −342.2, 而 SAFE_Y_MIN = −350 ⇒ 只差 7.8mm),
+        //   本谓词【会】拒。
+        //   ⇒ 它今天死, 只是因为 SAFETY_BOUNDARY_CLAMP_ENABLED == false (clampToBoundaryActive
+        //     退化成 identity)。开关翻回来后, 这条【不是】死的。
+        //   ⚠ 上面那个 7.8mm 【不满足】"5mm 以内" ⇒ 这条路径是【可达但尚未实测触发过】,
+        //     不是"已经拒过", 别读成实测证据。本条的例外也已记进 Config.h 那个开关的注释。
         if (clamped.x != target.x || clamped.y != target.y || clamped.z != target.z) {
             m_lastVerdict.action = SafetyVerdict::REJECT;
             m_lastVerdict.errorCode = RobotErrorCode::ERR_SAFETY_BOUNDARY;

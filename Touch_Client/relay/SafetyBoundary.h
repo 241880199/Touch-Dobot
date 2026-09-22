@@ -38,13 +38,24 @@ inline Vec3 clampToBoundary(const Vec3& target) {
 // 关闭时【原样返回】—— 依赖"钳位是否改变了我"的那两处谓词随之自动不再拒绝, 它们那边不需要
 //   再判断一次开关。
 // ⚠ 关于那两处谓词今天的实际作用, 见 Config::SAFETY_BOUNDARY_CLAMP_ENABLED 注释里标了
-//   "实测核过"的那一段 —— **它们拿到的是已夹过的值, 所以今天是死的**。仍然一起关: 那是为了
-//   开关的语义自洽, 不是因为"否则拦得住"。
+//   "实测核过"的那一段 —— **它们今天都是死的**。⚠ 但死的理由【两处不同, 别当成一条】:
+//   · evaluate 那条 (RelayCore.cpp:874): 拿到的就是已夹过的值 ⇒ 幂等 ⇒ 【可证】恒假;
+//   · evaluatePositionOnly 那条 (RelayCore.cpp:1143): 只因开关关着才死 —— 纯姿态模式下它拿到的
+//     值会被 ≤5mm 的 tcpAdj【推到夹紧之后】⇒ 开关一翻回来它就会拒。
+//   逐行依据见 SafetyPredictor.cpp 里那两段 (2026-09-22)。
+//   仍然一起关: 那是为了开关的语义自洽, 不是因为"否则拦得住"。
 inline Vec3 clampToBoundaryActive(const Vec3& target) {
     if (!Config::SAFETY_BOUNDARY_CLAMP_ENABLED) return target;
     return clampToBoundary(target);
 }
 
+// ⚠★ 2026-09-22 核过 (全仓 + .bat + .vcxproj): 本函数【没有任何生产调用点】,
+//   唯一的使用者是 tests/test_coord_safety.cpp:265/280/293/302/316。
+//   ⚠ 别与两个【活着】的同名概念混淆:
+//     · RobotStateMachine::speedFactor()  (safety/RobotStateMachine.cpp:28,
+//       被 RelayCore.cpp:857/:1404/:1910 消费) —— 生产在用;
+//     · SafetyVerdict::speedFactor 字段 (safety/SafetyPredictor.h:22) —— 生产在用。
+//   ⇒ 删或留由用户定; 现状是【留着 + 标出来】, 免得下一个人以为边界降速已经接上了。
 inline double computeSpeedFactor(const Vec3& target) {
     // 计算距最近边界的距离（归一化到 [0, 1]）
     double rangeX = Config::SAFE_X_MAX - Config::SAFE_X_MIN;
