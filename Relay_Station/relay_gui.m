@@ -212,8 +212,18 @@ function relay_gui()
         'FontColor', clr.text_dim, 'FontSize', 9);
     lblFFToggle.Layout.Row = 1;  lblFFToggle.Layout.Column = 1;
 
+    % ★ 这里是 @(~,~) onForceFeedbackToggle(swFF.Value) —— 【既有缺陷】, 与本分支的增益调参无关,
+    %   是在这个文件里干活时【顺手发现】的 (在分支基线上就能重现)。匿名函数在【赋值完成之前】
+    %   就引用了 swFF, 而 MATLAB 的匿名函数按【创建时刻】捕获变量的值 ⇒ 这个句柄从未捕获到
+    %   那个开关, 一扳开关就报"函数或变量 'swFF' 无法识别"。
+    % 后果不只是"报了个错": uiswitch 的 Value 【自己会翻】(外观变化与回调成败无关), 而
+    %   FF|0 / FF|1 【一条都没发出去】⇒ 屏幕上的开关位置与 C++ 那侧的真实状态不一致 ——
+    %   正是本分支整趟在消灭的那类不一致。
+    % ⇒ 改成从【回调的源参数】取值 (s.Value), 与下面滑条/编辑框那几处同一种写法,
+    %   不再捕获外部变量。uiswitch 的 Value 是 char, 内容就是 Items 里的 'ON'/'OFF',
+    %   正是 onForceFeedbackToggle 期望的入参。
     swFF = uiswitch(pnlFFToggle, 'Items', {'OFF', 'ON'}, 'Value', 'ON', ...
-        'ValueChangedFcn', @(~,~) onForceFeedbackToggle(swFF.Value));
+        'ValueChangedFcn', @(s,~) onForceFeedbackToggle(s.Value));
     swFF.Layout.Row = 1;  swFF.Layout.Column = 2;
 
     lblForceFilt = uilabel(pnlFF, 'Text', {'Filtered force for haptic feedback...', '', ...
