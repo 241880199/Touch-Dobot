@@ -7,7 +7,7 @@
 //     Calibration::enabled / R / t 声明为 extern, 而它们的【定义】在那个 .cpp 里
 //     (namespace Calibration, 第 8 行)。少它 ⇒ LNK2019 三个符号(实测复现)。
 //     本文件调用 convertTouchToRobot ⇒ 实例化那个 inline 函数 ⇒ 拉进这三个 extern。
-//     或直接 call .\build_coord_safety_test.bat (它的配方是对的; .\ 不能省 —— 见 test_force_pipeline.cpp 头部)。
+//     或直接 call .\build_coord_safety_test.bat (它的配方是对的; .\ 不能省 —— 见 test_force_pipeline.cpp 头部; ⚠ 上面的 cl 要求 cwd = 本目录[路径全是相对的]; 它与脚本的差别只有两个【仅关警告】的开关: /DWIN32_LEAN_AND_MEAN /D_WINSOCK_DEPRECATED_NO_WARNINGS, 无实质影响)。
 // Run: test_coord_safety.exe
 
 #include <iostream>
