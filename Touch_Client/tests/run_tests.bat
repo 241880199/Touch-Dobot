@@ -12,7 +12,6 @@ echo.
 for %%e in (
     test_force_pipeline.exe
     test_constraint_force.exe
-    test_safety_core.exe
     test_feedback_parser.exe
     test_escalation.exe
     test_kinematics.exe
@@ -108,6 +107,26 @@ if %ERRORLEVEL% EQU 0 (
     echo.
     echo === test_tcp_calibration.exe ===
     "%TESTDIR%\test_tcp_calibration.exe"
+    if %ERRORLEVEL% EQU 0 (
+        set /a PASSED+=1
+        echo   [OK]
+    ) else (
+        set /a FAILED+=1
+        echo   [FAIL]
+    )
+) else (
+    echo   [FAIL: build error]
+    set /a FAILED+=1
+)
+echo.
+
+echo --- Building test_safety_core ---
+call "%TESTDIR%\build_safety_core_test.bat"
+if %ERRORLEVEL% EQU 0 (
+    echo   Build OK
+    echo.
+    echo === test_safety_core.exe ===
+    "%TESTDIR%\test_safety_core.exe"
     if %ERRORLEVEL% EQU 0 (
         set /a PASSED+=1
         echo   [OK]

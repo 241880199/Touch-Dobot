@@ -105,8 +105,17 @@ void RobotDiagnostics::logError(const RobotError& error, double constraintMag,
     e.constraintForceMag = constraintMag;
     log(e);
 
+    // 把这条诊断转发到线上 (D| 帧) —— 需要 RelayCore 整个链接进来。
+    // ★ 2026-09-22: 用例里挡掉它。理由与 SingularityAvoidance.cpp 的 TEST_SINGAVOID 相同:
+    //   test_safety_core 只验状态机与升级逻辑, 它【不该】为了那一帧把 RelayCore
+    //   (以及它的 winsock / OpenHaptics / 全部依赖) 拉进来 —— 那条链现在甚至链接不过
+    //   (LNK2019), 于是这条用例的 exe 一直是个 07-25 的陈旧二进制, 它报的 FAIL 是零信息。
+    //   沿用同一形状, 但用更通用的名字: 不止一个套件需要挡 RelayCore。
+    //   落盘 (log(e)) 与内存计数不受影响 —— 被挡掉的只是"再发一帧给 MATLAB"。
+#ifndef TEST_NO_RELAY_CORE
     RelayCore::instance().reportDiagnostic(
         static_cast<int>(error.code), error.speedFactor, errorCodeName(error.code));
+#endif
 }
 
 int RobotDiagnostics::errorCount(RobotErrorCode code) const {
