@@ -1995,7 +1995,15 @@ void RelayCore::reportFeedback(const char* fbText) {
 //       的【接受】/【拒绝】两个分支, 以及每帧那次 `if (s_gainReportPending)` 补发;
 //     · 【触觉实时线程】—— 重连那一条: HapticCallback 的 reportPosition() →
 //       ensureRelayConnected() → 重连成功时 sendReflectionGain(true)。
-//   (第三处 initRelayReporting() 在 GLUT 主循环【之前】由 main() 调, 那时还没有并发。)
+//   ★ 启动那一次【也不例外】(2026-09-22 再修正): 这里从前写的是"initRelayReporting() 由
+//     main() 在 GLUT 主循环【之前】调, 那时还没有并发"—— 那句是【错的】, 而且错法与上面那句
+//     "只由 GLUT 线程调"同源: 把"启动时"当成了"单线程"。实际次序是 initHapticDevice() →
+//     hdStartScheduler() 【先把触觉线程起了起来】, initRelayReporting() 是之后才调的 ⇒
+//     这中间 reportPosition() 已按 Config::RELAY_UPDATE_INTERVAL 在跑, 而那一刻 socket 还是
+//     INVALID_SOCKET ⇒ ensureRelayConnected() 里 lastTryMs 初值为 0, 守卫
+//     (lastTryMs != 0 && …) 对【首次】调用必然放行 ⇒ 连上就在【触觉线程上】调
+//     sendReflectionGain(true), 与 main() 自己在 initRelayReporting() 里的那一次重叠。
+//     ⇒ 这个调用点新加的状态同样要并发保护, 不能按"启动时是单线程"推断。
 //   ⇒ 下面三个状态必须是 atomic: 两个线程不同步地读写同一个非原子对象就是数据竞争 (UB)。
 //   残留的只是【次序】上的竞争, 而且无害 —— 这三个状态【不参与强制发送的决策】:
 //     · force=true 一个判断都不从它们取 (只写) ⇒ 交错最坏 = 多回一条、或晚回一条;
