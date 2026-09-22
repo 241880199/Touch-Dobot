@@ -2848,6 +2848,19 @@ static void requestForceZero(const char* src) {
                  "[Force] 调零中: 保持机械臂静止, 采集完成后自动应用并存盘 (来自 %s)", src);
         std::cout << msg << std::endl;
         relay.reportCommand(msg);
+    } else {
+        // ★ 2026-09-22: 这个 else 是【必须的】, 不是装饰。startForceZeroing() 返回 false 时, 原因由
+        //   forceCalibPreconditions 打到 stdout —— 而操作员坐在 MATLAB 前面【看不到 stdout】
+        //   ⇒ 只打 stdout 就等于"点了按钮什么都没发生"。
+        // ⚠ 【这里故意不重复判那三个条件】(仍在传输 / 机械臂未连 / 报警中): 那会把守卫链复制成
+        //   第二份, 而本功能的设计就是"守卫链只有一份"(见本函数顶上那段)。所以只报"未启动",
+        //   并让操作员知道去查哪三处。
+        // 文本【不含逗号】: 与 reportWarning 的自律一致 (C| 虽只拼一个 %s, 但保持同一套习惯)。
+        snprintf(msg, sizeof(msg),
+                 "[Force] 调零【未启动】—— 机械臂状态不允许 (仍在传输 / 未连接 / 报警中 三者之一)"
+                 " 请先排除后重试 (来自 %s)", src);
+        std::cout << msg << std::endl;
+        relay.reportCommand(msg);
     }
 }
 
@@ -3739,17 +3752,15 @@ int main(int argc, char* argv[]) {
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
     // 1.5 加载力反射增益 (calib/force_tuning.json; 没有就用 Config.h 的默认值)
-    // ★★ 【必须在 initRelayReporting 之前】—— 那一步连上 MATLAB 后会立刻回读一次增益。
-    //   若在它之后加载, 回读报的是旧值而实际生效的是文件里的值, 且之后【没有任何事件】
-    //   会纠正它 ⇒ 界面显示 120、手上是 300, 无声地不一致。这正是本设计要消灭的状态。
-    // ★★ 而且它必须比"initRelayReporting 之前"更早 —— 真正【最先】回读的那一次不在 main()
-    //   里: 下面第 2 步的 initHapticDevice() → hdStartScheduler() 已经把【触觉实时线程】
-    //   起了起来, 那个线程每 Config::RELAY_UPDATE_INTERVAL 调一次 reportPosition() →
-    //   ensureRelayConnected(), 而那个函数的节流守卫 (lastTryMs != 0 && …) 对【首次】调用
-    //   必然放行 (lastTryMs 初值为 0) ⇒ 它一连上就会在触觉线程上发一条
-    //   sendReflectionGain(true)。所以只排到 initRelayReporting 前面是不够的, 必须早到
-    //   【触觉线程可能连上】之前 —— 也就是要排在 initHapticDevice() 前面, 即本步。
-    //   (同一条事实在 RelayCore.cpp 的 sendReflectionGain 文档块里也记着, 两处互为佐证。)
+    // ★★ 【必须排在 initRelayReporting 与 initHapticDevice 之前】—— 这两步之后都【可能】
+    //   立刻回读一次增益, 而且哪一次最先发生是【竞争】: 触觉线程可能先连上, 不能指望它输,
+    //   ⇒ 只排到 initRelayReporting 前面是不够的。约束的本质是"必须排在前面", 不是
+    //   "因为某一次总是先发生"。
+    //   ⚠ 后来者别把本调用"整理"到后面去 —— 机制 (触觉线程上那一次回读) 见 RelayCore.cpp
+    //   的 sendReflectionGain 文档块, 此处不重复。
+    // ★ 晚了会怎样: 回读报的是旧值而实际生效的是文件里的值 ⇒ 界面一个数、手上另一个数,
+    //   无声地不一致; 这个不一致要等到下一次回读 —— 重连, 或一次被接受的增益改动 —— 才会
+    //   被纠正, 没有别的事件会自己纠正它。这正是本设计要消灭的状态。
     // ★ 也必须在 initForceReader 之前 —— 那里的 ForcePipeline::init() 会把增益斜坡就位;
     //   晚了那 0.25 秒里增益是错的 (不会失控, 总夹还在, 但没必要)。
     ForceTuning::loadOnStartup();
