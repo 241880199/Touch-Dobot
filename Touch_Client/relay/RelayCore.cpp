@@ -2091,12 +2091,15 @@ void RelayCore::pollForce() {
     //   平均出另一路量的零偏, 而两路的零偏不是一回事 (12:38 那份夹具上逐轴均值差
     //   19.8 / 1.6 / 1.7 N, 见 tests/fixtures/calib_poses_2026-09-19.txt):
     //   扣错以后读数依旧是个 N, 不报错。
-    if (ForceCalibration::isRunning()) {
-        ForceCalibration::update(0.033, app.forceData.sixForceRaw, pose);
-        if (ForceCalibration::isDone()) {
-            // Apply results handled in idle() / keyboard callback
-        }
-    }
+    // ★ 2026-09-22: 【去掉 isRunning() 的门, 改成无条件调用】。
+    //   两件事一起改的, 不能只改一件:
+    //   ① update() 自己测"距上次调用的实测耗时"当 dt (从前是调用方传常数 0.033,
+    //      而真实节拍 46~203ms ⇒ 静默期被拉长 ~2.7 倍)。
+    //   ② 那个计时器靠【每次轮询都被调用】保持新鲜。若继续用 isRunning() 门着,
+    //      计时器会停在"上一次标定运行"那一刻 —— 下次按 'z' 时第一个 dt 就是那之间的
+    //      全部时间 (几分钟), 一步跨过静默期与累计期, 而且【不会报任何错】。
+    //   非运行态下 update() 自己早退 (只做一次 GetTickCount), 所以无条件调用无副作用。
+    ForceCalibration::update(app.forceData.sixForceRaw, pose);
 
     // ★★ 2026-09-21: 补偿 (ForceCompensation::step) 与滤波/映射 (ForcePipeline::step) 已经
     //   【搬到 ForceReader 线程里跑】—— 见 forceReaderThread 里那一段的说明与

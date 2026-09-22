@@ -41,8 +41,19 @@ namespace ForceCalibration {
     State currentState();
     const char* statusText();
 
-    // Called each frame from pollForce (~30Hz)
-    bool update(double dt, const double raw[6], const double pose[6]);
+    // Called each poll tick from pollForce. 【dt 不再由调用方给】——
+    // ★ 2026-09-22: 这里从前是 `update(double dt, ...)`，调用方传常数 0.033
+    //   (= 名义节拍 FORCE_POLL_INTERVAL_MS，而那个常数是"节流下限"，不是实际节拍)。
+    //   实测节拍 46~203ms (均值 92ms) ⇒ TARE 的"静默 0.5s + 累计 2s"在实际时间里
+    //   是 ~1.35s + 5.4s，而提示打印的是 2.5s ⇒ 操作员在静默期里就松手 ⇒ 又采到瞬态。
+    //   ⇒ 现在按【实测耗时】自算，做法与 ForceCompensation::stepIntervalSec 逐字同构
+    //     (那边是 2026-09-21 用同一条理由改的)。
+    // ⚠ 本函数的调用点【必须每次轮询都调】—— 实测间隔的计时器靠它保持新鲜，见 .cpp 里的说明。
+    bool update(const double raw[6], const double pose[6]);
+
+    // 用例专用: 把 dt 变成【确定的输入】(默认 -1 = 不干预, 走实测)。
+    //   与 ForceCompensation::setStepDtForTest 同一个约定、同一条理由。
+    void setUpdateDtForTest(double sec);
 
     // Persistence —— 全量模型的参数表 (version 3)。
     //   A:          3×3 row-major (kg)          c_s: 质心 (【米】, 传感器测量系)

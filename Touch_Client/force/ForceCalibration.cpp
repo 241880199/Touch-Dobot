@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <algorithm>
+#include <windows.h>   // GetTickCount / DWORD —— 实测间隔的时基 (与 ForceCompensation.cpp 同一做法)
 
 // ===== Internal state =====
 
@@ -75,6 +76,28 @@ const char* statusText() {
 static double g_lastFinalizeFg[3] = {0, 0, 0};
 static double g_lastFinalizeMg[3] = {0, 0, 0};
 
+// 用例驱动的时间步长 (秒)。负数 = 不干预, 走实测。见头文件 setUpdateDtForTest。
+static double g_updateDtForTest = -1.0;
+
+// 两次 update() 之间的【真实】耗时 (s)。第一次调用返回 0。
+// ★ 2026-09-22: 这就是从前写死在调用点上的那个 0.033 的替代。理由见头文件。
+// ⚠ 它靠"每次轮询都被调用"保持新鲜 —— 若调用点又加回 `if (isRunning())` 的门,
+//   计时器会停在【上一次运行】那一刻 ⇒ 下次启动的第一个 dt 是那之间的全部时间
+//   (可能是几分钟) ⇒ 一步跨过静默期与累计期, 而且不会报任何错。判据见 Task 1 Step 8。
+static double updateIntervalSec() {
+    if (g_updateDtForTest >= 0.0) return g_updateDtForTest;
+    static DWORD lastMs = 0;
+    const DWORD now = GetTickCount();
+    if (lastMs == 0) { lastMs = now; return 0.0; }
+    const double dt = (now - lastMs) / 1000.0;
+    lastMs = now;
+    return dt;
+}
+
+void setUpdateDtForTest(double sec) {
+    g_updateDtForTest = sec;
+}
+
 static void finalizeBias() {
     int n = (g_tareCount > 0) ? g_tareCount : 1;
     for (int i = 0; i < 6; i++) g_tareAccum[i] /= n;
@@ -124,6 +147,10 @@ bool start() {
 
     // ★ 2026-09-21: 这里从前硬写 "2s" —— 而 TARE 现在多了一段 0.5s 静默期 (见 update() 的 TARE 分支),
     //   总时长是 2.5s。跟上面那条一样: 时长写错会让操作员在静默期里就松手 ⇒ 又采到瞬态。
+    // ★★ 2026-09-22: 那句打印【到今天才第一次是诚实的】。从前 update() 收到的是调用方传的
+    //   常数 0.033, 而它实际被调用的节拍是 46~203ms(均值 92ms) ⇒ 计时器走完 2.5s 要 76 次
+    //   调用 ≈ 实际 ~7s ⇒ **从前打印 2.5s 而实际等 ~6.75s**, 静默期本身也被拉长 2.7 倍。
+    //   现在 dt 是实测的 ⇒ 下面这个数就是操作员真的要等的秒数。
     printf("[Force] Calibration started — TARE phase (keep robot still for %.0fs = "
            "%.1fs 静默期 + %.0fs 累计)...\n",
            Config::FORCE_CALIB_SETTLE_TIME_S + Config::FORCE_CALIB_STILL_COLLECT_S,
@@ -142,6 +169,10 @@ bool startZero() {
 
     // ★ 2026-09-21: 时长与分工要交代清楚 —— 前 0.5s 是【静默期】(不采样), 之后才累计。
     //   不写出来, 操作员会按旧的 2 秒去等, 然后在静默期里就松手/动臂 ⇒ 又采到瞬态。
+    // ★★ 2026-09-22: 与 start() 里同一条 —— 这个数【从前是假的】: update() 那时收到常数
+    //   0.033 而真实节拍 92ms ⇒ **从前打印 2.5s 而实际等 ~6.75s** (静默期 ~1.35s)。
+    //   2026-09-21 加静默期本来就是为了治"操作员提前松手", 而时长被算错 2.7 倍
+    //   恰好又制造了同一件事。现在 dt 实测 ⇒ 打印的秒数 = 真实要等的秒数。
     printf("[Force] ZERO started — keep robot still for %.0fs "
            "(前 %.1fs 静默期不采样, 之后 %.0fs 才累计)...\n"
            "        (TARE only: no motion phase, drag mode NOT enabled)...\n",
@@ -180,7 +211,11 @@ void confirmPose() {
     }
 }
 
-bool update(double dt, const double raw[6], const double pose[6]) {
+bool update(const double raw[6], const double pose[6]) {
+    // ★ 先量节拍, 【再】早退 —— 顺序不能反。见 updateIntervalSec 的说明:
+    //   计时器必须每次轮询都刷新, 否则下次启动的第一个 dt 会是"距上次运行的全部时间"。
+    const double dt = updateIntervalSec();
+
     if (g_state == State::IDLE || g_state == State::DONE || g_state == State::ABORTED) {
         return (g_state == State::DONE || g_state == State::ABORTED);
     }

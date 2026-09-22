@@ -1152,12 +1152,13 @@ static void test_zero_only_no_motion() {
 
     CHECK(ForceCalibration::startZero());
     CHECK(ForceCalibration::isZeroing());
+    ForceCalibration::setUpdateDtForTest(0.5);   // 步长由用例给 (从前是传给 update 的实参)
 
     // 静置 2s: 每次 0.5s, 采集满 FORCE_CALIB_STILL_COLLECT_S 后自动定稿
     double raw[6] = {-0.48, -1.35, -0.02, 0.010, -0.020, 0.005};
     double pose[6] = {0, 0, 0, 0, 0, 0};
     for (int i = 0; i < 5 && !ForceCalibration::isDone(); i++) {
-        ForceCalibration::update(0.5, raw, pose);
+        ForceCalibration::update(raw, pose);
     }
 
     CHECK(ForceCalibration::isDone());
@@ -1193,6 +1194,7 @@ static void test_zero_only_no_motion() {
     // 力矩零偏也已应用 (Mx 零偏 0.010); c_s 沿 z 与 A·g 平行 → 重力力矩为 0
     CHECK(fabs(fd.compensated[3] - (5.0 - 0.010)) < 0.02);
 
+    ForceCalibration::setUpdateDtForTest(-1.0);   // 还原, 免得污染后面的用例
     ForceCalibration::setDragModeCallback(nullptr);
     PASS();
 }
@@ -1212,9 +1214,10 @@ static void test_zero_abort_not_applied() {
     CHECK(ForceCompensation::isCalibrated());
 
     CHECK(ForceCalibration::startZero());
+    ForceCalibration::setUpdateDtForTest(0.5);   // 步长由用例给 (从前是传给 update 的实参)
     double raw[6] = {-0.48, -1.35, -0.02, 0.010, -0.020, 0.005};
     double pose[6] = {0, 0, 0, 0, 0, 0};
-    ForceCalibration::update(0.5, raw, pose);   // 只采 0.5s, 未达阈值
+    ForceCalibration::update(raw, pose);   // 只采 0.5s, 未达阈值
     ForceCalibration::abort();
 
     CHECK(!ForceCalibration::isRunning());
@@ -1236,6 +1239,7 @@ static void test_zero_abort_not_applied() {
     ForceCompensation::step(fd, pose);
     CHECK(ForceCompensation::guardState() == ForceCompensation::GuardState::OK);
     CHECK(fabs(fd.compensated[0] - 4.0) < 0.02);   // 旧零偏 (1.0), 不是新的 (−0.48)
+    ForceCalibration::setUpdateDtForTest(-1.0);   // 还原, 免得污染后面的用例
     PASS();
 }
 
@@ -1248,11 +1252,12 @@ static void test_sweep_still_enters_motion() {
 
     CHECK(ForceCalibration::start());
     CHECK(!ForceCalibration::isZeroing());          // 全流程不是调零
+    ForceCalibration::setUpdateDtForTest(0.5);      // 步长由用例给 (从前是传给 update 的实参)
 
     double raw[6] = {0, 0, 0, 0, 0, 0};
     double pose[6] = {0, 0, 0, 0, 0, 0};
     for (int i = 0; i < 5 && ForceCalibration::currentState() == ForceCalibration::State::TARE; i++) {
-        ForceCalibration::update(0.5, raw, pose);
+        ForceCalibration::update(raw, pose);
     }
 
     CHECK(ForceCalibration::currentState() == ForceCalibration::State::MOTION);
@@ -1262,6 +1267,7 @@ static void test_sweep_still_enters_motion() {
     CHECK(g_dragOnCalls == 1);                      // abort 只关不开
     CHECK(!ForceCalibration::isRunning());
 
+    ForceCalibration::setUpdateDtForTest(-1.0);     // 还原, 免得污染后面的用例
     ForceCalibration::setDragModeCallback(nullptr);
     PASS();
 }
@@ -1279,8 +1285,9 @@ static void test_zero_restartable() {
     double pose[6] = {0, 0, 0, 0, 0, 0};
 
     CHECK(ForceCalibration::startZero());
+    ForceCalibration::setUpdateDtForTest(0.5);      // 步长由用例给 (从前是传给 update 的实参)
     for (int i = 0; i < 5 && !ForceCalibration::isDone(); i++) {
-        ForceCalibration::update(0.5, raw, pose);
+        ForceCalibration::update(raw, pose);
     }
     CHECK(ForceCalibration::isDone());
 
@@ -1294,6 +1301,44 @@ static void test_zero_restartable() {
     CHECK(ForceCalibration::currentState() == ForceCalibration::State::TARE);
     ForceCalibration::abort();
     CHECK(!ForceCalibration::isRunning());
+    ForceCalibration::setUpdateDtForTest(-1.0);     // 还原, 免得污染后面的用例
+    PASS();
+}
+
+// ★ 2026-09-22: 钉住"dt 是实测/用例给定的，不是常数"。
+// 【为什么需要这条】从前 RelayCore 传常数 0.033（名义节拍），而真实节拍是 46~203ms
+//   ⇒ 静默期 0.5s 在实际时间里是 ~1.35s。这条用例把时间变成【确定的输入】，
+//   于是"采够 2.5s 才定稿"这件事可以被验 —— 从前不可能验，因为没人能驱动时间。
+static void test_calib_tare_timing_follows_measured_dt() {
+    TEST(calib_tare_timing_follows_measured_dt);
+    ForceCompensation::init();
+    double A[9]; diagA(0.42, A);
+    double cS[3] = {0, 0, 0.03};
+    double bF[3] = {0, 0, 0}, bM[3] = {0, 0, 0};
+    ForceCompensation::setCalibration(A, bF, bM, cS);
+
+    double raw[6] = {-0.48, -1.35, -0.02, 0.010, -0.020, 0.005};
+    double pose[6] = {0, 0, 0, 0, 0, 0};
+    const double dt = 0.033;                 // ★ 故意用那个【错】的常数当步长
+
+    CHECK(ForceCalibration::startZero());
+    ForceCalibration::setUpdateDtForTest(dt);
+
+    // ★ 钉住【边界】而不是"大概够了"。
+    //   路径 (update() 的 TARE 分支): 每步 g_phaseTimer += dt; 若 < 0.5 直接早退(不累计);
+    //   越过 0.5 之后才累计, 并在同一步里判 >= 0.5+2.0 == 2.5 就定稿。
+    //   dt = 0.033 ⇒ 计时器 = 0.033n:
+    //     n = 75 ⇒ 2.475  < 2.5 ⇒ 【必须还没 DONE】
+    //     n = 76 ⇒ 2.508 >= 2.5 ⇒ 【必须 DONE】(累计从 n=16 越过 0.5 那步开始)
+    //   ⇒ 这两句一起把"时长真的按 dt 走、且真的是 2.5s 而不是别的数"钉死了。
+    for (int i = 0; i < 75; i++) ForceCalibration::update(raw, pose);
+    CHECK(!ForceCalibration::isDone());      // 75 × 0.033 = 2.475s < 2.5s
+    ForceCalibration::update(raw, pose);
+    CHECK(ForceCalibration::isDone());       // 76 × 0.033 = 2.508s >= 2.5s
+
+    // ⚠ 本用例【不断言零偏数值】⇒ 不依赖 currentGravityTerm 的缓存
+    //   (那是 Task 2 那条红的成因); 别在这里照抄 Task 2 的热身, 那是另一件事。
+    ForceCalibration::setUpdateDtForTest(-1.0);   // 还原, 免得污染后面的用例
     PASS();
 }
 
@@ -1768,6 +1813,7 @@ int main() {
     test_zero_abort_not_applied();
     test_sweep_still_enters_motion();
     test_zero_restartable();
+    test_calib_tare_timing_follows_measured_dt();
     test_setcalib_rejects_zero_and_degenerate_A();
     test_calib_file_roundtrip();
     test_calib_file_rejects_old_format();
