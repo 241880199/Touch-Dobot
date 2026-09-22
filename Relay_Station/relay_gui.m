@@ -62,7 +62,11 @@ function relay_gui()
     % 真值【只在 C++ 那一侧】。下面这些字段只是【显示缓存】, 全部由 RG| 回读刷新 ——
     % 绝不当作"我设过什么"的记忆使用 (那正是无声不一致的入口)。
     S.tuning = struct('gain', NaN, 'min', NaN, 'max', NaN, 'ratio', NaN, ...
-                      'deadN', NaN, 'satN', NaN, 'defGain', NaN, 'known', false);
+                      'deadN', NaN, 'satN', NaN, 'defGain', NaN, 'known', false, ...
+                      'displayUnknown', false);
+    % displayUnknown: 控件上【没有可信的增益数】(回读自相矛盾那一档才为 true)。
+    %   只由 showGainUnknown() 置 true、由"赋真值"那两句置 false —— 它描述的是【显示状态】,
+    %   不是回读本身, 所以标题行也拿它当判据 (见 updateTextPanels)。
     S.tuningDragging = false;   % 拖动中禁止回读移动滑块 (否则和手指打架)
     S.tuningLastSent = NaN;     % 最近一次发出去的值, 用于判断回读是否与请求不符 (拒收)
     % 3D 场景对象 (Task 7)
@@ -240,7 +244,8 @@ function relay_gui()
     %     实测空值时框里是 '— 等待 C++ —'; 第一次回读时 AllowEmpty 置 false 并给真值。
     % ⚠ 这里【一个占位魔数都不写】: 编辑框空着 (Limits 取默认 [-Inf Inf]), 滑条用 MATLAB 自己的
     %   默认 Limits [0 100] / Value 0, 且明确把 MajorTickLabels 置空 ⇒ 滑条上也没有数字
-    %   (实测: 不置空的话默认刻度会打出一整排数 0/6/12/…/100, 那又是一排假数)。
+    %   (实测 R2025b: 默认 MajorTicks 是 [0 20 40 60 80 100], 而【画出来】的自动标签是
+    %    0 4 8 12 … 96 100 一整排 —— 以出图为准, 那又是一排假数)。
     %   占位范围只在"控件禁用、发不出去"这一档存在; 第一次 RG| 回读就用 C++ 的 min/max 顶掉它。
     sldGain = uislider(pnlGainCtl, 'Enable', 'off', 'MajorTickLabels', {}, ...
         'ValueChangingFcn', @(s,e) onGainChanging(e.Value), ...
@@ -519,6 +524,35 @@ function relay_gui()
         sendToClient('Z|1');
     end
 
+    function showGainUnknown()
+        % 回读自相矛盾时【唯一诚实的显示】: 喊一声 + 把两个控件摆成"没有数"这一档。
+        %   (2026-09-22 Fix round 2。判据与守门见 processNetworkData 里跳赋值的那一支。)
+        % 【为什么不能用 NaN】实测 (R2025b, 本机): 数值框与滑条【都拒】NaN —— 构造与赋值都报
+        %   ''Value' 必须为位于 'Limits' 的范围之内的双精度标量'。
+        % 数值框: AllowEmpty=true + Value=[] 就是"没有数"这一档, 占位串顶上去 ——
+        %   与"第一次回读之前"用的是同一个机制, 不是这里新发明的一种状态。
+        % 滑条: 【没有空值这一档】⇒ 用 Enable='off', 刻度标签本来就已置空 (MajorTickLabels={})。
+        %   出图核对过: 关掉之后【一个数字都没有】, 只剩变灰的轨道与手柄。
+        % ⚠ 先关 Enable 再清编辑框, 顺序不能反: 置 AllowEmpty=true 会把"交出空值"这条路重新
+        %   打开, 而 onGainChanged 收到 [] 会发出 sprintf('RG|%.4f', []) = 'RG|' —— 一条畸形
+        %   命令 (实测就是 'RG|')。关掉 Enable ⇒ 操作员根本交不出空值。
+        % ⚠ 那句 ⚠ 日志【写在本函数里】不是随手放的: 这样任何一处调用都会喊, 不会有"清了屏
+        %   幕却没人说话"的调用方式。
+        fprintf(['[Relay] ⚠ 回读自相矛盾: 回读的当前增益 %.1f 落在它自己声明的范围 ' ...
+                 '[%.0f, %.0f] 之外 —— 增益已显示为【未知】(控件清空+禁用), ' ...
+                 '不留上一条回读的旧数\n'], ...
+            S.tuning.gain, S.tuning.min, S.tuning.max);
+        edGain.Enable      = 'off';
+        sldGain.Enable     = 'off';
+        edGain.AllowEmpty  = true;
+        edGain.Value       = [];
+        % 占位串【短】是量出来的, 不是随手写的: 这一格是 58px 宽 (pnlGainCtl 的 ColumnWidth),
+        %   实测 '— 回读矛盾 · 增益未知 —' 会被截断成 '— 回读矛盾', 而 '— 未知 —' 完整显示。
+        %   细节留给上面那行标题去说 (宽度够, 整句都在), 这一格只回答"有没有数"。
+        edGain.Placeholder = '— 未知 —';
+        S.tuning.displayUnknown = true;
+    end
+
     function sendToClient(cmd)
         if ~isempty(S.server) && isvalid(S.server) && S.server.Connected
             try
@@ -637,8 +671,14 @@ function relay_gui()
                             %   不含当前 Value 时 MATLAB 只夹紧不抛错 (120 → 150);
                             %   而上下限反了会让 uislider 直接抛错, 那条已在上面并进"可用"判据。
                             sldGain.Limits = [S.tuning.min S.tuning.max];
-                            % 空值只在"还没回读"那一档合法 ⇒ 真值到手就关掉 AllowEmpty,
-                            %   此后编辑框不可能为空 (实测置 false 本身不报错, 之后赋 [] 被拒)。
+                            % 空值是"没有数"那一档, 只在【回读之前】与【回读自相矛盾】两处合法
+                            %   ⇒ 有真值就关掉 AllowEmpty (实测: 置 false 之后赋 [] 会被拒)。
+                            % ⚠ 补一条实测 (2026-09-22): 值的的确确还空着时置 false 【不报错】,
+                            %   而是把值【悄悄变成 0】; 紧接的下面那句 Limits 写入又把它夹回 min。
+                            %   ⇒ 屏幕上看不到这个 0, 而且这几句在同一个同步回调里、中间插不进
+                            %   一次重绘 ⇒ 无用户可见效果。记下来是因为它【看起来像没发生】。
+                            %   (Fix round 2 起"此后不可能为空"这句不再成立: 回读自相矛盾时
+                            %    showGainUnknown() 会把编辑框重新清空。)
                             edGain.AllowEmpty = false;
                             edGain.Limits  = [S.tuning.min S.tuning.max];
                             sldGain.MajorTicks = ...
@@ -657,16 +697,6 @@ function relay_gui()
                                          '[%.0f, %.0f], 当前 %.1f\n'], ...
                                     prevMin, prevMax, S.tuning.min, S.tuning.max, ...
                                     S.tuning.gain);
-                            end
-                            % 这条【不能静默】: 若 C++ 报的 gain 落在它自己声明的范围之外, 下面
-                            %   那段会给控件赋一个越界的 Value —— 而【给控件赋越界的 Value 是抛错,
-                            %   不是夹紧】(实测: Limits 赋值才会夹紧) ⇒ 那是收包循环里的一声炸,
-                            %   会把那一拍的所有消息一起带走。所以下面加了守门; 这里先喊出来。
-                            if S.tuning.gain < S.tuning.min || S.tuning.gain > S.tuning.max
-                                fprintf(['[Relay] ⚠ 回读自相矛盾: 回读的当前增益 %.1f 落在它' ...
-                                         '自己声明的范围 [%.0f, %.0f] 之外 —— 控件保留旧值, ' ...
-                                         '屏幕上的数将不等于 C++ 实际值\n'], ...
-                                    S.tuning.gain, S.tuning.min, S.tuning.max);
                             end
                         end
 
@@ -690,12 +720,35 @@ function relay_gui()
 
                         if ~S.tuningDragging
                             % 拖动中不动滑块 —— 否则回读会和手指打架
-                            % ⚠ 加了范围守卫 (Fix 1 之后才需要): 回读自相矛盾时 (gain 在它自己
-                            %   声明的范围之外), 这一句会【抛错】而不是把值夹紧 —— 上面已经喊过,
-                            %   这里就【不写】, 让控件停在旧值上, 不要把收包循环带崩。
+                            % ⚠ 范围守卫 (Fix 1 之后才需要): 回读自相矛盾时 (gain 在它自己声明的
+                            %   范围之外) 这一句会【抛错】而不是把值夹紧 (实测: 只有 Limits 赋值
+                            %   才夹紧) ⇒ 那是收包循环里的一声炸, 会把那一拍的所有消息一起带走。
                             if S.tuning.gain >= S.tuning.min && S.tuning.gain <= S.tuning.max
                                 sldGain.Value = S.tuning.gain;
                                 edGain.Value  = S.tuning.gain;
+                                % ★ 从"未知"那一档恢复 —— 必须也把控件【恢复成可用】。
+                                %   ⚠ 这一步不能指望上面那道范围门: 它只在"第一次回读 / 范围变了"
+                                %   时才跑, 而矛盾状态【随时】可能被下一条正常回读解掉 (同一范围内
+                                %   报一个合法 gain 就够了) ⇒ 只赋 Value 的话, 屏幕上是有了数,
+                                %   两个控件却永远灰着、操作员再也动不了它们。
+                                %   顺序: 先赋 Value (上面两句) 再关 AllowEmpty —— 值非空时置 false
+                                %   才不会触发"悄悄变 0"那一条 (见上面第一道门的注释)。
+                                %   占位串【不必在这里恢复】: 它只在框空着时可见, 而进入"空"只有
+                                %   两处 (构造 / showGainUnknown), 两处都各自写了当时该显示的句子。
+                                if S.tuning.displayUnknown
+                                    sldGain.Enable    = 'on';
+                                    edGain.Enable     = 'on';
+                                    edGain.AllowEmpty = false;
+                                    S.tuning.displayUnknown = false;
+                                end
+                            else
+                                % ★ 跳过赋值的那一支 —— 那句 ⚠ 就挂在这里 (2026-09-22 Fix round 2)。
+                                %   从前它写在上面的范围门里 ⇒ 只有"第一次回读 / 范围变了"才打。
+                                %   于是【范围没变的矛盾回读】(gain 越界, 而 min/max 与上一条相同)
+                                %   一次都不打地走完全程, 控件停在上一条回读的夹紧值上 ——
+                                %   一个看着像、却不是机械臂在用的增益, 而且无人吭声。本文件的
+                                %   整个立意就是"屏幕上的数 = 机械臂在用的数" ⇒ 不能留这个洞。
+                                showGainUnknown();
                             end
                         end
                     else
@@ -1047,9 +1100,18 @@ function relay_gui()
         % (gain 300 时窗口只有 0.20–0.67N, 死区占了 30%)。
         % ⚠ "该轴分量"这句不能省: HapticCallback 是【三个轴各自夹】, 不是夹合力。
         if S.tuning.known
-            lblGainTitle.Text = sprintf( ...
-                'Reflection Gain  ≈%.2f:1   响应窗口 %.2f – %.2f N (该轴分量)', ...
-                S.tuning.ratio, S.tuning.deadN, S.tuning.satN);
+            if S.tuning.displayUnknown
+                % ⚠ 回读自相矛盾时【这行也不能照常写】: ratio/satN 同样是【那一条】回读算出来的
+                %   (C++ 侧 netRatioPerGainUnit()*g), 与控件一样不可信。若还照常显示, 面板就
+                %   自相矛盾 —— 标题按某条回读报一个窗口, 而控件说"未知"。这里改成说清矛盾。
+                lblGainTitle.Text = sprintf( ...
+                    'Reflection Gain  ⚠ 回读自相矛盾: 报的 %.1f 不在 [%.0f, %.0f] —— 增益未知', ...
+                    S.tuning.gain, S.tuning.min, S.tuning.max);
+            else
+                lblGainTitle.Text = sprintf( ...
+                    'Reflection Gain  ≈%.2f:1   响应窗口 %.2f – %.2f N (该轴分量)', ...
+                    S.tuning.ratio, S.tuning.deadN, S.tuning.satN);
+            end
         end
     end
 
