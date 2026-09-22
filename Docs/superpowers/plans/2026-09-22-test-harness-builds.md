@@ -79,40 +79,68 @@
 
 ---
 
-### Task 1: `vcvarsall` 幂等化 —— 一次会话里最多真正调用一次
+> ## ⚠★ 2026-09-22 执行中【scope 被推翻】—— 本 Task 最初只写了"四个文件"，那是错的
+>
+> 第一版把范围定成"`run_tests.bat` **当前**调用的那四个无守卫脚本"。实现者审计了**全部 22 个**
+> `build_*.bat` 之后指出：**今天无害，但做完 Task 2 就会再炸一次** ——
+> Task 2 要接进来六个**孤儿**脚本（`build_force_pipeline_test` / `build_constraint_test` /
+> `build_feedback_parser_test` / `build_escalation_test` / `build_kinematics_test` /
+> `build_coord_safety_test`），**它们全都是无守卫的**，再加上受害者本身
+> `build_noise_probe_test.bat` 也没守卫。⇒ 做完 Task 2 就有 **7 次真实调用**
+> ⇒ `1917 + 7×1349 = 11360 > 8191` ⇒ **cmd 又在第 5 次中止，形状正是本计划批评的"挪动故障"。**
+>
+> **控制方已独立核实**（一条 grep）：`build_*.bat` 共 **22** 个，**无守卫 16 个、有守卫 6 个**，
+> 而那六个孤儿 + `noise_probe` **全部**在无守卫名单里。⇒ 实现者的意见成立，**本 Task 的范围定错了**：
+> 我把"当前调用图"当成了"将来的调用图"，而 Task 2 恰好要改调用图。
+>
+> **⇒ 修正后的范围：把 `tests/` 下【所有】无守卫的 `call ...vcvarsall` 都加上守卫**，
+> 使"一条 cmd 会话里最多真正调用一次"成为**全目录不变量**。这不比原计划多多少工作
+> （每个脚本一行），但它把判据从"我们想到了 4 个"变成**一条可 grep 验证的不变量**。
+>
+> **新的验收判据（取代"改 4 个文件"）：`tests/` 下无守卫的 `call .*vcvarsall` 计数 == 0。**
+>
+> ⚠ 顺带更正 **Step 1 的方法错**：它让分五次 `cmd //c` 来复现溢出 —— 而**每次 `cmd //c` 都是
+> 全新会话，PATH 根本不可能累积** ⇒ 那个步骤**结构上就复现不了**它声称要复现的东西。
+> （实现者照做后没复现，并自己在一个**真正的单一会话**里复现了真症状 —— 这是对的。）
+> 基线必须在**一个** cmd 会话里连续调用来做。
+
+### Task 1: `vcvarsall` 幂等化 —— 一条会话里最多真正调用一次（全目录不变量）
 
 **为什么**：这是 `test_noise_probe` 从不运行的**根因**，也是"全量跑一趟"不可信的原因。
 现在的做法是**给个别脚本打补丁**，那只把溢出点往后挪。正确做法是**每个脚本都自带守卫**
 ⇒ 一条 cmd 会话里只有**第一次**真正调用 `vcvarsall`，PATH 只涨一次 ~1350 字符（上限 8191）
 ⇒ **任何顺序、任何调用次数都不会溢出**，而且每个脚本**仍然能单独用**。
 
-**Files:**
-- Modify: `Touch_Client/tests/build_force_comp_test.bat`（加守卫）
-- Modify: `Touch_Client/tests/build_relay_command_test.bat`（加守卫）
-- Modify: `Touch_Client/tests/build_force_logger_test.bat`（加守卫）
-- Modify: `Touch_Client/tests/build_tcp_calibration_test.bat`（加守卫）
-- （`build_safety_core_test.bat` / `build_session_report_test.bat` **已有**守卫，不动 —— 它们是先例）
+**Files:**（**修正后**：`tests/` 下所有无守卫的 `build_*.bat`。执行时以 grep 结果为准，别照抄这份名单）
+- 已改（commit `7c63249`）：`build_force_comp_test.bat` / `build_relay_command_test.bat` /
+  `build_force_logger_test.bat` / `build_tcp_calibration_test.bat`
+- **待改（12 个）**：`build_calib_store_test.bat` / `build_calibration_test.bat` /
+  `build_constraint_test.bat` / `build_coord_safety_test.bat` / `build_escalation_test.bat` /
+  `build_feedback_parser_test.bat` / `build_fk_validate.bat` / `build_force_pipeline_test.bat` /
+  `build_frame_layout_test.bat` / `build_inertia_identification_test.bat` /
+  `build_kinematics_test.bat` / `build_noise_probe_test.bat` /
+  `build_payload_calibration_test.bat` / `build_self_collision_test.bat` /
+  `build_singavoid_test.bat` / `build_test.bat` ← **以执行时的 grep 为准**（本名单可能已过时；
+  控制方核实过的是"无守卫 16 个、有守卫 6 个"）
+- 不动：已有守卫的 6 个（含 `build_safety_core_test.bat` / `build_session_report_test.bat` —— 它们是先例）
 
 **Interfaces:**
 - Produces: 本仓 `.bat` 的既有约定 —— 形如
   `if not defined VCINSTALLDIR call "D:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat" x64`
   （**逐字**照 `build_session_report_test.bat:2` 与 `build_safety_core_test.bat` 的写法）
 
-- [ ] **Step 1: 先复现"溢出现象"（不要跳过 —— 这是本 Task 的判据基线）**
+- [ ] **Step 1: 先在一个【单一 cmd 会话】里复现溢出（这是判据基线）**
 
-按真实顺序模拟：
-```bash
-cd /d/Projects/Touch/Touch_Client/tests
-cmd //c "build_force_comp_test.bat"        > /tmp/h1.log 2>&1; echo "step1 exit=$?"
-cmd //c "build_relay_command_test.bat"     >> /tmp/h1.log 2>&1; echo "step2 exit=$?"
-cmd //c "build_force_logger_test.bat"      >> /tmp/h1.log 2>&1; echo "step3 exit=$?"
-cmd //c "build_tcp_calibration_test.bat"   >> /tmp/h1.log 2>&1; echo "step4 exit=$?"
-cmd //c "build_noise_probe_test.bat"       >> /tmp/h1.log 2>&1; echo "step5 exit=$?"
-```
-⚠ **每一步必须是独立的 `cmd //c`** —— 否则你测的是别的东西。
-把每一步的 exit 与 `BUILD_EXIT=` 抄进报告。**期望看到最后一步失败**（或至少与前面不同）。
-⚠ 断点依赖**起始 PATH**：若这里没复现，如实说明"本 shell 的起始 PATH 不同，未复现"，
-并**改用 Step 3 的判据**（见下）而不是假装复现了。
+⚠★ **必须在【同一个】cmd 会话里连续调用**。分多次 `cmd //c` 是**几个全新会话**，
+PATH 根本不可能累积 ⇒ **那样测结构上就不可能复现**（本计划第一版把这个方法写反了，实现者照做后没复现、
+并自己用一个真正的单一会话复现了真症状 —— 那是对的）。
+
+做法：写一个**临时**的 ASCII 助手 `.bat`（放 `/tmp`，**不要放进仓库**），在里面**按顺序 call**
+四个无守卫脚本 + `build_noise_probe_test.bat`，每步之后记一次 `%PATH%` 长度与 `%ERRORLEVEL%`，
+一次 `cmd //c` 跑完它。**期望**：PATH 每次涨 ~1350 字符（`3264 → 4613 → 5962 → 7311`），
+**第 5 次真实调用时 cmd 中止、exit 255、后面的步骤全不执行**。
+把每步的 PATH 长度与 exit 抄进报告。
+⚠ 若本 shell 的起始 PATH 不同导致断点不同，如实说明；**别为了好看去调环境**。
 
 - [ ] **Step 2: 给四个脚本各加一行守卫**
 
@@ -132,6 +160,18 @@ if not defined VCINSTALLDIR call "D:\Program Files\Microsoft Visual Studio\2022\
 ⚠ **纯 ASCII**。⚠ 保持这两个 `rem` 行与 `if` 行之间的**行数与内容**一致即可，别动脚本其余部分。
 
 - [ ] **Step 3: 判据 —— 幂等性可测，不依赖"能不能复现溢出"**
+
+**判据 (a) —— 全目录不变量（这是主判据，取代"改了 4 个文件"）**：
+```bash
+cd /d/Projects/Touch/Touch_Client/tests
+grep -lE '^[[:space:]]*call .*vcvarsall' build_*.bat    # 期望：无输出（计数 0）
+grep -cE 'if not defined VCINSTALLDIR call .*vcvarsall' build_*.bat | grep -v ':0' | wc -l
+```
+判据：**无守卫的 `call .*vcvarsall` 计数为 0**。这条比"我们想到了哪几个"强得多 ——
+它把要求变成一条**可 grep 验证的性质**，而不是一份可能过时的名单。
+（控制方在 2026-09-22 核实过基线是"无守卫 16、有守卫 6、共 22"。你的执行结果应使前者归零。）
+
+**判据 (b) —— 幂等性本身（性质层面，不依赖某个起始 PATH 会不会溢出）**：
 
 新开一个 `cmd`，**在同一个会话里连续调用同一个脚本三次**，观察 PATH 长度是否只涨一次：
 ```bash
@@ -168,6 +208,13 @@ test_noise_probe 正是那个受害者 —— 而它成为受害者恰恰因为�
 ---
 
 ### Task 2: 把六个孤儿接进"先建再跑"，并删掉第一段"只跑不建"
+
+> **★ 前置条件（Task 1 的修正带来的）**：本 Task **必须**在 Task 1 的"全目录不变量"成立之后做 ——
+> 即 `tests/` 下无守卫的 `call .*vcvarsall` 计数为 **0**。
+> **否则本 Task 会把溢出重新引爆**：它要接进来六个**无守卫**的孤儿脚本
+> （外加受害者 `build_noise_probe_test.bat` 本来也没守卫）⇒ 一共 7 次真实调用
+> ⇒ `1917 + 7×1349 = 11360 > 8191` ⇒ cmd 在第 5 次中止，**看到的现象与本 Task 要修的一模一样**，
+> 而原因换成了我们自己接进来的东西。**开工前先跑一遍那条 grep 确认它是 0。**
 
 **为什么**：这才是让那六个套件**变成可信证据**的那一步。
 今天它们"能构建"（Task 1 之外的事实）却**没有任何东西会重建它们**，而且第一段的 `[OK]`/`[FAIL]`
