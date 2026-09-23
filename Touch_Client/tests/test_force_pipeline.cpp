@@ -366,6 +366,74 @@ static void test_soft_deadzone_shared_and_smooth() {
     PASS();
 }
 
+// ★ 2026-09-23 新增 (抖动计划 Task 2): 两个【只读】累加器真的被 step() 喂了 —— 而且喂的是
+//   【两个不同的量】。本用例不读硬件、不碰 socket, 只用现成的 AppState::ForceData。
+//
+// 【为什么必须有这条】Task 2 的接线全是"没有返回值的副作用", 没有任何既有用例会因为
+//   接线写错而红: 删掉那两行 addFrame、把两个累加器互换、只喂一个、或者按错的东西喂,
+//   整床照样全绿 —— 而判据 A/B 会据此给出【相反】的结论。本项目在"接线从未被用例区分过"
+//   这条上吃过多次亏 (最近一次: 按钮2 的限幅用例单轴 ⇒ 逐分量夹与旋转角夹等价)。
+//
+// 【它怎么区分】(两个子情形, 都在死区【两侧】各钉一次)
+//   (a) 死区【之上】(dz*4 的常量输入): 残差每帧都越阈 ⇒ fracResidual == 1.0 精确值。
+//       ⚠ 它同时是"阈值在喂帧前被武装过"的证据: 没武装时 fracAbove 返回 −1, 不是 1.0。
+//   (b) 死区【之下】(dz*0.25): 残差 = 那个输入本身 (0.05 量级, 逐帧不变, 不过死区);
+//       而输出还要再挨一次软门 (r²) 与增益 ⇒ meanOut 比 meanResidual 【小得多】。
+//       若把两个累加器【接反】(输出喂成残差), 这个比值会变成 1, 本条立刻红。
+//       ⇒ 这一条是"两个量不可互换"在本仓唯一的自动证据。
+static void test_jitter_accumulators_are_fed_and_distinct() {
+    TEST(jitter_accumulators_are_fed_and_distinct);
+    const double dz = Config::FORCE_RESIDUAL_DEADZONE_N;
+    AppState::ForceData fd;
+    for (int i = 0; i < 6; i++) fd.compensated[i] = 0.0;
+
+    // ⚠ 【先把滤波器建立起来, 再开窗口】: init() 会把滤波器清零, 于是窗口头几帧的 filtered
+    //   其实还在从 0 往上爬 (阶跃响应的时间常数约 4 帧)。把它们算进窗口, 均值会偏低、
+    //   越阈占比也不会是"每帧都越"—— 那量到的是【滤波器建立过程】, 不是本用例要问的东西。
+    //   (第一版就是这么写红的: fracResidual 报 0.925 而不是 1.0。)
+    //   这里顺便把 resetJitterStats() 也走一遍: 它【不该】把武装的阈值一起清掉 ——
+    //   清掉的话下面的 fracResidual 会变成 −1 (算不出来), 一眼就能看出来。
+    const int SETTLE = 20;          // ≈5 个时间常数 ⇒ 值已在渐近线的 0.7% 以内
+    const int N = 40;
+
+    // ---- (a) 死区之上 ----
+    fd.compensated[0] = dz * 4.0;
+    ForcePipeline::init();          // 清窗口 + 武装越阈计数 (必须在喂帧之前)
+    for (int i = 0; i < SETTLE; i++) ForcePipeline::step(fd);
+    ForcePipeline::resetJitterStats();      // 窗口从这里开始 (武装是粘性的)
+    for (int i = 0; i < N; i++) ForcePipeline::step(fd);
+
+    ForcePipeline::JitterSnapshot s;
+    ForcePipeline::copyJitterSnapshot(s);
+    CHECK(s.nOut == N);             // 一次 step = 一帧 (不数回调次数)
+    CHECK(s.nResidual == N);
+    CHECK(s.nOut == s.nResidual);   // 同一个喂入点 ⇒ 恒等 (main.cpp 的打印也靠这条不变式)
+    CHECK(s.fracResidual[0] == 1.0);   // 每帧都越阈; 不是 −1 (⇒ 阈值武装过了, 且没被 reset 清掉)
+    CHECK(s.meanResidual[0] > dz);     // 残差 = 死区的【输入】(传感器 N), 未被软门压小
+
+    // ---- (b) 死区之下: 两个量必须分得开 ----
+    fd.compensated[0] = dz * 0.25;
+    ForcePipeline::init();          // 重新开一个窗口 (顺带复位滤波器与斜坡)
+    for (int i = 0; i < SETTLE; i++) ForcePipeline::step(fd);
+    ForcePipeline::resetJitterStats();
+    for (int i = 0; i < N; i++) ForcePipeline::step(fd);
+    ForcePipeline::copyJitterSnapshot(s);
+    CHECK(s.nOut == N);
+    CHECK(s.fracResidual[0] == 0.0);          // 0.05 量级的残差不越 0.20 的门 —— 而且【不是 −1】
+    // 它就是那个输入本身 (窗口里没有建立过程了 ⇒ 容差可以收紧到 5%)。
+    CHECK(fabs(s.meanResidual[0] - dz * 0.25) < dz * 0.25 * 0.05);
+    CHECK(s.meanOut[0] > 0.0);                // 输出还活着 (没被清零)
+    CHECK(s.meanOut[0] < s.meanResidual[0] * 0.5);   // 软门 + 增益 ⇒ 小得多; 接反了会变成 1:1
+
+    // ---- 窗口语义: reset 之后从 0 开始 (main.cpp 的"自上次 'n' 起"靠它) ----
+    ForcePipeline::resetJitterStats();
+    ForcePipeline::copyJitterSnapshot(s);
+    CHECK(s.nOut == 0);
+    CHECK(s.nResidual == 0);
+    CHECK(s.fracResidual[0] == 0.0);   // 0 帧 ⇒ 0 (不是 −1: 空集的占比是"没有", 不是"算不出来")
+    PASS();
+}
+
 int main() {
     std::cout << "=== ForcePipeline Unit Tests ===" << std::endl;
     test_residual_deadzone();
@@ -378,6 +446,7 @@ int main() {
     test_coord_transform();
     test_filter_convergence();
     test_stale_detection();
+    test_jitter_accumulators_are_fed_and_distinct();
     std::cout << "\nResults: " << g_passed << " passed, " << g_failed << " failed" << std::endl;
     return g_failed ? 1 : 0;
 }

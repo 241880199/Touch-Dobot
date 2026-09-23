@@ -11,6 +11,12 @@
 //
 // 真值一律用【构造序列】从定义算出来 (见每个用例的注释), 不拿实现去对实现。
 //
+// ★ 2026-09-23 (抖动计划 Task 2): 累加器换成 Welford (O(1) 内存, 因为要跑在控制路径上),
+//   代价是【不留样本】⇒ 越阈计数只能边喂边数 ⇒ 阈值必须在喂帧【之前】用
+//   setCountThreshold 武装。本文件里 three 条 fracAbove 用例因此各加一行武装调用
+//   (真值一个没改), 并新增两条钉住"算不出来时返回 −1 而不是 0"的用例 —— 那是这次
+//   换算法【唯一】会静默量错的地方, 必须有用例守着。
+//
 // ⚠ 断言宏: 本文件的 TEST 是【标签打印器】(只印名字, 不求值也不计失败), 真正求值并计
 //   失败的是 CHECK —— 写成 TEST(<表达式>) 会让用例无论对错都绿 (本仓 2026-09-23 实测复现过)。
 
@@ -77,9 +83,11 @@ static void test_known_sequence_mean_and_sd() {
 //   -0.3 -> 0.3  >= 0.2 算   ← 只看大小, 方向不分正负 (死区是两侧对称的)
 //   0.2  -> 0.2  >= 0.2 算   ← 边界【算越】, 与"取 >= "这条约定一致
 //   ⇒ 3/4 = 0.75
+// ⚠ 武装必须在 addFrame 【之前】(Welford 不留样本, 见文件顶上的说明)。
 static void test_fracAbove_uses_magnitude_and_includes_boundary() {
     TEST(fracAbove_uses_magnitude_and_includes_boundary);
     JitterStats s;
+    s.setCountThreshold(0.20);
     const double seq[4] = {0.1, 0.25, -0.3, 0.2};
     for (int i = 0; i < 4; i++) {
         const double v[3] = {seq[i], seq[i], seq[i]};
@@ -95,6 +103,7 @@ static void test_fracAbove_uses_magnitude_and_includes_boundary() {
 static void test_fracAbove_boundary_just_below_is_excluded() {
     TEST(fracAbove_boundary_just_below_is_excluded);
     JitterStats s;
+    s.setCountThreshold(0.2);
     const double v[3] = {0.2 - 1e-9, 0.2 - 1e-9, 0.2 - 1e-9};
     s.addFrame(v);
     CHECK(near(s.fracAbove(0, 0.2), 0.0));     // 差一点点 ⇒ 不算
@@ -106,10 +115,57 @@ static void test_fracAbove_boundary_just_below_is_excluded() {
 static void test_fracAbove_zero_threshold_counts_zeros() {
     TEST(fracAbove_zero_threshold_counts_zeros);
     JitterStats s;
+    s.setCountThreshold(0.0);
     const double v[3] = {0.0, 0.0, 0.0};
     s.addFrame(v);
     s.addFrame(v);
     CHECK(near(s.fracAbove(0, 0.0), 1.0));
+    PASS();
+}
+
+// ===== ★ 算不出来时必须返回 −1, 【不能】返回 0 =====
+// 这是换成 Welford 之后【唯一】会静默量错的地方: 占比是边喂边数的, 所以"没武装"、
+// "问的阈值与武装的不一致"、"有帧是在武装之前喂进来的"这三种情况下, 计数要么没有、
+// 要么只覆盖了一部分帧。这时返回 0 会被读成"没有帧越阈 ⇒ 机制不成立" —— 一个凭空
+// 出现的结论。⇒ 约定: 返回 −1 (一个不可能是占比的值)。
+static void test_fracAbove_unarmed_returns_minus_one_not_zero() {
+    TEST(fracAbove_unarmed_returns_minus_one_not_zero);
+    JitterStats s;
+    const double v[3] = {0.5, -0.5, 0.5};      // 每一帧都【明显】越 0.20
+    for (int i = 0; i < 4; i++) s.addFrame(v);
+    CHECK(s.n() == 4);
+    for (int a = 0; a < 3; a++) {
+        CHECK(s.fracAbove(a, 0.20) == -1.0);   // 没武装 ⇒ 算不出来, 不是 0
+        CHECK(s.fracAbove(a, 0.20) != 0.0);    // 明确钉住"不是 0"
+    }
+    // 阈值不匹配也算不出来 (武装的是 0.30, 问的是 0.20 —— 两者都合法, 但不能混用)
+    JitterStats t;
+    t.setCountThreshold(0.30);
+    t.addFrame(v);
+    CHECK(t.fracAbove(0, 0.20) == -1.0);
+    CHECK(near(t.fracAbove(0, 0.30), 1.0));    // 用武装过的那个阈值 ⇒ 正常回答
+    PASS();
+}
+
+// 武装【晚了】也不能把"没数过的帧"当成"越阈的帧 = 0"。
+// (真实调用不会晚 —— ForcePipeline::init 在任何帧之前武装; 但万一将来有人把
+//  setCountThreshold 挪到窗口中间, 这条会红, 而不是悄悄给出一个偏低的占比。)
+static void test_fracAbove_armed_after_frames_returns_minus_one() {
+    TEST(fracAbove_armed_after_frames_returns_minus_one);
+    JitterStats s;
+    const double v[3] = {0.5, 0.5, 0.5};       // 4 帧都越阈, 但都是在武装之前喂的
+    for (int i = 0; i < 4; i++) s.addFrame(v);
+    s.setCountThreshold(0.20);                 // 晚了
+    CHECK(s.fracAbove(0, 0.20) == -1.0);       // 有 4 帧没被数过 ⇒ 算不出来
+    // 武装之后继续喂的帧是算得出来的……但窗口里已经混了没数过的帧, 所以仍然不算 ——
+    // 这正是要的行为: 宁可说"算不出来", 也不给一个只覆盖一部分帧的占比。
+    s.addFrame(v);
+    CHECK(s.fracAbove(0, 0.20) == -1.0);
+    // reset 之后从干净的窗口重新开始 (阈值是粘性的, 见 setCountThreshold)
+    s.reset();
+    for (int i = 0; i < 4; i++) s.addFrame(v);
+    CHECK(s.n() == 4);
+    CHECK(near(s.fracAbove(0, 0.20), 1.0));
     PASS();
 }
 
@@ -218,6 +274,8 @@ int main() {
     test_fracAbove_uses_magnitude_and_includes_boundary();
     test_fracAbove_boundary_just_below_is_excluded();
     test_fracAbove_zero_threshold_counts_zeros();
+    test_fracAbove_unarmed_returns_minus_one_not_zero();
+    test_fracAbove_armed_after_frames_returns_minus_one();
     test_empty_returns_zero_no_division_by_zero();
     test_single_sample_sd_is_zero();
     test_axes_are_independent();
