@@ -642,9 +642,14 @@ namespace Config {
     //   ⇒ 现场表现: 移动手写笔时笔杆朝向只差 0.9°, 机器人姿态却转了 10.4°;
     //     缓慢移动也大幅晃动、范围越走越大。
     const double ORIENT_DEADZONE_DEG = 0.05;         // 姿态响应的【逐轴】门限 (degrees)
-    // ⚠ 本参数【只作用于旧路径】—— 新路径（真旋转合成，`BTN2_ROTATION_COMPOSE_ENABLED=true`，今天就是）
-    //   不吃它，也不吃 `ORIENT_FLIP_R*`。理由与后果见下面那段里的一句
-    //   「⚠ `ORIENT_GAIN` / `ORIENT_FLIP_R*` **只作用于旧路径**」（评审指出时它在 733-736 行）。
+    // ⚠★ 2026-09-23 复审订正：**必须点明是哪个常数**，否则"本参数"会被读成上面那行
+    //   （`ORIENT_DEADZONE_DEG`），而那个读法是【反的】✗ —— **死区对新路径【仍然生效】**：
+    //   它门的是 `drx/dry/drz`（`RelayCore.cpp` 的 `axisGate`），而新路径正是经由
+    //   `curFiltered = 参照 + 已过门偏移` 消费它们的。
+    //   ⇐ 所以本段说的是【下面那行】：
+    // ⚠ **`ORIENT_GAIN` 本参数【只作用于旧路径】** —— 新路径（真旋转合成，
+    //   `BTN2_ROTATION_COMPOSE_ENABLED=true`，今天就是）不吃它，也不吃 `ORIENT_FLIP_R*`。
+    //   理由与后果见下面那段里的一句「⚠ `ORIENT_GAIN` / `ORIENT_FLIP_R*` **只作用于旧路径**」。
     //   ⚠ **按这句引文去找，别按行号** —— 行号会随每次在上方插注释而漂（本注释自己就把它
     //     推下去了 5 行：这就是"行号是脆的"的一次实时演示）。
     const double ORIENT_GAIN = 1.0;                  // 姿态增益 (可调灵敏度)
