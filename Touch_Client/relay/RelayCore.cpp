@@ -1128,9 +1128,15 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
                 R10 = Calibration::R[3]; R11 = Calibration::R[4]; R12 = Calibration::R[5];
                 R20 = Calibration::R[6]; R21 = Calibration::R[7]; R22 = Calibration::R[8];
             } else {
-                R00 = 1.0; R01 = 0.0; R02 =  0.0;
-                R10 = 0.0; R11 = 0.0; R12 = -1.0;
-                R20 = 0.0; R21 = 1.0; R22 =  0.0;
+                // 与平移路径同一张表（唯一一份定义）—— 见 CoordinateTransform::touchToRobotMatrix
+                // ⚠ 这里【故意】用显式局部数组 + 逐个赋值，而不是 touchToRobotMatrix(&R00):
+                //   "R00..R22 这 9 个 double 在内存里连续" 是一个【未验证的前提】(编译器可以对
+                //   局部标量各自安排位置), 而显式赋值不需要任何前提。
+                double M[9];
+                touchToRobotMatrix(M);
+                R00 = M[0]; R01 = M[1]; R02 = M[2];
+                R10 = M[3]; R11 = M[4]; R12 = M[5];
+                R20 = M[6]; R21 = M[7]; R22 = M[8];
             }
             double robot_dRx = R00*drx + R01*dry + R02*drz;
             double robot_dRy = R10*drx + R11*dry + R12*drz;

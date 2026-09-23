@@ -41,6 +41,18 @@ namespace Calibration {
     void cancelCollect();
 }
 
+// ★★ 2026-09-23: 器件系 → 基座系 的【唯一一份】3×3（行主序），robot = M · touch。
+// 【为什么要抽出来】平移路径(convertTouchToRobot)与姿态路径(RelayCore 的 robot_dR)各自写了一遍
+//   同一张表，而姿态那一份的注释写着"从未被验证过" ⇒ 两边【可能】已经漂开，且漂开时没有任何东西会报。
+//   抽成一处之后，"它们是不是同一张表"变成一条【可断言的】性质（见 test_frame_layout 的两条用例）。
+// ⚠ Calibration::enabled 为真时，平移路径走的是标定出来的 R/t（含平移项）—— 那不是一张纯 3×3，
+//   本函数【只描述兜底那一份】；调用者要按 Calibration::enabled 自己分支（与现在一致）。
+inline void touchToRobotMatrix(double M[9]) {
+    M[0] = 1.0; M[1] = 0.0; M[2] =  0.0;
+    M[3] = 0.0; M[4] = 0.0; M[5] = -1.0;
+    M[6] = 0.0; M[7] = 1.0; M[8] =  0.0;
+}
+
 // Touch 原始坐标 (devicePos[3]) → 机械臂右手系
 inline Vec3 convertTouchToRobot(const double devicePos[3]) {
     if (Calibration::enabled) {
