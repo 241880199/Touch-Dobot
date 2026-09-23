@@ -1408,23 +1408,41 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
     //   **触觉反馈**（`dampOrientationMotion` 写 `app.orientRepulsionForce`）与 TCP 微调；
     //   删掉它就等于**顺手关掉了奇异避让**，而那是明确要求"一条都不许删"的那一类。
     //   ⚠ 代价（**如实记账，不藏**）：关节空间路径下那一段仍然在跑，它的输出
-    //     `targetRx/Ry/Rz` 只流向 ① `[Relay] Motion sends` 那行日志 ② `app.robotTargetPose`
-    //     （`render/SceneRenderer.cpp:201` 只用来画目标位姿）—— 也就是说**这两处显示的仍是
-    //     那条不再下发的 RPY 目标**。真正发出去的是什么，看 `cmd`（下面的 `reportCommand(cmd)`
-    //     与 `app.lastCommandSent` 存的都是 `cmd` 本身 ⇒ 那两处是准的）。
-    //   ⇒ 也就是说：新路径**不调** `clampOrientToBounds`（关节空间里没有 RPY 表示、没有 ±180
-    //     接缝，"夹表示量"这件事不存在），但**也没把它从旧路径删掉** —— 旧路径要它。
+    //     `targetRx/Ry/Rz` 只流向 `app.robotTargetPose`（`render/SceneRenderer.cpp:201` 只用来
+    //     画目标位姿）—— 也就是说**那一处显示的仍是那条不再下发的 RPY 目标**。真正发出去的是
+    //     什么，看 `cmd`（下面的 `reportCommand(cmd)` 与 `app.lastCommandSent` 存的都是 `cmd`
+    //     本身 ⇒ 那两处是准的）。
+    //   ★ 2026-09-23 复审 I3：`[Relay] Motion sends` 那行**原来只打 target/orient**，在关节模式
+    //     下等于**显示与实发不一致**（本项目最恨的那一类）⇒ 已在那行**补上真正发出去的 `cmd`**。
+    //     二选一里选的是这一条（**不是**"关节模式下跳过 `robotTargetPose` 写入"）：
+    //     后者会让目标位姿**冻结在上一次按下之前的值**（静止的假象仍会误导），而且会改动
+    //     `SceneRenderer` 看到的状态 ⇒ 影响面更大。⇒ **残留（已知、可接受）**：GUI 里画的
+    //     目标位姿在关节模式下仍是那条 RPY 目标；对账的唯一权威是 `cmd`。
+    //   ⇒ 措辞订正（2026-09-23 复审 M1 —— 原文写的是"新路径**不调** `clampOrientToBounds`"，
+    //     那是**假的**）：它**每帧仍在执行**（`:1268`，那个共享的 RPY 块在下面这个分叉【之前】）。
+    //     关节空间里确实没有 RPY 表示、没有 ±180 接缝，所以"夹表示量"这件事对**下发值**
+    //     没有意义；消失的只是它**对下发值的影响** —— 那一整段本身**一条没删**（旧路径要它，
+    //     触觉反馈也挂在里面）。
     //
     // ⚠⚠ 守不住什么：`RelayCore.cpp` **不被任何测试编译** ⇒ 这个分叉**没有自动化用例**。
     //   能守它的只有三样：① MSBuild 零 error；② 负对照（往本文件注入语法错误 ⇒ 必须报
     //   `error C…`，证明这次构建确实在编它）；③ 上机（Task 3 的执行单）。纯函数那一半有单测
     //   （`tests/test_button2_joint.cpp`），但"**接线接对了没有**"只能靠上机。
+    //   ⚠ 本条在 2026-09-23 修复轮又长了一块（I1 参照可信度 · I2 关节限位 · M2 逐帧步长限幅），
+    //     同样**一条都没有自动化用例** ⇒ 只能靠人读 + 上机（见修复报告）。
     // ⚠ **只按按钮2**（不含按钮1+2 组合）：组合模式要**同时**做平移，而**平移在关节空间里不是
     //   一个关节量** ⇒ 要支持它就得回到 IK ⇒ 正是本方案要绕开的东西 ✗。
     //   ⇒ 组合模式**继续走旧的 RPY 路径**（= 保持现状，**不引入功能回退** ✓）；这是有理由的取舍，
     //     不是遗漏（2026-09-23 控制方裁定）。
-    if (Config::BTN2_JOINT_SPACE_ENABLED && m_transmittingOrient && m_orientValid &&
-        !appState.lastButtonState) {
+    //
+    // ★★★ 复审 C1 (Critical)：下面判的是**按下那一刻锁存的** `m_btn2JointMode`，
+    //   **不是**每帧重算 `Config::BTN2_JOINT_SPACE_ENABLED && !appState.lastButtonState`。
+    //   那个写法会在**按住中途换控制律**（真值随按钮1 变化而翻面）：
+    //     · 松开按钮1 ⇒ 条件变真 ⇒ `ServoJ(m_jointRef + δ)` 把臂**拽回按下按钮2 时的位姿**
+    //       （组合模式平移出去多远都白搭；那条 FK 位置门抓不到 —— 它校验的目标就是那个位姿）；
+    //     · 先按2 再按1 ⇒ 反过来翻成 `ServoP` ⇒ 姿态突变。
+    //   锁存点：`onButton2Press`（与 `m_jointRef` 同一个临界区）。
+    if (m_btn2JointMode && m_transmittingOrient && m_orientValid) {
         // ================= 新路径：关节空间（厂商 ServoJ）=================
         // ① 关节目标：Task 1 的纯函数（**有单测**）——
         //      笔杆 Rx(前后摆)⇒J4 · Rz(左右摆)⇒J5 · Ry(自转)⇒J6；J1/J2/J3 无条件保持参照；
@@ -1441,6 +1459,74 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
         sRef[1] = m_orientRefStylus.y;
         sRef[2] = m_orientRefStylus.z;
         button2JointTarget(m_jointRef, sRef, m_btn2StylusFilt, j);
+
+        // ================= 复审 I1（Important）：参照不可信 ⇒ **拒发** =================
+        // 【场景】`app.robotActualPose.j1..j6` 的初值**全 0**，唯一写入点是 `queryJointAngles`
+        //   里 `FeedbackParser::parseAngle` 的**成功路径** ⇒ 若 `GetAngle()` **从未解析成功**，
+        //   `m_jointRef` 就一直是全 0 ⇒ FK(0,…,0) = (0, −233.3, 756) **过得了下面所有位置门**
+        //   ⇒ `ServoJ(0,0,0,0,0,0)` 会把臂**开向模型零位**（一个大而无门可挡的运动）。
+        // 【判据】两个都查，任一成立即拒：
+        //   · **六位恰好全 0** —— 真机上不可能（关节零点不会同时精确落在 0.0000）；
+        //   · `!Kinematics::isWithinJointLimits(ref)` —— 现成函数、**有用例**（`Kinematics.cpp:457`，
+        //     `tests/test_kinematics.cpp:322-337`），越限的参照一定不可信。
+        // 【动作】`cerr` 出声 + `return`（**本帧不下发**）—— 与下面 `REJECT` 同款。
+        // 【守什么】这是"**值**"上的判据，不是"解析成功过没有"那个标志：`m_jointRef` 是按下
+        //   那一刻的快照，本分支每帧都在跑 ⇒ 判当前值才是"这一帧要用的那个参照"。
+        //   ⚠ 不覆盖 NaN：NaN 在 `isWithinJointLimits` 里逐条比较全为 false ⇒ 它**返回 true**
+        //     （放行）。那个情形由下面 ② 的 FK 门接住（FK(NaN) ⇒ NaN ⇒ 第一道守卫 REJECT）。
+        // ⚠ 无自动化用例（本文件不被任何测试编译）⇒ 由人读 + 上机。
+        {
+            const bool allZero =
+                (m_jointRef[0] == 0.0 && m_jointRef[1] == 0.0 && m_jointRef[2] == 0.0 &&
+                 m_jointRef[3] == 0.0 && m_jointRef[4] == 0.0 && m_jointRef[5] == 0.0);
+            if (allZero || !Kinematics::isWithinJointLimits(m_jointRef)) {
+                std::cerr << "[Safety] Btn2 joint REF UNTRUSTWORTHY ("
+                          << (allZero ? "all six joints are exactly 0" : "outside joint limits")
+                          << ") — NOT sending. ref=("
+                          << m_jointRef[0] << "," << m_jointRef[1] << "," << m_jointRef[2] << ","
+                          << m_jointRef[3] << "," << m_jointRef[4] << "," << m_jointRef[5] << ")"
+                          << std::endl;
+                return;   // 本帧不下发（下一帧从同一状态重算）
+            }
+        }
+
+        // ================= 复审 I2（Important）：目标的**关节限位** =================
+        // `ref ± 150°`（`Button2Joint.cpp` 的偏移限幅）可能超出 J4/J5/J6 的 ±360 ⇒ 从前只有
+        // **控制器事后抱怨**。这里在下发前一行判**期望目标**，越限即 `cerr` + `return`。
+        // ⚠ 判的是**期望目标**（纯函数给的那个），不是下面限幅后的值 —— 限幅只是把"走过去"
+        //   这件事摊到多帧，它**不改变"目标本身合不合法"**。
+        // ⚠ 与 I1 同一句：无自动化用例，由人读 + 上机。
+        if (!Kinematics::isWithinJointLimits(j)) {
+            std::cerr << "[Safety] Btn2 joint TARGET outside joint limits — NOT sending. j=("
+                      << j[0] << "," << j[1] << "," << j[2] << ","
+                      << j[3] << "," << j[4] << "," << j[5] << ")"
+                      << std::endl;
+            return;   // 本帧不下发
+        }
+
+        // ================= 复审 M2（Minor，但属**安全回退**）：每帧步长限幅 =================
+        // 【为什么必须有】纯函数给的是 `参照 + 增量`，与**上一帧发了什么**无关 ⇒ 手一甩，
+        //   哪怕笔杆偏移已经过死区与低通，本帧目标仍可能一步跨出 ~17.5°（≈30 Hz ⇒ 525°/s），
+        //   远超厂商"寸动"用法。RPY 路径有 `ORIENT_MAX_STEP_DEG = 3°/帧` 挡着（它的注释就是
+        //   "手一甩不甩飞机器人"），关节路径**原来没有** ⇒ 这里照它**同一形状**补上。
+        // 【形状照抄】`期望 − 上一帧已下发` **逐轴**夹到 `Config::ORIENT_MAX_STEP_DEG`，再累加。
+        //   ⚠ 累加（**不是**对 `m_jointRef` 直接夹）：直接夹 `j − ref` 会让大偏移被**永久截断**，
+        //     而累加式下它只会**慢慢跟上** —— RPY 路径 2026-09-21 那条改造就是为这个
+        //     （见 `Config.h` 的 `ORIENT_DEADZONE_DEG` 历史段与上面 `wx/wy/wz` 那一段的注释）。
+        //   ⚠ 量级**不自己发明**：起点照用 `ORIENT_MAX_STEP_DEG`。两条路量的都是"度"，而 RPY
+        //     那一段本身就同时在限制关节走速 ⇒ 同值起步有依据。Task 3 上机若觉得慢/快，
+        //     改的是**这一个常数**（以及可能要给关节路径单开一个，届时再说）。
+        // 【原地改写 `j`】⇒ 下面 ② 的 FK 门与 ③ 的下发用的都是**限幅后**的值（发出去的就是
+        //   被这道闸放行的那一个，不存在"判一个、发另一个"）。
+        // 【积分器的推进点】只在**真的走到下发**那一步（见 ③ 之后的一行）—— 被上面任一
+        //   道门拒掉的帧**不参与积分** ⇒ 它记的是"发过什么"，不是"算过什么"。
+        // ⚠ 无自动化用例（本文件不被任何测试编译）⇒ 由人读 + 上机守。
+        for (int i = 0; i < 6; ++i) {
+            double w = j[i] - m_btn2JointCmd[i];
+            if (w >  Config::ORIENT_MAX_STEP_DEG) w =  Config::ORIENT_MAX_STEP_DEG;
+            if (w < -Config::ORIENT_MAX_STEP_DEG) w = -Config::ORIENT_MAX_STEP_DEG;
+            j[i] = m_btn2JointCmd[i] + w;
+        }
 
         // ② 安全门：关节目标先**正解**出末端位置，再走**现有**的位置入口
         //    （`evaluatePositionOnly`：NaN/Inf · 工作空间半径 620mm · Z 行程 0~795 ·
@@ -1469,6 +1555,12 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
         //      与厂商建议的 33 Hz 同量级，**那个节流没动**（两条路径共用）。
         snprintf(cmd, sizeof(cmd), "ServoJ(%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,0.1,50,500)",
                  j[0], j[1], j[2], j[3], j[4], j[5]);
+
+        // M2：**走到这里才推进步长积分器**（上面任何一道门 `return` 掉的帧都不参与）。
+        //   ⚠ 位置在 `robotSendMotion` **之前**：若那一次发送失败（链路问题，已有 `failCount`
+        //     记账），积分器会比实际快一帧 —— 一帧的差，且下一帧照旧逐轴夹住 ⇒ 不放大。
+        //     之所以不放它后面：那要跨过下面那段两条路径共用的代码，反而更绕、更易错。
+        for (int i = 0; i < 6; ++i) m_btn2JointCmd[i] = j[i];
     } else {
         // ================= 旧路径（**逐字**）=================
         snprintf(cmd, sizeof(cmd), "ServoP(%.2f,%.2f,%.2f,%.2f,%.2f,%.2f)",
@@ -1480,11 +1572,18 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
     static int sendCount = 0, failCount = 0;
     sendCount++;
     if (!sent) failCount++;
+    // ★ 2026-09-23 复审 I3：**补上真正发出去的 `cmd`**（本项目最恨"显示与实发不一致"）。
+    //   原来这行只打 `target=`/`orient=`（那条 **冻结的 TCP** 与**不再下发的 RPY 目标**），
+    //   关节模式下等于在撒谎。二选一里选的是"补 cmd"而不是"关节模式下跳过 `robotTargetPose`
+    //   写入"，理由与残留见上面的分叉注释（I3 那一段）。
+    //   ⚠ 无条件加给两条路径：RPY 模式下 `cmd` 与 target/orient 重复，只是那一行变长；
+    //     它**不改变任何下发内容**，也不改 `else` 那一支的语义。
     if (sendCount % 50 == 0) {
         std::cout << "[Relay] Motion sends: " << sendCount
                   << " ok, " << failCount << " fail"
                   << "  target=(" << servoCmdX << "," << servoCmdY << "," << servoCmdZ << ")"
                   << " orient=(" << targetRx << "," << targetRy << "," << targetRz << ")"
+                  << "  cmd=" << cmd
                   << std::endl;
     }
 
@@ -1593,6 +1692,23 @@ void RelayCore::onButton2Press(const Vec3& stylusOrient) {
         m_jointRef[3] = app.robotActualPose.j4;
         m_jointRef[4] = app.robotActualPose.j5;
         m_jointRef[5] = app.robotActualPose.j6;
+
+        // ★★ 2026-09-23 (Task 2 修复 / 复审 C1, Critical)：**锁存**这一次按住的模式。
+        //   读的是"按下按钮2 的**这一刻**按钮1 是否已按下" ⇒ 组合模式（1+2）进来就锁成 false
+        //   （整段按住走旧 RPY 路），**整个按住期间不再变化**。
+        //   ⚠ 与 `m_jointRef` 在**同一个临界区**：模式与参照必须是同一次采样的产物
+        //     （否则会出现"用 A 时刻的参照、按 B 时刻的模式下发"）。
+        //   ⚠ 这一行**替代**了 `sendPosition` 里原来每帧重算的那个条件 —— 那个写法会在按住
+        //     中途换控制律（松开按钮1 ⇒ 翻到 ServoJ 并回到按下时的位姿；先按2再按1 ⇒ 翻到 ServoP）。
+        m_btn2JointMode = Config::BTN2_JOINT_SPACE_ENABLED && !appState.lastButtonState;
+
+        // M2：步长限幅积分器的种子 = 参照本身 ⇒ 第一帧"本帧要走的量"为 0（与纯函数返回参照一致）。
+        m_btn2JointCmd[0] = m_jointRef[0];
+        m_btn2JointCmd[1] = m_jointRef[1];
+        m_btn2JointCmd[2] = m_jointRef[2];
+        m_btn2JointCmd[3] = m_jointRef[3];
+        m_btn2JointCmd[4] = m_jointRef[4];
+        m_btn2JointCmd[5] = m_jointRef[5];
         LeaveCriticalSection(&app.robotPoseMutex);
     }
 
@@ -1633,11 +1749,20 @@ void RelayCore::onButton2Press(const Vec3& stylusOrient) {
               << m_jointRef[3] << "," << m_jointRef[4] << "," << m_jointRef[5] << ")"
               << (Config::BTN2_JOINT_SPACE_ENABLED ? "  [joint-space: ServoJ]" : "  [RPY: ServoP]")
               << std::endl;
+    // ★ 2026-09-23 (Task 2 修复 / 复审 C1)：**锁存后的**模式也打出来 —— 它与上面那行的
+    //   "开关状态"**不是一回事**：组合模式下开关是 true 而锁存后是 false（这一整段按住走 RPY）。
+    //   ⚠ 上机对账时看的是**这一行**：`[joint-space: ServoJ]` 只说明开关开着，模式要看这里。
+    std::cout << "[Relay] Button2 PRESS — latched mode: "
+              << (m_btn2JointMode ? "JOINT-SPACE (ServoJ for the whole hold)"
+                                  : "RPY (ServoP for the whole hold)")
+              << std::endl;
 }
 
 void RelayCore::onButton2Release() {
     m_transmittingOrient = false;
     m_orientValid = false;
+    // C1：模式跟着这一次按住一起结束（下一次按下的锁存在 `onButton2Press`）。
+    m_btn2JointMode = false;
 
     // If button1 is NOT pressed (only button2 was active), stop all transmission.
     // When button1 IS still held, keep m_transmitting active for position control.

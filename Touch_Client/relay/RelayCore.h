@@ -245,6 +245,25 @@ private:
     bool  m_orientValid = false;
     bool  m_transmittingOrient = false;
 
+    // ★★ 2026-09-23 (Task 2 修复 / 复审 C1, Critical)：**按下那一刻锁存的**下发模式。
+    //   = `Config::BTN2_JOINT_SPACE_ENABLED && !appState.lastButtonState`，在 `onButton2Press`
+    //   的临界区里求**一次**，整个按住期间不变；`sendPosition` 的分叉只判它。
+    //   ⚠ 为什么不能每帧重算那个条件（C1 的两个后果，都是**按住中途换控制律**）：
+    //     · 先按 1+2（组合，走 RPY）→ 平移出去 → 松开按钮1 ⇒ 条件在**按住中途**变真 ⇒
+    //       下一帧发 `ServoJ(m_jointRef + δ)`，而 `m_jointRef` 是**按下按钮2 那一刻**的关节角
+    //       ⇒ 机械臂被命令**回到那时的位姿**（平移出去多远都白搭）。
+    //       下面的 FK 位置门抓不到它：它校验的**目标**就是那个位姿 ⇒ 构造上安全。
+    //     · 先按按钮2 再按按钮1 ⇒ 条件反向翻面 ⇒ 从 `ServoJ` 跳回 `ServoP` ⇒ 姿态突变。
+    //   ⇒ "模式"是**这一次按住的属性**，只能在按下时定一次（与 `m_jointRef` 同一次采样）。
+    bool  m_btn2JointMode = false;
+    // ★★ 2026-09-23 (Task 2 修复 / 复审 M2)：关节路径的**上一帧已下发**目标（j1..j6），
+    //   逐帧步长限幅的积分器。按下按钮2 时种子 = `m_jointRef`（⇒ 第一帧增量为 0，臂原地不动）。
+    //   限幅形状照 RPY 路径那一段：`期望 − 当前` **逐轴**夹到 `Config::ORIENT_MAX_STEP_DEG`，
+    //   再累加 —— 夹的是"本帧要走的量"，所以大偏移只会让它**慢慢跟上**，不会被永久截断。
+    //   ⚠ 只有真的走到下发那一步才推进它（被任何一道门拒掉的帧不参与积分）⇒ 它是"发过什么"，
+    //     不是"算过什么"。
+    double m_btn2JointCmd[6] = {0, 0, 0, 0, 0, 0};
+
     CRITICAL_SECTION m_basePointLock;
     std::vector<IExtension*> m_extensions;
 
