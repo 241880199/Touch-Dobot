@@ -514,6 +514,43 @@ if %ERRORLEVEL% EQU 0 (
 )
 echo.
 
+rem ============================================================
+rem Suite wired into "build then run" on 2026-09-23 (7th of the orphan set):
+rem   button2_mapping -- the pure function behind button 2's stylus->robot
+rem   orientation mapping. Measured green 2026-09-23, right after a fresh
+rem   build: exe exit code 0. The assertion count is deliberately NOT copied
+rem   here: it is printed by the suite itself on every run, and a hand-typed
+rem   copy of it only goes stale in the silent direction (see the note on
+rem   hand-typed numbers in the NOT RUN block at the bottom of this file).
+rem   Adding this .cpp is what makes the runtime suite count on disk move
+rem   from 21 to 22; if this section is ever deleted while the .cpp stays,
+rem   the harness asserts at the bottom and exits 1 -- by design.
+rem   The FORM of the result check is NOT special to this suite -- every
+rem   section in this file uses it. See "HOW TEST RESULTS ARE JUDGED" at
+rem   the top of this file for the rule and the two tempting-but-wrong forms.
+rem ============================================================
+
+echo --- Building test_button2_mapping ---
+call "%TESTDIR%\build_button2_mapping_test.bat"
+@echo off
+if %ERRORLEVEL% EQU 0 (
+    echo   Build OK
+    echo.
+    echo === test_button2_mapping.exe ===
+    "%TESTDIR%\test_button2_mapping.exe"
+    if !ERRORLEVEL! EQU 0 (
+        set /a PASSED+=1
+        echo   [OK]
+    ) else (
+        set /a FAILED+=1
+        echo   [FAIL]
+    )
+) else (
+    echo   [FAIL: build error]
+    set /a FAILED+=1
+)
+echo.
+
 echo ================================================
 echo   Tests complete
 echo ================================================
