@@ -91,13 +91,13 @@ static void test_gain_actually_changes_output() {
     CHECK(ForceTuning::setGain(300.0));
     ForcePipeline::init();                // 让斜坡直接就位 (不然要等 0.25s)
     for (int i = 0; i < 300; i++) ForcePipeline::step(fd);   // 让滤波器收敛
-    CHECK(fabs(fd.hapticOut[0] - (+4.95)) < 0.05);
+    CHECK(fabs(fd.hapticOut[0] - (-4.95)) < 0.05);
 
     // gain = 120: 同一个输入 ⇒ +1.98
     CHECK(ForceTuning::setGain(120.0));
     ForcePipeline::init();
     for (int i = 0; i < 300; i++) ForcePipeline::step(fd);
-    CHECK(fabs(fd.hapticOut[0] - (+1.98)) < 0.03);
+    CHECK(fabs(fd.hapticOut[0] - (-1.98)) < 0.03);
 
     PASS();
 }
@@ -166,12 +166,12 @@ static void test_gain_ramp_is_gradual() {
     ForcePipeline::init();                       // 斜坡就位在 100
     for (int i = 0; i < 300; i++) ForcePipeline::step(fd);   // 先让滤波器收敛
     const double at100 = fd.hapticOut[0];
-    CHECK(fabs(at100 - (+1.65)) < 0.03);         // 1.0 × 0.0165 × 100 = 1.65 (符号 2026-09-23 翻正)
+    CHECK(fabs(at100 - (-1.65)) < 0.03);         // 1.0 × 0.0165 × 100 = 1.65, σ_x=−1 ⇒ 负
 
     // 跳到 300, 数多少帧才到位
     CHECK(ForceTuning::setGain(300.0));
     int frames = 0;
-    while (fabs(fd.hapticOut[0] - (+4.95)) > 0.05 && frames < 200) {
+    while (fabs(fd.hapticOut[0] - (-4.95)) > 0.05 && frames < 200) {
         ForcePipeline::step(fd);
         frames++;
     }
@@ -256,7 +256,7 @@ static void test_saturation() {
     CHECK(fabs(fabs(fd.hapticOut[0]) - clampedMax) < 0.01);   // 正好在夹子上
     // ⚠ 符号故意写死 (拿 Config 常数去算断言会对那些常数【恒真】),
     //   完整论述见 test_coord_transform 的同段说明。
-    CHECK(fd.hapticOut[0] > 0.0);   // 正输入 ⇒ 正输出 (器件 X ← +基座 Fx, FORCE_FEEDBACK_TOUCH_X_SIGN = +1;
+    CHECK(fd.hapticOut[0] < 0.0);   // 正输入 ⇒ 负输出 (器件 X ← −基座 Fx, FORCE_FEEDBACK_TOUCH_X_SIGN = −1;
                                     //   2026-09-23 现场实测推翻旧符号，依据见该常数处注释)
     PASS();
 }
@@ -314,10 +314,12 @@ static void test_coord_transform() {
     //     真正用的那个数。上面 ratio 那两个常数【保留】是对的 —— 流水线确实读它们。
     double ratio = Config::FORCE_MAX_TOUCH_N / Config::FORCE_MAX_SENSOR_N;
     double gain = ForceTuning::gain();
-    CHECK(fabs(fd.hapticOut[0] - (+ratio * 10.0 * gain)) < 0.01);     // 来自 +Fx = +10 ⇒ 【正】
+    CHECK(fabs(fd.hapticOut[0] - (-ratio * 10.0 * gain)) < 0.01);     // 来自 +Fx = +10 ⇒ 【负】
+                                                                      //   (2026-09-23 深夜改回 −Mᵀ: σ_x=−1)
                                                                       //   (2026-09-23 符号 −1→+1，同 f196cb0)
     CHECK(fabs(fd.hapticOut[1]) < 0.01);                              // Fz→Y 已关 ⇒ 与 fz=+30 无关
-    CHECK(fabs(fd.hapticOut[2] - (-ratio * 20.0 * gain)) < 0.01);     // 来自 +Fy = +20 ⇒ 【负】
+    CHECK(fabs(fd.hapticOut[2] - (+ratio * 20.0 * gain)) < 0.01);     // 来自 +Fy = +20 ⇒ 【正】
+                                                                      //   (σ_z=+1)
                                                                       //   ★ 2026-09-23: 器件 Z ← −基座 Fy（Mᵀ 决定，与 X 相反；
                                                                       //     两路【相对】符号必然相反 ⇒ 由"一个共用常数"拆成逐路两个）
     PASS();
@@ -465,8 +467,10 @@ static void test_jitter_accumulators_are_fed_and_distinct() {
     CHECK(s.fracResidual[0] == 0.0);          // 0.05 量级的残差不越 0.20 的门 —— 而且【不是 −1】
     // 它就是那个输入本身 (窗口里没有建立过程了 ⇒ 容差可以收紧到 5%)。
     CHECK(fabs(s.meanResidual[0] - dz * 0.25) < dz * 0.25 * 0.05);
-    CHECK(s.meanOut[0] > 0.0);                // 输出还活着 (没被清零)
-    CHECK(s.meanOut[0] < s.meanResidual[0] * 0.5);   // 软门 + 增益 ⇒ 小得多; 接反了会变成 1:1
+    CHECK(s.meanOut[0] < 0.0);                // 输出还活着 (没被清零); σ_x=−1 ⇒ 残差为正时输出为负
+    // ⚠ 必须用 fabs 比【幅值】: 原来是有符号比较 ⇒ σ 翻成 −1 之后它【恒真】
+    //   (本想钉"输出比残差小得多", 却变成什么都不测) —— 2026-09-23 当场抓到并修。
+    CHECK(fabs(s.meanOut[0]) < fabs(s.meanResidual[0]) * 0.5);
 
     // ---- 窗口语义: reset 之后从 0 开始 (main.cpp 的"自上次 'n' 起"靠它) ----
     ForcePipeline::resetJitterStats();
