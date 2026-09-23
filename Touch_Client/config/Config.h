@@ -716,6 +716,17 @@ namespace Config {
     //   ⚠ 保留这个开关（而不是删掉代码）是刻意的：它记着"为什么不能这么做"，
     //     而那条结论不是从文档推的，是**实测撞出来的**。
     //   ⚠ 那三个 `SAFE_R*` 没有出处的问题**仍然未解决**（见下面的记账）。
+    // ⚠⚠★ 2026-09-23 终审发现（**翻回 true 之前必须先做这件事**）：
+    //   本开关的修法有**【两半】**，而 `BTN2_ROTATION_COMPOSE_ENABLED=true` 之后，
+    //   其中只有**一半**被互锁挡住：
+    //     · 半 1（逐分量钳位 `clampOrientOffset`）—— `RelayCore.cpp` 里已由
+    //       `ORIENT_SEAM_FIX_ENABLED && !BTN2_ROTATION_COMPOSE_ENABLED` 挡住 ✓；
+    //     · 半 2（**下发前规范化** `normalizeDeg180`）—— 仍**只**受本开关管 ✗。
+    //   ⇒ 若有人照上面那句"翻回 true 重试"：新路径会（按设计）返回**接缝就近**的代表
+    //     （如 `out.x = 185`），而半 2 会在下发前把它改写成 **−175** ⇒ **−358° 的数值跳**
+    //     ⇒ 正是本开关当初撞出来的那次**关节超速** ✗。
+    //   ⇒ **修法（一行）**：把半 2 的那个调用点也加上 `&& !Config::BTN2_ROTATION_COMPOSE_ENABLED`。
+    //     在那之前，**不要**单独把本开关翻成 true。
     const bool   ORIENT_SEAM_FIX_ENABLED = false;
     const double ORIENT_MAX_OFFSET_DEG   = 150.0;   // 姿态相对参照的最大偏移 (deg)
 
