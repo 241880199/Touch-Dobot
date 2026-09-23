@@ -81,20 +81,23 @@ static void test_gain_actually_changes_output() {
     fd.compensated[0] = 1.0;              // 1.0 N 远在死区 0.20 之上 ⇒ softDeadzone 原样返回
     fd.lastUpdateMs = GetTickCount();
 
-    // gain = 300: 输出 = 1.0 × (3.3/200) × 300 = 4.95, 横向符号 −1 ⇒ −4.95
+    // gain = 300: 输出 = 1.0 × (3.3/200) × 300 = 4.95, 横向符号 +1 ⇒ +4.95
+    // ⚠ 符号 2026-09-23 由 −1 翻成 +1：现场实测「往右推 touch 会有往右的力」（= 顺着推，不是阻力），
+    //   命中了 Config::FORCE_FEEDBACK_LATERAL_SIGN 注释里【它自己写下的那条可证伪检验】。
+    //   期望值随之翻号、幅度不变；依据（含两个现场报告互相矛盾那件事）记在该常数处。
     // ⚠ 300 是 ForceTuning::GAIN_MAX 的当前值 —— 范围若收窄, setGain 会【返回 false 且什么都不改】,
     //   而下面那条断言只会在值对不上时红 ⇒ 病因看起来是"映射错了"。所以前置条件必须在这里
     //   被【命名】: 这条 CHECK 红了就是"量程对不上", 不是"增益没生效"。
     CHECK(ForceTuning::setGain(300.0));
     ForcePipeline::init();                // 让斜坡直接就位 (不然要等 0.25s)
     for (int i = 0; i < 300; i++) ForcePipeline::step(fd);   // 让滤波器收敛
-    CHECK(fabs(fd.hapticOut[0] - (-4.95)) < 0.05);
+    CHECK(fabs(fd.hapticOut[0] - (+4.95)) < 0.05);
 
-    // gain = 120: 同一个输入 ⇒ −1.98
+    // gain = 120: 同一个输入 ⇒ +1.98
     CHECK(ForceTuning::setGain(120.0));
     ForcePipeline::init();
     for (int i = 0; i < 300; i++) ForcePipeline::step(fd);
-    CHECK(fabs(fd.hapticOut[0] - (-1.98)) < 0.03);
+    CHECK(fabs(fd.hapticOut[0] - (+1.98)) < 0.03);
 
     PASS();
 }
@@ -163,12 +166,12 @@ static void test_gain_ramp_is_gradual() {
     ForcePipeline::init();                       // 斜坡就位在 100
     for (int i = 0; i < 300; i++) ForcePipeline::step(fd);   // 先让滤波器收敛
     const double at100 = fd.hapticOut[0];
-    CHECK(fabs(at100 - (-1.65)) < 0.03);         // 1.0 × 0.0165 × 100 = 1.65
+    CHECK(fabs(at100 - (+1.65)) < 0.03);         // 1.0 × 0.0165 × 100 = 1.65 (符号 2026-09-23 翻正)
 
     // 跳到 300, 数多少帧才到位
     CHECK(ForceTuning::setGain(300.0));
     int frames = 0;
-    while (fabs(fd.hapticOut[0] - (-4.95)) > 0.05 && frames < 200) {
+    while (fabs(fd.hapticOut[0] - (+4.95)) > 0.05 && frames < 200) {
         ForcePipeline::step(fd);
         frames++;
     }
@@ -253,7 +256,8 @@ static void test_saturation() {
     CHECK(fabs(fabs(fd.hapticOut[0]) - clampedMax) < 0.01);   // 正好在夹子上
     // ⚠ 符号故意写死负号 (拿 Config 常数去算断言会对那些常数【恒真】),
     //   完整论述见 test_coord_transform 的同段说明。
-    CHECK(fd.hapticOut[0] < 0.0);   // 正输入 ⇒ 负输出 (横向映射 FORCE_FEEDBACK_LATERAL_SIGN = −1)
+    CHECK(fd.hapticOut[0] > 0.0);   // 正输入 ⇒ 正输出 (横向映射 FORCE_FEEDBACK_LATERAL_SIGN = +1;
+                                    //   2026-09-23 现场实测推翻旧符号，依据见该常数处注释)
     PASS();
 }
 
