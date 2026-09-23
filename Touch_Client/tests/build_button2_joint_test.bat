@@ -15,11 +15,30 @@ rem   chain reaches <HDU/hduVector.h>:
 rem       relay/Button2Joint.cpp -> robot/Kinematics.h -> relay/CoordinateTransform.h -> HDU
 rem   hence the two /I paths, and hence Kinematics.cpp must be linked for that symbol.
 rem   Still pure in the sense that mattered (no socket, no appState, no OpenHaptics CALLS) -- but
-rem   no longer header-free, so the old "think twice" rule is now: think twice before making it
-rem   depend on anything that is NOT itself a pure translation unit.
-rem   Checked, so the next reader does not have to: Kinematics.cpp needs nothing but <cmath> and
-rem   <cstring> (no Calibration:: symbols), which is why CoordinateTransform.cpp is NOT linked
-rem   here the way build_button2_mapping_test.bat links TcpCalibration.cpp.
+rem   no longer header-free, so the old "think twice" rule is restated here (2026-09-23 fix2,
+rem   review finding 3). It used to read: think twice before making it depend on anything that is
+rem   NOT itself a pure translation unit. That is the WRONG criterion. The right question is
+rem   TRANSITIVE: what does the HEADER drag in, and is its link closure already satisfied?
+rem   Reason "is this unit pure?" fails: a pure unit's HEADERS can carry INLINE functions that
+rem   reference externs, and CALLING such an inline is what creates the link-time dependency.
+rem   Worked example, this very chain: relay/CoordinateTransform.h declares "extern bool enabled;"
+rem   (line 24) and "extern double R[9];" (line 25) inside namespace Calibration, and the INLINE
+rem   convertTouchToRobot (line 57) reads both. So a file that includes that header and calls that
+rem   inline needs those symbols at link time, even though every translation unit involved is pure.
+rem   Not hypothetical: it is exactly why build_coord_safety_test.bat must also compile the .cpp
+rem   that DEFINES them (calibration/CalibrationIO.cpp, "namespace Calibration" at line 7) or take
+rem   LNK2019 x3 -- see test_coord_safety.cpp lines 6-10 for the recorded, reproduced failure.
+rem   Checked here, so the next reader does not have to: Button2Joint.cpp, Kinematics.cpp and
+rem   test_button2_joint.cpp all reach CoordinateTransform.h (via robot/Kinematics.h), yet NONE of
+rem   the three calls convertTouchToRobot (grep: no hit in any of them) -- the inline is never
+rem   instantiated, those Calibration:: symbols are never referenced, so CalibrationIO.cpp is NOT
+rem   needed here. Kinematics.cpp itself needs nothing but <cmath> and <cstring> either (no
+rem   Calibration:: reference at all -- checked).
+rem   CORRECTION (2026-09-23): the line here used to say "CoordinateTransform.cpp is NOT linked" --
+rem   no such file exists in this repo (verified). The DEFINITIONS of those externs live in
+rem   calibration/CalibrationIO.cpp. That .cpp is the one that is not linked here.
+rem   Cf. build_button2_mapping_test.bat, which DOES link a calibration .cpp (TcpCalibration.cpp)
+rem   for a symbol its test actually calls -- the same transitive rule, applied that way.
 rem NOTE: keep this file ASCII-only. Non-ASCII comments in a .bat get mis-decoded by cmd.exe
 rem under a non-UTF-8 codepage and can silently swallow the following line.
 cl /EHsc /std:c++17 /I"D:\Projects\Touch\OpenHaptics\Developer\3.5.0\include" /I"D:\Projects\Touch\OpenHaptics\Developer\3.5.0\utilities\include" /DWIN32 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS test_button2_joint.cpp ../relay/Button2Joint.cpp ../robot/Kinematics.cpp /Fe:test_button2_joint.exe

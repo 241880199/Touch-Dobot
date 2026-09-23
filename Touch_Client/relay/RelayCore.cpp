@@ -1523,6 +1523,13 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
                     // ⚠ 这里的"理由"是**自己再问一次** `isWithinJointLimits`（判据只回 bool）。
                     //   两个分支**互斥且穷尽**：被拒 且 在限位内 ⇒ 只能是"六位恰好全 0"
                     //   ⇒ 打出来的字符串与抽出前那句 `allZero ? … : …` **逐字相同**。
+                    //   ⚠ 2026-09-23 复审订正：上面这句成立**【只因为 0 落在每个关节的量程内】**
+                    //     （`robot/Kinematics.h:15-20`：J3 是 ±155，其余五个是 ±360）—— 这是个
+                    //     **未写明的前提**，把它写出来：若哪个 `J*_MIN` 被抬到 0 之上，全 0 的参照
+                    //     就会落到**另一个**分支、打出 "outside joint limits"（旧代码那里打的是
+                    //     "all six joints are exactly 0"）⇒ **只有这句标签不同**，
+                    //     而**拒发行为完全一样**（判据只回 bool、`return` 不依赖这句话）。
+                    //     ⇒ 即"互斥且穷尽"依赖限位常数，不是依赖 `isWithinJointLimits` 的实现。
                     //   代价：只在**被拒**的那一帧算一次（本来也要 return，可忽略）。
                     std::cerr << "[Safety] Btn2 joint REF UNTRUSTWORTHY ("
                               << (Kinematics::isWithinJointLimits(m_jointRef)
