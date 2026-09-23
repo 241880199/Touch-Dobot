@@ -591,6 +591,44 @@ if %ERRORLEVEL% EQU 0 (
 )
 echo.
 
+rem ============================================================
+rem Suite wired into "build then run" on 2026-09-23 (Task 1 of the
+rem   button-2 joint-space plan):
+rem   button2_joint -- the pure function (relay/Button2Joint.{h,cpp}) that maps the
+rem   stylus Euler deltas onto J4/J5/J6 (Rx->J4, Rz->J5, Ry->J6; J1/J2/J3 held;
+rem   translation cannot participate because the signature has no position input).
+rem   The assertion count is deliberately NOT copied here: the suite prints it on
+rem   every run, and a hand-typed copy only goes stale in the silent direction
+rem   (see the note on hand-typed numbers in the NOT RUN block at the bottom).
+rem   Adding this .cpp is what makes the runtime suite count on disk move
+rem   from 23 to 24; if this section is ever deleted while the .cpp stays,
+rem   the harness asserts at the bottom and exits 1 -- by design.
+rem   The FORM of the result check is NOT special to this suite -- every
+rem   section in this file uses it. See "HOW TEST RESULTS ARE JUDGED" at the
+rem   top of this file for the rule and the two tempting-but-wrong forms.
+rem ============================================================
+
+echo --- Building test_button2_joint ---
+call "%TESTDIR%\build_button2_joint_test.bat"
+@echo off
+if %ERRORLEVEL% EQU 0 (
+    echo   Build OK
+    echo.
+    echo === test_button2_joint.exe ===
+    "%TESTDIR%\test_button2_joint.exe"
+    if !ERRORLEVEL! EQU 0 (
+        set /a PASSED+=1
+        echo   [OK]
+    ) else (
+        set /a FAILED+=1
+        echo   [FAIL]
+    )
+) else (
+    echo   [FAIL: build error]
+    set /a FAILED+=1
+)
+echo.
+
 echo ================================================
 echo   Tests complete
 echo ================================================
