@@ -822,6 +822,27 @@ namespace Config {
     //   的用例），但"接线接对了没有"只能靠上机。
     const bool   BTN2_ROTATION_COMPOSE_ENABLED = true;
 
+    // ★★ 2026-09-23 按钮2 改【关节空间】—— 总开关（计划 Task 2）
+    //   （计划：`Docs/superpowers/plans/2026-09-23-button2-joint-space.md`）
+    //
+    // 【回滚 = 把这个开关翻回 false —— 一行】false 时 `RelayCore::sendPosition` 的命令构造
+    //   **逐字**走原来那条 `ServoP(X,Y,Z,Rx,Ry,Rz)`（那段代码一字未改，就在分叉的 else 支里）。
+    //   开关决定的只有一件事：**下发的是 `ServoJ(六个关节)` 还是 `ServoP(末端位姿)`**。
+    //
+    // 【为什么要走关节空间】本机末端姿态常年贴着 RPY 的**表示接缝与奇点**（实测 `|rx| > 170`
+    //   占 85.8%）⇒ 旧路不得不带上 `clampOrientToBounds` / 逐分量限幅 / 跨接缝回避那一整套，
+    //   而 2026-09-22 那次**关节超速**正是出在那一层（见 `ORIENT_SEAM_FIX_ENABLED`）。
+    //   关节空间里**无 IK、无 RPY、无接缝** ⇒ 整层被绕开。映射的出处与规格见
+    //   `relay/Button2Joint.h`（源轴是**实测**的，正负**没量过** ⇒ 见下面 `BTN2_J*_SIGN`）。
+    //
+    // ⚠ 【这个开关守不住什么 —— 说在开关旁边，因为踩它的人第一个读到的是这里】
+    //   `RelayCore.cpp` **不被任何测试编译**（它只进 `build.bat` 那个 exe，`tests/` 里没有任何
+    //   套件包含它）⇒ 这个分叉**没有自动化用例**。能守它的只有三样：
+    //     ① MSBuild 零 error；② 负对照（往被改的文件里注入语法错误 ⇒ 必须报 `error C…`，
+    //     证明这次构建**确实**在编它）；③ 上机（Task 3 的执行单）。
+    //   纯函数那一半有单测（`tests/test_button2_joint.cpp`），但"**接线接对了没有**"只能靠上机。
+    const bool   BTN2_JOINT_SPACE_ENABLED = true;
+
     // ★★ 2026-09-23 按钮2 改【关节空间】—— 逐轴符号常数
     //   （计划：`Docs/superpowers/plans/2026-09-23-button2-joint-space.md`）
     //
@@ -842,8 +863,8 @@ namespace Config {
     //   ⚠ 消费方是 `relay/Button2Joint.cpp`（纯函数）；它的单测也用这三个常数表达期望值
     //     ⇒ **改符号不会让任何用例变红** —— 变的只有方向语义。
     //   ⚠ 与 `ORIENT_FLIP_R*` **不是一回事**：那三个只作用于**旧路径**（末端姿态增量），
-    //     这三个只作用于**关节空间路径**。两条路的切换开关是 `BTN2_JOINT_SPACE_ENABLED`，
-    //     由计划 Task 2 落地 —— **写这条注释时它还不存在**（先在这里点名，免得有人以为丢了）。
+    //     这三个只作用于**关节空间路径**。两条路的切换开关是 `BTN2_JOINT_SPACE_ENABLED`
+    //     （**上面那一段**，由计划 Task 2 落地 —— 该注释当初写"它还不存在"时是事实，现已成立）。
     const double BTN2_J4_SIGN = +1.0;   // 笔杆 Rx（前后摆）⇒ J4 增量的符号
     const double BTN2_J5_SIGN = +1.0;   // 笔杆 Rz（左右摆）⇒ J5 增量的符号
     const double BTN2_J6_SIGN = +1.0;   // 笔杆 Ry（自转）  ⇒ J6 增量的符号

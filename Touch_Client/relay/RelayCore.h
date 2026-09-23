@@ -224,6 +224,24 @@ private:
     Vec3 m_lastStylusOrient;      // 上一帧笔杆姿态, 用于增量计算
     Vec3 m_orientRefStylus;       // 按下瞬间的笔杆参考姿态
     Vec3 m_orientRefRobot;        // 按下瞬间的末端参考姿态
+
+    // ★★ 2026-09-23 (Task 2)：按钮2 **关节空间路径**的两个入参 —— 与上面那条姿态参照
+    //   在【同一次按下、同一个临界区】里抓（`onButton2Press`）。两条路径的参照必须来自
+    //   同一次采样，否则它们描述的不是同一个位姿。
+    //   · `m_jointRef`         = 按下那一刻的**六个关节角**（抄自 `app.robotActualPose.j1..j6`，
+    //                            用法同本文件 `sendPosition` 里那两处逐字段拷贝）。**整个按住期间不变**
+    //                            —— 它是 `button2JointTarget` 的定点，漂了就意味着 J1/J2/J3 会动。
+    //   · `m_btn2StylusFilt`   = 本帧"**已过死区、已低通**"的笔杆姿态（= `m_orientRefStylus` + drx/dry/drz），
+    //                            在 `sendPosition` 的偏移段之后刷新（两条 RPY 路径共用的那个位置）。
+    //                            按下时重置为**参照本身** ⇒ 偏移植 0 ⇒ 纯函数返回的关节逐位等于参照。
+    //   ⚠ 线程：与 `m_orientRefStylus` 完全同一批（只在触觉回调线程上读写 —— `sendPosition` 只被
+    //     `HapticCallback.cpp` 调，`onButton2Press` 同线程），沿用现有约定，不额外加锁。
+    //   ⚠ 下标是 `j1..j6` 的次序（**不是**笔杆的 Rx/Ry/Rz 次序）—— `button2JointTarget` 按位置读。
+    //   ⚠ 就地清零：它们在 `onButton2Press` 里【无条件】被赋值，本无需初值；但"按下之前
+    //     `sendPosition` 会不会读到它们"取决于 `m_transmittingOrient`/`m_orientValid` 的组合，
+    //     而那是个**跨成员的不变量**（今天成立，改一行就可能不成立）⇒ 不留未初始化的读。
+    double m_jointRef[6] = {0, 0, 0, 0, 0, 0};
+    double m_btn2StylusFilt[3] = {0, 0, 0};
     bool  m_orientValid = false;
     bool  m_transmittingOrient = false;
 

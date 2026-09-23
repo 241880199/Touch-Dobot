@@ -1,5 +1,6 @@
 #define _USE_MATH_DEFINES
 #include "RelayCore.h"
+#include "Button2Joint.h"     // ★ Task 2: 按钮2 关节空间纯函数 (笔杆偏移 ⇒ J4/J5/J6 增量)
 #include "Button2Mapping.h"
 #include "FeedbackParser.h"
 #include "RelayCommandParser.h"
@@ -1084,6 +1085,21 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
         double dry = axisGate(offy);
         double drz = axisGate(offz);
 
+        // ★★ 2026-09-23 (Task 2)：关节空间路径要的"**当前**笔杆姿态"就是这里 ——
+        //   参照 + 【已过死区(drx/dry/drz)、已低通(上面的 s_stylusOffFilt)】的偏移。
+        //   ⚠ 这正是下面 RPY 路径用的 `curFiltered`（同样的三个分量相加），**不是**另一个量。
+        //     之所以不写在那一处：那一处在 `BTN2_ROTATION_COMPOSE_ENABLED` 分支【里面】
+        //     ⇒ 哪天 RPY 开关翻回 false，**关节路径的入参也会跟着冻住** —— 那是静默耦合
+        //     （关掉 A 却改了 B 的行为）。放这里 ⇒ 两条路径共用同一份"过门+低通"的中间量。
+        //   ⚠ NaN：`dr*` 是 NaN 时这里会把 NaN 抄进去 —— **无害**，且不靠巧合：
+        //     `button2JointTarget` 自己的守卫（Button2Joint.cpp 的 allFinite3）会让返回值
+        //     **退回参照** ⇒ 关节不动、正解出的位置也有限。⇒ NaN 到不了 ServoJ，也到不了安全门。
+        //   ⚠ 死区把三轴全归 0 时，这里写入的就是 `m_orientRefStylus` 本身 ⇒ 纯函数返回
+        //     逐位等于 `m_jointRef` 的目标 ⇒ 机械臂**原地保持**（不是"这一帧不下发"）。
+        m_btn2StylusFilt[0] = m_orientRefStylus.x + drx;
+        m_btn2StylusFilt[1] = m_orientRefStylus.y + dry;
+        m_btn2StylusFilt[2] = m_orientRefStylus.z + drz;
+
         // ⚠ m_lastStylusOrient 从本改动起【只用于诊断】(记录最近一次原始读到的笔杆姿态),
         //   控制回路不再读它 —— 别再把它当成"增量式参照"。
         m_lastStylusOrient = current;
@@ -1381,9 +1397,79 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
     }
 
     char cmd[256];
-    snprintf(cmd, sizeof(cmd), "ServoP(%.2f,%.2f,%.2f,%.2f,%.2f,%.2f)",
-        servoCmdX, servoCmdY, servoCmdZ,
-        targetRx, targetRy, targetRz);
+
+    // ★★★ 2026-09-23 (Task 2)：按钮2 的两条下发路径在**这里**分叉 —— 唯一的开关是
+    //   `Config::BTN2_JOINT_SPACE_ENABLED`（**回滚 = 翻 false**，下面 else 那一支就是【逐字】
+    //   的旧路径，一字未改）。
+    //
+    // 【为什么分叉点选在下发前、而不是把上面那整块姿态计算换掉】
+    //   开关只决定"**发出去的是什么**"。上面那一段（期望姿态 → 逐帧限幅 → 奇异阻尼 →
+    //   `clampOrientToBounds` → `orientRepulsionForce`）**一行不动**，因为其中还挂着
+    //   **触觉反馈**（`dampOrientationMotion` 写 `app.orientRepulsionForce`）与 TCP 微调；
+    //   删掉它就等于**顺手关掉了奇异避让**，而那是明确要求"一条都不许删"的那一类。
+    //   ⚠ 代价（**如实记账，不藏**）：关节空间路径下那一段仍然在跑，它的输出
+    //     `targetRx/Ry/Rz` 只流向 ① `[Relay] Motion sends` 那行日志 ② `app.robotTargetPose`
+    //     （`render/SceneRenderer.cpp:201` 只用来画目标位姿）—— 也就是说**这两处显示的仍是
+    //     那条不再下发的 RPY 目标**。真正发出去的是什么，看 `cmd`（下面的 `reportCommand(cmd)`
+    //     与 `app.lastCommandSent` 存的都是 `cmd` 本身 ⇒ 那两处是准的）。
+    //   ⇒ 也就是说：新路径**不调** `clampOrientToBounds`（关节空间里没有 RPY 表示、没有 ±180
+    //     接缝，"夹表示量"这件事不存在），但**也没把它从旧路径删掉** —— 旧路径要它。
+    //
+    // ⚠⚠ 守不住什么：`RelayCore.cpp` **不被任何测试编译** ⇒ 这个分叉**没有自动化用例**。
+    //   能守它的只有三样：① MSBuild 零 error；② 负对照（往本文件注入语法错误 ⇒ 必须报
+    //   `error C…`，证明这次构建确实在编它）；③ 上机（Task 3 的执行单）。纯函数那一半有单测
+    //   （`tests/test_button2_joint.cpp`），但"**接线接对了没有**"只能靠上机。
+    if (Config::BTN2_JOINT_SPACE_ENABLED && m_transmittingOrient && m_orientValid) {
+        // ================= 新路径：关节空间（厂商 ServoJ）=================
+        // ① 关节目标：Task 1 的纯函数（**有单测**）——
+        //      笔杆 Rx(前后摆)⇒J4 · Rz(左右摆)⇒J5 · Ry(自转)⇒J6；J1/J2/J3 无条件保持参照；
+        //      死区/符号/限幅的语义都在函数内部（见 relay/Button2Joint.h 的「管线」与「单位变了」）。
+        //    入参按位置读：`m_jointRef` 是 j1..j6，`m_btn2StylusFilt` 是笔杆的 **Rx,Ry,Rz**
+        //    （即 `stylusOrient` 的次序）。⚠ 两个次序**不同**，且函数内部的映射是**错开**的
+        //    （out[4]←Rz、out[5]←Ry）⇒ 这里写错次序不会报错，只会让"前后摆变成左右摆"。
+        //    ⚠ 直传 `m_jointRef` / `m_btn2StylusFilt`：它们是**真的 double 数组**，退化成
+        //      指针是标准行为。（对照：下面 RPY 路径要从 `Vec3` 取 double[3] 就必须**显式拷贝**
+        //      —— "Vec3 的三个成员在内存里连续"是个没有依据的前提，本仓已因同类前提翻过车。）
+        double j[6];
+        double sRef[3];
+        sRef[0] = m_orientRefStylus.x;
+        sRef[1] = m_orientRefStylus.y;
+        sRef[2] = m_orientRefStylus.z;
+        button2JointTarget(m_jointRef, sRef, m_btn2StylusFilt, j);
+
+        // ② 安全门：关节目标先**正解**出末端位置，再走**现有**的位置入口
+        //    （`evaluatePositionOnly`：NaN/Inf · 工作空间半径 620mm · Z 行程 0~795 ·
+        //      安全边界 · 圆柱奇异 30/80mm · 报警点黑名单 —— **一条都没删、也没绕**）。
+        //    ⚠ `Kinematics::forwardPosition` 与 `SafetyPredictor` 吃的是**同一个基座系**
+        //      （`app.robotActualPose` 那一套），所以这条比较才有意义。
+        //    ⚠ `refJoints` 本身是 NaN（机器人状态已经坏了）时：FK 结果是 NaN ⇒ 撞上本入口的
+        //      **第一道**守卫（NaN/Inf ⇒ REJECT）⇒ 本帧不下发。这是纯函数**刻意**不兜底的那个
+        //      情形（见 Button2Joint.h 的契约段）在**接线层**被接住的证据。
+        //    ⚠ 这条门判的是**关节目标**；上面姿态模式那条 TCP 门（`evaluatePositionOnly(tcpCheck)`，
+        //      `tcpCheck` 来自 `servoCmdX/Y/Z`）判的是另一个对象。两条都在，**不是**重复。
+        Vec3 fkPos = Kinematics::forwardPosition(j);
+        SafetyVerdict jv = SafetyPredictor::instance().evaluatePositionOnly(fkPos);
+        if (jv.action == SafetyVerdict::REJECT) {
+            std::cerr << "[Safety] Btn2 joint target REJECT: " << (jv.reason ? jv.reason : "?")
+                      << " — j=(" << j[0] << "," << j[1] << "," << j[2] << ","
+                      << j[3] << "," << j[4] << "," << j[5] << ")"
+                      << " fk=(" << fkPos.x << "," << fkPos.y << "," << fkPos.z << ")"
+                      << std::endl;
+            return;   // 与上面那条 TCP REJECT 同款: 本帧不下发, 下一帧从同一状态重算
+        }
+
+        // ③ 下发：厂商 `ServoJ(J1..J6,t,lookahead_time,gain)`，参数照文档示例
+        //    （t=0.1 / lookahead_time=50 / gain=500 —— 见 Docs/机械臂资料/TCP_IP远程控制接口文档.md 的 ServoJ 节）。
+        //    ⚠ 30 Hz 节流在本函数**开头**（`if (now - m_lastServoTime < 33) return;`）——
+        //      与厂商建议的 33 Hz 同量级，**那个节流没动**（两条路径共用）。
+        snprintf(cmd, sizeof(cmd), "ServoJ(%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,0.1,50,500)",
+                 j[0], j[1], j[2], j[3], j[4], j[5]);
+    } else {
+        // ================= 旧路径（**逐字**）=================
+        snprintf(cmd, sizeof(cmd), "ServoP(%.2f,%.2f,%.2f,%.2f,%.2f,%.2f)",
+            servoCmdX, servoCmdY, servoCmdZ,
+            targetRx, targetRy, targetRz);
+    }
 
     bool sent = robotSendMotion(cmd);
     static int sendCount = 0, failCount = 0;
@@ -1471,6 +1557,15 @@ void RelayCore::onButton2Press(const Vec3& stylusOrient) {
     //   否则上一次按住期间的滤值会留到这一次，表现为"刚按下就有一小段残余姿态"。
     resetStylusOffsetFilter();
 
+    // ★★ 2026-09-23 (Task 2)：关节空间路径的"当前笔杆姿态"也从按下这一刻起算。
+    //   初值 = **参照本身** ⇒ 三个偏移全为 0 ⇒ `button2JointTarget` 返回的关节**逐位等于参照**
+    //   （= 臂原地不动）。之后 `sendPosition` 的偏移段每帧覆盖它（见那里的 `m_btn2StylusFilt` 赋值）。
+    //   ⚠ 写在这里（而不是靠 `sendPosition` 第一帧去填）：那会让第一帧读到**上一次按住**留下的
+    //     陈旧笔杆姿态 ⇒ 按下瞬间跳一下。与姿态路径 `m_targetOrient = 当前实际姿态` 是同一个理由。
+    m_btn2StylusFilt[0] = stylusOrient.x;
+    m_btn2StylusFilt[1] = stylusOrient.y;
+    m_btn2StylusFilt[2] = stylusOrient.z;
+
     // Capture robot current orientation
     double curRx, curRy, curRz;
     {
@@ -1480,6 +1575,19 @@ void RelayCore::onButton2Press(const Vec3& stylusOrient) {
         curRx = app.robotActualPose.rx;
         curRy = app.robotActualPose.ry;
         curRz = app.robotActualPose.rz;
+        // ★★ 2026-09-23 (Task 2)：关节参照 —— **六个关节角**，抄自按下那一刻的实际位姿。
+        //   字段是现成的（`AppState::RobotPose::j1..j6`），本文件 `sendPosition` 里已有两处
+        //   同款逐字段拷贝（:991 与 :1220）。
+        //   ⚠ 放在**同一个临界区**里：姿态参照与关节参照必须是同一次采样的结果，否则两者
+        //     描述的不是同一个位姿（而纯函数拿 `m_jointRef` 当整个按住期间的定点）。
+        //   ⚠ 次序是 `j1..j6`（**不是**笔杆的 Rx/Ry/Rz）—— `button2JointTarget` 按位置读，
+        //     灌错次序不会报错、只会让"前后摆变成左右摆"，所以这里逐字段写、不写循环。
+        m_jointRef[0] = app.robotActualPose.j1;
+        m_jointRef[1] = app.robotActualPose.j2;
+        m_jointRef[2] = app.robotActualPose.j3;
+        m_jointRef[3] = app.robotActualPose.j4;
+        m_jointRef[4] = app.robotActualPose.j5;
+        m_jointRef[5] = app.robotActualPose.j6;
         LeaveCriticalSection(&app.robotPoseMutex);
     }
 
@@ -1511,6 +1619,14 @@ void RelayCore::onButton2Press(const Vec3& stylusOrient) {
     std::cout << "[Relay] Button2 PRESS — orient ref=("
               << m_orientRefStylus.x << "," << m_orientRefStylus.y << "," << m_orientRefStylus.z << ")"
               << " robot ref=(" << m_orientRefRobot.x << "," << m_orientRefRobot.y << "," << m_orientRefRobot.z << ")"
+              << std::endl;
+    // ★ 2026-09-23 (Task 2)：关节参照也打出来。**这不是装饰** —— Task 3 上机判据里有一条
+    //   "J1/J2/J3 在按住期间逐位不变 ⇒ 若有漂说明参照没抓对"，而"抓到了什么"这件事
+    //   没有任何自动化用例覆盖（本文件不被测试编译）⇒ 至少让它可观察、可对账。
+    std::cout << "[Relay] Button2 PRESS — joint ref=("
+              << m_jointRef[0] << "," << m_jointRef[1] << "," << m_jointRef[2] << ","
+              << m_jointRef[3] << "," << m_jointRef[4] << "," << m_jointRef[5] << ")"
+              << (Config::BTN2_JOINT_SPACE_ENABLED ? "  [joint-space: ServoJ]" : "  [RPY: ServoP]")
               << std::endl;
 }
 
