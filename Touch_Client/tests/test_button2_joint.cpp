@@ -16,7 +16,16 @@
 //
 // ⚠ 本文件【不碰 socket、不碰 OpenHaptics 运行时、不碰 appState】：Button2Joint 是纯函数，
 //   这正是把它抽出来的目的（与 Button2Mapping.h / FrameLayout.h / JitterStats.h 同一套做法）。
-//   ⇒ 本套件只链接 `../relay/Button2Joint.cpp` 一个翻译单元，且**不需要**任何 /I 路径。
+//
+// ⚠★ 2026-09-23 fix2 订正（**原文是错的，别按它读**）：原文写"本套件只链接
+//   `../relay/Button2Joint.cpp` 一个翻译单元，且**不需要**任何 /I 路径"。
+//   抽出 `isTrustworthyJointRef` 之后它要用 `Kinematics::isWithinJointLimits`，而那条链会走到
+//   `<HDU/hduVector.h>` ⇒ 本套件**多链一个 `../robot/Kinematics.cpp`，并且需要两个 /I 路径**。
+//   ⚠ 变的只是**构建图的形状**，函数本身仍然纯（Kinematics 的 FK/IK 也是纯算术，不碰 Win32）；
+//     即"不需要 /I"这句话现在**只在'不碰 OpenHaptics 调用'那个意义下**还成立。
+//     理由与完整的依赖链写在 `build_button2_joint_test.bat` 的注释里（那里是改的时候第一个要读的）。
+// ⚠ `#include "../robot/Kinematics.h"` 是给 ⑫ 用的（期望值从限位常数**导出**，不写死数字）——
+//   它同样是编译期依赖，同样需要那两个 /I。
 
 #include <iostream>
 #include <cmath>
@@ -24,6 +33,7 @@
 
 #include "../relay/Button2Joint.h"
 #include "../config/Config.h"
+#include "../robot/Kinematics.h"   // ⑫：关节限位常数（给 isTrustworthyJointRef 导出期望值）
 
 static int g_passed = 0, g_failed = 0;
 
@@ -355,6 +365,217 @@ static void test_sign_constants_are_unit_signs() {
     PASS();
 }
 
+// ⑩ 【2026-09-23 fix2 追加】`isTrustworthyJointRef` 的**正常**输入必须被接受。
+//    四条用例（⑩~⑬）合起来才是这个判据的完整规格：接受什么、拒绝什么、以及**故意不覆盖什么**。
+//    【为什么非补不可】`RelayCore.cpp` 不被任何测试编译 ⇒ I1 那道门原来是"读 + 上机"。
+//      而"抽出来"这件事的**全部价值**就在于这四条能跑。
+//    ⚠ 本条的参照里**故意留了一个恰好 0 的关节**（J1/J5）：那是**合法**的关节角
+//      （J1 归零是常态），而"六位**恰好**全 0"才是指纹 ⇒ 这条同时是"子句一不是按轴 OR 判的"
+//      的判别器（把 `&&` 写成 `||` 会在这里红，见 ⑫）。
+static void test_trustworthy_ref_is_accepted() {
+    TEST(trustworthy_ref_is_accepted);
+    // 一个含两个恰好 0 的**正常**参照：都在关节限位内（J3 的 ±155 是所有轴里最紧的）
+    const double ref[6] = {0.0, -20.0, 30.0, 40.0, 0.0, 60.0};
+    CHECK(isTrustworthyJointRef(ref));
+    PASS();
+}
+
+// ⑪ 六位**恰好**全 0 ⇒ 拒绝（"`GetAngle()` 从未解析成功"的指纹）。
+//    ⚠ 这是 I1 的**存在理由**：那种参照 FK 出来 = (0, −233.3, 756)，**过得了位置门**
+//      ⇒ 不拒就是 `ServoJ(0,…,0)` 把臂开向模型零位。
+static void test_all_zero_ref_is_rejected() {
+    TEST(all_zero_ref_is_rejected);
+    const double zeros[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    CHECK(!isTrustworthyJointRef(zeros));
+    PASS();
+}
+
+// ⑫ 越关节限位 ⇒ 拒绝。**逐轴**各试一遍 ⇒ "只查了某一个下标"的实现会红。
+//    ⚠ 期望值从 `Kinematics` 的限位常数**导出**（不写死 200）：限位表是唯一真相源，
+//      写死数字会在限位被调整时让用例变成"红得像判据坏了"。
+//    ⚠ 顺带钉住另一半：**恰好落在限位边界上**是**可信**的（`isWithinJointLimits` 用
+//      `>` / `<`，是闭区间）—— 这一句是 ⑫ 与 ⑬ 之间的边界，别把它读成"越界"。
+static void test_out_of_limits_ref_is_rejected() {
+    TEST(out_of_limits_ref_is_rejected);
+    const double limsMin[6] = {Kinematics::J1_MIN, Kinematics::J2_MIN, Kinematics::J3_MIN,
+                               Kinematics::J4_MIN, Kinematics::J5_MIN, Kinematics::J6_MIN};
+    const double limsMax[6] = {Kinematics::J1_MAX, Kinematics::J2_MAX, Kinematics::J3_MAX,
+                               Kinematics::J4_MAX, Kinematics::J5_MAX, Kinematics::J6_MAX};
+    const double ref[6] = {0.0, -20.0, 30.0, 40.0, 0.0, 60.0};
+
+    for (int i = 0; i < 6; i++) {
+        // 自检：本轴的行程非零，否则"上界 +1"既不越界也没意义（那条轴会变成空转）
+        CHECK(limsMax[i] > limsMin[i]);
+        {
+            double over[6] = {ref[0], ref[1], ref[2], ref[3], ref[4], ref[5]};
+            over[i] = limsMax[i] + 1.0;
+            CHECK(!isTrustworthyJointRef(over));
+        }
+        {
+            double under[6] = {ref[0], ref[1], ref[2], ref[3], ref[4], ref[5]};
+            under[i] = limsMin[i] - 1.0;
+            CHECK(!isTrustworthyJointRef(under));
+        }
+        // 恰好在边界上 ⇒ 可信（闭区间）
+        {
+            double atMax[6] = {ref[0], ref[1], ref[2], ref[3], ref[4], ref[5]};
+            atMax[i] = limsMax[i];
+            CHECK(isTrustworthyJointRef(atMax));
+        }
+    }
+    PASS();
+}
+
+// ⑬ ★【边界用例】NaN 参照被本判据**接受** —— 断的是**现状**，而且它是**刻意**的现状。
+//    【为什么非写不可（而不是"顺手修好"）】`isWithinJointLimits` 对 NaN 逐条比较全为 false
+//      ⇒ 它**返回 true**（放行）；而"恰好全 0"对 NaN 也为假 ⇒ 本函数对 NaN 返回 **true**。
+//      接住 NaN 的是**调用方的 FK 门**（FK(NaN) ⇒ NaN ⇒ 位置入口第一道守卫 REJECT），
+//      那条**不在**本函数的职责内。
+//      ⇒ 这条用例把"谁负责哪一段"写成可执行的：谁要在本函数里补一个 `isfinite` 守卫
+//        （看起来像"顺手修好"），**这条用例立刻红** —— 而那次改动会拿走 FK 门那一层
+//        与这里的分工，且**没有任何东西**在背面接着。见 Button2Joint.h 的 NaN 那一段。
+//    ⚠ 与 ⑥ 的关系：⑥ 钉的是 `button2JointTarget`（笔杆或参照非有限 ⇒ 六个关节退回参照），
+//      本条钉的是**另一个函数**的另一条契约 ⇒ 两者不重复。
+static void test_nan_ref_is_accepted_by_this_predicate() {
+    TEST(nan_ref_is_accepted_by_this_predicate);
+    const double nan_v = std::numeric_limits<double>::quiet_NaN();
+    // 全 NaN：`isWithinJointLimits` 逐条为 false ⇒ 放行；全 0 子句也为假 ⇒ 本判据判"可信"
+    {
+        const double allNan[6] = {nan_v, nan_v, nan_v, nan_v, nan_v, nan_v};
+        CHECK(isTrustworthyJointRef(allNan));
+    }
+    // 只坏一路 ⇒ 同样放行（NaN 不会被"恰好全 0"或"越限位"任一条捞住）
+    {
+        const double oneNan[6] = {0.0, -20.0, nan_v, 40.0, 0.0, 60.0};
+        CHECK(isTrustworthyJointRef(oneNan));
+    }
+    // ⚠ Inf **会**被捞住（`Inf > J*_MAX` 为真 ⇒ 越限位 ⇒ 拒绝）—— 与 NaN 不同，一并钉住，
+    //   免得下一个人从"NaN 被放行"推出"非有限一律被放行"。
+    {
+        const double inf_v = std::numeric_limits<double>::infinity();
+        const double oneInf[6] = {0.0, -20.0, inf_v, 40.0, 0.0, 60.0};
+        CHECK(!isTrustworthyJointRef(oneInf));
+    }
+    PASS();
+}
+
+// ⑭ ★【判别力用例】五路恰好 0 + 第六路是极小非零 ⇒ **可信**（"六位**恰好**全 0"的边界）。
+//    【为什么非补不可】把子句一的 `&&` 写成 `||`（"任一为 0 就判坏"）是个**很容易犯**的写法
+//      （六个 `== 0.0` 的链子读起来像"有零就是坏"）；而它会让 ⑩（含两个 0）与 ⑪（全 0）
+//      一起绿 —— ⑩⑪ 的组合**区分不了** `&&` 与 `||`。这条把边界钉在**恰好**上：
+//      `||` 下 `0.001` 之外的五个 0 会让它被拒 ⇒ 红。
+//    ⚠ 0.001° 是**合法**关节角（J1 恰好停在零点附近本就常见）⇒ 不是"太刁钻的输入"。
+static void test_five_zeros_and_a_tiny_value_is_still_trustworthy() {
+    TEST(five_zeros_and_a_tiny_value_is_still_trustworthy);
+    const double nearly[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.001};
+    CHECK(isTrustworthyJointRef(nearly));
+    // 自检：那一位**确实非零**（否则本用例退化成 ⑪ 的翻版，什么都不区分）
+    CHECK(nearly[5] != 0.0);
+    PASS();
+}
+
+// ⑮ `clampJointStep`：偏移为 0 ⇒ **逐位不变**（且不许有浮点痕迹）。
+//    语义上是"按下按钮2 的第一帧"：`prev` 被种子化成参照本身、期望也等于参照 ⇒ 本帧不走。
+//    ⚠ 用 `==` 而不是 `< 1e-9`：契约是"没动就是原样搬"，不该有任何浮点痕迹。
+static void test_clamp_step_zero_offset_changes_nothing() {
+    TEST(clamp_step_zero_offset_changes_nothing);
+    const double prev[6] = {-173.0, -22.0, -118.0, 100.0, -100.0, 179.0};
+    double out[6] = {99, 99, 99, 99, 99, 99};
+    clampJointStep(prev, prev, Config::ORIENT_MAX_STEP_DEG, out);
+    for (int i = 0; i < 6; i++) CHECK(out[i] == prev[i]);
+    PASS();
+}
+
+// ⑯ 单步限幅：大偏移下**逐轴**夹到 `maxStep`（不是夹合成量、不是永久截断成 maxStep）。
+//    ⚠ 输入从常数导出（`4 × maxStep`），不写死 17.5 —— 与 ④ 同一个理由（常数是脆的）。
+static void test_clamp_step_limits_a_large_offset_per_axis() {
+    TEST(clamp_step_limits_a_large_offset_per_axis);
+    const double step = Config::ORIENT_MAX_STEP_DEG;
+    CHECK(step > 0.0);                       // 自检：负/零会让下面三句全部失去意义
+    const double huge = 4.0 * step;          // 一定超过单步上限
+    const double prev[6] = {10.0, 20.0, 30.0, 40.0, 50.0, 60.0};
+    double out[6];
+
+    // (a) 六轴**同向**各差 huge ⇒ 每轴恰好走一步，且**方向**是朝目标的（不是反向）
+    {
+        double desired[6];
+        for (int i = 0; i < 6; i++) desired[i] = prev[i] + huge;
+        clampJointStep(prev, desired, step, out);
+        for (int i = 0; i < 6; i++) CHECK(fabs(out[i] - (prev[i] + step)) < 1e-12);
+    }
+
+    // (b) 负方向 ⇒ 同样夹到 −step
+    {
+        double desired[6];
+        for (int i = 0; i < 6; i++) desired[i] = prev[i] - huge;
+        clampJointStep(prev, desired, step, out);
+        for (int i = 0; i < 6; i++) CHECK(fabs(out[i] - (prev[i] - step)) < 1e-12);
+    }
+
+    // (c) ★ 别名：调用方就是**原地**把 `j` 同时当 `desired` 与 `out` 传进来的
+    //     （`RelayCore.cpp` 的 `clampJointStep(m_btn2JointCmd, j, …, j)`）。若实现成"先算完
+    //     再整体写回"之外的顺序（或先把 out 清零），这里会红。
+    {
+        double j[6] = {10.0 + huge, 20.0 - huge, 30.0 + huge,
+                       40.0 - huge, 50.0 + huge, 60.0 - huge};
+        clampJointStep(prev, j, step, j);
+        CHECK(fabs(j[0] - (prev[0] + step)) < 1e-12);
+        CHECK(fabs(j[1] - (prev[1] - step)) < 1e-12);
+        CHECK(fabs(j[2] - (prev[2] + step)) < 1e-12);
+        CHECK(fabs(j[3] - (prev[3] - step)) < 1e-12);
+        CHECK(fabs(j[4] - (prev[4] + step)) < 1e-12);
+        CHECK(fabs(j[5] - (prev[5] - step)) < 1e-12);
+    }
+
+    // (d) 在步长**之内**的偏移 ⇒ 一步到位（限幅不该拖慢正常小移动）
+    {
+        const double small = 0.5 * step;
+        double desired[6];
+        for (int i = 0; i < 6; i++) desired[i] = prev[i] + small;
+        clampJointStep(prev, desired, step, out);
+        for (int i = 0; i < 6; i++) CHECK(fabs(out[i] - desired[i]) < 1e-12);
+    }
+    PASS();
+}
+
+// ⑰ ★【累加器不会永久截断】大目标在多帧里**慢慢跟上**，最终**恰好**到达。
+//    【为什么非补不可】⑯ 只证明"单步被夹住"。而"夹取"与"永久截断"在**单帧**里长得一样 ——
+//      把累加式换成"把目标直接夹到 `prev ± step` 就发"（= 不推进积分器）会**逐帧结果相同**
+//      但对大偏移**永远走不到**（每帧都从同一个 prev 夹同一个量）⇒ 只有**多帧**能区分。
+//      RPY 路径 2026-09-21 那次改造就是为这个（见 `Config.h` 的 `ORIENT_DEADZONE_DEG` 历史段）。
+//    ⚠ 这是本函数与调用方**分工**的用例：本函数无状态，累加器（`prev` 的推进）由调用方持有
+//      ⇒ 这里就照调用方的形状**自己推**那个积分器（每帧把上一帧的输出当下一帧的 prev）。
+static void test_accumulator_reaches_a_large_target_over_several_frames() {
+    TEST(accumulator_reaches_a_large_target_over_several_frames);
+    const double step = Config::ORIENT_MAX_STEP_DEG;
+    CHECK(step > 0.0);
+    const double prev0[6] = {0.0, 10.0, -20.0, 30.0, -40.0, 50.0};
+    // 目标偏移 20 步 ⇒ 不设累加的话永远走不到；设了就到得了（帧数与步长都从常数导出）
+    const int    frames = 20;
+    double desired[6], cmd[6];
+    for (int i = 0; i < 6; i++) {
+        desired[i] = prev0[i] + frames * step;
+        cmd[i] = prev0[i];                    // 积分器种子 = 参照本身（与 onButton2Press 一致）
+    }
+
+    // 前 frames-1 帧：每帧**恰好**推进一个 step（不是更多、也不是更少）
+    for (int f = 0; f < frames - 1; f++) {
+        clampJointStep(cmd, desired, step, cmd);
+        for (int i = 0; i < 6; i++) {
+            CHECK(fabs(cmd[i] - (prev0[i] + (f + 1) * step)) < 1e-9);
+        }
+    }
+
+    // 最后一帧：**恰好**到达目标（且没有过冲）
+    clampJointStep(cmd, desired, step, cmd);
+    for (int i = 0; i < 6; i++) CHECK(fabs(cmd[i] - desired[i]) < 1e-9);
+
+    // 再走一帧：目标已到 ⇒ 不再变化（这条抓"每帧无条件加一个 step"那种写法）
+    clampJointStep(cmd, desired, step, cmd);
+    for (int i = 0; i < 6; i++) CHECK(fabs(cmd[i] - desired[i]) < 1e-9);
+    PASS();
+}
+
 int main() {
     std::cout << "--- Button2Joint (按钮2 关节空间映射：笔杆 Euler 增量 -> 关节增量) ---" << std::endl;
     test_each_stylus_axis_moves_exactly_one_joint();
@@ -366,6 +587,14 @@ int main() {
     test_three_axes_at_once_are_independent_at_large_angles();
     test_deadzone_is_per_axis_not_by_magnitude();       // ⑧ 复审追加
     test_sign_constants_are_unit_signs();               // ⑨ 复审追加
+    test_trustworthy_ref_is_accepted();                 // ⑩ 2026-09-23 fix2：I1 的判据（抽出后）
+    test_all_zero_ref_is_rejected();                    // ⑪
+    test_out_of_limits_ref_is_rejected();               // ⑫
+    test_nan_ref_is_accepted_by_this_predicate();       // ⑬ ★ 边界（刻意放行 NaN）
+    test_five_zeros_and_a_tiny_value_is_still_trustworthy();   // ⑭ ★ 恰好全 0 的边界
+    test_clamp_step_zero_offset_changes_nothing();      // ⑮ M2 的判据（抽出后）
+    test_clamp_step_limits_a_large_offset_per_axis();   // ⑯
+    test_accumulator_reaches_a_large_target_over_several_frames();  // ⑰ ★ 不会永久截断
     std::cout << "\nResults: " << g_passed << " passed, " << g_failed << " failed" << std::endl;
     return g_failed == 0 ? 0 : 1;
 }

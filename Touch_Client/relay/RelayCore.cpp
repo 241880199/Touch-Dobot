@@ -1505,14 +1505,11 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
         //   那一刻的快照，本分支每帧都在跑 ⇒ 判当前值才是"这一帧要用的那个参照"。
         //   ⚠ 不覆盖 NaN：NaN 在 `isWithinJointLimits` 里逐条比较全为 false ⇒ 它**返回 true**
         //     （放行）。那个情形由下面 ② 的 FK 门接住（FK(NaN) ⇒ NaN ⇒ 第一道守卫 REJECT）。
-        // ⚠ 无自动化用例（本文件不被任何测试编译）⇒ 由人读 + 上机。
-        // ⚠ Task 2-fix2 会把这个判据本身抽到 `relay/Button2Joint.cpp`（那里有单测）；
-        //   本提交**只改消息**（Minor 2/3），判据与 `return` 的位置一个字没动。
+        // ⚠ 接线这一段（什么时候调、返回值怎么用）**仍然没有自动化用例**（本文件不被任何
+        //   测试编译）⇒ 由人读 + 上机。判据**本身**已抽到 `relay/Button2Joint.cpp` 的
+        //   `isTrustworthyJointRef`（那里有单测）—— 抽出的只有算术，`return` 留在这里。
         {
-            const bool allZero =
-                (m_jointRef[0] == 0.0 && m_jointRef[1] == 0.0 && m_jointRef[2] == 0.0 &&
-                 m_jointRef[3] == 0.0 && m_jointRef[4] == 0.0 && m_jointRef[5] == 0.0);
-            if (allZero || !Kinematics::isWithinJointLimits(m_jointRef)) {
+            if (!isTrustworthyJointRef(m_jointRef)) {
                 // ★ Minor 2：这条**构造上非瞬时** —— 反馈在按下那一刻就坏了 ⇒ `m_jointRef` 是
                 //   个坏快照 ⇒ 下面这个条件**整个按住期间恒成立** ⇒ 不压就是一整行、
                 //   以 ~30 Hz 的发送速率刷到操作员松手为止。而 `cerr` 写在**触觉回调线程**上，
@@ -1523,8 +1520,13 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
                 //   ⚠ 标记复位在 `onButton2Press`（与 `m_btn2JointMode` 同一个临界区）⇒ 下一次按下会再报。
                 if (!m_btn2JointRefRejectLogged) {
                     m_btn2JointRefRejectLogged = true;
+                    // ⚠ 这里的"理由"是**自己再问一次** `isWithinJointLimits`（判据只回 bool）。
+                    //   两个分支**互斥且穷尽**：被拒 且 在限位内 ⇒ 只能是"六位恰好全 0"
+                    //   ⇒ 打出来的字符串与抽出前那句 `allZero ? … : …` **逐字相同**。
+                    //   代价：只在**被拒**的那一帧算一次（本来也要 return，可忽略）。
                     std::cerr << "[Safety] Btn2 joint REF UNTRUSTWORTHY ("
-                              << (allZero ? "all six joints are exactly 0" : "outside joint limits")
+                              << (Kinematics::isWithinJointLimits(m_jointRef)
+                                      ? "all six joints are exactly 0" : "outside joint limits")
                               << ") — NOT sending. Reported ONCE per press (every frame is still "
                               << "rejected). ref=("
                               << m_jointRef[0] << "," << m_jointRef[1] << "," << m_jointRef[2] << ","
@@ -1571,13 +1573,12 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
         //   被这道闸放行的那一个，不存在"判一个、发另一个"）。
         // 【积分器的推进点】只在**真的走到下发**那一步（见 ③ 之后的一行）—— 被上面任一
         //   道门拒掉的帧**不参与积分** ⇒ 它记的是"发过什么"，不是"算过什么"。
-        // ⚠ 无自动化用例（本文件不被任何测试编译）⇒ 由人读 + 上机守。
-        for (int i = 0; i < 6; ++i) {
-            double w = j[i] - m_btn2JointCmd[i];
-            if (w >  Config::ORIENT_MAX_STEP_DEG) w =  Config::ORIENT_MAX_STEP_DEG;
-            if (w < -Config::ORIENT_MAX_STEP_DEG) w = -Config::ORIENT_MAX_STEP_DEG;
-            j[i] = m_btn2JointCmd[i] + w;
-        }
+        // ★ Task 2-fix2：这段算术已抽到 `relay/Button2Joint.cpp` 的 `clampJointStep`
+        //   （**那里有单测**）—— 逐轴夹取、次序、原地改写 `j` 全部逐字照抄。
+        //   ⚠ **积分器 `m_btn2JointCmd` 仍然由本函数持有**（它是"上一次发了什么"这个跨帧状态，
+        //     不是算术）⇒ 抽出来的函数是无状态的、`prev` 靠入参传进去。
+        //   ⚠ 接线这一段（传谁当 `prev`、什么时候推进）**仍然没有自动化用例**。
+        clampJointStep(m_btn2JointCmd, j, Config::ORIENT_MAX_STEP_DEG, j);
 
         // ② 安全门：关节目标先**正解**出末端位置，再走**现有**的位置入口
         //    （`evaluatePositionOnly`：NaN/Inf · 工作空间半径 620mm · Z 行程 0~795 ·

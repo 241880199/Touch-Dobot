@@ -91,3 +91,58 @@ void button2JointTarget(const double refJoints[6],
                         const double refStylus[3],
                         const double curStylus[3],
                         double outJoints[6]);
+
+// ============================================================================
+//  接线层的两条纯判据（2026-09-23 Task 2 修复轮：从 RelayCore.cpp **抽出来**）
+// ============================================================================
+//
+// 【为什么要抽】`RelayCore.cpp` **不被任何测试编译** ⇒ 修复轮（复审 1×Critical + 3×Important
+//   + 2×Minor）新加的三条判据**一条自动化用例都没有**，只能靠人读 + 上机。而其中两条
+//   **本来就是纯算术**（不碰 Win32、不碰 socket、不碰 appState）⇒ 抽到这里，由
+//   `tests/test_button2_joint.cpp` 直接喂入参。本文件就是"这条逻辑的受测之家"。
+//
+// ⚠⚠ 【这一抽**不改变**任何行为，也**不改变**"接线有没有接对"的可验证性】
+//   1) 判据、次序、夹取方向、累加点**逐字照抄**原处（见各自的注释与用例）；
+//   2) **控制流留在调用方**：三处 `return`（本帧不下发）是流程不是算术 ⇒ 抽出来的只有算术；
+//   3) 接线层（`RelayCore.cpp` 里"什么时候调、返回值怎么用"）**仍然没有自动化用例** ⇒
+//      仍然只能靠人读 + 上机。**别把"这两条有单测了"读成"接线接对了"** —— 那是两件事。
+//
+// ⚠ 【依赖变了，必须记账】`isTrustworthyJointRef` 要用 `Kinematics::isWithinJointLimits`
+//   ⇒ `Button2Joint.cpp` 现在 `#include "../robot/Kinematics.h"`，而那条链会走到
+//   `CoordinateTransform.h` → `<HDU/hduVector.h>` ⇒ **`tests/build_button2_joint_test.bat`
+//   从"不需要任何 /I 路径"变成需要 OpenHaptics 那两个 /I，并且要多链接
+//   `../robot/Kinematics.cpp`**。那是本次抽取的唯一代价，写在那个 .bat 的注释里（原注释
+//   曾断言"本套件不需要 /I" —— 那句现在**是错的**，已就地订正，没有留下）。**函数本身仍然纯**
+//   （Kinematics 的 FK/IK 也是纯算术），变的只是**构建图的形状**。
+
+// 参照可信度（复审 I1）：六位**恰好**全 0 **或** 越关节限位 ⇒ 不可信（返回 false）。
+//   【场景】`app.robotActualPose.j1..j6` 的初值**全 0**，唯一写入点是 `queryJointAngles` 里
+//     `FeedbackParser::parseAngle` 的**成功路径** ⇒ 若 `GetAngle()` 从未解析成功，参照就一直是
+//     全 0 ⇒ FK(0,…,0) = (0, −233.3, 756) **过得了位置门** ⇒ `ServoJ(0,…,0)` 会把臂开向模型零位。
+//   ⚠ 两个子句**都保留**（少任何一个都会漏掉一整类）：全 0 是"`GetAngle()` 从未成功"的指纹
+//     （真机关节零点不会同时精确落在 0.0000），越限位是另一个独立的坏值形态。
+//   ⚠⚠ **NaN 不在本函数的覆盖面内，而且是刻意的**：NaN 进 `isWithinJointLimits` 时逐条比较
+//     全为 false ⇒ 它**返回 true**（放行）；而"恰好全 0"对 NaN 也为假 ⇒ 本函数对 NaN
+//     **返回 true（可信）**。接住 NaN 的是调用方的 **FK 门**（FK(NaN) ⇒ NaN ⇒ 位置入口的
+//     第一道守卫 REJECT）—— 那条不在本函数职责内。**这个边界被用例⑬逐字钉住**（断言的
+//     是**现状**，且是**刻意**的现状）：别"顺手修好"它 —— 那会是一次**没有负对照**的行为改变。
+bool isTrustworthyJointRef(const double ref[6]);
+
+// 逐轴步长限幅（复审 M2）：`out[i] = prev[i] + clamp(desired[i] − prev[i], ±maxStep)`。
+//   【形状是从 RPY 路径照抄的】那条路的 `ORIENT_MAX_STEP_DEG` 注释就写着"手一甩不甩飞机器人"；
+//     关节路径原来是**没有**这一道 ⇒ 手一甩本帧目标可能一步跨出 ~17.5°（30 Hz ⇒ 525°/s）。
+//   ⚠ 夹的是"**本帧要走的量**"再**累加**，不是"把目标夹到 `prev ± maxStep` 就完事" ——
+//     两者**逐帧结果相同**，区别在**累加器**：它是"上一帧**已下发**的目标"，由调用方持有
+//     （本函数**无状态**：`prev` 由调用方传进来）。大偏移因此在多帧里**慢慢跟上**、
+//     **不会被永久截断** —— RPY 路径 2026-09-21 那次改造就是为这个（`Config.h` 里
+//     `ORIENT_DEADZONE_DEG` 的历史段）。
+//   ⚠ **`out` 允许与 `desired` 同一块内存**（调用方就是原地改写 `j`）：逐轴**先读后写**、
+//     每轴只碰自己那一个下标 ⇒ 别名安全。用例⑯(c) 把这个用法钉住。
+//   ⚠ NaN：`NaN > maxStep` 与 `NaN < −maxStep` **都为假** ⇒ NaN **原样穿过**（与抽出前逐字
+//     一致）。那**不是**本函数该管的事 —— 接住它的是调用方的 FK 门（同 `button2JointTarget`
+//     的入参契约）。**别在这里加 isfinite 守卫**：那会是一次没有用例背书的行为改变。
+//   ⚠ `maxStep` 传负数是**未定义意图**，本函数**逐字照抄**原写法（先比 `> maxStep`、
+//     再比 `< −maxStep`）：负值下先被赋 `maxStep`、再被赋 `−maxStep` ⇒ 结果 = |maxStep|。
+//     荒谬，但**与原处一致** —— 没有"顺手修正"（修正就是行为改变，且没有用例会红）。
+//     调用方传的是 `Config::ORIENT_MAX_STEP_DEG`。
+void clampJointStep(const double prev[6], const double desired[6], double maxStep, double out[6]);

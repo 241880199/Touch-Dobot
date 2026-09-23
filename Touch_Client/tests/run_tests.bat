@@ -597,6 +597,9 @@ rem   button-2 joint-space plan):
 rem   button2_joint -- the pure function (relay/Button2Joint.{h,cpp}) that maps the
 rem   stylus Euler deltas onto J4/J5/J6 (Rx->J4, Rz->J5, Ry->J6; J1/J2/J3 held;
 rem   translation cannot participate because the signature has no position input).
+rem   As of 2026-09-23 fix2 it also covers the two hookup-layer predicates that were
+rem   extracted out of RelayCore.cpp (isTrustworthyJointRef / clampJointStep) -- the
+rem   arithmetic only; the call sites in RelayCore.cpp still have no automated coverage.
 rem   The assertion count is deliberately NOT copied here: the suite prints it on
 rem   every run, and a hand-typed copy only goes stale in the silent direction
 rem   (see the note on hand-typed numbers in the NOT RUN block at the bottom).

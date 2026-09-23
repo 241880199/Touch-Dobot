@@ -1,6 +1,13 @@
 #include "Button2Joint.h"
 #include "../config/Config.h"
-#include <cmath>
+// ⚠ 2026-09-23 Task 2 修复轮：`isTrustworthyJointRef` 要用 `Kinematics::isWithinJointLimits`
+//   ⇒ 这里多了一条依赖。它**不是** Win32/socket/appState —— Kinematics 的 FK/IK 也是纯算术，
+//   本文件仍然"纯"。但这条链会走到 `CoordinateTransform.h` → `<HDU/hduVector.h>`
+//   ⇒ **构建图的形状变了**（测试用的 .bat 要多给两个 /I、多链一个 .cpp），
+//     见 `tests/build_button2_joint_test.bat` 的注释与 `Button2Joint.h` 的「依赖变了」那一段。
+//   ⚠ 用**现成的** `isWithinJointLimits` 而不是在这里重抄一遍关节限位：那是**唯一真相源**
+//     （`Kinematics.h` 的 `J*_MIN/MAX`），重抄一份就是两处会各自漂移的量。
+#include "../robot/Kinematics.h"
 
 // ============================================================================
 //  笔杆 Euler 增量 → 关节增量（纯函数）
@@ -75,4 +82,42 @@ void button2JointTarget(const double refJoints[6],
     outJoints[3] = refJoints[3] + clampJointDelta(dJ4);
     outJoints[4] = refJoints[4] + clampJointDelta(dJ5);
     outJoints[5] = refJoints[5] + clampJointDelta(dJ6);
+}
+
+// ============================================================================
+//  接线层的两条纯判据（从 RelayCore.cpp 抽出来 —— 那里不被任何测试编译）
+// ============================================================================
+// 契约、边界（尤其是 NaN 与负数 maxStep 这两处"刻意照抄"）全部写在 Button2Joint.h 上；
+// 这里只写"为什么是这几行"。**两处都是逐字搬运**：任何"顺手改进"都是没有用例背书的行为改变。
+// ⚠ 判据本身与"接线有没有接对"是两件事：控制流（三处 `return`）留在 `RelayCore.cpp`
+//   ⇒ 那一段**仍然没有自动化用例**，抽出来的只有算术。
+
+bool isTrustworthyJointRef(const double ref[6]) {
+    // 子句一：六位**恰好**全 0（"`GetAngle()` 从未解析成功"的指纹）。
+    //   ⚠ 写全六个下标而**不写循环**：与 `onButton2Press` 里那三处逐字段拷贝同一风格，
+    //     而且它判的是**恰好**而不是"接近" —— 换成 1e-9 之类的容差会把"机械臂真的停在
+    //     零位附近"判成坏参照，而那是**合法位姿**（臂就该停在那儿按着不动）。
+    const bool allZero =
+        (ref[0] == 0.0 && ref[1] == 0.0 && ref[2] == 0.0 &&
+         ref[3] == 0.0 && ref[4] == 0.0 && ref[5] == 0.0);
+
+    // 子句二：越关节限位 ⇒ 不可信。用现成函数（`Kinematics.cpp:457`；`tests/test_kinematics.cpp`
+    //   322-337 有用例）而不是在这里重抄限位表 —— 那份表是唯一真相源，重抄会各自漂移。
+    //   ⚠ 它对 NaN 返回 **true**（逐条比较全为 false）—— 这是本函数对 NaN 放行的**唯一**
+    //     原因，见头文件那一段。别在这里补 NaN 判断（理由同样写在头文件）。
+    return !(allZero || !Kinematics::isWithinJointLimits(ref));
+}
+
+void clampJointStep(const double prev[6], const double desired[6], double maxStep, double out[6]) {
+    // 逐轴：本帧要走的量 → 夹到 ±maxStep → 加到"上一帧已下发"上。
+    //   ⚠ 次序照抄原处：**先比上界、再比下界**。两条都用独立的 `if`（**不是** else-if）——
+    //     `maxStep` 为负时两条都会被执行到（见头文件的"未定义意图"），换成 else-if 就变了。
+    //   ⚠ 先读后写（同一轮里读完 `prev[i]`/`desired[i]` 才写 `out[i]`）⇒ 调用方原地传 `j`
+    //     当 `out` 是安全的（用例⑯(c)）。
+    for (int i = 0; i < 6; ++i) {
+        double w = desired[i] - prev[i];
+        if (w >  maxStep) w =  maxStep;
+        if (w < -maxStep) w = -maxStep;
+        out[i] = prev[i] + w;
+    }
 }
