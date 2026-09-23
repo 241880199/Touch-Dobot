@@ -283,6 +283,44 @@ git commit -m "feat(relay): 按钮2 姿态映射改成真旋转合成（纯函�
 ### Task 3: 接进 RelayCore（开关后，回滚一行）
 
 **Files:**
+- Modify: `Touch_Client/config/Config.h`（新增开关，位置紧邻 `ORIENT_SEAM_FIX_ENABLED`）
+- Modify: `Touch_Client/relay/RelayCore.cpp`（姿态块：`sendPosition` 里计算 `drx/dry/drz` → `desired` → 限幅那一整段）
+- Modify: `Touch_Client/relay/Button2Mapping.h`（按附加要求 ② 交代 `Calibration` 分支）
+- Test: `Touch_Client/tests/test_button2_mapping.cpp`（按附加要求 ① 补"能区分限幅语义"的用例 + 负对照）
+
+**Interfaces:**
+- Consumes: `button2OrientationTarget(refRobotRpy, refStylusRpy, curStylusRpy)`（Task 2，入参/返回均为度）
+- Produces: `Config::BTN2_ROTATION_COMPOSE_ENABLED`（bool，**默认 true**）
+
+**设计决定（必须照此实现，别自行改）** —— 这一段是接线，`RelayCore.cpp` **不被任何测试编译**，
+所以唯一能守它的就是"形状简单 + 开关可回滚"：
+
+1. **开关**：`const bool BTN2_ROTATION_COMPOSE_ENABLED = true;`，注释里写明回滚 = 翻 false。
+2. **门与低通保留在原来的位置上**（逐轴死区 `axisGate` + 偏移低通 `s_stylusOffFilt`）—— 它们作用在
+   **笔杆偏移**上，语义不变。**做法**：先按现状算出**已过门、已低通**的偏移 `(offx,offy,offz)`，
+   再**合成一个"当前笔杆姿态"** `curFiltered = refStylus + (offx,offy,offz)`，把它喂给新函数。
+   ⚠ **不要**把 `axisGate`/低通搬进纯函数（那会改变它们已被现场验证过的语义，且会把它们拖出可测范围）。
+3. **新路径**：`desired = Vec3(button2OrientationTarget(&m_orientRefRobot.x, &m_orientRefStylus.x, &curFiltered.x))`
+   —— 注意三者的 `.x` 是 `Vec3` 的**首地址**（行主序 3 个 double 连续，Task 1 已确认该形状可用）。
+4. **限幅**：新函数**内部已按旋转角**夹到 `ORIENT_MAX_OFFSET_DEG` ⇒ 新路径**不再调用**
+   `clampOrientOffset`（逐分量那个）；**旧路径（false 分支）保持原样**调用它 ✓。
+   `clampOrientToBounds`（绝对值 ±180 的安全钳位）**两条路径都保留、语义不动** ✓。
+5. **每帧步长限幅**（`ORIENT_MAX_STEP_DEG` 那一小段）**两条路径共用、不动** ✓。
+
+- [ ] **Step 1: 加开关 + 接线（上面 5 条，一条不落）**
+- [ ] **Step 2: 编译验证 + 负对照**（照 Task 1 的先例）：MSBuild 编译 `Touch_Client.vcxproj`，
+      要求 **0 error**；再做一次负对照（临时注入一个语法错误 ⇒ 必须报 `error C…`），
+      证明这次 MSBuild 确实在编译被改的文件（mtime 在本树不可用，Task 1 已踩过）。
+      ⚠ 重建前**必须先退出正在跑的客户端**，否则 `LNK1168`。
+- [ ] **Step 3: 补"能区分限幅语义"的用例 + 负对照**（见上面附加要求 ①）
+- [ ] **Step 4: 整床** ⇒ `cmd /c "cd /d D:\Projects\Touch\Touch_Client	ests && .un_tests.bat"`，
+      **exit 0**、`Suites accounted: N of N`。
+- [ ] **Step 5: 提交**，提交信息里必须写明：开关名与默认值、回滚方式、以及"`RelayCore.cpp` 不被测试编译
+      ⇒ 本任务只能靠编译 + 负对照 + 上机（Task 4）守"。
+
+### Task 3（原提纲，保留作背景）
+
+**Files:**
 - Modify: `Touch_Client/relay/RelayCore.cpp:1121-1191`（姿态块）
 - Modify: `Touch_Client/config/Config.h`（新增 `BTN2_ROTATION_COMPOSE_ENABLED`）
 
