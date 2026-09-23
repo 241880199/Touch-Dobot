@@ -140,10 +140,19 @@ bool allFinite(const double v[3]) {
 Vec3 button2OrientationTarget(const double refRobotRpy[3],
                               const double refStylusRpy[3],
                               const double curStylusRpy[3]) {
-    // NaN/Inf 守卫：任何非有限的输入都会顺着下面的矩阵乘法把返回值污染成 NaN，
-    // 再经 RelayCore 下发出去 —— 那时现场看到的是"机械臂乱动"，而不是"哪里算错了"。
-    // 这里退化成"目标 = 参照"（即不倾斜），让按下按钮2 的那一刻姿态成为安全落点。
-    // （RelayCore 侧另有一道 NaN 守卫，见计划 Task 3；两道是刻意的，代价只是一次比较。）
+    // NaN/Inf 守卫：三个入参【任一】非有限 ⇒ 返回参照姿态（"不倾斜"），让按下按钮2 的那一刻
+    // 姿态成为安全落点。否则非有限值会顺着下面的矩阵乘法把返回值污染成 NaN，再经 RelayCore
+    // 下发出去 —— 那时现场看到的是"机械臂乱动"，而不是"哪里算错了"。
+    // ⚠⚠ 2026-09-23 订正（Task 3 附加要求③）：这里原先写着"**任何**非有限的输入都会…"——
+    //   **说过头了**。`refRobotRpy` 自己非有限时，本函数**照样把它原样返回**（就是下面这行
+    //   return 的那三个分量），即它**不**保证"返回值一定有限"。这不是 bug 而是没有更好的选择：
+    //   那一刻没有"安全值"可退（0 是一个真实姿态，机械臂会真的转过去），所以这一层只能由
+    //   **调用者**负责。RelayCore 的参照 (`m_orientRefRobot`) 抄自实际姿态，它若已经是 NaN，
+    //   新旧两条路径都会把 NaN 传下去 —— 本函数不是那条分界线。
+    //   该行为已被用例钉住（tests/test_button2_mapping.cpp ⑫，覆盖三个入参位置），
+    //   所以"注释说的"和"代码做的"不会再各自漂。
+    //   另：RelayCore 的姿态块里还有一道 NaN 守卫，但它守的是 drx/dry/drz（笔杆偏移），
+    //   **不覆盖**参照本身；两道是刻意的，代价只是一次比较。
     if (!allFinite(refRobotRpy) || !allFinite(refStylusRpy) || !allFinite(curStylusRpy)) {
         return Vec3(refRobotRpy[0], refRobotRpy[1], refRobotRpy[2]);
     }

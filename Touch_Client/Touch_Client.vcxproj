@@ -105,6 +105,8 @@
     <!-- relay -->
     <ClInclude Include="relay\IExtension.h" />
     <ClInclude Include="relay\CoordinateTransform.h" />
+    <ClInclude Include="relay\Button2Mapping.h" />
+    <ClCompile Include="relay\Button2Mapping.cpp" />
     <ClInclude Include="relay\SafetyBoundary.h" />
     <!-- ProtocolAdapter inlined into RelayCore -->
     <ClInclude Include="relay\FeedbackParser.h" />

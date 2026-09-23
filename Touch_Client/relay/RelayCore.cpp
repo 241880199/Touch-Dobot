@@ -1,5 +1,6 @@
 #define _USE_MATH_DEFINES
 #include "RelayCore.h"
+#include "Button2Mapping.h"
 #include "FeedbackParser.h"
 #include "RelayCommandParser.h"
 #include "SafetyBoundary.h"
@@ -113,6 +114,10 @@ static void resetStylusOffsetFilter() {
     s_stylusOffFiltLastMs = 0;
     s_stylusOffFiltReady = false;
 }
+
+// ★ 2026-09-23 (Task 3): "标定路径没接上"这件事只披露【一次】，别每帧刷屏。
+// 见 Config::BTN2_ROTATION_COMPOSE_ENABLED 与 Button2Mapping.h 的调用约定那一节。
+static bool s_warnedBtn2CalibIgnored = false;
 
 // ===== 帧率噪声探针的【环形缓冲】=====
 // 见 RelayCore.h 里那一段 (要回答什么问题) 与 force/NoiseProbe.h (统计量的判据)。
@@ -1093,62 +1098,99 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
         //   ⇒ 现在只问一句: 这一帧有没有任何一轴真的用掉了增量?
         if (drx != 0.0 || dry != 0.0 || drz != 0.0) {
 
-            // Apply gain
-            drx *= Config::ORIENT_GAIN;
-            dry *= Config::ORIENT_GAIN;
-            drz *= Config::ORIENT_GAIN;
+            // ★★★ 2026-09-23 (Task 3)：期望目标由【两条路径】之一给出 —— 开关见
+            //   Config::BTN2_ROTATION_COMPOSE_ENABLED（默认 true ⇒ 新路径；翻 false = 回滚）。
+            //   ⚠ 这一段【不被任何测试编译】：守住它的只有"编译 + 语法错误注入的负对照 + 上机"。
+            Vec3 desired(0.0, 0.0, 0.0);
+            if (Config::BTN2_ROTATION_COMPOSE_ENABLED) {
+                // ---- 新路径：真旋转合成（纯函数，见 relay/Button2Mapping.{h,cpp}）----
+                //   · 喂进去的是"当前笔杆姿态" = 参照 + 【已过门、已低通】的偏移（drx/dry/drz）。
+                //     死区与低通仍作用在【笔杆偏移】上，语义不变 —— 它们【不】进纯函数
+                //     （搬进去会改掉它们已被现场验证过的语义，还会把它们拖出可测范围）。
+                //   · 偏移的限幅在【函数内部】按【旋转角】做完（≤ ORIENT_MAX_OFFSET_DEG）
+                //     ⇒ 这条路径【不】再调 clampOrientOffset（逐分量那个，见下面的钳位段）。
+                //   · 三个 Vec3 各自【显式拷贝】成局部 double[3]，不写 `&m_orientRefRobot.x`：
+                //     那前提是"Vec3 的三个成员在内存里连续且按 x,y,z 排列"，而这个前提
+                //     **没有任何东西保证**（编译器可以对成员各自安排）—— Task 1 已因同类
+                //     前提被要求改写法。显式拷贝没有前提。
+                Vec3 curFiltered(m_orientRefStylus.x + drx,
+                                 m_orientRefStylus.y + dry,
+                                 m_orientRefStylus.z + drz);
+                double aRef[3] = { m_orientRefRobot.x,  m_orientRefRobot.y,  m_orientRefRobot.z  };
+                double sRef[3] = { m_orientRefStylus.x, m_orientRefStylus.y, m_orientRefStylus.z };
+                double sCur[3] = { curFiltered.x,       curFiltered.y,       curFiltered.z       };
+                desired = button2OrientationTarget(aRef, sRef, sCur);
 
-            // ★ 单帧限幅【不在这里】(2026-09-21 参照式改造)。
-            //   参照式下 drx/dry/drz 是"相对按下按钮2那一点的偏移"——**可以很大, 而且那是对的**:
-            //   操作员转了 30°, 就该给 30°。从前这里限的是【偏移】, 那是累加式时代的写法,
-            //   会把大转动【永久截断】掉。
-            //   ⇒ 限幅改到【目标姿态每帧的变化】上 (见下面 wx/wy/wz 那一段) —— 那才是"手一甩
-            //     不让机器人跟着猛转"要限的量。
-
-            // ★★ 逐轴符号 (2026-09-21 改)。从前这里是【无条件三轴取负】, 注释的理由是
-            //   "Touch Euler (ZYX intrinsic) 沿正轴看逆时针增大, 而 Dobot RPY 相反"。
-            //   那个理由与仓库里的两份实现都不符 —— Touch 侧的 Euler 提取与 Dobot 侧的
-            //   TcpCalibration::rpyToMatrix **都是 Rz·Ry·Rx**; 而现场实测也是"转向反了"。
-            //   ⇒ 默认改为【不翻转】。完整依据、以及"若只有某些轴反而是置换问题"的处置,
-            //     见 Config::ORIENT_FLIP_RX 那一大段。
-            drx *= Config::ORIENT_FLIP_RX;
-            dry *= Config::ORIENT_FLIP_RY;
-            drz *= Config::ORIENT_FLIP_RZ;
-
-            // ---- Axis remap: stylus frame → robot frame ----
-            // Build 3×3 rotation that maps Touch rotation axes to robot rotation axes.
-            // When calibration is enabled, use the calibrated rigid transform R.
-            // Fallback: hardcoded axis mapping matching convertTouchToRobot():
-            //   robot_X = touch_X   → [1, 0,  0]
-            //   robot_Y = -touch_Z  → [0, 0, -1]
-            //   robot_Z = touch_Y   → [0, 1,  0]
-            double R00, R01, R02, R10, R11, R12, R20, R21, R22;
-            if (Calibration::enabled) {
-                R00 = Calibration::R[0]; R01 = Calibration::R[1]; R02 = Calibration::R[2];
-                R10 = Calibration::R[3]; R11 = Calibration::R[4]; R12 = Calibration::R[5];
-                R20 = Calibration::R[6]; R21 = Calibration::R[7]; R22 = Calibration::R[8];
+                // ⚠ 记账（Task 3 附加要求②，完整说明在 Button2Mapping.h 的调用约定里）：
+                //   纯函数只用【兜底】那张表 M，**标定路径没接**。⇒ 一旦 calibration.json 存在
+                //   （Calibration::enabled = true），平移路径走标定出来的 R/t，而姿态路径仍走
+                //   兜底 M ⇒ 两条路【静默】不一致。本仓库最怕静默，所以这里至少让它响一次。
+                if (Calibration::enabled && !s_warnedBtn2CalibIgnored) {
+                    s_warnedBtn2CalibIgnored = true;
+                    std::cerr << "[Orient] Calibration is enabled, but the button-2 pose mapping still "
+                                 "uses the fallback axis table M (calibrated path NOT wired) -- "
+                                 "translation and orientation will disagree. See relay/Button2Mapping.h."
+                              << std::endl;
+                }
             } else {
-                // 与平移路径同一张表（唯一一份定义）—— 见 CoordinateTransform::touchToRobotMatrix
-                // ⚠ 这里【故意】用显式局部数组 + 逐个赋值，而不是 touchToRobotMatrix(&R00):
-                //   "R00..R22 这 9 个 double 在内存里连续" 是一个【未验证的前提】(编译器可以对
-                //   局部标量各自安排位置), 而显式赋值不需要任何前提。
-                double M[9];
-                touchToRobotMatrix(M);
-                R00 = M[0]; R01 = M[1]; R02 = M[2];
-                R10 = M[3]; R11 = M[4]; R12 = M[5];
-                R20 = M[6]; R21 = M[7]; R22 = M[8];
-            }
-            double robot_dRx = R00*drx + R01*dry + R02*drz;
-            double robot_dRy = R10*drx + R11*dry + R12*drz;
-            double robot_dRz = R20*drx + R21*dry + R22*drz;
+                // ---- 旧路径：Euler 角之差当旋转向量 + 逐分量加到参照上（**逐字保留**，只缩进）----
+                // Apply gain
+                drx *= Config::ORIENT_GAIN;
+                dry *= Config::ORIENT_GAIN;
+                drz *= Config::ORIENT_GAIN;
 
-            // ★★★ 期望目标 = 【按下按钮2时的机器人姿态】+ 映射后的偏移 —— 【不是累加】。
-            //   `m_orientRefRobot` 是 onButton2Press 时抓的那一份机器人姿态, 在整个按住期间不变。
-            //   ⇒ 抖动只让 desired 在参照附近【颤动】, 手一回它自己就回去 ⇒【不漂】,
-            //     而且与抖动多大无关 (这就是这套改法的全部意义)。
-            const Vec3 desired(m_orientRefRobot.x + robot_dRx,
+                // ★ 单帧限幅【不在这里】(2026-09-21 参照式改造)。
+                //   参照式下 drx/dry/drz 是"相对按下按钮2那一点的偏移"——**可以很大, 而且那是对的**:
+                //   操作员转了 30°, 就该给 30°。从前这里限的是【偏移】, 那是累加式时代的写法,
+                //   会把大转动【永久截断】掉。
+                //   ⇒ 限幅改到【目标姿态每帧的变化】上 (见下面 wx/wy/wz 那一段) —— 那才是"手一甩
+                //     不让机器人跟着猛转"要限的量。
+
+                // ★★ 逐轴符号 (2026-09-21 改)。从前这里是【无条件三轴取负】, 注释的理由是
+                //   "Touch Euler (ZYX intrinsic) 沿正轴看逆时针增大, 而 Dobot RPY 相反"。
+                //   那个理由与仓库里的两份实现都不符 —— Touch 侧的 Euler 提取与 Dobot 侧的
+                //   TcpCalibration::rpyToMatrix **都是 Rz·Ry·Rx**; 而现场实测也是"转向反了"。
+                //   ⇒ 默认改为【不翻转】。完整依据、以及"若只有某些轴反而是置换问题"的处置,
+                //     见 Config::ORIENT_FLIP_RX 那一大段。
+                drx *= Config::ORIENT_FLIP_RX;
+                dry *= Config::ORIENT_FLIP_RY;
+                drz *= Config::ORIENT_FLIP_RZ;
+
+                // ---- Axis remap: stylus frame → robot frame ----
+                // Build 3×3 rotation that maps Touch rotation axes to robot rotation axes.
+                // When calibration is enabled, use the calibrated rigid transform R.
+                // Fallback: hardcoded axis mapping matching convertTouchToRobot():
+                //   robot_X = touch_X   → [1, 0,  0]
+                //   robot_Y = -touch_Z  → [0, 0, -1]
+                //   robot_Z = touch_Y   → [0, 1,  0]
+                double R00, R01, R02, R10, R11, R12, R20, R21, R22;
+                if (Calibration::enabled) {
+                    R00 = Calibration::R[0]; R01 = Calibration::R[1]; R02 = Calibration::R[2];
+                    R10 = Calibration::R[3]; R11 = Calibration::R[4]; R12 = Calibration::R[5];
+                    R20 = Calibration::R[6]; R21 = Calibration::R[7]; R22 = Calibration::R[8];
+                } else {
+                    // 与平移路径同一张表（唯一一份定义）—— 见 CoordinateTransform::touchToRobotMatrix
+                    // ⚠ 这里【故意】用显式局部数组 + 逐个赋值，而不是 touchToRobotMatrix(&R00):
+                    //   "R00..R22 这 9 个 double 在内存里连续" 是一个【未验证的前提】(编译器可以对
+                    //   局部标量各自安排位置), 而显式赋值不需要任何前提。
+                    double M[9];
+                    touchToRobotMatrix(M);
+                    R00 = M[0]; R01 = M[1]; R02 = M[2];
+                    R10 = M[3]; R11 = M[4]; R12 = M[5];
+                    R20 = M[6]; R21 = M[7]; R22 = M[8];
+                }
+                double robot_dRx = R00*drx + R01*dry + R02*drz;
+                double robot_dRy = R10*drx + R11*dry + R12*drz;
+                double robot_dRz = R20*drx + R21*dry + R22*drz;
+
+                // ★★★ 期望目标 = 【按下按钮2时的机器人姿态】+ 映射后的偏移 —— 【不是累加】。
+                //   `m_orientRefRobot` 是 onButton2Press 时抓的那一份机器人姿态, 在整个按住期间不变。
+                //   ⇒ 抖动只让 desired 在参照附近【颤动】, 手一回它自己就回去 ⇒【不漂】,
+                //     而且与抖动多大无关 (这就是这套改法的全部意义)。
+                desired = Vec3(m_orientRefRobot.x + robot_dRx,
                                m_orientRefRobot.y + robot_dRy,
                                m_orientRefRobot.z + robot_dRz);
+            }
 
             // 本帧要走的量 = 期望 − 当前目标, 再【逐轴限幅】。
             // 保护的是"手一甩不会让机器人跟着猛转"; 因为目标是朝 desired 收敛的,
@@ -1190,7 +1232,15 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
             m_targetOrient.z += damped.z;
             // ★★ 2026-09-22 实验：钳位改成比【相对参照的偏移】(理由见 clampOrientOffset)。
             //   翻回 false ⇒ 走原来的绝对值钳位 (那条会在参照贴着 ±180 时逐帧夹 ⇒ 手一抖就抖)。
-            if (Config::ORIENT_SEAM_FIX_ENABLED) {
+            // ★ 2026-09-23 (Task 3)：逐分量那条钳位**只给旧路径** —— 新路径的偏移限幅已经在
+            //   `button2OrientationTarget` 内部按【旋转角】做完（≤ ORIENT_MAX_OFFSET_DEG），
+            //   再逐分量夹一次会与那个语义打架（把"合成的旋转"按表示量切掉一块）。
+            //   `clampOrientToBounds`（绝对值 ±180 的安全钳位）两条路径都保留、语义不动。
+            //   ⚠ 这条 `!BTN2_ROTATION_COMPOSE_ENABLED` 今天【不改变任何行为】：
+            //     ORIENT_SEAM_FIX_ENABLED 是 false（那条修法 2026-09-22 现场证否，见 Config.h）。
+            //     加它是因为 SEAM_FIX 的文档写着"翻回 true 即可重试" —— 不写这一句，那个回滚
+            //     会在新路径上偷偷把逐分量限幅又接回来（本仓库最怕这种静默的组合）。
+            if (Config::ORIENT_SEAM_FIX_ENABLED && !Config::BTN2_ROTATION_COMPOSE_ENABLED) {
                 m_targetOrient = clampOrientOffset(m_targetOrient, m_orientRefRobot);
             } else {
                 m_targetOrient = clampOrientToBounds(m_targetOrient);

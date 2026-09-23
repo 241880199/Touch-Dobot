@@ -15,6 +15,7 @@
 
 #include <iostream>
 #include <cmath>
+#include <limits>      // ⑫ 用 quiet_NaN / infinity
 
 #include "../relay/Button2Mapping.h"
 #include "../relay/CoordinateTransform.h"
@@ -191,6 +192,93 @@ static void test_gimbal_lock_plus90_side_is_exact() {
     PASS();
 }
 
+// ⑪ 【Task 3 附加要求①，实现者补】限幅按【旋转角】而不是【逐分量】—— 多轴输入下两者分道扬镳。
+//
+//    【为什么非补不可】⑧ 只有【单轴】（`sz` −170°）。在那个输入下"逐分量 ±150°"与
+//      "旋转角 ≤150°"**恰好等价** —— 实测（把限幅临时换成逐分量版跑一遍）：⑧ 的输入在
+//      逐分量规则下同样落在 150.0，差 0.0 ⇒ **本计划的头号改动（限幅语义）当时没有任何用例
+//      能区分**，⑧ 只证明"那段代码是活的"（Task 2 报告 §6 已自己记账了这一点）。
+//
+//    【数值是算出来的，不是抄来的】笔杆偏移取 `rx = +149°`、`rz = +149°`（参照 refS = 0）：
+//      · 逐分量：三个差 149 / 0 / 149 全部 < 150 ⇒ 逐分量规则在这个输入下**什么也不夹**；
+//      · 合成旋转角：ΔR_dev = R(cur)·R(refS)ᵀ，refS = 0 ⇒ ΔR_dev = R(cur) = Rz(149°)·Rx(149°)，
+//        实测 **171.8093°** > 150 ⇒ 旋转角规则**必须夹**。
+//        （基座系那个 ΔR_rob = M·ΔR_dev·Mᵀ 是相似变换：`tr(XRXᵀ) = tr(R)` ⇒ 旋转角不变，
+//          所以"器件系量出来的 171.809°"就是限幅判据要比较的那个角。）
+//      ⇒ 于是这条用例**只可能**两种结局：夹到 150（新语义）或**不是** 150（逐分量语义）。
+//        负对照实测（NC-limit：把限幅临时换成"把目标 RPY 相对参照逐分量夹"那一版）：
+//        本用例报 `fabs(angDeg(Rt, Rr) - 150.0) < 1e-3` FAIL，实测角 **169.9916°**（差 19.99°）
+//        ⇒ 它**真的能红**，而且这条用例是**只有它**能抓到这一半（⑧ 的输入两法同解，见上）。
+static void test_multi_axis_offset_is_clamped_by_rotation_angle() {
+    TEST(multi_axis_offset_is_clamped_by_rotation_angle);
+    double ref[3] = {-173.0, -22.0, -118.0};      // 用本机真实的贴接缝姿态（同 ⑦）
+    double refS[3] = {0, 0, 0};
+    double cur[3] = {149.0, 0.0, 149.0};          // 两轴同时偏 149°（都 < 150）
+    double Rdev[9], I[9], Rr[9], Rt[9];
+
+    // 自检 1：三个【逐分量】偏移都在上限【以内】 ⇒ 逐分量规则在本输入下不夹任何东西
+    for (int i = 0; i < 3; i++) CHECK(fabs(cur[i] - refS[i]) < 150.0);
+
+    // 自检 2：而合成的【旋转角】确实超限 ⇒ 下面那条 150 不可能是"没夹到"
+    rpyToMatrix(cur[0], cur[1], cur[2], Rdev);
+    identity(I);
+    CHECK(angDeg(Rdev, I) > 150.0);               // 实测 171.8093°
+
+    rpyToMatrix(ref[0], ref[1], ref[2], Rr);
+    targetM(ref, refS, cur, Rt);
+    CHECK(fabs(angDeg(Rt, Rr) - 150.0) < 1e-3);   // 恰为 ORIENT_MAX_OFFSET_DEG
+    PASS();
+}
+
+// ⑫ 【Task 3 附加要求③，实现者补】NaN/Inf 守卫 —— 覆盖【三个入参位置】。
+//
+//    【为什么非补不可】那段守卫此前**没有任何用例**，而它的注释当时写着"任何非有限的输入都会
+//      把返回值污染成 NaN"——那句话**说过头了**（见 Button2Mapping.cpp 里的订正）：`refRobotRpy`
+//      自己非有限时，函数**原样返回**它，即"返回值一定有限"**不成立**。
+//      ⇒ 这条用例把注释与代码钉在一起：前两个位置断言"退化到参照"，第三个位置断言"**原样传
+//        出去**"。第三条断言的是**现状**而不是理想 —— 但它是【刻意】的现状（那一刻没有安全值
+//        可退，0 是一个真实姿态），而不是没人知道的意外。
+//    ⚠ Inf 与 NaN 一起测：`std::isfinite` 那条守卫对两者都成立，只测一种等于另一半没验过。
+static void test_nonfinite_guard_covers_all_three_argument_positions() {
+    TEST(nonfinite_guard_covers_all_three_argument_positions);
+    const double nan_v = std::numeric_limits<double>::quiet_NaN();
+    const double inf_v = std::numeric_limits<double>::infinity();
+    double ref[3]  = {-173.0, -22.0, -118.0};
+    double refS[3] = {-20.0, 12.0, 30.0};
+    double cur[3]  = {10.0, 20.0, 30.0};
+    double Rr[9], Rt[9];
+    rpyToMatrix(ref[0], ref[1], ref[2], Rr);
+
+    // (a)(b) refStylus / curStylus 非有限（三个位置 × {NaN, Inf}）⇒ 退化到参照（不倾斜）
+    for (int arg = 0; arg < 2; arg++) {
+        for (int axis = 0; axis < 3; axis++) {
+            for (int kind = 0; kind < 2; kind++) {
+                double a0[3] = {ref[0],  ref[1],  ref[2]};
+                double a1[3] = {refS[0], refS[1], refS[2]};
+                double a2[3] = {cur[0],  cur[1],  cur[2]};
+                double* injected = (arg == 0) ? a1 : a2;
+                injected[axis] = (kind == 0 ? nan_v : inf_v);
+                Vec3 t = button2OrientationTarget(a0, a1, a2);
+                CHECK(std::isfinite(t.x) && std::isfinite(t.y) && std::isfinite(t.z));
+                rpyToMatrix(t.x, t.y, t.z, Rt);
+                CHECK(angDeg(Rt, Rr) < 1e-6);       // 逐位等于参照
+            }
+        }
+    }
+
+    // (c) refRobotRpy 非有限 ⇒ **原样传出去**：本函数【不】保证返回值有限（刻意的现状）
+    for (int axis = 0; axis < 3; axis++) {
+        for (int kind = 0; kind < 2; kind++) {
+            double a0[3] = {ref[0], ref[1], ref[2]};
+            a0[axis] = (kind == 0 ? nan_v : inf_v);
+            Vec3 t = button2OrientationTarget(a0, refS, cur);
+            double got[3] = {t.x, t.y, t.z};
+            CHECK(!std::isfinite(got[axis]));       // 那个非有限值原样在【同一个位置】上
+        }
+    }
+    PASS();
+}
+
 int main() {
     std::cout << "--- Button2Mapping (按钮2 姿态映射：真旋转合成) ---" << std::endl;
     test_no_motion_returns_reference();
@@ -201,6 +289,8 @@ int main() {
     test_offset_is_clamped_by_rotation_angle();
     test_gimbal_lock_picks_a_canonical_representative();
     test_gimbal_lock_plus90_side_is_exact();
+    test_multi_axis_offset_is_clamped_by_rotation_angle();
+    test_nonfinite_guard_covers_all_three_argument_positions();
     std::cout << "\nResults: " << g_passed << " passed, " << g_failed << " failed" << std::endl;
     return g_failed == 0 ? 0 : 1;
 }

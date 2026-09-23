@@ -36,6 +36,27 @@
 //   约定一致（R = Rz·Ry·Rx）。
 // ⚠ 本函数【没有位置入参】：平移分量在结构上就进不来，这是"笔杆平移时机械臂不动"
 //   的第一道保证（第二道在 RelayCore 的姿态块里）。
+//
+// ⚠⚠ 2026-09-23（Task 3 记账）**本函数只用【兜底】那张表 M，标定路径未接**。
+//   `CoordinateTransform.h:48-49` 明写"`Calibration::enabled` 为真时调用者要自己分支"，
+//   而本函数既没有分支、也【不打算】在这里分支：
+//     · 它拿不到标定那份的语义 —— `Calibration::R` 是"含平移的 4×4 里的 3×3 旋转块"
+//       （见 convertTouchToRobot），要接就得由调用者把旋转块传进来；
+//     · 而 RelayCore 的调用形状被设计定成**三参数**（计划 Task 3 设计决定 3，理由是
+//       显式拷贝、不给 Vec3 成员连续性任何前提）⇒ 接标定 = 改接口 = 新设计，不是本任务。
+//   **代价（已知欠账，不是"未发现的问题"）**：若 `calibration.json` 存在
+//   （`Calibration::enabled = true`，由 main.cpp 的标定流程也可在运行中置真），平移路径走
+//   标定出来的 R/t，姿态路径仍走兜底 M ⇒ **两条路静默不一致**。
+//   ⇒ 接线处（RelayCore 的新路径）加了一条**一次性告警**（`[Orient] Calibration is enabled
+//     but ...`）来把它从"静默"变成"响一次"。
+//   ⇒ 要还这笔账：给本函数加一个 M 入参（或一个重载），由调用者按 `Calibration::enabled`
+//     选表，并**验**（单测 + 上机）"标定之后姿态仍对"。
+//
+// ⚠ NaN/Inf 契约：三个入参【任一】非有限 ⇒ 返回 `refRobotRpy`（="不倾斜"，退回按下时的姿态）。
+//   ⚠ 但**若 refRobotRpy 自己非有限，本函数会把那个非有限值原样返回** —— 它【不】保证
+//     "返回值一定有限"。这时没有安全的兜底可退（0 是一个真实姿态，机械臂会真的转过去），
+//     那一层只能由调用者负责：RelayCore 的 `m_orientRefRobot` 抄自实际姿态，它若已经是 NaN，
+//     新旧两条路径都会把 NaN 传下去。该行为有用例钉住（test_button2_mapping.cpp ⑫ 覆盖三个入参位置）。
 Vec3 button2OrientationTarget(const double refRobotRpy[3],
                               const double refStylusRpy[3],
                               const double curStylusRpy[3]);
