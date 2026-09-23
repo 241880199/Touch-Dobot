@@ -1583,7 +1583,11 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
         //   `onButton2Press`）—— 它**不是瞬时的**：只要笔杆偏移一直保持很大，目标就
         //   **每帧都越限**，不压就是 ~30 Hz 刷满整个按住期（触觉回调线程上的 `cerr`）。
         //   ⚠ 压的**只有消息**：`return` 仍在外面、**每帧照走**（本帧不下发是安全性质）。
-        //   ⚠ 重复没有诊断价值：第一行已经带了**理由**与**位置**，后面每一行都是同一行。
+        //   ⚠ 重复没有诊断价值：第一行已经带了**理由**与**位置**。
+        //     ★ 2026-09-23 焦点复审 (Minor 1)：**重复的是理由与门，不是数值** —— `j` 是
+        //       `ref + clamp(偏移, ±150°)` **每帧重算**的，只有那根轴顶在 ±150° 限幅上时数值才不动，
+        //       未饱和的轴会逐帧变（FK 那条打印的 `fk` 同理）。所以"每行都一样"**不是**这条的理由，
+        //       理由只有两条：**重复的是同一个门与同一个理由** + **体积**（~30 Hz × 整段按住）。
         if (!Kinematics::isWithinJointLimits(j)) {
             if (!m_btn2JointTargetRejectLogged) {
                 m_btn2JointTargetRejectLogged = true;
