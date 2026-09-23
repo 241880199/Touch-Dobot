@@ -41,6 +41,9 @@
       构建前确认客户端没在运行（**此刻核实：没在运行** ✓；否则 `LNK1168`）。**不要杀它。**
 - [x] **基线已跑（2026-09-22 17:59，本机实测，`master` = `f8bca86` + 未提交的 `main.cpp` 注释订正）**
       ⇒ **`12 of 20 suites run - 12 OK, 0 FAILED`，退出码 0**。
+      **★ 2026-09-23：测试床扩建了（六个孤儿套件接进"先建再跑" + 三个计数改成运行时推导）**
+      ⇒ **当前基线是 `Summary: 19 of 21 suites accounted for - 19 OK, 0 FAILED`，`Suites accounted: 21 of 21`，退出码 0**。
+      ⚠ **今晚再跑测试床时，看到 `19 of 21` 才是对的，不是回归**；上面那行 `12 of 20` 是 09-22 那一刻的快照。
       逐套件：`force_compensation 42/0` · `relay_command_parser 11/0` · `force_logger 7/0` ·
       `tcp_calibration 7/0` · `force_pipeline 7/0` · `feedback_parser 28/0` · `escalation 15/0` ·
       `kinematics 18/0` · `coord_safety 27/0` · `safety_core 8/0` · `session_report 20/0` ·
