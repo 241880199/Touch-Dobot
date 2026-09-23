@@ -9,6 +9,9 @@
 //      ⚠ 这里【一个 +1 都不写死】—— 符号由 `Config::BTN2_J4/J5/J6_SIGN` 决定，
 //        而计划 Task 3 上机会把它们钉成 ±1。写死了 +1 的话，Task 3 一改符号就满堂红，
 //        而红的是测试不是实现。
+//      ⚠ 但"期望值不写死符号"不等于"符号常数没人管"——**恰恰相反**：所有期望值都经
+//        这三个常数表达 ⇒ 它们被改成任何值都全绿（含 0.5，即把增益塞进符号位）。
+//        ⇒ ⑨ 单独把这三个常数的**取值域**钉死在 {+1, −1}。两句话不矛盾，各管一层。
 //   ③ 契约层：NaN/Inf 守卫、签名里没有位置入参（编译期）。
 //
 // ⚠ 本文件【不碰 socket、不碰 OpenHaptics 运行时、不碰 appState】：Button2Joint 是纯函数，
@@ -121,19 +124,29 @@ static void test_signature_has_no_position_input() {
     PASS();
 }
 
-// ④ 偏移限幅：笔杆转 170°（> ORIENT_MAX_OFFSET_DEG = 150）⇒ 关节增量**恰为** 150°。
+// ④ 偏移限幅：笔杆转过**上限的 2 倍**（> ORIENT_MAX_OFFSET_DEG）⇒ 关节增量**恰为**上限。
 //    ⚠ 符号按 Config::BTN2_J4_SIGN 表达（Task 3 改符号后本用例仍应绿）。
 //    ⚠ 这条断的是【关节增量】，不是末端姿态的任何量 —— 常数在这里换了语义，
 //      见 Button2Joint.h「单位变了」那一段。
+//    ⚠ 【输入从常数导出，别硬编码 170】原版写死 `+170.0`。那在"上限今天 = 150"时成立，
+//      但**上限一变就红，而且红得像"钳位坏了"**（其实是常数被调大了）—— 又一处"常数是脆的"。
+//      取 `2 × 上限`：既【一定】超限，又不必知道上限的现值（上限翻倍/减半都仍成立）。
+//    ⚠ 断言仍写成"恰为 ORIENT_MAX_OFFSET_DEG"（**不是**"= 输入"）—— 后者会在"没夹"时
+//      也红不了（输入 = 输出），等于对常数恒真，把这条变成空转。
 static void test_oversized_stylus_rotation_is_clamped_per_joint() {
     TEST(oversized_stylus_rotation_is_clamped_per_joint);
     const double ref[6] = {0, 0, 0, 40, 50, 60};
     const double refS[3] = {0, 0, 0};
+    const double overCap = 2.0 * Config::ORIENT_MAX_OFFSET_DEG;   // 一定超过上限
     double out[6];
 
-    // (a) 前后摆 170° ⇒ J4 增量 = 符号 × 150
+    // 自检：输入确实**超过**上限。上限若被改成 0 或负数，这一句先红 ——
+    //   否则下面三条会因为"根本没超"而变成空转（2×0 = 0 不超 0）。
+    CHECK(overCap > Config::ORIENT_MAX_OFFSET_DEG);
+
+    // (a) 前后摆 +2×上限 ⇒ J4 增量 = 符号 × 上限
     {
-        const double cur[3] = {+170.0, 0, 0};
+        const double cur[3] = {+overCap, 0, 0};
         button2JointTarget(ref, refS, cur, out);
         CHECK(fabs(out[3] - ref[3]) > 1e-6);
         CHECK(fabs(fabs(out[3] - ref[3]) - Config::ORIENT_MAX_OFFSET_DEG) < 1e-9);
@@ -142,16 +155,16 @@ static void test_oversized_stylus_rotation_is_clamped_per_joint() {
         CHECK(fabs(out[5] - ref[5]) < 1e-9);
     }
 
-    // (b) 反向：前后摆 −170° ⇒ J4 增量 = 符号 × (−150)
+    // (b) 反向：前后摆 −2×上限 ⇒ J4 增量 = 符号 × (−上限)
     {
-        const double cur[3] = {-170.0, 0, 0};
+        const double cur[3] = {-overCap, 0, 0};
         button2JointTarget(ref, refS, cur, out);
         CHECK(fabs((out[3] - ref[3]) + Config::BTN2_J4_SIGN * Config::ORIENT_MAX_OFFSET_DEG) < 1e-9);
     }
 
-    // (c) 三个轴同时超限 ⇒ 三路各自夹到 150（逐关节夹，不是合成量）
+    // (c) 三个轴同时超限 ⇒ 三路各自夹到上限（逐关节夹，不是合成量）
     {
-        const double cur[3] = {+170.0, -170.0, +170.0};
+        const double cur[3] = {+overCap, -overCap, +overCap};
         button2JointTarget(ref, refS, cur, out);
         CHECK(fabs(fabs(out[3] - ref[3]) - Config::ORIENT_MAX_OFFSET_DEG) < 1e-9);   // Rx -> J4
         CHECK(fabs(fabs(out[4] - ref[4]) - Config::ORIENT_MAX_OFFSET_DEG) < 1e-9);   // Rz -> J5
@@ -227,13 +240,30 @@ static void test_nonfinite_guard_covers_all_argument_positions() {
         }
     }
 
-    // (c) refJoints 非有限 ⇒ **原样传到同一个位置**（本函数不保证返回值有限；刻意的现状）
+    // (c) refJoints 非有限 ⇒ **原样传到同一个位置**，且**只影响那一路** ——
+    //     其余五路必须【有限】且【逐位等于"同等入参、refJoints 全有限"时的结果】。
+    //    ⚠ 原版只断言被注入那一路 `!isfinite` ⇒ "**把六路全写 NaN**"照样全绿（复审实测）。
+    //    ⚠ 复审给的修法原文是"其余五路 …… `== ref[i]`"。这里**没有逐字照写**，因为
+    //      在本用例的入参下那句对 J4/J6 **恒不成立**：`refS ≠ cur`（(a)(b) 刻意如此 ⇒
+    //      偏移非零），正常路径上 out[3] = ref[3] + SIGN·(cur[0]−refS[0])、out[5] 同理，
+    //      它们本来就 ≠ ref[i] ⇒ 照写会让**正确实现恒红**（那会把测试变成新的假红源）。
+    //      ⇒ 改断"逐位等于基线"。判别力与复审的意图相同、且更强：基线对
+    //        「六路全 NaN」与「非有限时退回参照」**两种**错法都红（后者下 out[3] 会退回 40）。
+    double base[6];
+    button2JointTarget(ref, refS, cur, base);           // 同等入参、refJoints 全有限
     for (int axis = 0; axis < 6; axis++) {
         for (int kind = 0; kind < 2; kind++) {
             double a0[6] = {ref[0], ref[1], ref[2], ref[3], ref[4], ref[5]};
             a0[axis] = (kind == 0 ? nan_v : inf_v);
             button2JointTarget(a0, refS, cur, out);
-            CHECK(!std::isfinite(out[axis]));           // 那个非有限值还在【同一个位置】
+            for (int i = 0; i < 6; i++) {
+                if (i == axis) {
+                    CHECK(!std::isfinite(out[i]));      // 那个非有限值还在【同一个位置】
+                } else {
+                    CHECK(std::isfinite(out[i]));       // 其余五路【有限】
+                    CHECK(out[i] == base[i]);           // 且**逐位**等于基线（没被污染）
+                }
+            }
         }
     }
     PASS();
@@ -263,6 +293,68 @@ static void test_three_axes_at_once_are_independent_at_large_angles() {
     PASS();
 }
 
+// ⑧ 【复审追加】死区是【逐轴】的，不是按笔杆偏移的**矢量模长**聚合的。
+//    【为什么非补不可】①⑤⑦ 里三个轴的偏移**要么全过门、要么全不过门**（⑤(a) 全不过、
+//      ⑤(c) 全恰好过、①⑦ 全远过）⇒ 把 `axisGate` 换成
+//      `sqrt(dRx²+dRy²+dRz²) >= dz` 这种**聚合**门，整个套件仍然全绿（复审实测 7/7 绿）。
+//      聚合门的后果不是"抖"而是**漏门**：一根轴远越界时（+5.0），它会把另一根只有
+//      0.04° 的轴**一起放行** —— 而那 0.04° 正是设计上要吞掉的那一档（⑤(a) 判的就是它）。
+//    【这条怎么区分】★ 必须在**同一次调用**里两件事同时出现：
+//      一根轴远越界（+5.0 ⇒ J4 应动 SIGN×5.0）、另一根轴**刚好在门限之下**
+//      （0.8×dz ⇒ J5 应**逐位**等于参照）。逐轴门下两句都成立；聚合门下一句红（J5 拿到 0.04）。
+//      ⚠ 拆成两次调用就区分不了 —— 那正是 ⑤ 已有的形状，也正是它漏掉这个错的原因。
+static void test_deadzone_is_per_axis_not_by_magnitude() {
+    TEST(deadzone_is_per_axis_not_by_magnitude);
+    const double ref[6] = {11.0, 22.0, 33.0, 44.0, 55.0, 66.0};
+    const double refS[3] = {0, 0, 0};
+    const double dz = Config::ORIENT_DEADZONE_DEG;
+    // 门限**之下**但**非零**，且从常数导出（写死 0.04 会在 dz 被调小时变成恒真 —— 见 ④ 的注释）
+    const double under = 0.8 * dz;
+    double out[6];
+
+    // 自检：这一条的三个前提本身要成立，否则它什么都没证明
+    CHECK(dz > 0.0);                       // 门限为正 ⇒ under > 0 且 "5.0 ≥ dz" 才有意义
+    CHECK(under > 0.0);                    // ★ 非零 —— 聚合门才"有东西可以顺便放行"
+    CHECK(under < dz);                     // ★ 确实在门限【之下】
+    CHECK(5.0 >= dz);                      // 另一根轴确实【远】在门限之上
+    CHECK(5.0 < Config::ORIENT_MAX_OFFSET_DEG);   // 且不被限幅吃掉 ⇒ 差值应当【恰为】5.0
+
+    // 一次调用：cur[0]=Rx=+5.0（远越界 ⇒ J4）· cur[1]=Ry=0（⇒ J6）· cur[2]=Rz=+under（门限之下 ⇒ J5）
+    const double cur[3] = {+5.0, 0.0, +under};
+    button2JointTarget(ref, refS, cur, out);
+
+    // (a) 远越界那一根：逐轴门与聚合门**都**放行 ⇒ 单看它区分不了两种门（幅度也钉住：±1e-6）
+    CHECK(fabs((out[3] - ref[3]) - Config::BTN2_J4_SIGN * 5.0) < 1e-6);
+    // (b) ★ 判别力所在：门限之下那一根必须**逐位**等于参照。
+    //     用 `==` 而不是 `< 1e-9`：0.04 一旦被放行，差值就是 0.04（远大于 1e-9），
+    //     但逐位相等是这里真正的契约（没放行就是原样搬参照，不该有任何浮点痕迹）。
+    CHECK(out[4] == ref[4]);               // Rz -> J5：0.04 被吞掉
+    // (c) 第三根是 0，且三根之间没有串扰；J1~J3 逐位不变
+    CHECK(out[5] == ref[5]);
+    CHECK(out[0] == ref[0]);
+    CHECK(out[1] == ref[1]);
+    CHECK(out[2] == ref[2]);
+    PASS();
+}
+
+// ⑨ 【复审追加】`BTN2_J4/J5/J6_SIGN` 必须是**符号**，不是增益。
+//    【为什么非补不可】本文件所有期望值都**经由这三个常数**写（刻意的，见文件头 ②：
+//      Task 3 改符号不该让用例红）。代价是：把某个常数改成 `0.5`（= 把**增益**塞进符号位）
+//      整套用例**照样全绿** —— 因为 `out[3]−ref[3] == SIGN·Δ` 这句里 SIGN 出现在两边，
+//      它就是实现本身，对 SIGN 的任何取值都成立。
+//    ⚠★ 而这正是**计划 Task 3 最可能犯的错**：它的活就是"加逐轴增益"，最容易顺手写进
+//      这三个常数里（Button2Joint.h 的「本函数不施加逐轴增益」那一段正是为此写的）。
+//      ⇒ 需要一条【不经过实现】的断言，把这三个常数的**取值域**钉死在 {+1, −1}。
+static void test_sign_constants_are_unit_signs() {
+    TEST(sign_constants_are_unit_signs);
+    // 误差 1e-12（与复审给的判据一致）。写成 `fabs(fabs(x) − 1.0) < 1e-12` 而不是
+    //   `x == 1.0 || x == -1.0`：后者只认字面量写法，前者认"数值上等于 ±1"这个语义。
+    CHECK(fabs(fabs(Config::BTN2_J4_SIGN) - 1.0) < 1e-12);
+    CHECK(fabs(fabs(Config::BTN2_J5_SIGN) - 1.0) < 1e-12);
+    CHECK(fabs(fabs(Config::BTN2_J6_SIGN) - 1.0) < 1e-12);
+    PASS();
+}
+
 int main() {
     std::cout << "--- Button2Joint (按钮2 关节空间映射：笔杆 Euler 增量 -> 关节增量) ---" << std::endl;
     test_each_stylus_axis_moves_exactly_one_joint();
@@ -272,6 +364,8 @@ int main() {
     test_deadzone_swallows_tiny_offset_and_keeps_the_boundary();
     test_nonfinite_guard_covers_all_argument_positions();
     test_three_axes_at_once_are_independent_at_large_angles();
+    test_deadzone_is_per_axis_not_by_magnitude();       // ⑧ 复审追加
+    test_sign_constants_are_unit_signs();               // ⑨ 复审追加
     std::cout << "\nResults: " << g_passed << " passed, " << g_failed << " failed" << std::endl;
     return g_failed == 0 ? 0 : 1;
 }
