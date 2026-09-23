@@ -193,5 +193,41 @@ Vec3 button2OrientationTarget(const double refRobotRpy[3],
     // ⑥ 只在最后提取一次 RPY
     double rpy[3];
     matToRpy(R_tgt, rpy);
-    return Vec3(rpy[0], rpy[1], rpy[2]);
+
+    // ⑦ ★ 2026-09-23 (Task 3 评审 Important，方案 (a))：按【参照】就近取代表。
+    //
+    //   【这一步【不】改任何旋转语义】—— 它换的只是"同一个旋转取哪一组代表"。
+    //   `R = Rz(rz)·Ry(ry)·Rx(rx)` 这个约定下，**单个**角加任意整数个 360° 不改变矩阵
+    //   （Rx/Ry/Rz 各自都是 2π 周期的）⇒ `(rx + 360k, ry, rz)` 与 `(rx, ry, rz)` 是
+    //   **同一个旋转**。所以下面挑出来的那组值**仍然精确表示 `R_tgt`**（用例 ⑨/⑩ 的
+    //   `angDeg(Rt, want)` 往返断言就是这条的守卫）。
+    //   ⚠ 逐轴独立取整是**允许**的，正是靠上面那句"单角 ±360k 不改矩阵"；若约定的复合顺序
+    //     一变（比如换成 Rz·Rx·Ry），这句话就要重验 —— 它依赖的是三个角各自进一个
+    //     独立的因子矩阵。
+    //
+    //   【为什么必须做】`matToRpy` 给的是**规范分支** `rx ∈ (−180, 180]`，而 `m_targetOrient`
+    //   可以被钳位（`clampOrientToBounds`，`SAFE_RX_MAX = 180`）**钉在正好 +180**，且本机
+    //   末端常年贴着 rx≈±180（实测 |rx|>170 占 85.8% ⇒ 接缝是常驻工作点）。目标在 +180 时
+    //   再倾 1° 跨过接缝 ⇒ 这里原本返回 `rx ≈ −179` ⇒ 调用方（RelayCore 姿态块）逐分量算
+    //   `wx = desired.x − m_targetOrient.x ≈ −359°`，被 `ORIENT_MAX_STEP_DEG` 限成 −3°/帧
+    //   ⇒ 目标从 +180 一路扫到 −179 = **整整 360° 的手腕自转**（≈90°/s、约 4 秒）。
+    //   **这就是 2026-09-22 那次"环绕/规范化"实验在这台控制器上撞出的关节超速** ——
+    //   控制器【不】把 RPY 当模 360，那个数值跳被照字面解释成 J6 转一整圈
+    //   （见 Config::ORIENT_SEAM_FIX_ENABLED 那段）。旧路径不会这样：`desired = m_orientRefRobot + Δ`
+    //   **继承了参照的表示**，`wx` 永远小；本函数是"最后才提取一次 RPY"的，必须把那份
+    //   继承**显式补回来**。
+    //   ⚠ **解法是"避免穿过接缝"，不是"穿过去再把表示转回来"** —— 与 09-22 那条被证否的
+    //     修法方向正相反：这里目标**始终不出参照的那个 ±180 邻域**，所以不会产生任何数值跳。
+    //   ⚠ 用例 `test_target_stays_near_reference_across_the_rx_seam`（tests/test_button2_mapping.cpp ⑬）
+    //     钉的就是这件事：`ref = (180,0,0)` + 1° 倾斜 ⇒ 三个轴都必须 `|desired_i − ref_i| < 10°`。
+    //     改动前实测 **红**：`desired = (-179, -1, 0)`，x 轴差 **−359°**。
+    double out[3];
+    for (int i = 0; i < 3; i++) {
+        // 离 refRobotRpy[i] 最近的那个 rpy[i] + 360k —— 即 k = round((ref − rpy)/360)。
+        // ⚠ 基数是 `rpy[i]`、【不是】`refRobotRpy[i]`：写成"以参照为基数"那一版会退化成
+        //   "把每一轴都吸到参照上"（|rpy−ref|<180 时 floor(±0.5以下)=0 ⇒ 结果恒等于 ref），
+        //   那是**改旋转**、不是换代表 —— 实测那一版会让 ②~⑪ 全部变红（目标被吸到参照姿态）。
+        out[i] = rpy[i] + 360.0 * std::floor((refRobotRpy[i] - rpy[i]) / 360.0 + 0.5);
+    }
+    return Vec3(out[0], out[1], out[2]);
 }

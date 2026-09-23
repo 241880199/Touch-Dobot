@@ -279,6 +279,56 @@ static void test_nonfinite_guard_covers_all_three_argument_positions() {
     PASS();
 }
 
+// ⑬ 【Task 3 评审 Important，实现者补】★ 本用例守的是 **2026-09-22 那类关节超速**。
+//
+//    【场景（现场实录过）】`m_targetOrient` 可以被【钉在正好 +180】：控制台打过
+//      `Orientation target out of bounds, clamped. Original: (183,-2.76643,15.5627)`
+//      （钳位见 RelayCore 的 `clampOrientToBounds`，`SAFE_RX_MAX = 180`）；
+//      而本机末端常年贴着 rx≈±180（实测 |rx|>170 占 85.8%）⇒ **接缝是常驻工作点**。
+//
+//    【旧实现的翻车路径（本用例要抓的）】`matToRpy` 返回的是**规范分支** `rx ∈ (−180, 180]`。
+//      目标在 +180 时再倾 1° 跨过接缝 ⇒ `desired.x ≈ −179` ⇒ 逐分量步长
+//      `wx = desired.x − m_targetOrient.x ≈ −359` 被限成 −3°/帧 ⇒ 目标从 +180 一路扫到 −179
+//      = **整整 360° 的手腕自转**（≈90°/s、约 4 秒）。这正是 09-22 那次"环绕/规范化"实验
+//      在这台控制器上撞出的**关节超速**（记录在 `Config::ORIENT_SEAM_FIX_ENABLED` 那段注释里；
+//      控制器【不】把 RPY 当模 360，那个数值跳被照字面解释成 J6 转一整圈）。
+//      旧路径（`desired = m_orientRefRobot + Δ`）**不会**这样 —— 它**继承了参照的表示**，`wx` 永远小。
+//
+//    【判据】目标与参照**在表示上也**必须近：三个轴各自 `|desired_i − ref_i| < 10°`。
+//      构造：`refRobotRpy = {180, 0, 0}`（钉在接缝上的那个值）、`refStylusRpy = 0`、
+//      `curStylusRpy = refStylusRpy + 1° 的两轴倾斜`。
+//      ⚠ 这条断言**只在表示层面**成立与否（矩阵层面两法都"对"）—— 逐轴量恰恰是本用例
+//        唯一能看的东西：表示跳了 360°，旋转却是同一个。所以它必须是**第二条**断言面，
+//        不能只写 `angDeg`（矩阵比是本文件通例，但这里矩阵比【恰好】看不见病）。
+//      ⚠ 这条用例在改动前【实测是红的】（实测值见实现处注释 / 报告）—— 红的是 x 轴（≈−179 vs 180），
+//        y/z 本来就 < 10°，所以它红得**只有 x 一个轴**：这正是"整圈自转"的那个轴。
+static void test_target_stays_near_reference_across_the_rx_seam() {
+    TEST(target_stays_near_reference_across_the_rx_seam);
+    double ref[3] = {180.0, 0.0, 0.0};            // 钉在接缝上的参照（SAFE_RX_MAX = 180）
+    double refS[3] = {0.0, 0.0, 0.0};
+    double cur[3]  = {1.0, 0.0, 1.0};             // 相对参照 1° 级的倾斜（两轴，避免单轴巧合）
+    Vec3 t = button2OrientationTarget(ref, refS, cur);
+
+    // 自检：这个输入确实只产生一个【小】旋转（否则下面那条"应当很近"就说不通）
+    double Rcur[9], I[9];
+    rpyToMatrix(cur[0], cur[1], cur[2], Rcur);
+    identity(I);
+    CHECK(angDeg(Rcur, I) < 5.0);
+
+    // ⚠ 失败时先把三个差值打出来：`CHECK` 只印表达式，看不到"差了整整 360°"这个关键事实
+    //   （这条用例的"红"长得就是一个 ±360° 的数）。仍在范围内时一个字不印。
+    if (fabs(t.x - ref[0]) >= 10.0 || fabs(t.y - ref[1]) >= 10.0 || fabs(t.z - ref[2]) >= 10.0) {
+        std::cout << "desired-ref = (" << (t.x - ref[0]) << ", " << (t.y - ref[1]) << ", "
+                  << (t.z - ref[2]) << ")  desired = (" << t.x << ", " << t.y << ", " << t.z << ")  ";
+    }
+
+    // 判据：三个轴【在表示上】也必须近 —— 跨过接缝不能变成 ±360° 的差
+    CHECK(fabs(t.x - ref[0]) < 10.0);
+    CHECK(fabs(t.y - ref[1]) < 10.0);
+    CHECK(fabs(t.z - ref[2]) < 10.0);
+    PASS();
+}
+
 int main() {
     std::cout << "--- Button2Mapping (按钮2 姿态映射：真旋转合成) ---" << std::endl;
     test_no_motion_returns_reference();
@@ -291,6 +341,7 @@ int main() {
     test_gimbal_lock_plus90_side_is_exact();
     test_multi_axis_offset_is_clamped_by_rotation_angle();
     test_nonfinite_guard_covers_all_three_argument_positions();
+    test_target_stays_near_reference_across_the_rx_seam();
     std::cout << "\nResults: " << g_passed << " passed, " << g_failed << " failed" << std::endl;
     return g_failed == 0 ? 0 : 1;
 }

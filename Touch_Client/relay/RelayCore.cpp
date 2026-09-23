@@ -1101,7 +1101,13 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
             // ★★★ 2026-09-23 (Task 3)：期望目标由【两条路径】之一给出 —— 开关见
             //   Config::BTN2_ROTATION_COMPOSE_ENABLED（默认 true ⇒ 新路径；翻 false = 回滚）。
             //   ⚠ 这一段【不被任何测试编译】：守住它的只有"编译 + 语法错误注入的负对照 + 上机"。
-            Vec3 desired(0.0, 0.0, 0.0);
+            // ⚠ 初值取【当前目标】而不是 `(0,0,0)`：`(0,0,0)` 是一个**合法但错**的目标姿态
+            //   （机械臂真的会朝它转过去）。今天两条路径【都】无条件给 desired 赋值，所以这只
+            //   是记账；但只要将来有人在上面加一条早退分支（比如某个开关下"这帧跳过"），
+            //   初值就会**静默地**变成那个错目标 —— 而这一段**不被任何测试编译**
+            //   （见 Config::BTN2_ROTATION_COMPOSE_ENABLED 那段：守它的只有编译 + 上机）。
+            //   取 `m_targetOrient` ⇒ 早退 = "目标不动"，即 `wx=wy=wz=0`，是本帧的安全语义。
+            Vec3 desired = m_targetOrient;
             if (Config::BTN2_ROTATION_COMPOSE_ENABLED) {
                 // ---- 新路径：真旋转合成（纯函数，见 relay/Button2Mapping.{h,cpp}）----
                 //   · 喂进去的是"当前笔杆姿态" = 参照 + 【已过门、已低通】的偏移（drx/dry/drz）。
