@@ -152,14 +152,16 @@ void step(AppState::ForceData& fd) {
     //        Config::FORCE_FEEDBACK_Z_SIGN 那一大段 —— **动它之前先读那一段。**
     //    ⚠ 另两项本来就原样映射 (fx→X, fy→Z), 未动。
     //    ⚠ 第 4 步的【轴对应】本身尚未被独立验证 —— 若实测是"力出现在错的轴上", 那是另一件事。
-    //    ★★ 2026-09-21 (同日第二次定案): 横向两路也带上了整体符号 −1。
-    //      力映射应当是【位置映射的逆】(L = Mᵀ, M = convertTouchToRobot), 而代码里写死的轴对应
-    //      等于 Mᵀ 再整体取负 ⇒ L = −Mᵀ。那个整体符号 −1 由【唯一有实测锚点的那一行】(垂直)
-    //      定死, 再对三行一起成立。完整推导与"它为什么只是推导+现场描述"见
-    //      Config::FORCE_FEEDBACK_LATERAL_SIGN 那一大段 —— **动符号之前先读它。**
-    fd.hapticOut[0] =  fx * Config::FORCE_FEEDBACK_LATERAL_SIGN;  // Robot Fx -> Touch X
-    fd.hapticOut[1] =  fz * Config::FORCE_FEEDBACK_Z_SIGN;        // Robot Fz -> Touch Y (0 = 关)
-    fd.hapticOut[2] =  fy * Config::FORCE_FEEDBACK_LATERAL_SIGN;  // Robot Fy -> Touch Z
+    //    ★★ 2026-09-21 (同日第二次定案): 横向两路**曾**共用一个整体符号（当天定成 −1）。
+    //    ⛔⛔ 2026-09-23 拆掉了那个写法 —— 原因见 `Config::FORCE_FEEDBACK_TOUCH_X_SIGN` 那一大段：
+    //      两路的**相对**符号由 Mᵀ 决定、**必然相反**，所以"一个常数给两路"在结构上就是错的
+    //      （σ=−1 ⇒ X 错 Z 对；σ=+1 ⇒ X 对 Z 错 —— **两份现场报告各说一路**正是这么来的）。
+    //      **动符号之前先读那一段。**
+    // ★★ 2026-09-23: 横向两路【各自】一个常数 —— 它们的**相对**符号必须相反（Mᵀ 决定的，见 Config.h）。
+    //   从前两路共用一个 FORCE_FEEDBACK_LATERAL_SIGN ⇒ **一个常数不可能同时对**（两份现场报告各说一路）。
+    fd.hapticOut[0] =  fx * Config::FORCE_FEEDBACK_TOUCH_X_SIGN;  // Robot Fx -> Touch X  (+)
+    fd.hapticOut[1] =  fz * Config::FORCE_FEEDBACK_Z_SIGN;        // Robot Fz -> Touch Y  (0 = 关)
+    fd.hapticOut[2] =  fy * Config::FORCE_FEEDBACK_TOUCH_Z_SIGN;  // Robot Fy -> Touch Z  (−) ★
 
     // 5. Apply reflection gain (amplify for human perception)
     //    Typical contact forces (5-30N) → clearly perceptible (0.4-2.5N at Touch)

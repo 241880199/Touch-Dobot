@@ -256,7 +256,7 @@ static void test_saturation() {
     CHECK(fabs(fabs(fd.hapticOut[0]) - clampedMax) < 0.01);   // 正好在夹子上
     // ⚠ 符号故意写死负号 (拿 Config 常数去算断言会对那些常数【恒真】),
     //   完整论述见 test_coord_transform 的同段说明。
-    CHECK(fd.hapticOut[0] > 0.0);   // 正输入 ⇒ 正输出 (横向映射 FORCE_FEEDBACK_LATERAL_SIGN = +1;
+    CHECK(fd.hapticOut[0] > 0.0);   // 正输入 ⇒ 正输出 (器件 X ← +基座 Fx, FORCE_FEEDBACK_TOUCH_X_SIGN = +1;
                                     //   2026-09-23 现场实测推翻旧符号，依据见该常数处注释)
     PASS();
 }
@@ -309,8 +309,35 @@ static void test_coord_transform() {
     CHECK(fabs(fd.hapticOut[0] - (+ratio * 10.0 * gain)) < 0.01);     // 来自 +Fx = +10 ⇒ 【正】
                                                                       //   (2026-09-23 符号 −1→+1，同 f196cb0)
     CHECK(fabs(fd.hapticOut[1]) < 0.01);                              // Fz→Y 已关 ⇒ 与 fz=+30 无关
-    CHECK(fabs(fd.hapticOut[2] - (+ratio * 20.0 * gain)) < 0.01);     // 来自 +Fy = +20 ⇒ 【正】
+    CHECK(fabs(fd.hapticOut[2] - (-ratio * 20.0 * gain)) < 0.01);     // 来自 +Fy = +20 ⇒ 【负】
+                                                                      //   ★ 2026-09-23: 器件 Z ← −基座 Fy（Mᵀ 决定，与 X 相反）
                                                                       //   (2026-09-23 符号 −1→+1，同 f196cb0)
+    PASS();
+}
+
+// ★★ 2026-09-23（用户要求"先解决阻力方向"）：**横向两路的相对符号是【结构性的】，不是选择**。
+//   力是向量 ⇒ 器件系里的力 = Mᵀ·(基座系力)，而 M 就是平移路径那张表：
+//       基座 +X  ->  器件 +X      (同号)
+//       基座 +Y  ->  器件 −Z      (【反号】)   ← 这一条是本用例要钉的
+//       基座 +Z  ->  器件 +Y      (同号, 今天整轴关掉)
+//   ⇒ 对同样的输入, `hapticOut[0]` 与 `hapticOut[2]` 必须【符号相反】。
+//   任何"用一个常数给两路"的写法都【必然】违反它 —— 那正是 09-21 与 09-23 两份互相矛盾的
+//   现场报告各说一路的根源（σ=−1: X 错 Z 对 · σ=+1: X 对 Z 错）。本用例会让那种写法变红。
+static void test_lateral_channels_have_opposite_relative_sign() {
+    AppState::ForceData fd = {};
+    fd.compensated[0] = +10.0;   // 基座 Fx 为正
+    fd.compensated[1] = +20.0;   // 基座 Fy 为正
+    fd.compensated[2] = 0.0;
+    fd.lastUpdateMs = GetTickCount();
+    CHECK(ForceTuning::setGain(120.0));
+    ForcePipeline::init();
+    for (int i = 0; i < 300; i++) ForcePipeline::step(fd);
+    // 两路都必须非零（否则这条断言会被"某一路恒 0"白拿）
+    CHECK(fabs(fd.hapticOut[0]) > 1e-6);
+    CHECK(fabs(fd.hapticOut[2]) > 1e-6);
+    const double s0 = fd.hapticOut[0] > 0 ? 1.0 : -1.0;
+    const double s2 = fd.hapticOut[2] > 0 ? 1.0 : -1.0;
+    CHECK(s0 * s2 < 0.0);            // ← 必须相反
     PASS();
 }
 
@@ -447,6 +474,7 @@ int main() {
     test_soft_deadzone_shared_and_smooth();
     test_saturation();
     test_coord_transform();
+    test_lateral_channels_have_opposite_relative_sign();
     test_filter_convergence();
     test_stale_detection();
     test_jitter_accumulators_are_fed_and_distinct();
