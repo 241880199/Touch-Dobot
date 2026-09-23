@@ -781,6 +781,11 @@ namespace Config {
     //     ⇒ 正是本开关当初撞出来的那次**关节超速** ✗。
     //   ⇒ **修法（一行）**：把半 2 的那个调用点也加上 `&& !Config::BTN2_ROTATION_COMPOSE_ENABLED`。
     //     在那之前，**不要**单独把本开关翻成 true。
+    //   ⚠ 2026-09-23 (Task 2) 追加：上面那条危害现在**还额外受 `BTN2_JOINT_SPACE_ENABLED` 影响** ——
+    //     关节空间打开时，姿态模式压根**不构造 `ServoP`**（发的是 `ServoJ`）⇒ 半 2 改写出来的那个
+    //     数值跳**不会到达机械臂**。⇒ "翻 true 有多危险"取决于**另一个开关**，
+    //     别把今天的"还好"当成"那一半已经修好了"：把 `BTN2_JOINT_SPACE_ENABLED` 翻回 false
+    //     （= 回滚关节空间）时，本条危害**原样复活**。修法没变，仍是上面那一行。
     const bool   ORIENT_SEAM_FIX_ENABLED = false;
     const double ORIENT_MAX_OFFSET_DEG   = 150.0;   // 姿态相对参照的最大偏移 (deg)
     //   ⚠ 2026-09-23: 本常数现在有【第二个消费者】, 而它在那里量的是**别的东西** ——
