@@ -182,6 +182,11 @@ static void test_left_right_is_yaw_about_base_Y() {
     double L[3] = {0, 0, -30.0}, R[3] = {0, 0, +30.0};
     double RL[9], RR[9], Ry_p[9], Ry_m[9], I[9];
     targetM(ref, refS, L, RL);
+    targetM(ref, refS, R, RR);      // ⚠ 2026-09-23 补：本计划原文漏了这一行，
+                                    //   导致下面 CHECK(RR…) 断言的是【未初始化的 9 个 double】
+                                    //   （/O2 下可能"碰巧"绿）。实现者按本用例自己的注释补齐，
+                                    //   没有动符号或推导。教训：**计划里的示例代码也要被审**，
+                                    //   它同样会带缺陷（本计划已中两处：TEST 假绿 + 这一处）。
     rotY( +30.0, Ry_p); rotY(-30.0, Ry_m); identity(I);
     CHECK(angDeg(RL, Ry_p) < 1e-6);      // 左摆 = 绕 +Y 转 30°
     CHECK(angDeg(RR, Ry_m) < 1e-6);      // 右摆 = 绕 −Y 转 30°
