@@ -116,6 +116,10 @@ git commit -m "refactor(relay): 坐标变换抽成唯一一份 + 断言平移/�
 - Create: `Touch_Client/relay/Button2Mapping.h` / `.cpp`
 - Create: `Touch_Client/tests/test_button2_mapping.cpp`
 - Create: `Touch_Client/tests/build_button2_mapping_test.bat`
+  ⚠ **链接行必须含测试用到的那些 .cpp**：Task 1 的实测先例 —— `convertTouchToRobot` 一被调用就
+  LNK2019×3（`Calibration::enabled/R/t` 的定义在 `calibration/CalibrationIO.cpp`）；本任务用
+  `TcpCalibration::rpyToMatrix` ⇒ 需要 `..\calibration\TcpCalibration.cpp`（先例见
+  `build_coord_safety_test.bat`）。**提交时 .bat 要一起进**（Task 1 的简报漏了它，被实现者补上）。
 - Modify: `Touch_Client/tests/run_tests.bat`（接线一个段）
 
 **Interfaces:**
@@ -183,7 +187,8 @@ static void test_large_tilt_is_exact() { ... θ=90 比角 ... }
 static void test_offset_is_clamped_by_rotation_angle() { ... θ=170 输入 ⇒ angDeg(Rt,Rr) ≈ 150 ... }
 ```
 
-每条 `TEST(...)` 都在文件末尾按既有套件的写法注册（与 `test_frame_layout.cpp` 相同的 main/注册风格）。
+⚠⚠ **不要照抄 `TEST(...)`** —— 2026-09-23 Task 1 的实现者**实测复现了假绿**：`test_frame_layout.cpp` 里的 `TEST` 是**标签打印器**（不求值、不计失败），照它写出来的断言即使把映射表改错也照样印 `Results: 12 passed, 0 failed`、退出码 0。
+⇒ 用该文件里**真正求值的那个宏**（Task 1 用的是 `CHECK`），并**为每条补 `PASS()`**；**先在你要照抄的那个文件里确认宏的语义**（宏的含义是逐文件不同的，不是仓库级的）。
 
 - [ ] **Step 2: 跑测试确认失败**
 Run: `cmd /c "cd /d D:\Projects\Touch\Touch_Client\tests && .\build_button2_mapping_test.bat && .\test_button2_mapping.exe" 2>&1 | tail -3`
