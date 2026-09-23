@@ -541,6 +541,9 @@ function relay_gui()
 
     function onZeroPressed()
         % 与键盘 'z' 同语义 (C++ 那边负责"再按一次 = 中止")
+        % 旁路日志: 与键盘 'z' 区分开 —— 两者发出去的都是 'Z|1', 但一条来自这个按钮、
+        %   一条来自键盘; 判"按钮到底有没有接上"时, 日志必须能分辨是哪一个动作。
+        tlog('UI', 'Zero button pressed');
         sendToClient('Z|1');
     end
 
@@ -573,6 +576,36 @@ function relay_gui()
         S.tuning.displayUnknown = true;
     end
 
+    % ===== 旁路日志 (2026-09-23): 只写文件, 不参与任何界面逻辑 =====
+    % 【为什么加】判读"阻力映射系数可调"那几项时, MATLAB 侧(界面 / 命令窗)与 C++ 侧(控制台)
+    %   是【两条互不可见的通道】—— 只能靠人在两边来回看、再口头对齐, 而口头对齐正是本项目
+    %   反复出错的环节。这一路把两侧的协议流量落到【同一个文件】, 事后可以逐条对齐。
+    % 【只记低频】P| / F| / J| / RP| 是 123 Hz 级遥测 —— 记了会把文件淹掉, 而且它们每一拍
+    %   都在变、与本功能无关; 真正要判读的是 RG| / C| / Z| / FF| 这一类: 由操作员动作触发、
+    %   频率低。高频那四路在【调用处】就滤掉了(名单只有一份, 就在那一个 if 里)。
+    % ⚠ 整个函数套 try/catch: 日志【永远不许】打断收包循环或发送路径。本项目对"静默"极敏感,
+    %   但这里是反过来的 —— 日志可以静默失败, 界面不许挂。
+    % ⚠ 每次调用各自 fopen/fclose(追加): 不需要持句柄、也就不用判句柄失效; 而且 MATLAB 被
+    %   直接关掉时不会丢掉缓冲区里的最后几行。调用频率(几十条/秒上限)下这点开销无感。
+    function tlog(tag, text)
+        persistent log_path
+        try
+            if isempty(log_path)
+                log_path = fullfile(fileparts(mfilename('fullpath')), ...
+                    ['_matlab_session_' char(datetime('now', 'Format', 'yyyyMMdd')) '.log']);
+            end
+            fid = fopen(log_path, 'a');
+            if fid < 0
+                return;
+            end
+            fprintf(fid, '%s %-5s %s\n', ...
+                char(datetime('now', 'Format', 'HH:mm:ss.SSS')), tag, text);
+            fclose(fid);
+        catch
+            % 刻意静默 —— 理由见本函数开头的注释
+        end
+    end
+
     function sendToClient(cmd)
         % ⚠ 送不出去【必须出声】(2026-09-22 终审 Fix 1)。
         %   从前的形状是一句无声的 return。于是 C++ 断线时操作员拖滑条 / 按 [Zero] /
@@ -592,11 +625,14 @@ function relay_gui()
         if ~isempty(S.server) && isvalid(S.server) && S.server.Connected
             try
                 write(S.server, uint8([cmd newline]), 'uint8');
+                tlog('OUT', cmd);
                 flushDropNotice();   % 真的送出去了 ⇒ 断线那一段到此为止 (无事时是空操作)
             catch e
                 fprintf('[Relay] ERROR sending to client: %s\n', e.message);
+                tlog('OUTFAIL', sprintf('%s  (%s)', cmd, e.message));
             end
         else
+            tlog('DROP', cmd);
             notifyDropped(cmd);
         end
     end
@@ -683,6 +719,12 @@ function relay_gui()
 
                 S.packet_count = S.packet_count + 1;
 
+                % 旁路日志: 只记【低频】协议 —— 高频遥测的名单与理由见 tlog 的注释。
+                %   这四个前缀是 123 Hz 级, 记全了会把文件淹掉, 且与本功能无关。
+                if ~any(startsWith(msg, {'P|', 'F|', 'J|', 'RP|'}))
+                    tlog('IN', msg);
+                end
+
                 % -- 现有协议 --
                 if startsWith(msg, 'P|')
                     vals = sscanf(msg(3:end), '%f,%f,%f,%f,%f,%f');
@@ -747,6 +789,13 @@ function relay_gui()
                         S.tuning.defGain = vals(7);
                         S.tuning.known   = true;
 
+                        % 旁路日志: 记下这条回读【解析出来的七个数】—— 判"滑条显示的范围到底
+                        %   是不是 C++ 声明的那个"时, 这是唯一可比的证据 (线上没有字段名, 靠位置)。
+                        tlog('TUNE', sprintf(['gain=%.4f min=%.4f max=%.4f ratio=%.6f ' ...
+                              'deadN=%.4f satN=%.4f defGain=%.4f'], ...
+                              S.tuning.gain, S.tuning.min, S.tuning.max, S.tuning.ratio, ...
+                              S.tuning.deadN, S.tuning.satN, S.tuning.defGain));
+
                         % ★ 范围【跟着回读走】, 不是只在第一次认 (2026-09-22 复审 Fix 1)。
                         %   原先只有 ~wasKnown 一条门 ⇒ C++ 重编/重启把 GAIN_MIN/GAIN_MAX 改了,
                         %   而本窗口一直开着: 新的 min/max 存进了 S.tuning 却【永远贴不到控件上】,
@@ -786,6 +835,12 @@ function relay_gui()
                             sldGain.Enable = 'on';
                             edGain.Enable  = 'on';
                             btnGainDefault.Enable = 'on';
+                            % 旁路日志: 控件的【实际状态】(范围/当前值) —— "滑条真的解锁了
+                            %   没有"与"它显示的是谁的范围"两件事在这里一次记全。
+                            tlog('CTL', sprintf(['enabled limits=[%.1f,%.1f] ' ...
+                                  'value=%.3f wasKnown=%d'], ...
+                                  sldGain.Limits(1), sldGain.Limits(2), ...
+                                  sldGain.Value, wasKnown));
                             if ~wasKnown
                                 fprintf(['[Relay] 增益控件已启用: 范围 [%.0f, %.0f], ' ...
                                          '当前 %.1f\n'], ...
@@ -815,6 +870,11 @@ function relay_gui()
                                      '[%.0f, %.0f], 仍是 %.1f\n'], ...
                                 S.tuningLastSent, S.tuning.min, ...
                                 S.tuning.max, S.tuning.gain);
+                            % 旁路日志: 这一句【必须】进文件 —— 它是"拖动没生效"的唯一
+                            %   信号, 而它本来只写命令窗(不在这份日志的覆盖范围里)。
+                            tlog('REFUSED', sprintf(['sent=%.1f refused, range=[%.0f,%.0f] ' ...
+                                  'still=%.1f'], S.tuningLastSent, S.tuning.min, ...
+                                  S.tuning.max, S.tuning.gain));
                         end
 
                         if ~S.tuningDragging
