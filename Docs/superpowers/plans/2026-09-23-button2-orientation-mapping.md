@@ -50,14 +50,14 @@ static void test_touch_to_robot_matrix_is_orthonormal() {
     touchToRobotMatrix(M);
     for (int i = 0; i < 3; i++) {
         double n = M[i*3]*M[i*3] + M[i*3+1]*M[i*3+1] + M[i*3+2]*M[i*3+2];
-        TEST(fabs(n - 1.0) < 1e-12);                       // 每行单位长
+        CHECK(fabs(n - 1.0) < 1e-12);                       // 每行单位长
         for (int j = i+1; j < 3; j++) {
             double d = M[i*3]*M[j*3] + M[i*3+1]*M[j*3+1] + M[i*3+2]*M[j*3+2];
-            TEST(fabs(d) < 1e-12);                          // 行间正交
+            CHECK(fabs(d) < 1e-12);                          // 行间正交
         }
     }
     double det = M[0]*(M[4]*M[8]-M[5]*M[7]) - M[1]*(M[3]*M[8]-M[5]*M[6]) + M[2]*(M[3]*M[7]-M[4]*M[6]);
-    TEST(fabs(det - 1.0) < 1e-12);                          // 右手系（det=+1，不是镜像）
+    CHECK(fabs(det - 1.0) < 1e-12);                          // 右手系（det=+1，不是镜像）
 }
 ```
 
@@ -148,14 +148,32 @@ Touch 标准器件系 = X 右 / Y 上 / Z 朝用户；`M`（Task 1）给出 `rob
 ```cpp
 // 判据一律用【矩阵】比，不用 RPY 比 —— RPY 有表示歧义，矩阵没有。
 // 期望：R_target = R_axis(±θ) · R_ref（左乘 = 在基座系里倾斜，与规格"尖端朝某方向"同义）
-static double angDeg(const double A[9], const double B[9]);   // 两个旋转矩阵的夹角（度）
+// ⚠ 用本文件【真正求值】的那个宏（Task 1 用的是 CHECK）—— 见本节末尾的假绿警告。
+static void axisR(double ax, double ay, double az, double thDeg, double R[9]) {  // 轴角 → 矩阵
+    double th = thDeg * 3.14159265358979323846 / 180.0, c = cos(th), s = sin(th), t = 1 - c;
+    R[0]=t*ax*ax+c;    R[1]=t*ax*ay-s*az; R[2]=t*ax*az+s*ay;
+    R[3]=t*ax*ay+s*az; R[4]=t*ay*ay+c;    R[5]=t*ay*az-s*ax;
+    R[6]=t*ax*az-s*ay; R[7]=t*ay*az+s*ax; R[8]=t*az*az+c;
+}
+static void mul3(const double A[9], const double B[9], double C[9]) {
+    for (int i=0;i<3;i++) for (int j=0;j<3;j++) {
+        double v=0; for (int k=0;k<3;k++) v += A[i*3+k]*B[k*3+j]; C[i*3+j]=v; }
+}
+static double angDeg(const double A[9], const double B[9]) {   // 两旋转矩阵夹角（度）
+    double T[9]; for (int i=0;i<3;i++) for (int j=0;j<3;j++) T[i*3+j]=A[0*3+i]*B[0*3+j]+A[1*3+i]*B[1*3+j]+A[2*3+i]*B[2*3+j];
+    double tr = T[0]+T[4]+T[8]; double c = (tr-1)/2; if (c>1) c=1; if (c<-1) c=-1;
+    return acos(c) * 180.0 / 3.14159265358979323846;
+}
+static void targetM(const double ref[3], const double refS[3], const double cur[3], double R[9]) {
+    Vec3 t = button2OrientationTarget(ref, refS, cur); rpyToMatrix(t.x, t.y, t.z, R);
+}
 
 // ① 笔杆不动 ⇒ 逐位返回参照（本函数没有位置入参 ⇒ 平移天然不参与）
 static void test_no_motion_returns_reference() {
     double ref[3] = {-173.0, -22.0, -118.0}, refS[3] = {-20.0, 12.0, 30.0};
     Vec3 t = button2OrientationTarget(ref, refS, refS);
     double Rt[9], Rr[9]; rpyToMatrix(t.x, t.y, t.z, Rt); rpyToMatrix(ref[0], ref[1], ref[2], Rr);
-    TEST(angDeg(Rt, Rr) < 1e-6);
+    CHECK(angDeg(Rt, Rr) < 1e-6);
 }
 
 // ②③ 左右摆：sz 减/增 θ ⇒ 基座系绕 +Y/−Y
@@ -163,28 +181,61 @@ static void test_left_right_is_yaw_about_base_Y() {
     double ref[3] = {0,0,0}, refS[3] = {0,0,0};
     double L[3] = {0, 0, -30.0}, R[3] = {0, 0, +30.0};
     double RL[9], RR[9], Ry_p[9], Ry_m[9], I[9];
-    rpyToMatrix(button2OrientationTarget(ref, refS, L).x, ... /* 取回三个角 */, RL);
+    targetM(ref, refS, L, RL);
     rotY( +30.0, Ry_p); rotY(-30.0, Ry_m); identity(I);
-    TEST(angDeg(RL, Ry_p) < 1e-6);      // 左摆 = 绕 +Y 转 30°
-    TEST(angDeg(RR, Ry_m) < 1e-6);      // 右摆 = 绕 −Y 转 30°
+    CHECK(angDeg(RL, Ry_p) < 1e-6);      // 左摆 = 绕 +Y 转 30°
+    CHECK(angDeg(RR, Ry_m) < 1e-6);      // 右摆 = 绕 −Y 转 30°
 }
 
 // ④⑤ 前后摆：sx 增/减 θ ⇒ 基座系绕 +X/−X
 static void test_fore_aft_is_pitch_about_base_X() {
     double ref[3] = {0,0,0}, refS[3] = {0,0,0};
     double F[3] = {+30.0, 0, 0}, B[3] = {-30.0, 0, 0};
-    ... rotX(±30) 比角
+    double RF[9], RB[9], Rx_p[9], Rx_m[9];
+    targetM(ref, refS, F, RF); targetM(ref, refS, B, RB);
+    axisR(1,0,0, +30.0, Rx_p); axisR(1,0,0, -30.0, Rx_m);
+    CHECK(angDeg(RF, Rx_p) < 1e-6);     // 前摆 = 绕 +X 转 30°
+    CHECK(angDeg(RB, Rx_m) < 1e-6);     // 后摆 = 绕 −X 转 30°
+    PASS();
 }
 
 // ⑥ 自转：sy 增 θ ⇒ 基座系绕 Z 转 θ（= 工具 roll ⇒ 关节上就是 J6，见实现的注释）
-static void test_twist_is_roll_about_base_Z() { ... rotZ(±30) 比角 }
+static void test_twist_is_roll_about_base_Z() {
+    double ref[3] = {0,0,0}, refS[3] = {0,0,0};
+    double T1[3] = {0, +30.0, 0}, T2[3] = {0, -30.0, 0};
+    double R1[9], R2[9], Rz_p[9], Rz_m[9];
+    targetM(ref, refS, T1, R1); targetM(ref, refS, T2, R2);
+    axisR(0,0,1, +30.0, Rz_p); axisR(0,0,1, -30.0, Rz_m);
+    CHECK(angDeg(R1, Rz_p) < 1e-6);
+    CHECK(angDeg(R2, Rz_m) < 1e-6);
+    PASS();
+}
 
-// ⑦ ★ 大角度（旧实现真正翻车的地方）：90° 的左右摆仍必须【精确】是绕 +Y 转 90°
+// ⑦ ★ 大角度（旧实现真正翻车的地方）：90° 的左右摆仍必须【精确】是绕 +Y 转 90°。
 //    旧写法把 Euler 差当旋转向量、还在参照上逐分量加 ⇒ 这里会差几十度。
-static void test_large_tilt_is_exact() { ... θ=90 比角 ... }
+static void test_large_tilt_is_exact() {
+    double ref[3] = {-173.0, -22.0, -118.0};      // 用本机真实的贴接缝姿态
+    double refS[3] = {-20.0, 12.0, 30.0};
+    double L90[3] = {refS[0], refS[1], refS[2] - 90.0};   // 左摆 90°（sz −90）
+    double Rr[9], Rt[9], Ry90[9], want[9];
+    rpyToMatrix(ref[0], ref[1], ref[2], Rr);
+    targetM(ref, refS, L90, Rt);
+    axisR(0,1,0, +90.0, Ry90);
+    mul3(Ry90, Rr, want);                          // 期望 = R_y(90°) · R_ref
+    CHECK(angDeg(Rt, want) < 1e-6);
+    PASS();
+}
 
 // ⑧ 限幅按【旋转角】：超过 ORIENT_MAX_OFFSET_DEG 的输入 ⇒ 目标与参照的夹角恰为该上限
-static void test_offset_is_clamped_by_rotation_angle() { ... θ=170 输入 ⇒ angDeg(Rt,Rr) ≈ 150 ... }
+static void test_offset_is_clamped_by_rotation_angle() {
+    double ref[3] = {0,0,0}, refS[3] = {0,0,0};
+    double L170[3] = {0, 0, -170.0};               // 左摆 170°，超过上限 150°
+    double Rr[9], Rt[9];
+    rpyToMatrix(ref[0], ref[1], ref[2], Rr);
+    targetM(ref, refS, L170, Rt);
+    CHECK(fabs(angDeg(Rt, Rr) - 150.0) < 1e-3);    // 夹到 ORIENT_MAX_OFFSET_DEG
+    PASS();
+}
 ```
 
 ⚠⚠ **不要照抄 `TEST(...)`** —— 2026-09-23 Task 1 的实现者**实测复现了假绿**：`test_frame_layout.cpp` 里的 `TEST` 是**标签打印器**（不求值、不计失败），照它写出来的断言即使把映射表改错也照样印 `Results: 12 passed, 0 failed`、退出码 0。
