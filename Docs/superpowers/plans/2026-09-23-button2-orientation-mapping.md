@@ -300,8 +300,17 @@ git commit -m "feat(relay): 按钮2 姿态映射改成真旋转合成（纯函�
    **笔杆偏移**上，语义不变。**做法**：先按现状算出**已过门、已低通**的偏移 `(offx,offy,offz)`，
    再**合成一个"当前笔杆姿态"** `curFiltered = refStylus + (offx,offy,offz)`，把它喂给新函数。
    ⚠ **不要**把 `axisGate`/低通搬进纯函数（那会改变它们已被现场验证过的语义，且会把它们拖出可测范围）。
-3. **新路径**：`desired = Vec3(button2OrientationTarget(&m_orientRefRobot.x, &m_orientRefStylus.x, &curFiltered.x))`
-   —— 注意三者的 `.x` 是 `Vec3` 的**首地址**（行主序 3 个 double 连续，Task 1 已确认该形状可用）。
+3. **新路径**：把三个 `Vec3` **各自显式拷进局部 `double[3]`** 再调用 ——
+   ```cpp
+   double aRef[3] = { m_orientRefRobot.x,   m_orientRefRobot.y,   m_orientRefRobot.z   };
+   double sRef[3] = { m_orientRefStylus.x,  m_orientRefStylus.y,  m_orientRefStylus.z  };
+   double sCur[3] = { curFiltered.x,        curFiltered.y,        curFiltered.z        };
+   Vec3 target = button2OrientationTarget(aRef, sRef, sCur);
+   ```
+   ⚠ **不要**写 `button2OrientationTarget(&m_orientRefRobot.x, …)` —— 那**前提是 Vec3 的三个成员在内存里
+   连续且按 x,y,z 排列**，而**这个前提没有任何东西保证**（Task 1 就因为同类前提被要求改写法）。
+   显式拷贝没有前提 ✓。
+
 4. **限幅**：新函数**内部已按旋转角**夹到 `ORIENT_MAX_OFFSET_DEG` ⇒ 新路径**不再调用**
    `clampOrientOffset`（逐分量那个）；**旧路径（false 分支）保持原样**调用它 ✓。
    `clampOrientToBounds`（绝对值 ±180 的安全钳位）**两条路径都保留、语义不动** ✓。
@@ -313,7 +322,8 @@ git commit -m "feat(relay): 按钮2 姿态映射改成真旋转合成（纯函�
       证明这次 MSBuild 确实在编译被改的文件（mtime 在本树不可用，Task 1 已踩过）。
       ⚠ 重建前**必须先退出正在跑的客户端**，否则 `LNK1168`。
 - [ ] **Step 3: 补"能区分限幅语义"的用例 + 负对照**（见上面附加要求 ①）
-- [ ] **Step 4: 整床** ⇒ `cmd /c "cd /d D:\Projects\Touch\Touch_Client	ests && .un_tests.bat"`，
+- [ ] **Step 4: 整床** ⇒ `cmd /c "cd /d D:\Projects\Touch\Touch_Client	ests && .
+un_tests.bat"`，
       **exit 0**、`Suites accounted: N of N`。
 - [ ] **Step 5: 提交**，提交信息里必须写明：开关名与默认值、回滚方式、以及"`RelayCore.cpp` 不被测试编译
       ⇒ 本任务只能靠编译 + 负对照 + 上机（Task 4）守"。
