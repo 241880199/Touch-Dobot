@@ -275,10 +275,18 @@ private:
     //       它描述的是"这次按住锁存成了关节模式"的一个**后果**，重复打印没有新信息。
     //   · `m_btn2JointRefRejectLogged` —— I1 那道"参照不可信"的 `cerr` 只报**一次**。
     //       ⚠ 只压**消息**，**不压 `return`**：被拒的帧每一帧照样不下发，变的只有"喊几次"。
-    //       这条与上面的 REJECT 路径不同，是**构造上非瞬时**的：反馈在按下时就坏掉
-    //       ⇒ `m_jointRef` 是个坏快照 ⇒ 条件整个按住期间恒成立（~30 Hz × 按住秒数）。
+    //       这条是**构造上非瞬时**的：反馈在按下时就坏掉 ⇒ `m_jointRef` 是个坏快照
+    //       ⇒ 条件整个按住期间恒成立（~30 Hz × 按住秒数）。
+    //   · `m_btn2JointTargetRejectLogged`（I2：目标越关节限位）与 `m_btn2JointFkRejectLogged`
+    //     （FK 位置门：`evaluatePositionOnly` 回 `REJECT`）—— 同款，各只报**一次**。
+    //     ★ 2026-09-23 整支终审 (A)：这两条**原先没压**，理由写的是"它们是瞬时的" ——
+    //       **那句前提是假的**：笔杆偏移一直保持很大 ⇒ 目标一直越限；笔杆被顶在工作空间
+    //       边缘 ⇒ FK 目标一直被拒 ⇒ 两条与 I1 一样**整个按住期间恒成立**，
+    //       同样以 ~30 Hz 刷在**触觉回调线程**上。⇒ 三条现在是同一套压法、同一个复位点。
     bool  m_btn2JointBtn1Noticed = false;
     bool  m_btn2JointRefRejectLogged = false;
+    bool  m_btn2JointTargetRejectLogged = false;
+    bool  m_btn2JointFkRejectLogged = false;
 
     CRITICAL_SECTION m_basePointLock;
     std::vector<IExtension*> m_extensions;

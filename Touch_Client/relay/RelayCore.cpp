@@ -1514,8 +1514,20 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
                 //   个坏快照 ⇒ 下面这个条件**整个按住期间恒成立** ⇒ 不压就是一整行、
                 //   以 ~30 Hz 的发送速率刷到操作员松手为止。而 `cerr` 写在**触觉回调线程**上，
                 //   控制台阻塞（QuickEdit）是本仓已记录的危害 ⇒ **每次按下只报一次**。
-                //   ⚠ 与上面/下面那些 `REJECT` 路径不同：它们是**瞬时**的（下一帧状态一变就不报了）
-                //     ⇒ 它们不需要这一手，这里也不需要顺手给它们加。
+                //   ★ 2026-09-23 整支终审 (A) 订正：本段原文接着写的是"与上面/下面那些 `REJECT`
+                //     路径不同：它们是**瞬时**的（下一帧状态一变就不报了）⇒ 它们不需要这一手"
+                //     —— **那句前提是【假的】**，现已按它自己的理由把 I2 与 FK 那两道也压成一次：
+                //       · I2（目标越关节限位）：偏移一直保持很大 ⇒ 目标**一直**越限；
+                //       · FK 位置门：笔杆被顶在工作空间边缘 ⇒ FK 目标**一直**被拒。
+                //     两条都**整个按住期间恒成立**，都以 ~30 Hz 刷在触觉回调线程上 ⇒
+                //     正是让本条压成一次的那条链（控制台写 → QuickEdit 阻塞 → 看门狗 → EmergencyStop）。
+                //   ★ (G) "当初为什么只给 I1 压、I2 没压"**不是**因"I2 瞬时"（已证否）——
+                //     真正的差别在**可达性**：I1 的坏参照来自一次**冷** `GetAngle()`，
+                //     操作员**什么都没做**它就可能成立（`app.robotActualPose.j1..j6` 初值全 0）；
+                //     而 I2 的越限目标要求参照**已经坐在一个大关节角上**（`ref ± 150°` 才越界）
+                //     ⇒ 那条路上有操作员的动作。次序上 I1 在前，是因为它**最便宜**
+                //     （六次比较 + 一次限位查表，不算 FK）。这解释了**为什么 I1 排第一**，
+                //     但**不构成**"I2 不必压"—— 两条理由各管各的。
                 //   ⚠ 只压消息，**不压 `return`**：被拒的帧每一帧照样不下发（那是安全性质）。
                 //   ⚠ 标记复位在 `onButton2Press`（与 `m_btn2JointMode` 同一个临界区）⇒ 下一次按下会再报。
                 if (!m_btn2JointRefRejectLogged) {
@@ -1543,7 +1555,18 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
                               //   整个按住都是死的。原文只说了"不发"，**没说怎么办** ⇒ 补上
                               //   唯一的那条恢复路径（否则操作员只能等，或者以为坏了）。
                               << ". RELEASE AND RE-PRESS BUTTON 2 — the reference is a press-time "
-                              << "snapshot and cannot recover while this hold lasts."
+                              << "snapshot and cannot recover while this hold lasts. "
+                              // ★ 2026-09-23 整支终审 (D)：**假拒的角落** —— 若机械臂的**物理零位**
+                              //   真的让六个关节读数**恰好全是 0**（那是**合法位姿**，臂就该停在
+                              //   那儿按着不动），本判据照样拒发，而上面那句"松开再按按钮2"
+                              //   **帮不了**：重按读到的还是同一个全 0 快照 ⇒ 这是**无法自愈**的
+                              //   假拒。判据**刻意不改**（放宽成容差会把"停在零位附近"也放行，
+                              //   而"恰好全 0"正是 `isTrustworthyJointRef` 要抓的坏参照指纹，
+                              //   见 `relay/Button2Joint.cpp:96-102`）⇒ 如实写进消息，
+                              //   给出唯一有效的那条出路（把臂挪离零位再按）。
+                              << "(If the arm is genuinely parked at its all-zero pose this is a "
+                              << "false positive and re-pressing will read all-zero again — nudge "
+                              << "one joint off zero first.)"
                               << std::endl;
                 }
                 return;   // 本帧不下发（下一帧从同一状态重算）
@@ -1556,12 +1579,21 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
         // ⚠ 判的是**期望目标**（纯函数给的那个），不是下面限幅后的值 —— 限幅只是把"走过去"
         //   这件事摊到多帧，它**不改变"目标本身合不合法"**。
         // ⚠ 与 I1 同一句：无自动化用例，由人读 + 上机。
+        // ★ 2026-09-23 整支终审 (A)：这条 `cerr` 改成**每次按下只报一次**（标志复位在
+        //   `onButton2Press`）—— 它**不是瞬时的**：只要笔杆偏移一直保持很大，目标就
+        //   **每帧都越限**，不压就是 ~30 Hz 刷满整个按住期（触觉回调线程上的 `cerr`）。
+        //   ⚠ 压的**只有消息**：`return` 仍在外面、**每帧照走**（本帧不下发是安全性质）。
+        //   ⚠ 重复没有诊断价值：第一行已经带了**理由**与**位置**，后面每一行都是同一行。
         if (!Kinematics::isWithinJointLimits(j)) {
-            std::cerr << "[Safety] Btn2 joint TARGET outside joint limits — NOT sending. j=("
-                      << j[0] << "," << j[1] << "," << j[2] << ","
-                      << j[3] << "," << j[4] << "," << j[5] << ")"
-                      << std::endl;
-            return;   // 本帧不下发
+            if (!m_btn2JointTargetRejectLogged) {
+                m_btn2JointTargetRejectLogged = true;
+                std::cerr << "[Safety] Btn2 joint TARGET outside joint limits — NOT sending. "
+                          << "Reported ONCE per press (every frame is still rejected). j=("
+                          << j[0] << "," << j[1] << "," << j[2] << ","
+                          << j[3] << "," << j[4] << "," << j[5] << ")"
+                          << std::endl;
+            }
+            return;   // 本帧不下发（每帧都走这里，与上面那行"只报一次"无关）
         }
 
         // ================= 复审 M2（Minor，但属**安全回退**）：每帧步长限幅 =================
@@ -1588,8 +1620,32 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
         clampJointStep(m_btn2JointCmd, j, Config::ORIENT_MAX_STEP_DEG, j);
 
         // ② 安全门：关节目标先**正解**出末端位置，再走**现有**的位置入口
-        //    （`evaluatePositionOnly`：NaN/Inf · 工作空间半径 620mm · Z 行程 0~795 ·
-        //      安全边界 · 圆柱奇异 30/80mm · 报警点黑名单 —— **一条都没删、也没绕**）。
+        //    （`evaluatePositionOnly` —— **一条都没删、也没绕**）。
+        //    ⚠ 判的对象是**法兰**，**不是笔尖**：`Kinematics::forwardPosition` 返回的是
+        //      `positions[6]`（`robot/Kinematics.cpp:200-204` = 链末那个齐次矩阵的平移列），
+        //      而 `Kinematics` 整条链里**没有工具偏移**（TCP 偏移的 apply 接线另有一笔待办）
+        //      ⇒ 真实笔尖比这个对象多出**整个笔杆的长度**。
+        //      ★ 2026-09-23 整支终审 (C)：关节模式下这个对象**是被【扫过】的**（swept），
+        //        不再像"命令是一段**固定 TCP**"时那样是个**静止的点** —— J4/J5/J6 一动，
+        //        法兰沿一段圆弧走过去，**工具偏移那部分误差是【被遍历的】**：工作空间半径
+        //        620mm 与 Z 行程都按**法兰**算，而笔尖真实位置可能已经出界。
+        //        ⚠ RPY 路径**没有**这条性质：它按住期间的 TCP 目标是冻结的（本门判的正是那个）。
+        //    ★ 2026-09-23 整支终审 (B) 订正 —— 本入口**能产生 `REJECT` 的只有四种**
+        //      （逐行核过 `safety/SafetyPredictor.cpp:240-339`）：
+        //        · NaN/Inf（`:243`）· 工作空间半径 620mm（`:255`）· Z 行程 0~795（`:265`）
+        //        · 安全边界"超出"（`:288`）—— ⚠ 这一条**今天恒为假**：它比的是
+        //          `clampToBoundaryActive(target)` 有没有改动 `target`，而该函数在
+        //          `Config::SAFETY_BOUNDARY_CLAMP_ENABLED == false`（**现值**，`Config.h:75`）时
+        //          **退化成 identity**（`relay/SafetyBoundary.h:47-50`）⇒ 永远不会改动
+        //          ⇒ 它是**死的**（不是"暂时还没撞上"；开关翻回来它就活）。
+        //      ⇒ 原文把 **圆柱奇异 30/80mm** 与 **报警点黑名单** 也列在这里，**那是错的**：
+        //        这两条**都返回 `WARN_SLOW`**（`:300` / `:307` / `:319` / `:326`），
+        //        **从不 `REJECT`**。而调用方（下面那一行）**只对 `REJECT` 动作** ——
+        //        `if (jv.action == SafetyVerdict::REJECT)` ⇒ 这两条在本门里**什么都不做**，
+        //        与 RPY 路径那条 TCP 门**同款**（`:1320` 同样只判 `REJECT`；两条路一致，
+        //        不是"降速在关节路径上漏接了"）。
+        //        ⚠ 别再把它们写成"会拒"—— 那句话会让人以为奇异区/报警点在这里有一道闸，
+        //          于是在上机时把"没被拒"读成"门坏了"。
         //    ⚠ `Kinematics::forwardPosition` 与 `SafetyPredictor` 吃的是**同一个基座系**
         //      （`app.robotActualPose` 那一套），所以这条比较才有意义。
         //    ⚠ `refJoints` 本身是 NaN（机器人状态已经坏了）时：FK 结果是 NaN ⇒ 撞上本入口的
@@ -1600,11 +1656,19 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
         Vec3 fkPos = Kinematics::forwardPosition(j);
         SafetyVerdict jv = SafetyPredictor::instance().evaluatePositionOnly(fkPos);
         if (jv.action == SafetyVerdict::REJECT) {
-            std::cerr << "[Safety] Btn2 joint target REJECT: " << (jv.reason ? jv.reason : "?")
-                      << " — j=(" << j[0] << "," << j[1] << "," << j[2] << ","
-                      << j[3] << "," << j[4] << "," << j[5] << ")"
-                      << " fk=(" << fkPos.x << "," << fkPos.y << "," << fkPos.z << ")"
-                      << std::endl;
+            // ★ 2026-09-23 整支终审 (A)：本 `cerr` 改成**每次按下只报一次**（复位在
+            //   `onButton2Press`）—— 它**不是瞬时的**：笔杆被顶在工作空间边缘/越界时，
+            //   FK 目标**每帧都落在同一处**、每帧都被拒 ⇒ 不压就是 ~30 Hz 刷满整个按住期。
+            //   ⚠ 压的**只有消息**：`return` 仍在外面、**每帧照走**（本帧不下发是安全性质）。
+            if (!m_btn2JointFkRejectLogged) {
+                m_btn2JointFkRejectLogged = true;
+                std::cerr << "[Safety] Btn2 joint target REJECT: " << (jv.reason ? jv.reason : "?")
+                          << " — Reported ONCE per press (every frame is still rejected). j=("
+                          << j[0] << "," << j[1] << "," << j[2] << ","
+                          << j[3] << "," << j[4] << "," << j[5] << ")"
+                          << " fk=(" << fkPos.x << "," << fkPos.y << "," << fkPos.z << ")"
+                          << std::endl;
+            }
             return;   // 与上面那条 TCP REJECT 同款: 本帧不下发, 下一帧从同一状态重算
         }
 
@@ -1617,7 +1681,15 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
 
         // M2：**走到这里才推进步长积分器**（上面任何一道门 `return` 掉的帧都不参与）。
         //   ⚠ 位置在 `robotSendMotion` **之前**：若那一次发送失败（链路问题，已有 `failCount`
-        //     记账），积分器会比实际快一帧 —— 一帧的差，且下一帧照旧逐轴夹住 ⇒ 不放大。
+        //     记账），积分器比"实际发出去的东西"**多走了一帧的量**。
+        //   ★ 2026-09-23 整支终审 (F) **订正**：原文写的是"一帧的差，且下一帧照旧逐轴夹住
+        //     ⇒ **不放大**" —— **对连续失败是错的**：逐轴夹逼只界住**每帧**的增量（≤3°），
+        //     它**不**收回"积分器已经领先实际发送多少"。丢了 k 次则积分器领先 k×3°，
+        //     恢复发送的第一帧下发的是 `领先量 + 3°` ⇒ **那一步是 k×3°，不是 1×3°**
+        //     ⇒ 机械臂要一口气走完那 k 帧没走的路。等价说法：**每帧有界，连续丢包数无界**。
+        //     ⚠ `failCount` 只**记账**、不参与任何控制律 ⇒ 今天**没有任何东西**按它回退积分器。
+        //     ⚠ 量级参考：`ORIENT_MAX_STEP_DEG = 3°/帧` × 30 Hz ⇒ 那句"≈90°/s"**只对
+        //       "逐帧"成立**，对"恢复的那一步"**不成立**（同一条订正；"≤90°/s"不是整条链的界）。
         //     之所以不放它后面：那要跨过下面那段两条路径共用的代码，反而更绕、更易错。
         for (int i = 0; i < 6; ++i) m_btn2JointCmd[i] = j[i];
     } else {
@@ -1773,10 +1845,14 @@ void RelayCore::onButton2Press(const Vec3& stylusOrient) {
         //   ⚠ "按钮1 早已按着、之后再按按钮2"那种情形**与次序无关**（`lastButtonState` 早在上一帧
         //     就已经是 true）⇒ 受影响的只有**同帧**那一种，也就是最不容易被注意的那种。
 
-        // ★ 2026-09-23 复审 Minor 2：两条一次性标记与"模式"同生共死 ⇒ **在这里复位**
-        //   （同一个临界区、同一份"这一次按下"的快照），见 `RelayCore.h` 里那两个成员的注释。
+        // ★ 2026-09-23 复审 Minor 2：一次性标记与"模式"同生共死 ⇒ **在这里复位**
+        //   （同一个临界区、同一份"这一次按下"的快照），见 `RelayCore.h` 里那四个成员的注释。
+        //   ★ 2026-09-23 整支终审 (A)：原先是**两条**（Minor 2 那轮），本轮把 I2 与 FK 那两道
+        //   `cerr` 也压成"每次按下只报一次" ⇒ 变成**四条**，一起在这里复位。
         m_btn2JointBtn1Noticed = false;
         m_btn2JointRefRejectLogged = false;
+        m_btn2JointTargetRejectLogged = false;
+        m_btn2JointFkRejectLogged = false;
 
         // M2：步长限幅积分器的种子 = 参照本身 ⇒ 第一帧"本帧要走的量"为 0（与纯函数返回参照一致）。
         m_btn2JointCmd[0] = m_jointRef[0];

@@ -797,6 +797,12 @@ namespace Config {
     //     数值跳**不会到达机械臂**。⇒ "翻 true 有多危险"取决于**另一个开关**，
     //     别把今天的"还好"当成"那一半已经修好了"：把 `BTN2_JOINT_SPACE_ENABLED` 翻回 false
     //     （= 回滚关节空间）时，本条危害**原样复活**。修法没变，仍是上面那一行。
+    //     ★ 2026-09-23 整支终审 (E)：**那个开关定义在【本文件靠下】**，本行读它时它**还没定义**
+    //       （与上面 `ORIENT_SEAM_FIX` 那条"上面/下面说反了"的订正同款 —— 按名字找，别按方位词）。
+    //       定义处是 `const bool BTN2_JOINT_SPACE_ENABLED = true;`（写作本行时在 `:906`，
+    //       即在 `BTN2_ROTATION_COMPOSE_ENABLED` 之后、【逐轴符号常数】那一段之前）。
+    //       ⚠ 行号会漂（本轮就在本行之后就插了注释——它原在 `:888`）⇒ 稳的找法是
+    //         `grep -n "BTN2_JOINT_SPACE_ENABLED = " config/Config.h`。
     const bool   ORIENT_SEAM_FIX_ENABLED = false;
     const double ORIENT_MAX_OFFSET_DEG   = 150.0;   // 姿态相对参照的最大偏移 (deg)
     //   ⚠ 2026-09-23: 本常数现在有【第二个消费者】, 而它在那里量的是**别的东西** ——
@@ -885,6 +891,18 @@ namespace Config {
     //         ⇒ 对账的唯一权威是 `cmd`（见 `RelayCore.cpp` 分叉注释的"代价"那一段）。
     //     ⚠ 同轮 Minor 4 订正了 `ORIENT_MAX_STEP_DEG` **自己那句注释**——它现在有两个消费方，
     //       而右边那句"单步最大角度增量"只描述了旧路径那一个（同 M1 那类"文件在描述已变的行为"）。
+    //   ★ 2026-09-23 **整支终审轮**（A/B/C/D/F/G 七项）在**同两层**又动了注释与**两条**压报行为
+    //     （`RelayCore.cpp` / `RelayCore.h` / `relay/Button2Joint.h`；**同样没有被任何测试编译**）：
+    //     · (A) **I2 与 FK 那两道 `cerr` 也改成"每次按下只报一次"** —— 新增两个标记
+    //       （`m_btn2JointTargetRejectLogged` / `m_btn2JointFkRejectLogged`，复位点同上）。
+    //       这一条**动了行为**（喊几次变了），而"每帧仍然不下发"**一字未动**。
+    //       ⚠ 原来的理由"它们是瞬时的"**是假的**（见 `RelayCore.cpp` 那两段）；
+    //     · (B)(C) FK 门的注释订正：能 `REJECT` 的只有 NaN/Inf · 620mm · Z 0~795 ·
+    //       安全边界（**死**，`SAFETY_BOUNDARY_CLAMP_ENABLED=false` ⇒ identity）；圆柱奇异
+    //       30/80mm 与报警点黑名单**只回 `WARN_SLOW`、从不 `REJECT`**（调用方只判 `REJECT`）；
+    //       判的对象是**法兰**（无工具偏移），且关节模式下它**被扫过**、不再是个静点；
+    //     · (D) I1 的**假拒角落**如实写进注释与消息（臂真的停在物理全零位 ⇒ 重按也读全 0）；
+    //     · (F) 积分器的失败模式订正：**每帧有界、连续丢包数无界**（不是"不放大"）。
     const bool   BTN2_JOINT_SPACE_ENABLED = true;
 
     // ★★ 2026-09-23 按钮2 改【关节空间】—— 逐轴符号常数
