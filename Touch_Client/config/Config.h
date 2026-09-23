@@ -671,6 +671,15 @@ namespace Config {
     const int    FORCE_GUARD_REPORT_MS = 5000;
 
     // ========== 姿态控制参数 ==========
+    // ⚠★ 2026-09-23 复审 Minor 4：本常数现在有**两个**消费方，而它们量的是**不同的量**
+    //   —— 名字与右边那句"单步最大角度增量"只描述了**前者**，别按名字读它：
+    //     · 旧路径（本文件上面 `ORIENT_SEAM_FIX` 那一带、`RelayCore.cpp` 的 RPY 块）：
+    //       限的是**末端姿态表示量的逐帧增量**（degree，RPY 的三个分量各自）；
+    //     · 关节空间路径（`relay/Button2Joint.cpp` 的 `clampJointStep`，按钮2 关节模式）：
+    //       限的是**关节角的逐帧增量**（degree，J1~J6 各自）。
+    //   量纲碰巧都是"度"、值碰巧都可比 —— 但**语义不同**（一个是表示量、一个是物理关节角）。
+    //   这是与 `ORIENT_MAX_OFFSET_DEG` / `ORIENT_DEADZONE_DEG` 同一类的"单位变了"记账，
+    //   见 `relay/Button2Joint.h` 的「单位变了」那一段。**要分家就得新开一个常数**（别改语义）。
     const double ORIENT_MAX_STEP_DEG = 3.0;          // 单步最大角度增量 (degrees)
     // 姿态回路的【逐轴】响应门限 (degrees)。
     //
@@ -862,6 +871,18 @@ namespace Config {
     //     · I1/I2 **拒发两道**：参照不可信（六位恰好全 0 / 越关节限位）与目标越关节限位
     //       ⇒ `cerr` 出声 + 本帧不下发。
     //     · M2 **每帧步长限幅**：照 RPY 路径同一形状，逐轴夹到 `ORIENT_MAX_STEP_DEG`(3°/帧)。
+    //   ★ 2026-09-23 **Task 2 修复轮**（复审 Important#1 + Minor 2/3/4/5）在同一层又加了两处，
+    //     **同样没有自动化用例**（都包在 `RelayCore.cpp` 里）⇒ 只能靠人读 + 上机：
+    //     · I1 的 `cerr` 改成**每次按下只报一次**（同款复位点）+ 文案补上**恢复办法**
+    //       （松开再按按钮2 —— `m_jointRef` 是按下时的快照，按住期间不会自己恢复）。
+    //       ⚠ 只压**消息**，**不压 `return`**：被拒的帧每一帧照样不下发。
+    //     · Important#1 **按钮1 在关节模式里被静默忽略** ⇒ 补一条**每次按下一次**的 `cout`
+    //       （`m_btn2JointBtn1Noticed`）。**行为一行未改**（锁存是刻意的，见上面 C1）。
+    //       ⚠ 残留（**已知、可接受**，与 RPY 目标同款且更隐蔽）：关节模式下 `servoCmdX/Y/Z`
+    //         （按钮1 那条平移块写的）与 `app.robotTargetPose` **都在照常更新、却都不下发**
+    //         ⇒ 对账的唯一权威是 `cmd`（见 `RelayCore.cpp` 分叉注释的"代价"那一段）。
+    //     ⚠ 同轮 Minor 4 订正了 `ORIENT_MAX_STEP_DEG` **自己那句注释**——它现在有两个消费方，
+    //       而右边那句"单步最大角度增量"只描述了旧路径那一个（同 M1 那类"文件在描述已变的行为"）。
     const bool   BTN2_JOINT_SPACE_ENABLED = true;
 
     // ★★ 2026-09-23 按钮2 改【关节空间】—— 逐轴符号常数

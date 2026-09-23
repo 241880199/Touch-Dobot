@@ -1412,6 +1412,13 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
     //     画目标位姿）—— 也就是说**那一处显示的仍是那条不再下发的 RPY 目标**。真正发出去的是
     //     什么，看 `cmd`（下面的 `reportCommand(cmd)` 与 `app.lastCommandSent` 存的都是 `cmd`
     //     本身 ⇒ 那两处是准的）。
+    //   ★ 2026-09-23 复审 Important#1 补记：**同一句话对平移也成立，而且更隐蔽** ——
+    //     按钮1 那条平移块写的是 `servoCmdX/Y/Z`（本函数上面 `if (appState.lastButtonState)`
+    //     那一段，:891），它同样**照旧更新**、同样**一条都不发**（这一支发出的 `cmd` 是 `ServoJ`）。
+    //     ⇒ 关节模式下有**两个**"只显示、不下发"的目标：`servoCmdX/Y/Z`（它又流向下面
+    //       `[Relay] Motion sends` 的 `target=` 与 `app.robotTargetPose.x/y/z`）与
+    //       `app.robotTargetPose`（画在 GUI 上）。对账的唯一权威仍然是 `cmd`。
+    //     ⇒ 行为**一行未改**（锁存是刻意的，见下面关节分支的按钮1 提示）；改的是"让它出声"。
     //   ★ 2026-09-23 复审 I3：`[Relay] Motion sends` 那行**原来只打 target/orient**，在关节模式
     //     下等于**显示与实发不一致**（本项目最恨的那一类）⇒ 已在那行**补上真正发出去的 `cmd`**。
     //     二选一里选的是这一条（**不是**"关节模式下跳过 `robotTargetPose` 写入"）：
@@ -1443,6 +1450,30 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
     //     · 先按2 再按1 ⇒ 反过来翻成 `ServoP` ⇒ 姿态突变。
     //   锁存点：`onButton2Press`（与 `m_jointRef` 同一个临界区）。
     if (m_btn2JointMode && m_transmittingOrient && m_orientValid) {
+        // ================= 复审 Important#1：按钮1 在这个模式里被【静默忽略】=================
+        // 【场景】先单按按钮2（锁存关节模式）⇒ **按住不放**再按按钮1。按钮1 那条平移块
+        //   （本函数上面 `if (appState.lastButtonState)` 那一段，:891）**照旧在跑**：它更新
+        //   `servoCmdX/Y/Z`、过安全门、推进速度衰减 —— 而本分支**看都不看它们**（下面发的是
+        //   `ServoJ`）⇒ 平移**什么都没发生**，而且**一声不响**。
+        //   ⚠ 这正是本项目最恨的"显示值 ≠ 实发值"：GUI 的目标位姿在动、`[Relay] Motion sends`
+        //     那行的 `target=` 在动，只有臂不动。
+        // 【为什么不改行为】锁存是**刻意的**（C1：模式必须是"这一次按下"的属性 —— 中途换控制律
+        //   会把臂拽回按下时的位姿 / 姿态突变），而组合模式要**同时**做平移、平移在关节空间里
+        //   又不是关节量 ⇒ 要支持它就得回到 IK ⇒ 正是本方案要绕开的东西（计划已裁定）。
+        //   ⇒ 能改的只有**可观察性**与**书面记录**：让操作员当场知道"为什么不动"，
+        //     并在下面分叉注释的"代价"那一段把平移也点名（原文只点了 RPY 目标）。
+        // 【为什么必须一次性】按钮1 一直按着 ⇒ 这个条件**每帧都成立**；不设标记就是
+        //   "按住多久刷多久"，而 `cout` 写在触觉回调线程上（见 `m_btn2JointBtn1Noticed` 的注释）。
+        //   ⚠ 标记复位在 `onButton2Press` ⇒ 下一次按住会再报一次。
+        if (appState.lastButtonState && !m_btn2JointBtn1Noticed) {
+            m_btn2JointBtn1Noticed = true;
+            std::cout << "[Relay] Btn2 JOINT hold: button1 pressed — TRANSLATION IGNORED until re-press. "
+                      << "servoCmdX/Y/Z and robotTargetPose keep updating but this hold is latched to "
+                      << "ServoJ (a joint target has no translation, so none of it is sent). "
+                      << "Release and re-press button 2 to go back to combined (RPY) mode."
+                      << std::endl;
+        }
+
         // ================= 新路径：关节空间（厂商 ServoJ）=================
         // ① 关节目标：Task 1 的纯函数（**有单测**）——
         //      笔杆 Rx(前后摆)⇒J4 · Rz(左右摆)⇒J5 · Ry(自转)⇒J6；J1/J2/J3 无条件保持参照；
@@ -1475,17 +1506,37 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
         //   ⚠ 不覆盖 NaN：NaN 在 `isWithinJointLimits` 里逐条比较全为 false ⇒ 它**返回 true**
         //     （放行）。那个情形由下面 ② 的 FK 门接住（FK(NaN) ⇒ NaN ⇒ 第一道守卫 REJECT）。
         // ⚠ 无自动化用例（本文件不被任何测试编译）⇒ 由人读 + 上机。
+        // ⚠ Task 2-fix2 会把这个判据本身抽到 `relay/Button2Joint.cpp`（那里有单测）；
+        //   本提交**只改消息**（Minor 2/3），判据与 `return` 的位置一个字没动。
         {
             const bool allZero =
                 (m_jointRef[0] == 0.0 && m_jointRef[1] == 0.0 && m_jointRef[2] == 0.0 &&
                  m_jointRef[3] == 0.0 && m_jointRef[4] == 0.0 && m_jointRef[5] == 0.0);
             if (allZero || !Kinematics::isWithinJointLimits(m_jointRef)) {
-                std::cerr << "[Safety] Btn2 joint REF UNTRUSTWORTHY ("
-                          << (allZero ? "all six joints are exactly 0" : "outside joint limits")
-                          << ") — NOT sending. ref=("
-                          << m_jointRef[0] << "," << m_jointRef[1] << "," << m_jointRef[2] << ","
-                          << m_jointRef[3] << "," << m_jointRef[4] << "," << m_jointRef[5] << ")"
-                          << std::endl;
+                // ★ Minor 2：这条**构造上非瞬时** —— 反馈在按下那一刻就坏了 ⇒ `m_jointRef` 是
+                //   个坏快照 ⇒ 下面这个条件**整个按住期间恒成立** ⇒ 不压就是一整行、
+                //   以 ~30 Hz 的发送速率刷到操作员松手为止。而 `cerr` 写在**触觉回调线程**上，
+                //   控制台阻塞（QuickEdit）是本仓已记录的危害 ⇒ **每次按下只报一次**。
+                //   ⚠ 与上面/下面那些 `REJECT` 路径不同：它们是**瞬时**的（下一帧状态一变就不报了）
+                //     ⇒ 它们不需要这一手，这里也不需要顺手给它们加。
+                //   ⚠ 只压消息，**不压 `return`**：被拒的帧每一帧照样不下发（那是安全性质）。
+                //   ⚠ 标记复位在 `onButton2Press`（与 `m_btn2JointMode` 同一个临界区）⇒ 下一次按下会再报。
+                if (!m_btn2JointRefRejectLogged) {
+                    m_btn2JointRefRejectLogged = true;
+                    std::cerr << "[Safety] Btn2 joint REF UNTRUSTWORTHY ("
+                              << (allZero ? "all six joints are exactly 0" : "outside joint limits")
+                              << ") — NOT sending. Reported ONCE per press (every frame is still "
+                              << "rejected). ref=("
+                              << m_jointRef[0] << "," << m_jointRef[1] << "," << m_jointRef[2] << ","
+                              << m_jointRef[3] << "," << m_jointRef[4] << "," << m_jointRef[5] << ")"
+                              // ★ Minor 3：`m_jointRef` 是**按下那一刻的快照**，按住期间不会自己
+                              //   恢复 ⇒ 哪怕 `GetAngle()` 中途开始成功，这个参照照旧是坏的、
+                              //   整个按住都是死的。原文只说了"不发"，**没说怎么办** ⇒ 补上
+                              //   唯一的那条恢复路径（否则操作员只能等，或者以为坏了）。
+                              << ". RELEASE AND RE-PRESS BUTTON 2 — the reference is a press-time "
+                              << "snapshot and cannot recover while this hold lasts."
+                              << std::endl;
+                }
                 return;   // 本帧不下发（下一帧从同一状态重算）
             }
         }
@@ -1701,6 +1752,23 @@ void RelayCore::onButton2Press(const Vec3& stylusOrient) {
         //   ⚠ 这一行**替代**了 `sendPosition` 里原来每帧重算的那个条件 —— 那个写法会在按住
         //     中途换控制律（松开按钮1 ⇒ 翻到 ServoJ 并回到按下时的位姿；先按2再按1 ⇒ 翻到 ServoP）。
         m_btn2JointMode = Config::BTN2_JOINT_SPACE_ENABLED && !appState.lastButtonState;
+
+        // ⚠⚠ 2026-09-23 复审 Minor 5：上面这一行读到的 `appState.lastButtonState` **是本帧的值**，
+        //   而这一点**靠的是调用方的小节次序** —— `HapticCallback.cpp` 必须让
+        //   小节 5（按钮1 状态机，:114-123，它写 `app.lastButtonState = button1`）
+        //   **跑在小节 5b 之前**（小节 5b 才是调 `onButton2Press` 的那一处，:125-142）。
+        //   ⇒ 同帧内 1+2 一起按下时，这里读到的**已经是"按下"** ⇒ 锁成**组合模式**（走 RPY 旧路），
+        //     正是我们要的语义（"组合模式继续走旧路，不引入功能回退"）。
+        //   ⚠ 这条次序**没有任何自动化用例**：它跨文件、跨回调，两节调换顺序**不会报错、不会红**，
+        //     只会**静默**改掉组合语义（同帧 1+2 会被锁成关节模式 ⇒ 按钮1 的平移被忽略，
+        //     而那一路上还有一次性的 `cout` 提示）。**改 `HapticCallback.cpp` 的小节次序前先读这句。**
+        //   ⚠ "按钮1 早已按着、之后再按按钮2"那种情形**与次序无关**（`lastButtonState` 早在上一帧
+        //     就已经是 true）⇒ 受影响的只有**同帧**那一种，也就是最不容易被注意的那种。
+
+        // ★ 2026-09-23 复审 Minor 2：两条一次性标记与"模式"同生共死 ⇒ **在这里复位**
+        //   （同一个临界区、同一份"这一次按下"的快照），见 `RelayCore.h` 里那两个成员的注释。
+        m_btn2JointBtn1Noticed = false;
+        m_btn2JointRefRejectLogged = false;
 
         // M2：步长限幅积分器的种子 = 参照本身 ⇒ 第一帧"本帧要走的量"为 0（与纯函数返回参照一致）。
         m_btn2JointCmd[0] = m_jointRef[0];
