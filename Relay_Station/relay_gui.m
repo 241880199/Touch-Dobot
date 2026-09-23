@@ -588,19 +588,61 @@ function relay_gui()
     % ⚠ 每次调用各自 fopen/fclose(追加): 不需要持句柄、也就不用判句柄失效; 而且 MATLAB 被
     %   直接关掉时不会丢掉缓冲区里的最后几行。调用频率(几十条/秒上限)下这点开销无感。
     function tlog(tag, text)
-        persistent log_path
+        persistent log_path fid pendTag pendText pendN t0
         try
             if isempty(log_path)
                 log_path = fullfile(fileparts(mfilename('fullpath')), ...
                     ['_matlab_session_' char(datetime('now', 'Format', 'yyyyMMdd')) '.log']);
+                fid = -1; pendTag = ''; pendText = ''; pendN = 0;
+                t0 = tic;   % 刷新节拍的计时器：用【带句柄的 tic/toc】而不是 now ——
+                            %   后者会被 lint 判为"建议改用 datetime"，而 datetime('now')
+                            %   每条消息构造一次太贵，正好与本次"降开销"的目的相反。
+                            %   toc(t0) 是显式句柄形式，不受别处的 tic 影响。
             end
-            fid = fopen(log_path, 'a');
+            % ===== ★★ 2026-09-23 重写：从"每条消息 fopen/fclose 一次"改成"持句柄 + 每秒重开一次"
+            %   【为什么必须改】现场报告"按住按钮时 MATLAB 界面卡死、松手才恢复"。机制：
+            %   本函数跑在【收包回调】里，而那条线程正是服务界面的那条 ⇒ 每条一次 open/close
+            %   实测达 【~39 条/秒 × 3 次文件操作 ≈ 上百次 I/O/秒】，足以把界面饿死；而按钮一松、
+            %   C|ServoP 那一路停了、消息率骤降 ⇒ 界面就"活了"。
+            %   ⚠ 这是【测量工具扰动了被测对象】—— 本项目的老教训（09-21 那次"仪器本身出错"）；
+            %     所以改法是降低开销，而不是"少测点"。
+            %   【为什么不能只持句柄】实测（2026-09-23）：fseek(fid,0,'cof') 【不刷新】——
+            %   MATLAB 还在跑时另一个进程读到的是空文件 ⇒ 我的实时读取会失效。
+            %   ⇒ 折中：持句柄写（便宜），但【每秒 close+reopen 一次】把数据推出去，
+            %     我的读取最多滞后 1 秒。
+            % ===== 另一处等量开销：同内容去重 =====
+            %   客户端有一路 W| 是【设计上 30 Hz 重发】的（RelayCore.cpp "持续重发 MATLAB 警告"），
+            %   实测 21 条/秒，而每一拍的文本【完全相同】—— 信息量 0，却要付全部 I/O 代价。
+            %   G|/S| 这类状态量在不变时同理。⇒ 连续同内容【只写第一行】，之后只计数，
+            %   等它变了（或该标签换了）再补一行 "(xN 次相同)"。信息不丢，量掉一个数量级。
             if fid < 0
-                return;
+                fid = fopen(log_path, 'a');
+                if fid < 0
+                    return;
+                end
             end
-            fprintf(fid, '%s %-5s %s\n', ...
-                char(datetime('now', 'Format', 'HH:mm:ss.SSS')), tag, text);
-            fclose(fid);
+            same = strcmp(tag, pendTag) && strcmp(text, pendText);
+            if same
+                pendN = pendN + 1;
+            else
+                if pendN > 1
+                    fprintf(fid, '%s %-5s ···· 上一行内容连续相同, 另有 %d 次 (已省略)\n', ...
+                        char(datetime('now', 'Format', 'HH:mm:ss.SSS')), 'REP', pendN - 1);
+                end
+                fprintf(fid, '%s %-5s %s\n', ...
+                    char(datetime('now', 'Format', 'HH:mm:ss.SSS')), tag, text);
+                pendTag = tag; pendText = text; pendN = 1;
+            end
+            % 每秒把数据推出去（close 才会真落盘 —— fseek 不刷，已实测）
+            if toc(t0) >= 1.0
+                if pendN > 1
+                    fprintf(fid, '%s %-5s ···· 上一行内容连续相同, 另有 %d 次 (已省略)\n', ...
+                        char(datetime('now', 'Format', 'HH:mm:ss.SSS')), 'REP', pendN - 1);
+                    pendN = 1;
+                end
+                fclose(fid); fid = -1;
+                t0 = tic;
+            end
         catch
             % 刻意静默 —— 理由见本函数开头的注释
         end
@@ -703,6 +745,11 @@ function relay_gui()
     end
 
     function processNetworkData()
+        % 抽样计数（见下面旁路日志那一处）：persistent 必须声明在【函数顶层】——
+        %   放进循环体里会被 lint 报 "PERSISTENT 可能会非常低效"（实测 2026-09-23）。
+        persistent fastN
+        if isempty(fastN), fastN = 0; end
+
         if isempty(S.server) || ~isvalid(S.server) || S.server.NumBytesAvailable == 0
             return;
         end
@@ -719,10 +766,20 @@ function relay_gui()
 
                 S.packet_count = S.packet_count + 1;
 
-                % 旁路日志: 只记【低频】协议 —— 高频遥测的名单与理由见 tlog 的注释。
-                %   这四个前缀是 123 Hz 级, 记全了会把文件淹掉, 且与本功能无关。
+                % 旁路日志: 低频协议全记；高频遥测【抽样】记。
+                %   ★ 2026-09-23 改：从前是"P|/F|/J|/RP| 一律不记"，结果是**日志回答不了
+                %   "这几路到底有没有到"** —— 而当天要判的恰恰是这个（RP| 的解析 bug 就是这样
+                %   找到的：C++ 侧确证发了，只能从 MATLAB 侧查接收）。
+                %   ⇒ 现在除 F|（纯力遥测，与本功能无关）外，其余三路每 10 条记 1 条。
+                %     抽样率足够看出"有没有到、值在不在动"，又不会淹掉文件。
+                %   （P| 30 Hz、J|/RP| 各 10 Hz ⇒ 抽样后约 3 + 1 + 1 条/秒。）
                 if ~any(startsWith(msg, {'P|', 'F|', 'J|', 'RP|'}))
                     tlog('IN', msg);
+                elseif ~startsWith(msg, 'F|')
+                    fastN = fastN + 1;
+                    if mod(fastN, 10) == 1
+                        tlog('IN-S', msg);
+                    end
                 end
 
                 % -- 现有协议 --
@@ -747,7 +804,20 @@ function relay_gui()
                     vals = sscanf(msg(3:end), '%f,%f,%f,%f,%f,%f');
                     if length(vals) == 6, S.joint_angles = vals'; end
                 elseif startsWith(msg, 'RP|')
-                    vals = sscanf(msg(3:end), '%f,%f,%f,%f,%f,%f');
+                    % ★★★ 2026-09-23 修 —— 这里从前是 msg(3:end)，**一个字符的错，静默了整条链**。
+                    %   'RP|' 与 'RG|' 一样是【三个】字符 ⇒ 载荷从第 4 个字符起。
+                    %   msg(3:end) 的开头是 '|'，sscanf('%f,...') 撞上非数字【立刻返回空】
+                    %   ⇒ length(vals)==6 永远为假 ⇒ S.robot_pos 一次都没被赋过值。
+                    %   【现场症状(2026-09-23)】操作员报告"面板上 orientation 恒为 0" ——
+                    %   而 C++ 侧是好的（同一份 robotActualPose 既驱动姿态控制、又发给 RP|，
+                    %   且 `pos=`(GetPose) 与 `tcp=`(30004 帧) 实测逐位相同）。
+                    %   【代价】两处，都静默：
+                    %     · 面板 Position / Orientation 两行恒 0（来自同一个 S.robot_pos）；
+                    %     · 3D 里那个 eeMarkerActual（实际位置球标）被 `if any(rp(1:3)~=0)` 挡住
+                    %       ⇒ 【从来没显示过】。
+                    %   证据：headless 实测 `sscanf('RP|12.34,...'(3:end))` 长度 0、
+                    %   `(4:end)` 长度 6。同文件 RG| 那一段早就踩过并写下了警告，本支漏修。
+                    vals = sscanf(msg(4:end), '%f,%f,%f,%f,%f,%f');
                     if length(vals) == 6, S.robot_pos = vals'; end
                 % -- 新协议 --
                 elseif startsWith(msg, 'S|')
@@ -835,12 +905,14 @@ function relay_gui()
                             sldGain.Enable = 'on';
                             edGain.Enable  = 'on';
                             btnGainDefault.Enable = 'on';
-                            % 旁路日志: 控件的【实际状态】(范围/当前值) —— "滑条真的解锁了
-                            %   没有"与"它显示的是谁的范围"两件事在这里一次记全。
-                            tlog('CTL', sprintf(['enabled limits=[%.1f,%.1f] ' ...
-                                  'value=%.3f wasKnown=%d'], ...
-                                  sldGain.Limits(1), sldGain.Limits(2), ...
-                                  sldGain.Value, wasKnown));
+                            % 旁路日志: 控件【解锁那一刻】的实际 Limits 与是否首次。
+                            % ⚠ 这里【刻意不记 Value】: 下面那句 Limits 赋值会把空值悄悄夹成
+                            %   min (实测, 见本函数上面那段), 而真值是在更后面 (sldGain.Value =
+                            %   S.tuning.gain) 才写进去的 —— 在这一行记 Value 会记到一个中间态
+                            %   (实测 2026-09-23: 记成 100, 而实际显示 120), 那正是"拿快照下
+                            %   断言"的坑。值改记在它真正落定的地方, 标签是 SET。
+                            tlog('CTL', sprintf('enabled limits=[%.1f,%.1f] wasKnown=%d', ...
+                                  sldGain.Limits(1), sldGain.Limits(2), wasKnown));
                             if ~wasKnown
                                 fprintf(['[Relay] 增益控件已启用: 范围 [%.0f, %.0f], ' ...
                                          '当前 %.1f\n'], ...
@@ -885,6 +957,11 @@ function relay_gui()
                             if S.tuning.gain >= S.tuning.min && S.tuning.gain <= S.tuning.max
                                 sldGain.Value = S.tuning.gain;
                                 edGain.Value  = S.tuning.gain;
+                                % 旁路日志: 值【落定】的地方 —— 这才是"屏幕上到底是几"。
+                                %   非拖动时每条回读都会走到这里 (回读本身被 C++ 限到 ≥100ms,
+                                %   且只在值变/重连时才发) ⇒ 量很小, 不会淹掉文件。
+                                tlog('SET', sprintf('value=%.3f (from RG readback)', ...
+                                      sldGain.Value));
                                 % ★ 从"未知"那一档恢复 —— 必须也把控件【恢复成可用】。
                                 %   ⚠ 这一步不能指望上面那道范围门: 它只在"第一次回读 / 范围变了"
                                 %   时才跑, 而矛盾状态【随时】可能被下一条正常回读解掉 (同一范围内
