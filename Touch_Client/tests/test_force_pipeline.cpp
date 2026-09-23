@@ -303,9 +303,11 @@ static void test_coord_transform() {
     //     真正用的那个数。上面 ratio 那两个常数【保留】是对的 —— 流水线确实读它们。
     double ratio = Config::FORCE_MAX_TOUCH_N / Config::FORCE_MAX_SENSOR_N;
     double gain = ForceTuning::gain();
-    CHECK(fabs(fd.hapticOut[0] - (-ratio * 10.0 * gain)) < 0.01);     // 来自 +Fx = +10 ⇒ 【负】
+    CHECK(fabs(fd.hapticOut[0] - (+ratio * 10.0 * gain)) < 0.01);     // 来自 +Fx = +10 ⇒ 【正】
+                                                                      //   (2026-09-23 符号 −1→+1，同 f196cb0)
     CHECK(fabs(fd.hapticOut[1]) < 0.01);                              // Fz→Y 已关 ⇒ 与 fz=+30 无关
-    CHECK(fabs(fd.hapticOut[2] - (-ratio * 20.0 * gain)) < 0.01);     // 来自 +Fy = +20 ⇒ 【负】
+    CHECK(fabs(fd.hapticOut[2] - (+ratio * 20.0 * gain)) < 0.01);     // 来自 +Fy = +20 ⇒ 【正】
+                                                                      //   (2026-09-23 符号 −1→+1，同 f196cb0)
     PASS();
 }
 
