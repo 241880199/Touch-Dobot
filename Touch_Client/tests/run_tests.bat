@@ -551,6 +551,46 @@ if %ERRORLEVEL% EQU 0 (
 )
 echo.
 
+rem ============================================================
+rem Suite wired into "build then run" on 2026-09-23 (Task 1 of the
+rem   haptic-output jitter instrument plan):
+rem   jitter_stats -- the pure statistics accumulator (JitterStats.h) that the
+rem   jitter diagnosis feeds once per FRAME to get (a) the per-axis sd of
+rem   hapticOut and (b) the fraction of frames whose residual crosses the 0.20 N
+rem   dead zone. Both numbers decide whether the "1.27 sigma against a 0.20 N
+rem   dead zone" mechanism stands, so an error here flips the conclusion.
+rem   The assertion count is deliberately NOT copied here: the suite prints it on
+rem   every run, and a hand-typed copy only goes stale in the silent direction
+rem   (see the note on hand-typed numbers in the NOT RUN block at the bottom).
+rem   Adding this .cpp is what makes the runtime suite count on disk move
+rem   from 22 to 23; if this section is ever deleted while the .cpp stays,
+rem   the harness asserts at the bottom and exits 1 -- by design.
+rem   The FORM of the result check is NOT special to this suite -- every
+rem   section in this file uses it. See "HOW TEST RESULTS ARE JUDGED" at
+rem   the top of this file for the rule and the two tempting-but-wrong forms.
+rem ============================================================
+
+echo --- Building test_jitter_stats ---
+call "%TESTDIR%\build_jitter_stats_test.bat"
+@echo off
+if %ERRORLEVEL% EQU 0 (
+    echo   Build OK
+    echo.
+    echo === test_jitter_stats.exe ===
+    "%TESTDIR%\test_jitter_stats.exe"
+    if !ERRORLEVEL! EQU 0 (
+        set /a PASSED+=1
+        echo   [OK]
+    ) else (
+        set /a FAILED+=1
+        echo   [FAIL]
+    )
+) else (
+    echo   [FAIL: build error]
+    set /a FAILED+=1
+)
+echo.
+
 echo ================================================
 echo   Tests complete
 echo ================================================
