@@ -1419,7 +1419,12 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
     //   能守它的只有三样：① MSBuild 零 error；② 负对照（往本文件注入语法错误 ⇒ 必须报
     //   `error C…`，证明这次构建确实在编它）；③ 上机（Task 3 的执行单）。纯函数那一半有单测
     //   （`tests/test_button2_joint.cpp`），但"**接线接对了没有**"只能靠上机。
-    if (Config::BTN2_JOINT_SPACE_ENABLED && m_transmittingOrient && m_orientValid) {
+    // ⚠ **只按按钮2**（不含按钮1+2 组合）：组合模式要**同时**做平移，而**平移在关节空间里不是
+    //   一个关节量** ⇒ 要支持它就得回到 IK ⇒ 正是本方案要绕开的东西 ✗。
+    //   ⇒ 组合模式**继续走旧的 RPY 路径**（= 保持现状，**不引入功能回退** ✓）；这是有理由的取舍，
+    //     不是遗漏（2026-09-23 控制方裁定）。
+    if (Config::BTN2_JOINT_SPACE_ENABLED && m_transmittingOrient && m_orientValid &&
+        !appState.lastButtonState) {
         // ================= 新路径：关节空间（厂商 ServoJ）=================
         // ① 关节目标：Task 1 的纯函数（**有单测**）——
         //      笔杆 Rx(前后摆)⇒J4 · Rz(左右摆)⇒J5 · Ry(自转)⇒J6；J1/J2/J3 无条件保持参照；
