@@ -1036,7 +1036,8 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
     }
 
     // Mode 1: Position-only (button1, no button2) — optimize orientation
-    if (appState.lastButtonState && !m_transmittingOrient) {
+    if (Config::SINGAVOID_ORIENT_OPTIMIZE_ENABLED &&
+        appState.lastButtonState && !m_transmittingOrient) {
         double curJoints[6];
         {
             EnterCriticalSection(&app.robotPoseMutex);
