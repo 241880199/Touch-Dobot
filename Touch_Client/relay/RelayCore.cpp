@@ -250,8 +250,10 @@ static DWORD WINAPI forceReaderThread(LPVOID) {
             // 同一帧里的 TCPForce @720 —— 与 @576 是两个不同的量 (见 AppState.h 的说明)。
             // 实测改 EnableRobot 的负载时 @576 不变, 所以两路都留着, 供以后对比/诊断。
             double* tcpForcePtr = reinterpret_cast<double*>(buf + 720);
-            // 同一帧里的 ToolVectorActual @624 / TCPSpeedActual @672 —— 坐标系未确认
-            // (见 AppState.h 的说明)。现在只镜像进 ForceData, 供运动探针并排打印对照。
+            // 同一帧里的 ToolVectorActual @624 / TCPSpeedActual @672。
+            // ★ 2026-09-24: @624 的坐标系已确认 (= 基座系，与 GetPose 同约定) **且已被消费**
+            //   —— 本函数下面取重力项姿态时优先用它 (恰好全 0 才退回仪表盘)。
+            //   判定办法与证据写在 AppState.h 那个字段上。@672 **仍未确认**，仍然只镜像。
             const double* tcpPosePtr = reinterpret_cast<const double*>(buf + 624);
             const double* tcpSpeedPtr = reinterpret_cast<const double*>(buf + 672);
             // 同一帧里的 SixForceValue @1304 = "当前六维力数据原始值" —— 与 @576 的派生量
@@ -271,17 +273,31 @@ static DWORD WINAPI forceReaderThread(LPVOID) {
             // 【姿态为什么在这里读】与 pollForce 【同一来源、同一把锁、同一顺序】:
             //   robotPoseMutex 先取先放, 然后才取 forceDataMutex。反过来会与 pollForce 构成死锁。
             //   (HapticCallback 从不嵌套这两把锁 —— 144~172 行是串行取的。)
-            //   ⚠ 姿态仍只由 GetPose() 每 100 ms 刷新 (robotActualPose) ⇒ A·g 是阶梯。
-            //     但重力项变化慢 (0.1° ≈ 0.007 N), 代价可接受。真要同帧对齐: 30004 帧里本来就带
-            //     ToolVectorActual @624 (已镜像进 forceData.tcpPoseActual) —— 那是第二步, 未做。
+            //   ★★ 2026-09-24: **姿态改用【同一帧】的 ToolVectorActual @624**。上面那句
+            //     "姿态仍只由 GetPose() 每 100 ms 刷新 ⇒ A·g 是阶梯，但重力项变化慢
+            //      (0.1° ≈ 0.007 N)，代价可接受" —— **算术对，前提错**：
+            //      0.1° 是"慢速工况"下的陈旧量；关节模式手腕能到 90°/s，而姿态实测每 ~200 ms
+            //      才更新一次 ⇒ 每步陈旧 **9~21°** ⇒ `A·g` 残差可达 **1.55 N**。
+            //      离线复算与 force_demo_log 同一时刻的实测 |F| 逐个对上：
+            //        0.591/0.591 · 1.041/1.046 · 0.670/0.691 · 1.555/1.656（178 个姿态台阶，
+            //        corr(|ΔFg|,|F|) = +0.727）；乘力反射增益 ≈1.98 ⇒ 手上 1~3 N 的"较大且抖的力"。
+            //   【@624 的约定已实测确认，不再是"未确认"】位置那六位早就是同一个量
+            //     （180 条采样逐位相同到 ±0.001 mm）；姿态那三位 2026-09-24 实测：静止 32 个样本的
+            //     旋转矩阵差中位 0.000° / 最大 0.068°，运动样本的差正好= GetPose 自己的陈旧量
+            //     ⇒ 与 GetPose **同一约定**（ZYX/度/基座系）。
+            //   【为什么仍读一份仪表盘姿态】@624 在启动早期可能还没被填（全 0）⇒ 那一步退回
+            //     GetPose（难看，但比把 0 当姿态喂进重力项好得多）。判据沿用本仓既有的
+            //     "恰好全 0 = 从没写过"那条指纹（同 `isTrustworthyJointRef` 的子句一）。
+            //   ⚠ 兜底那一读守的是【与从前完全相同】的锁行为：同一把锁、同一顺序、同一频率
+            //     ⇒ 不引入任何新的锁序/争用（下面 forceDataMutex 那段注释仍然成立）。
             // 【★ 给下一个人的警告】这两个调用【全程序只能有这一处】。若在 pollForce 里再调一次,
             //   滤波器每帧被推两次 (11 Hz 那一路会把 123 Hz 的结果又滤一遍) ⇒ 相位与幅值全乱,
             //   而且没有任何报错。
-            double pose[6] = {0};
+            double dashPose[6] = {0};
             EnterCriticalSection(&app.robotPoseMutex);
-            pose[0] = app.robotActualPose.x;  pose[1] = app.robotActualPose.y;
-            pose[2] = app.robotActualPose.z;  pose[3] = app.robotActualPose.rx;
-            pose[4] = app.robotActualPose.ry; pose[5] = app.robotActualPose.rz;
+            dashPose[0] = app.robotActualPose.x;  dashPose[1] = app.robotActualPose.y;
+            dashPose[2] = app.robotActualPose.z;  dashPose[3] = app.robotActualPose.rx;
+            dashPose[4] = app.robotActualPose.ry; dashPose[5] = app.robotActualPose.rz;
             LeaveCriticalSection(&app.robotPoseMutex);
 
             EnterCriticalSection(&app.forceDataMutex);
@@ -295,6 +311,27 @@ static DWORD WINAPI forceReaderThread(LPVOID) {
             app.forceData.sixForceOnline = sixForceOnline;
             app.forceData.lastUpdateMs = GetTickCount();
             app.forceData.isStale = false;
+
+            // ★ 姿态：优先【同一帧】的 @624；全 0（启动早期没填过）则退回上面那份仪表盘姿态。
+            //   ⚠ 判据是"恰好全 0"而不是"接近 0"：机械臂真的停在法兰 (0,0,0)/姿态全 0 是不可能同时
+            //     成立的位姿，而"从没被写过"恰好就是这个指纹 —— 与 isTrustworthyJointRef 同一套。
+            const double* p624 = app.forceData.tcpPoseActual;
+            const bool have624 = !(p624[0] == 0.0 && p624[1] == 0.0 && p624[2] == 0.0 &&
+                                   p624[3] == 0.0 && p624[4] == 0.0 && p624[5] == 0.0);
+            double pose[6];
+            for (int i = 0; i < 6; i++) pose[i] = have624 ? p624[i] : dashPose[i];
+
+            // 一次性出声：把"这一刻用的是哪个源"变成可观测的。两种源的差别正是本节要消灭的东西
+            // —— 而"读代码才知道用的哪一个"正是本项目最忌的那种状态。
+            // ⚠ 只打一行、且只在这个线程里（forceDataMutex 持锁中 ⇒ 同一时刻只有一个写者）。
+            static bool s_poseSrcReported = false;
+            if (!s_poseSrcReported) {
+                s_poseSrcReported = true;
+                std::cout << "[Force] 重力项姿态源 = "
+                          << (have624 ? "同帧 ToolVectorActual @624 (123 Hz)"
+                                      : "⚠ GetPose 仪表盘 (~10 Hz 阶梯) —— @624 还没被填")
+                          << std::endl;
+            }
 
             // 顺序不能反: 先补偿 (ForceCompensation), 再滤波 + 映射 (ForcePipeline)。
             ForceCompensation::step(app.forceData, pose);

@@ -153,10 +153,16 @@ public:
         double tcpForce[6] = {0};
 
         // 30004 帧里的 ToolVectorActual @624 = "TCP笛卡尔实际坐标值" (6×double)。
-        // 与 robotActualPose (来自 100ms 一次的 GetPose() 仪表盘查询) 是【两个不同的来源】:
-        // 这个在 125Hz 的帧里, 但我们还没用它。**坐标系未确认** —— 名字含 "Tool",
-        // 而重力模型 (ForceCompensation / TcpCalibration::gravitySensorFrame) 假定的是
-        // 【基座系】(与 GetPose 一致)。并排打印两者即可判定。
+        // ★★ 2026-09-24: **坐标系已确认 = 基座系、欧拉约定与 GetPose 相同，且已被消费** ——
+        //   重力项 (ForceCompensation::step 里的 A·g) 现在吃的是【这一份同帧姿态】，
+        //   不再是 100ms 一次的 GetPose 仪表盘查询。理由：关节模式手腕能到 90°/s，
+        //   而那一阶梯度实测每 ~200ms 才更新 ⇒ 每步陈旧 9~21° ⇒ 残差可达 1.55 N
+        //   (离线复算与 force_demo_log 同一时刻的实测 |F| 逐个对上)。见 RelayCore.cpp 改它的那一段。
+        //   【怎么确认的】位置：180 条采样与 GetPose 逐位相同到 ±0.001 mm；
+        //     姿态：静止 32 个样本的旋转矩阵差中位 0.000°/最大 0.068°，运动样本的差
+        //     正好 = GetPose 自己的陈旧量 ⇒ 同一约定 (ZYX/度/基座系)。
+        //   ⚠ 消费点的判据是"恰好全 0 = 从没写过 ⇒ 退回 GetPose"(沿用本仓那条既有指纹)。
+        //   ⚠ 下面 TCPSpeedActual @672 的坐标系**仍未确认** —— 别顺手把它也换掉。
         double tcpPoseActual[6] = {0};
         // 30004 帧里的 TCPSpeedActual @672 = "TCP笛卡尔实际速度值" (6×double)。
         double tcpSpeedActual[6] = {0};
