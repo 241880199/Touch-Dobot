@@ -2264,6 +2264,22 @@ bool RelayCore::connectRelaySocket() {
     int timeout = 100;
     setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (char*)&timeout, sizeof(timeout));
 
+    // ★★ 2026-09-24: 这条 socket 改成【非阻塞】。
+    //   【为什么】它唯一的发送入口 `sendRelayUpdate` 跑在【触觉线程】里
+    //     （`HapticCallback.cpp:146/150` → `sendPosition` / `reportPosition`），而现场实测：
+    //     **MATLAB 开着、只是一时收得慢（背压）** ⇒ `send` 卡满 `SO_SNDTIMEO`(100ms) 超时，
+    //     而一个触觉帧里有**两处**调用 ⇒ 触觉线程静默 **204ms** ⇒ 安全看门狗判 FATAL ⇒
+    //     `ERR_EMERGENCY_STOP`、机械臂被禁用。
+    //     ⇒ 一条【只给 MATLAB 画孪生】的遥测链路，把机械臂急停了 —— 那是设计上的越权，
+    //       不是参数问题。MATLAB 在架构上是 display only（见 `start_system.bat` 的注释）。
+    //   【为什么必须放在 connect 之后】`FIONBIO` 对 `connect` 也生效 ⇒ 放前面会把连接变成
+    //     异步的，本函数下面"连不上就 closesocket 返回 false"那套语义就变了。
+    //   【收包路径不受影响，且已被核过】它本来就**先 select 零超时再 recv**，且把 `n <= 0`
+    //     一律当"没有数据"（本文件 `recv(sock, …)` 那一处，全文件只有那一处 recv）
+    //     ⇒ 非阻塞下 `recv` 返回 `WSAEWOULDBLOCK` 走的正是同一条路。
+    u_long nb = 1;
+    ioctlsocket(sock, FIONBIO, &nb);
+
     EnterCriticalSection(&m_relaySocketMutex);
     m_relaySocket = sock;
     LeaveCriticalSection(&m_relaySocketMutex);
@@ -2302,6 +2318,24 @@ void RelayCore::initRelayReporting() {
 // ⚠ 这条路径从前【完全无声】: sendRelayUpdate 把两次 send 的返回值直接相加就 return,
 //   SOCKET_ERROR (-1) 与换行那次 (+1) 会抵消成正数 ⇒ 连接死掉看起来和正常一样。
 static bool s_relayDownReported = false;
+
+// ★ 2026-09-24: 遥测【丢帧】的计数与限频上报 —— 与"断线"是两件事（见 sendRelayUpdate 里
+//   那条语义分界）。丢帧是背压下的正常取舍：宁可丢孪生的一帧，也不让触觉线程等 100ms。
+//   ⚠ 计数用 Interlocked：本路径可能被两个线程调用，普通 `++` 会丢计数。
+//   ⚠ 上报那两句**仍然是竞态的，且刻意不修**：最坏是多打一行或少打一行；
+//     为此再加一把锁，就是把触觉线程又往锁上挂一次 —— 那正是本次要消灭的东西。
+//   ⚠ 计数【不】在重连时清零：它是整场会话的累计，"今天一共丢了多少帧"才是有用的数。
+static volatile LONG s_relayDropFrames = 0;
+static DWORD s_relayDropLastReportMs = 0;
+
+static void noteRelayDrop() {
+    const LONG total = InterlockedIncrement(&s_relayDropFrames);
+    const DWORD now = GetTickCount();
+    if (s_relayDropLastReportMs != 0 && (now - s_relayDropLastReportMs) < 5000) return;
+    s_relayDropLastReportMs = now;
+    std::cout << "[Relay] GUI 遥测丢帧 " << total
+              << " 帧（对端一时收不过来 = 背压，【不是断线】；孪生会跳一段）" << std::endl;
+}
 
 void RelayCore::markRelayDisconnected(const char* why) {
     EnterCriticalSection(&m_relaySocketMutex);
@@ -2361,21 +2395,48 @@ int RelayCore::sendRelayUpdate(const char* msg) {
     LeaveCriticalSection(&m_relaySocketMutex);
     if (sock == INVALID_SOCKET) return -1;
 
-    // ★★ 2026-09-21: 从这里起【检查 send 的返回值】。
-    //   从前是 `return n1 + n2;` —— SOCKET_ERROR 是 -1, 而换行那次通常是 +1 ⇒ **两者相加
-    //   正好把错误抵消掉**, 调用方永远看不到失败, 连接死掉这件事在代码里【完全不留痕】。
-    //   现场代价: MATLAB 的孪生停在默认姿势, 而没有任何一处能说明"是一条消息都没送到"。
-    int n1 = send(sock, msg, (int)strlen(msg), 0);
-    if (n1 == SOCKET_ERROR) {
+    // ★★ 2026-09-24: 【先探可写性，不可写就丢这一帧】—— 与收包路径同一套办法（select 零超时）。
+    //   起因见 `connectRelaySocket` 里 FIONBIO 那一段：现场一次 204ms 的触觉静默触发了急停。
+    //   ============ 本函数最要紧的一处语义分界 ============
+    //     · 不可写 / WSAEWOULDBLOCK / WSAETIMEDOUT ⇒ **背压** ⇒ 丢帧、【不断线】。
+    //       从前把超时当断线 ⇒ 对端一次正常的慢就被 closesocket + 每秒重连 ——
+    //       而"对端慢"与"对端死"要做的处置完全相反（一个该丢帧，一个该重连）。
+    //     · 其它 send 错误（ECONNRESET / EPIPE …）⇒ 真的死了 ⇒ 才 `markRelayDisconnected`。
+    //   返回值：>0 已发字节 · −1 socket 无效或真断线 · −2 丢帧（背压）。
+    //   ⚠ 调用方【不消费】返回值（那是既有事实，见 `reportCommand` 那处的注释）——
+    //     加一个 −2 不会改变任何调用点的行为，只是把"丢了"这件事变成可数的。
+    fd_set wfds;
+    FD_ZERO(&wfds);
+    FD_SET(sock, &wfds);
+    timeval tv = { 0, 0 };
+    if (select(0, nullptr, &wfds, nullptr, &tv) <= 0) {
+        noteRelayDrop();
+        return -2;
+    }
+
+    // ★ 两次 send 合成一次（msg + '\n'）：
+    //   ① 暴露时间减半（原来正文与换行各是一次独立 send，各能卡一个 SO_SNDTIMEO）；
+    //   ② 顺手修掉那条老账 —— 两个线程同时发时正文与换行会交错、**粘行**，
+    //      而粘行对 MATLAB 而言等于"第二条消息不存在"（静默丢）。
+    //   ⚠ 截断就【整帧丢掉】，不发半条：半条会被对端当成一条畸形消息解析。
+    char line[512];
+    const int n = snprintf(line, sizeof(line), "%s\n", msg);
+    if (n <= 0 || n >= (int)sizeof(line)) {
+        noteRelayDrop();
+        return -2;
+    }
+
+    const int sent = send(sock, line, n, 0);
+    if (sent == SOCKET_ERROR) {
+        const int e = WSAGetLastError();
+        if (e == WSAEWOULDBLOCK || e == WSAETIMEDOUT) {   // 背压，不是死
+            noteRelayDrop();
+            return -2;
+        }
         markRelayDisconnected("send() 失败");
         return -1;
     }
-    int n2 = send(sock, "\n", 1, 0);
-    if (n2 == SOCKET_ERROR) {
-        markRelayDisconnected("send(换行) 失败");
-        return -1;
-    }
-    return n1 + n2;
+    return sent;
 }
 
 void RelayCore::reportPosition() {
