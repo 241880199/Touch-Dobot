@@ -172,7 +172,17 @@ GainReport gainReportDecision(bool force, double g, double lastSentGain,
 ### 现状（核过源码）
 - `ForceTuning::tick()`（`ForceTuning.cpp:118`）：内联 `GetTickCount()`（`:120`），与 `s_dirtyMs` 比 `TUNING_DEBOUNCE_MS`（= 1000，`ForceTuning.h:18`）。
 - **1 秒防抖是"跨重启保留"的唯一实现**（它是唯一的落盘路径）。
-- `test_force_tuning.cpp` 有 12 条用例，**没有一条碰 `tick()`** ⇒ 生产走的那条路**一条断言都没有**（而规格的验收行「落盘 → 读回」只经由显式路径那对函数验证过）。
+- `test_force_tuning.cpp` 有 **11** 条用例（本文件原先写"12"，是错的；Task 1 实现者按实测订正），
+  **没有一条碰 `tick()`** ⇒ 生产走的那条路**一条断言都没有**（而规格的验收行「落盘 → 读回」只经由显式路径那对函数验证过）。
+
+### ★ 本节设计里的一处缺陷（2026-09-24 实现时才发现，已修）
+上面写着"断言文件不存在或内容未变"用的是 `test_force_tuning.cpp` 的临时文件 `kTmp` ——
+但 `tickAt` 落盘写的是 `CalibStore::fileFor("force_tuning.json")`（**由 exe 位置推出的真实路径**），
+不是 `kTmp`。**照本节字面实现，那几条"还没写"的断言会【恒真】**（文件永远不存在 ⇒ 永远绿 ⇒
+防抖根本没被测到）。实现者的修法：加 `ForceTuning::setStorePathForTest(path)` 把落盘目标钉到
+`kTmp`（照既有 `ForceCompensation::setStepDtForTest` 的接缝先例）。**不采用**"去断言那个真实路径"
+—— 那会让测试运行时**覆盖并删掉现场的增益文件**（本项目记过这一笔：测试按工作目录写标定状态）。
+⇒ 教训与本项目一贯的那条同形：**"测试绿了"要先问它是不是空转**。
 
 ### 设计
 ```cpp
@@ -186,7 +196,10 @@ void tick();                        // = tickAt(GetTickCount())
 - 不 dirty 时 `tickAt(t0 + 10^6)` ⇒ 什么都不做（不重复落盘）。
 
 ### 判据
-- 四条全绿；**负对照**：把 `tickAt` 的比较改成 `>` 以外的东西（例如去掉窗口判断）⇒ 第 2 条必红。
+- 四条全绿；**负对照**：去掉 `tickAt` 的窗口判断那一行 ⇒ **第 1 条**（`test_tick_at_debounces_persistence`）必红。
+  ⚠ 本文件原先写"第 2 条必红"，是错的（Task 1 复审按实际输出订正：删窗口判断时第 1 条红、
+  第 2 条仍绿，因为第一次 `tickAt` 已经清掉了 `s_dirty`）。实现者另补了一条**打在另一处实现**上的
+  负对照（删 `s_dirty = false;` ⇒ 第 2 条红），两条合起来才说明**两条用例都不空转**。
 - 沿用 `test_force_tuning.cpp` 已有的临时文件名与清理约定（`_tuning_test_tmp.json`）。
 
 ---

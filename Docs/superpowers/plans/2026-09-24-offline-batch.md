@@ -1170,11 +1170,16 @@ cd /d/Projects/Touch/Touch_Client/tests && MSYS_NO_PATHCONV=1 cmd.exe /c ".\run_
 
 - [ ] **Step 4: 还原并核对**
 
+⚠ **不要用 `git checkout --` 当还原手段**（Task 3 实现者实测：本仓库 `core.autocrlf=true`
+⇒ `git checkout -- <file>` 会把工作区文件的 LF 改写成 CRLF（实测 2734 → 2811 字节），
+于是**原始 sha256 对不上，而 `git status` 仍说干净** —— 会把一次正确的还原误判成没还原）。
+
 ```bash
-cd /d/Projects/Touch && git checkout -- Touch_Client/tests/test_calib_store.cpp && sha256sum Touch_Client/tests/test_calib_store.cpp && git status --short
+cd /d/Projects/Touch && git show HEAD:Touch_Client/tests/test_calib_store.cpp > Touch_Client/tests/test_calib_store.cpp && sha256sum Touch_Client/tests/test_calib_store.cpp && git status --short
 ```
 
 Expected: 哈希与 Step 1 抄的**逐字相同**、`git status` 无该文件。
+（`git show HEAD:<path>` 写出来的是**仓库里的规范字节**，与提交 blob 逐字一致 —— 这正是我们要核的东西。）
 
 - [ ] **Step 5: 再跑一次整床，确认回到 baseline**
 
