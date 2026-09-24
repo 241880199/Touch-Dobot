@@ -123,6 +123,9 @@
 
 ### 判据
 - 整床：`26 of 26 (ran 24 + not-run 2)`、该套件 `74 passed, 0 failed`、**exit 0**。
+  ⚠ **2026-09-24 实测订正**：这一行是**动手前**的预测，落地的数是 **`76 passed, 0 failed`** ——
+  实现期间比写这份设计时多加了 2 条用例（`76` 是**用例数**：`PASS()` 每调一次 +1，不是断言数）。
+  实测输出见 `test_payload_calibration.exe` 末行；提交信息里用的也是这个量到的值。
   （基线实测：本批动手前是 **`24 of 24 (ran 22 + not-run 2)`，exit 0** —— 记忆里的 `19 of 21` 是中间态；`test_gain_readback_policy` 与 `test_payload_calibration_parked` 各 +1。）
 - ★ **负对照一（证明接线真的在携带那 74 条）**：临时去掉 `#ifdef`、让默认 exe 又跑那条红的 ⇒ 主套件回到 `74/1`、整床 **exit 1**。做完还原。
 - ★ **负对照二（证明三条新守卫有判别力）**：每条各配一份**改前必红**的合成夹具用例 —— 32 列（已有同类先例 `:3247`）、>8 复采对、超宽行。
@@ -144,6 +147,14 @@
 
 ### 设计
 新增 `relay/GainReadbackPolicy.{h,cpp}`（照 `relay/RelayCommandParser` 的形状）：
+
+⚠ **2026-09-24 订正（与落地的形状不符）**：实际是**纯头文件** `relay/GainReadbackPolicy.h`，
+**没有也不应该有 `.cpp`** —— 函数是 `inline` 定义在头里（`GainReadbackPolicy.h:30`），
+照 `relay/JitterStats.h` 那个先例（计划里明确覆盖了本行写的 `.h/.cpp` 两文件形状）。
+⇒ 只读本节会去找一个**不存在**的 `.cpp`。判据是构建脚本自己那句注释：
+`build_gain_readback_policy_test.bat` 里写着 "GainReadbackPolicy.h is a PURE header
+(inline implementation, no .cpp to link) -- same shape as JitterStats.h. Nothing else is linked
+on purpose"。**若哪天这个套件需要第二个编译单元，就说明这个策略不再"纯"了。**
 
 ```cpp
 enum class GainReport { Send, SkipUnchanged, SkipTooSoon };

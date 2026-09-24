@@ -405,7 +405,12 @@ harness 自述的 `Exit code: 1`（`:2951`），**没有**调用方量的那个�
 
 与 baseline 的 `diff` 只差 5 行：`[OK]`→`[FAIL]`、`24 OK, 0 FAILED`→`23 OK, 1 FAILED`、
 `24 passed, 0 failed`→`23 passed, 1 failed`、`Exit code: 0`→`Exit code: 1`，
-外加一行蒙特卡洛用时（1.7 s→1.9 s，噪声）。其余 2946 行逐字节相同。
+外加一行蒙特卡洛用时（1.8 s→1.9 s，噪声）。其余 2946 行逐字节相同。
+
+⚠ **2026-09-24 复审订正**：这里原文写的是 `1.7 s→1.9 s`。按日志实测是 **`1.8 s→1.9 s`**
+（`_harness_task4.log:2603` = `用时 1.8 s`，`_harness_runfail.log:2603` = `用时 1.9 s`；
+`diff` 逐行核过，两文件之间恰好只有下面列的这 5 行不同）。基线那份是 **`_harness_task4.log`**
+（245497 B），不是 `_harness_baseline.log`（162283 B，更早的一趟，连蒙特卡洛那行都没有）。
 
 还原后 sha256 与动手前**逐字相同**
 （`68d32651b33a89a4dc1073f8c8c46c0875362cd30feb54aedaba7830600943f4`，1766 B），
@@ -415,7 +420,10 @@ harness 自述的 `Exit code: 1`（`:2951`），**没有**调用方量的那个�
   Suites accounted: 26 of 26 (ran 24 + not-run 2)    Exit code: 0
 ```
 
-（`_harness_after_neg.log` 与 baseline 只差那一行计时。）
+（⚠ **2026-09-24 复审订正**：原文说 `_harness_after_neg.log` "与 baseline 只差那一行计时" ——
+**不成立**。它与 baseline（`_harness_task4.log`，245497 B）**逐字节相同**：`diff` 空，
+两者 sha256 同为 `3e3b8417e9a0752b9c0cecffa664e0d673524f9a42a1fd4db0e9f53831c4cea5`。还原不但把
+`[FAIL]` 收回去了，连那行计时也回到了 1.8 s。）
 
 ⚠ **还原这一步有个坑：`git show HEAD:<path> > <path>` 还原不出动手前的字节。**
 本文件的**工作区副本是 CRLF**（1766 B），而 **HEAD blob 是 LF**（1718 B，`afc55722…`）。
