@@ -20,6 +20,14 @@ static std::atomic<double> s_gain{ Config::FORCE_REFLECTION_GAIN };
 static bool  s_dirty = false;
 static DWORD s_dirtyMs = 0;
 
+// 用例驱动的落盘目标。nullptr = 不干预, 走 CalibStore 的生产路径。
+// 见头文件 setStorePathForTest / 它的定义。
+static const char* s_storePathForTest = nullptr;
+
+void setStorePathForTest(const char* path) {
+    s_storePathForTest = path;
+}
+
 double defaultGain() { return Config::FORCE_REFLECTION_GAIN; }
 double gain() { return s_gain.load(); }
 
@@ -116,12 +124,17 @@ void loadOnStartup() {
 }
 
 void tick() {
+    tickAt(GetTickCount());
+}
+
+void tickAt(unsigned long nowMs) {
     if (!s_dirty) return;
-    const DWORD now = GetTickCount();
-    if ((now - s_dirtyMs) < TUNING_DEBOUNCE_MS) return;   // 还在动, 再等等
+    if ((nowMs - s_dirtyMs) < TUNING_DEBOUNCE_MS) return;   // 还在动, 再等等
 
     const double v = s_gain.load();
-    const char* path = CalibStore::fileFor("force_tuning.json");
+    // 用例钉过的目标优先 (默认 nullptr = 不干预, 走生产路径)。
+    const char* path = s_storePathForTest ? s_storePathForTest
+                                          : CalibStore::fileFor("force_tuning.json");
     if (saveToFile(path, v)) {
         printf("[Tuning] 力反射增益已落盘: %.1f\n", v);
     } else {

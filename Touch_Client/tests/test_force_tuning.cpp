@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <cmath>
 #include <string>
+#include <windows.h>              // GetTickCount: tick() 那两条用例拿它当【基准时刻 t0】
 #include "../force/ForceTuning.h"
 #include "../config/Config.h"     // 用例要直接核 Config::FORCE_REFLECTION_GAIN
 
@@ -145,6 +146,68 @@ static void test_corrupt_file_rejected() {
     PASS();
 }
 
+// ===== tick(): 防抖落盘的【生产路径】—— 时间作为输入 (2026-09-24) =====
+//
+// 【为什么要有它】: `TUNING_DEBOUNCE_MS` 那 1 秒防抖是"跨重启保留"的【唯一】实现 ——
+//   `tick()` 是唯一的落盘路径 (RelayCore::pollRelayCommands 每帧调它)。
+//   而本文件此前【11】条用例没有一条碰过 tick() (实测: 加这两条之前跑出 "11 passed, 0 failed";
+//   计划/规格里写的 "12 条" 是笔误): 规格的验收行「落盘 → 读回」只经由
+//   `saveToFile` / `loadFromFile` 那对显式函数验证过 ⇒ 生产走的那条路一条断言都没有。
+// 【时间怎么进来】: `tickAt(nowMs)` 是接缝, `tick()` 在它外面包一层 GetTickCount()。
+//   基准 `t0` 取 `GetTickCount()`: `setGain` 刚刚返回, 它的 `s_dirtyMs` 与 t0 只差几微秒
+//   ⇒ t0 之后的偏移就是 s_dirtyMs 之后的偏移 (窗口 1000ms 对几微秒的误差免疫)。
+// ⚠ 两条用例都【自己建立前置状态】(先 setGain 把静默期起点钉在 t0) —— 不依赖 main() 里的
+//   调用顺序, 也不依赖 s_dirty 在进入本用例时是什么值 (它是 file-static, 会跨用例残留)。
+static bool fileExistsAt(const char* path) {
+    FILE* f = fopen(path, "r");
+    if (!f) return false;
+    fclose(f);
+    return true;
+}
+
+static void test_tick_at_debounces_persistence() {
+    TEST(tick_at_debounces_persistence);
+
+    remove(kTmp);
+    // ⚠ tick() 写的是 CalibStore::fileFor("force_tuning.json") —— 一条【由 exe 位置推出的】
+    //   绝对路径, 不是 kTmp。不打这一针, 下面全部 fileExistsAt(kTmp) 都在断言一个
+    //   永远不存在的文件 (永远"绿", 也就永远测不出防抖)。见 setStorePathForTest 的说明。
+    ForceTuning::setStorePathForTest(kTmp);
+    const unsigned long t0 = GetTickCount();
+    CHECK(ForceTuning::setGain(150.0));       // 标脏, 并把静默期起点钉在 t0
+
+    ForceTuning::tickAt(t0);                  // 立刻: 还在静默期
+    CHECK(!fileExistsAt(kTmp));
+    ForceTuning::tickAt(t0 + 999);            // 差 1ms: 仍然不写
+    CHECK(!fileExistsAt(kTmp));
+    ForceTuning::tickAt(t0 + 1000);           // 到点: 写
+    CHECK(fileExistsAt(kTmp));
+
+    double v = 0.0;                           // 写的必须是【目标值】
+    CHECK(ForceTuning::loadFromFile(kTmp, &v));
+    CHECK(fabs(v - 150.0) < 1e-9);
+
+    remove(kTmp);
+    PASS();
+}
+
+static void test_tick_at_does_not_rewrite_when_clean() {
+    TEST(tick_at_does_not_rewrite_when_clean);
+
+    remove(kTmp);
+    ForceTuning::setStorePathForTest(kTmp);   // 同上: 把落盘目标钉到本用例的临时文件
+    const unsigned long t0 = GetTickCount();
+    CHECK(ForceTuning::setGain(160.0));
+    ForceTuning::tickAt(t0 + 1000);           // 写第一次
+    CHECK(fileExistsAt(kTmp));
+
+    remove(kTmp);                             // 删掉: 若下面又写, 文件会重新出现
+    ForceTuning::tickAt(t0 + 5000);           // 已经不脏了 ⇒ 什么都不做
+    CHECK(!fileExistsAt(kTmp));               // ★ "不是每次都重写"的判据
+
+    PASS();
+}
+
 int main() {
     std::cout << "=== ForceTuning Tests ===" << std::endl;
     test_parse_ok();
@@ -158,6 +221,8 @@ int main() {
     test_save_load_roundtrip();
     test_missing_file_is_quiet_false();
     test_corrupt_file_rejected();
+    test_tick_at_debounces_persistence();
+    test_tick_at_does_not_rewrite_when_clean();
     std::cout << std::endl;
     std::cout << g_passed << " passed, " << g_failed << " failed" << std::endl;
     return g_failed > 0 ? 1 : 0;

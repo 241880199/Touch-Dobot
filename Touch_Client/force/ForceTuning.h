@@ -46,4 +46,22 @@ namespace ForceTuning {
     // 防抖落盘: 值变过 且 距上次改动 ≥ TUNING_DEBOUNCE_MS 才写。
     // 由 RelayCore::pollRelayCommands() 每帧调用 (借现成的空闲循环当心跳, 不新起线程)。
     void tick();
+
+    // 同上, 但把"现在"作为【输入】—— 接缝, 只给测试用。
+    //   `tick()` 就是 `tickAt(GetTickCount())`; 生产路径一个字没变。
+    //   【为什么需要它】: 1 秒防抖是落盘的唯一实现, 而它此前【一条断言都没有】——
+    //   要在测试里驱动它, 不注入时间就只能睡 1 秒 (本项目拒绝把睡眠写进测试)。
+    //   nowMs 与 setGain 记下的时刻比较; 差 >= TUNING_DEBOUNCE_MS 才写。
+    void tickAt(unsigned long nowMs);
+
+    // ===== 测试钩子: 把落盘目标【钉成给定路径】 =====
+    // 【为什么需要它】把"现在"做成输入还不够: `tickAt` 写的是 `CalibStore::fileFor(...)` ——
+    //   一条由【exe 所在位置】推出来的绝对路径, 用例控制不了它。于是"落盘了吗"这件事
+    //   在用例里没法断言 (断言临时文件 = 永远不存在; 断言那条路径 = 打到一个共享目录,
+    //   而它离现场文件只差一次目录布局改动)。⇒ 把目标也变成输入, 用例才只看自己的临时文件。
+    //   这条与 ForceCompensation::setStepDtForTest / ForceCalibration::setUpdateDtForTest
+    //   同一个约定、同一条理由: 时间/路径是【实测或推导】出来的, 调用方给不了。
+    // 传 nullptr = 恢复生产路径 (CalibStore::fileFor, 默认)。**只在用例里调**, 生产路径不许调。
+    // ⚠ 指针【不复制】: 传进来的必须比本进程活得久 (用例给的都是字符串字面量)。
+    void setStorePathForTest(const char* path);
 }
