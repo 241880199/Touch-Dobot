@@ -1132,6 +1132,23 @@ parked 变体(三行 #include, 零重复代码)只跑那一条、进 NOTRUN_LIST
 
 ### Task 5: 测试床【运行失败】分支的实测负对照
 
+> **★ 订正（2026-09-24，任务完成后按实测补）** —— 本节正文里有三处**我写时没核**的东西。
+> 保留原文以便对照，但**以本框为准**：
+> 1. **「手抄了 19 遍」→ 实测 24**。`19` 是 **2026-09-23 的快照**（`git show` 数过：
+>    `0a72524`=19 → `5de9d3f`=22 → `c01076e`=23 → `77e7724`=24）。这个数**每接一个套件就涨一次**。
+>    ⚠ **裸 `grep -c 'echo   \[FAIL\]'` 会数出 26** —— 多出来的两行是文件头
+>    "HOW TEST RESULTS ARE JUDGED" 里的**教学示例**（`run_tests.bat:51` / `:53`）。
+>    可靠的计数：`set /a PASSED+=1` / `[FAIL: build error]` / `call "%TESTDIR%\build_` 各 24。
+> 2. **「内层 `else` 从未被看到变红」→ 不实**。同批 Task 4 的整床负对照
+>    （`_harness_task4_neg.log`，基数与本轮相同）与 Task 2 的 `_harness_task2_redwiring.log`
+>    都走过这一支。准确说法：**它从未被【当成目标】刻意反证过**，且那两次的套件**自己也报红**、
+>    都没量**调用方的退出码** ⇒ 分不开"判定靠退出码"与"判定靠扫摘要"。Task 5 补的正是这一半。
+> 3. **`test_calib_store.cpp:163` → 第 47 行**（那文件只有 48 行）。
+>
+> 另：本节 Step 4 的还原处方（`git show HEAD:<path> > <path>`）在本文件上**也**还原不出动手前的字节
+> —— 见 [[git-restore-line-endings]]：`core.autocrlf=true` 下**行尾规范是每个文件各自的**，
+> 唯一可靠的判据是拿**动手前记的 sha256** 去对。
+
 **Files:**
 - Modify (临时，用完还原): `Touch_Client/tests/test_calib_store.cpp:163`
 - Modify: `Docs/superpowers/specs/2026-09-22-test-harness-state.md`（记结果）
