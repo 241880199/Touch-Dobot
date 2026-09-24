@@ -484,8 +484,32 @@ static void test_jitter_accumulators_are_fed_and_distinct() {
     PASS();
 }
 
+// ★ 2026-09-24: viscousDamping —— 环路阻尼项（见 Config::TOUCH_VISC_DAMPING）。
+//   判据：① 符号必须【反对】运动（damping 与 v 反向）② 静止恒为 0（⇒ 不改静态倍率，规格 1~3）
+//   ③ 与系数成正比 ⇒ 回滚（b=0）时恒为 0
+static void test_viscous_damping() {
+    TEST(viscous_damping);
+    double v[3] = {20.0, 0.0, -50.0};      // mm/s
+    double d[3];
+    ForcePipeline::viscousDamping(v, 0.01, d);
+    CHECK(d[0] < 0.0);                     // ① 正速度 ⇒ 负阻尼（反对运动）
+    CHECK(d[2] > 0.0);                     //    负速度 ⇒ 正阻尼
+    CHECK(fabs((d[0]) - (-0.20)) < (1e-12));       //    20mm/s × 0.01 = 0.20N
+    double v0[3] = {0.0, 0.0, 0.0};         // ② 静止 ⇒ 0（不动静态倍率）
+    ForcePipeline::viscousDamping(v0, 0.01, d);
+    CHECK(fabs((d[0]) - (0.0)) < (1e-15));
+    CHECK(fabs((d[1]) - (0.0)) < (1e-15));
+    CHECK(fabs((d[2]) - (0.0)) < (1e-15));
+    ForcePipeline::viscousDamping(v, 0.0, d);   // ③ 回滚：b=0 ⇒ 恒为 0
+    CHECK(fabs((d[0]) - (0.0)) < (1e-15));
+    ForcePipeline::viscousDamping(v, 0.02, d);  //    成正比
+    CHECK(fabs((d[0]) - (-0.40)) < (1e-12));
+    PASS();
+}
+
 int main() {
     std::cout << "=== ForcePipeline Unit Tests ===" << std::endl;
+    test_viscous_damping();   // ★ 2026-09-24
     test_residual_deadzone();
     test_gain_actually_changes_output();
     test_gain_ramp_is_gradual();

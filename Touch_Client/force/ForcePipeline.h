@@ -34,6 +34,15 @@ namespace ForcePipeline {
     //   ⇒ 而笔压 (0.3~0.6 N) 远在 dz 之上 ⇒ 幅值完全不受影响 ✓
     // ⚠ 性质如实说: 它是 C⁰ (值连续、斜率有折点) —— 而"值不连续"正是跳变的来源, C⁰ 已足够。
     // 由 tests/test_force_pipeline.cpp 的 soft_deadzone_no_jump 用例钉住 (门限两侧之差 < 0.02)。
+    // ★ 2026-09-24: 粘性阻尼项（环路阻尼）—— damping = −b · v（v = 器件速度 mm/s）。
+    //   用途/合规性（不改静态倍率）/"为什么不是降增益"：见 Config::TOUCH_VISC_DAMPING 那一大段。
+    //   ⚠ 符号是【负】：阻尼必须【反对】运动方向 —— 用例①从符号上钉住它。
+    inline void viscousDamping(const double velMmS[3], double b, double out[3]) {
+        out[0] = -b * velMmS[0];
+        out[1] = -b * velMmS[1];
+        out[2] = -b * velMmS[2];
+    }
+
     inline double softDeadzone(double val, double threshold) {
         if (threshold <= 0.0) return val;
         const double a = val < 0.0 ? -val : val;
