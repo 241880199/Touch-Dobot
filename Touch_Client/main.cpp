@@ -3094,16 +3094,17 @@ namespace ForceNoiseProbe {
                 fprintf(wf, "# wave %04d-%02d-%02d %02d:%02d:%02d.%03d  frames=%d\n",
                         st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond,
                         st.wMilliseconds, n);
-                fprintf(wf, "# t_us,raw_x,raw_y,raw_z,filt_x,filt_y,filt_z,tgt_x_mm,tgt_y_mm,tgt_z_mm,tgt_rx_deg,tgt_ry_deg,tgt_rz_deg,act_x_mm,act_y_mm,act_z_mm,act_rx_deg,act_ry_deg,act_rz_deg\n");
+                fprintf(wf, "# t_us,raw_x,raw_y,raw_z,filt_x,filt_y,filt_z,tgt_x_mm,tgt_y_mm,tgt_z_mm,tgt_rx_deg,tgt_ry_deg,tgt_rz_deg,act_x_mm,act_y_mm,act_z_mm,act_rx_deg,act_ry_deg,act_rz_deg,dev_x_mm,dev_y_mm,dev_z_mm\n");
                 for (int i = 0; i < n; i++) {
                     fprintf(wf, "%llu,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,"
-                                "%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f\n",
+                                "%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f\n",
                             buf[i].tickUs, buf[i].f[0], buf[i].f[1], buf[i].f[2],
                             buf[i].g[0], buf[i].g[1], buf[i].g[2],
                             buf[i].tgt[0], buf[i].tgt[1], buf[i].tgt[2],
                             buf[i].tgt[3], buf[i].tgt[4], buf[i].tgt[5],
                             buf[i].act[0], buf[i].act[1], buf[i].act[2],
-                            buf[i].act[3], buf[i].act[4], buf[i].act[5]);
+                            buf[i].act[3], buf[i].act[4], buf[i].act[5],
+                            buf[i].dev[0], buf[i].dev[1], buf[i].dev[2]);
                 }
                 fclose(wf);
                 std::cout << "  [ok] 波形已追加到 force_wave.csv（" << n << " 帧）" << std::endl;

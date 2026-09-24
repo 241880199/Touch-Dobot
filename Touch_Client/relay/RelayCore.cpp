@@ -140,7 +140,8 @@ static bool                     s_noiseLockInit = false;
 // 125 Hz 下一次临界区可以忽略。与 forceDataMutex 分开, 免得探针的读把力数据的路径也拖住。
 static void pushForceFrame(double fx, double fy, double fz,
                           double gx, double gy, double gz,
-                          const double tgt[6], const double act[6]) {
+                          const double tgt[6], const double act[6],
+                          const double dev[3]) {
     if (!s_noiseLockInit) return;   // 初始化竞态里的最早期帧, 丢掉即可 (不改变任何判决)
     const unsigned long long us =
         (unsigned long long)std::chrono::duration_cast<std::chrono::microseconds>(
@@ -157,6 +158,7 @@ static void pushForceFrame(double fx, double fy, double fz,
         s_noiseBuf[s_noiseWrite].tgt[i] = tgt[i];
         s_noiseBuf[s_noiseWrite].act[i] = act[i];
     }
+    for (int i = 0; i < 3; i++) s_noiseBuf[s_noiseWrite].dev[i] = dev[i];
     s_noiseWrite = (s_noiseWrite + 1) % kNoiseCap;
     if (s_noiseCount < kNoiseCap) s_noiseCount++;
     LeaveCriticalSection(&s_noiseLock);
@@ -365,6 +367,15 @@ static DWORD WINAPI forceReaderThread(LPVOID) {
             // ⚠ 位置在【本帧解析完之后、且与本帧的赋值同源】—— 存的是刚读进来的 sixForcePtr,
             //   不是别的快照。存的这一列要拿来量"帧率下噪声的结构", 错一帧就白量。
             // ★ 目标位姿：按本文件既有的锁序（robotPoseMutex 先取先放）在 forceDataMutex 之外取。
+            // ★ 器件(Touch)位置：叶子锁，先取先放（见 RelayCore.h 里 dev[] 的说明）。
+            double devPosBuf[3];
+            {
+                EnterCriticalSection(&app.devicePosMutex);
+                devPosBuf[0] = app.devicePos[0];
+                devPosBuf[1] = app.devicePos[1];
+                devPosBuf[2] = app.devicePos[2];
+                LeaveCriticalSection(&app.devicePosMutex);
+            }
             double tgtPoseBuf[6];
             {
                 EnterCriticalSection(&app.robotPoseMutex);
@@ -375,7 +386,7 @@ static DWORD WINAPI forceReaderThread(LPVOID) {
             }
             pushForceFrame(sixForcePtr[0], sixForcePtr[1], sixForcePtr[2],
                             app.forceData.filtered[0], app.forceData.filtered[1], app.forceData.filtered[2],
-                            tgtPoseBuf, app.forceData.tcpPoseActual);
+                            tgtPoseBuf, app.forceData.tcpPoseActual, devPosBuf);
 
             // 看门狗兜底: 每 300ms 检查一次 (GLUT 可能已死)
             static DWORD lastWatchdogCheck = 0;
