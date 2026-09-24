@@ -1,1 +1,0 @@
-928efae5644fa14aea82131ab77d9299a2faa6f69df2739d6869178a0eaed1da *test_payload_calibration.cpp

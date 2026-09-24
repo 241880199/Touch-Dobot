@@ -40,3 +40,19 @@ Desktop.ini
 Touch_Client/calib/
 # 仓库根的 calib/: exe 落在 Touch_Client\ 下一层时按同一套规则产生的运行时输出 (前导 / 锚定)
 /calib/
+
+# ===== 2026-09-24: 会话/证据日志（曾被 `git add -A` 误提交 138 个、约 60MB，已摘出）=====
+# ⚠ 用【定向】模式，不用 *.log / *_out.txt 宽通配 —— 仓库里有 16 个被跟踪的
+#   Docs/superpowers/evidence/.../_*_out.txt 是【入库证据】，宽通配会把它们藏起来。
+Relay_Station/_matlab_session_*.log
+Touch_Client/session_*.log
+Touch_Client/_build_*.log
+Touch_Client/_battest*.bat
+Touch_Client/tests/_build_*.log
+Touch_Client/tests/_fw_*.log
+Touch_Client/tests/_harness_*.log
+Touch_Client/tests/_t1_*.txt
+Touch_Client/tests/_*.bat
+Touch_Client/tests/_*.cpp
+Touch_Client/tests/*.log
+Hardware/stl.zip
