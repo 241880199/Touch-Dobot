@@ -571,7 +571,7 @@ namespace Config {
     //       ⇒ 肩部安全判据【恒在满档】⇒ 那个安全梯度里永远带着一个满量程的假项。
     //   【判据】翻 false 后：**按钮1 抖动应明显减小**（若如此 ⇒ 就是它，接着要改的是
     //     优化器的输入/条件，而不是这一行）；**不变** ⇒ 与它无关，回到"物理/机械"那条线。
-    const bool   SINGAVOID_ORIENT_OPTIMIZE_ENABLED = true;   // 2026-09-24 A/B 结论：它确有贡献（安全区内关掉后阻力小很多）⇒ 不关它，改去修它吃进来的那个假项（见 SingularityAvoidance.cpp 的订正）
+    const bool   SINGAVOID_ORIENT_OPTIMIZE_ENABLED = false;   // ★ 2026-09-24 深夜 A/B：判它是不是空载手感变差的元凶   // 2026-09-24 A/B 结论：它确有贡献（安全区内关掉后阻力小很多）⇒ 不关它，改去修它吃进来的那个假项（见 SingularityAvoidance.cpp 的订正）
     const bool   FORCE_POSE_ORIENT_FROM_624 = false;   // ★ 2026-09-24 现场判据: 翻 false 后若抖动回到"好多了"那档 ⇒ 本项是原因
     const double FORCE_MOTION_MAX_GAP_S = 0.5;
     // 在线零偏 EMA 的【时间常数】(s), 仅静止态更新。⚠ 语义是时间常数, 不是"每帧更新率":
