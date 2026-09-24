@@ -956,7 +956,26 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
     m_lastServoTime = now;
 
     // ===== 增量式位移: 每帧计算 Touch 相对于上一帧的微小位移 =====
-    Vec3 current = convertTouchToRobot(devicePos);
+    // ★★ 2026-09-24 深夜: 环路第一环的抵消 —— `x_命令 = x_手柄 − F_施加/k`。
+    //   论证/性质/判据见 Config::TOUCH_HANDLE_STIFFNESS_N_PER_MM。
+    //   ⚠ 在【器件系、convertTouchToRobot 之前】做：hapticOut 与手柄位移同在器件系 ✓
+    //   ⚠ 锁序：这里取 forceDataMutex，然后本函数下面才取 m_basePointLock；
+    //     核过【没有】反向嵌套（basePoint→forceData）⇒ 不构成锁环 ✓
+    hduVector3Dd devAdj = devicePos;
+    {
+        double fApplied[3] = {0.0, 0.0, 0.0};
+        EnterCriticalSection(&appState.forceDataMutex);
+        fApplied[0] = appState.forceData.hapticOut[0];
+        fApplied[1] = appState.forceData.hapticOut[1];
+        fApplied[2] = appState.forceData.hapticOut[2];
+        LeaveCriticalSection(&appState.forceDataMutex);
+        double off[3];
+        forceInducedHandleOffset(fApplied, Config::TOUCH_HANDLE_STIFFNESS_N_PER_MM, off);
+        devAdj[0] += off[0];
+        devAdj[1] += off[1];
+        devAdj[2] += off[2];
+    }
+    Vec3 current = convertTouchToRobot(devAdj);
 
     EnterCriticalSection(&m_basePointLock);
     if (!m_lastTouchValid) {

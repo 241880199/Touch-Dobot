@@ -86,6 +86,18 @@ inline Vec3 convertTouchToRobot(const hduVector3Dd& devicePos) {
 //   输出：本帧应当传给目标的位移。未达门限 ⇒ 0（目标吸附）；达到 ⇒ 把累积量**整块**传出并清零
 //   （⇒ 平均速度守恒，无系统性滞后）。
 //   ⚠ 余量被门限封顶 ⇒ **有界**（≤ dz）；新参照点到来时不必重置也不会跳。
+// ★ 2026-09-24: 环路第一环的抵消量 —— `offset = −F/k`（器件系）。
+//   用途/性质/判据见 Config::TOUCH_HANDLE_STIFFNESS_N_PER_MM。
+//   ⚠ 符号是【负】：要把"力把手柄推出去的那一段"从命令里**减掉**。
+//   ⚠ k <= 0 时返回全 0（= 关闭，回滚态）—— 用例钉住这条。
+inline void forceInducedHandleOffset(const double force[3], double k, double out[3]) {
+    if (!(k > 0.0)) { out[0] = out[1] = out[2] = 0.0; return; }
+    const double inv = 1.0 / k;
+    out[0] = -force[0] * inv;
+    out[1] = -force[1] * inv;
+    out[2] = -force[2] * inv;
+}
+
 inline double stictionGate(double& residual, double d, double dz) {
     residual += d;
     if (residual >= dz || residual <= -dz) {

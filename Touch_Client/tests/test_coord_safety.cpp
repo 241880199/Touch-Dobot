@@ -358,6 +358,27 @@ static void test_vec3_operators() {
 //   判据：① 小于门限的抖动永远传不出去（目标吸附）② 越过门限时把累积量**整块**传出并清零
 //   ③ 大位移直通、不被夹 ④ 余量有界 ⑤ 【恒等式】传出 + 余量 = 总输入（不吞、不造）
 //   ⚠ ⑤ 是它区别于"直接砍每帧增量"的关键：后者会让慢速有意的移动整体丢失。
+// ★ 2026-09-24: forceInducedHandleOffset —— 环路第一环的抵消量（见 Config::TOUCH_HANDLE_STIFFNESS_N_PER_MM）。
+//   判据：① 符号必须【负】（把力推出去的那段减掉）② 力为 0 ⇒ 恒为 0（⇒ 空载手感不变）
+//   ③ 与 1/k 成正比 ④ k<=0 ⇒ 恒为 0（回滚态）
+static void test_force_induced_handle_offset() {
+    TEST(force_induced_handle_offset);
+    double f[3] = {1.0, -2.0, 0.0};
+    double o[3];
+    forceInducedHandleOffset(f, 1.0, o);
+    CHECK(o[0] < 0.0);                       // ① 正力 ⇒ 负位移（减掉）
+    CHECK(o[1] > 0.0);                       //    负力 ⇒ 正位移
+    CHECK(fabs(o[0] - (-1.0)) < 1e-12);      //    1N / 1(N/mm) = 1mm
+    forceInducedHandleOffset(f, 4.0, o);
+    CHECK(fabs(o[0] - (-0.25)) < 1e-12);     // ③ 与 1/k 成正比
+    double f0[3] = {0.0, 0.0, 0.0};
+    forceInducedHandleOffset(f0, 1.0, o);
+    CHECK(o[0] == 0.0 && o[1] == 0.0 && o[2] == 0.0);   // ② 无接触 ⇒ 不施加
+    forceInducedHandleOffset(f, 0.0, o);
+    CHECK(o[0] == 0.0 && o[1] == 0.0 && o[2] == 0.0);   // ④ 回滚态
+    PASS();
+}
+
 static void test_stiction_gate() {
     TEST(stiction_gate);
     const double dz = 0.4;
@@ -421,6 +442,7 @@ int main() {
     test_sf_beyond_boundary_min_speed();
     test_sf_half_buffer();
 
+    test_force_induced_handle_offset();   // ★ 2026-09-24
     test_stiction_gate();   // ★ 2026-09-24
     test_vec3_length();
     test_vec3_operators();
