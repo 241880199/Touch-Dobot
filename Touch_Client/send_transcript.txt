@@ -1,0 +1,834 @@
+=== Touch-Dobot Digital Twin System v3.0 ===
+Robot: 192.168.101.11
+Touch: enabled
+Safety: X[-300,250] Y[-350,250] Z[140,500]
+Initializing Touch device...
+Touch 设备初始化成功
+[Payload] Loaded payload_calib.json (mass=0.404kg, com=(0.3,-0.1,68.7)mm, 6 poses, psi=90deg, sign_z=+1)
+Initializing robot via Relay...
+已连接使能端口 29999
+已连接运动端口 30003
+[StateMachine] DISCONNECTED → CONNECTED
+[Relay] 使能 EnableRobot(0.404,0.3,-0.1,68.7)  (实机标定值)
+[Relay] 机械臂使能成功
+[Relay] 机械臂状态正常 (mode=0)
+[Relay] GetPose retry 1/5...
+[Relay] 基准位姿: (-138.625,-96.7618,349.625)
+[StateMachine] CONNECTED → READY
+[Force] 无可用 force_calib.json — 按 'z' 调零。
+[Force] Reader thread started, connecting to port 30004...
+[Force] Connected to realtime port 30004
+[Force] Reader thread receiving at 125Hz...
+[STL] Binary: 42500 triangles
+[STL] Binary: 5004 triangles
+[Relay] 机械臂实际负载 (【首个合格帧】的快照): load=0.404 kg  center=(0.3, -0.1, 68.7) mm
+[STL] Binary: 11932 triangles
+[STL] Binary: 15904 triangles
+[STL] Binary: 4810 triangles
+[STL] Binary: 4898 triangles
+[STL] Binary: 8976 triangles
+[RobotModel] STL models loaded (models/cr3)
+[Calib] No calibration file, using default axis mapping
+[TCP] No tcp_calib.json — press 't' to calibrate TCP offset
+
+System ready.
+  q/ESC: quit
+  Touch button 1: control robot
+
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【没有可用模型】本地补偿未启用 —— 不是"标定与机械臂不符"
+[Force] !!   未标定 -> 去标定 ('m' 采多姿态 + 's' 解 A, 再 'z' 调零);
+[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。
+[Force] !!   【两者的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它在 HapticCallback.cpp:168 由位置现算,
+[Force] !!    与 compensated 无关 —— 安全边界的推手还在, 只是不再有传感器力。)
+[Force] !! (没有模型可比较: 逐通道对比表不适用。上面那一段才是原因。)
+[Force] !! 处理: 先按 'm' 采多姿态 -> 's' 解出 A, 再按 'z' 调零存盘。
+[Relay] Sent 100 position updates, last send=-1B
+[Force] 运动检测 #01: pos=(-138.625,-96.762,349.625)mm  tcp=(-138.625,-96.762,349.625)mm  vel=0.000000 m/s (阈值 0.0020)  acc=0.000000 m/s² (阈值 0.0050)  tcpV=(0.0001,0.0001,-0.0002)  isStill=1
+[Force] 运动检测 #02: pos=(-138.625,-96.762,349.625)mm  tcp=(-138.625,-96.762,349.625)mm  vel=0.000000 m/s (阈值 0.0020)  acc=0.000000 m/s² (阈值 0.0050)  tcpV=(-0.0001,0.0001,-0.0002)  isStill=1
+[Force] 运动检测 #03: pos=(-138.625,-96.762,349.625)mm  tcp=(-138.625,-96.762,349.625)mm  vel=0.000000 m/s (阈值 0.0020)  acc=0.000000 m/s² (阈值 0.0050)  tcpV=(0.0001,-0.0001,0.0000)  isStill=1
+[Force] 运动检测 #04: pos=(-138.625,-96.762,349.625)mm  tcp=(-138.625,-96.762,349.625)mm  vel=0.000000 m/s (阈值 0.0020)  acc=0.000000 m/s² (阈值 0.0050)  tcpV=(0.0001,0.0000,-0.0006)  isStill=1
+[Force] 运动检测 #05: pos=(-138.625,-96.762,349.625)mm  tcp=(-138.625,-96.762,349.625)mm  vel=0.000000 m/s (阈值 0.0020)  acc=0.000000 m/s² (阈值 0.0050)  tcpV=(0.0000,0.0001,0.0003)  isStill=1
+[Force] 运动检测 #06: pos=(-138.625,-96.762,349.625)mm  tcp=(-138.625,-96.762,349.625)mm  vel=0.000000 m/s (阈值 0.0020)  acc=0.000000 m/s² (阈值 0.0050)  tcpV=(0.0000,0.0000,0.0003)  isStill=1
+[Force] 运动检测 #07: pos=(-138.625,-96.762,349.625)mm  tcp=(-138.625,-96.762,349.625)mm  vel=0.000000 m/s (阈值 0.0020)  acc=0.000000 m/s² (阈值 0.0050)  tcpV=(0.0000,0.0001,0.0000)  isStill=1
+[Force] 运动检测 #08: pos=(-138.625,-96.762,349.625)mm  tcp=(-138.625,-96.762,349.625)mm  vel=0.000000 m/s (阈值 0.0020)  acc=0.000000 m/s² (阈值 0.0050)  tcpV=(0.0000,0.0000,-0.0001)  isStill=1
+[Force] 运动检测 #09: pos=(-138.625,-96.762,349.625)mm  tcp=(-138.625,-96.762,349.625)mm  vel=0.000000 m/s (阈值 0.0020)  acc=0.000000 m/s² (阈值 0.0050)  tcpV=(-0.0001,-0.0002,-0.0005)  isStill=1
+[Force] 运动检测 #10: pos=(-138.625,-96.762,349.625)mm  tcp=(-138.625,-96.762,349.625)mm  vel=0.000000 m/s (阈值 0.0020)  acc=0.000000 m/s² (阈值 0.0050)  tcpV=(0.0001,-0.0001,0.0000)  isStill=1
+[Force] 运动检测 #11: pos=(-138.625,-96.762,349.625)mm  tcp=(-138.625,-96.762,349.625)mm  vel=0.000000 m/s (阈值 0.0020)  acc=0.000000 m/s² (阈值 0.0050)  tcpV=(0.0000,0.0000,-0.0005)  isStill=1
+[Force] 运动检测 #12: pos=(-138.625,-96.762,349.625)mm  tcp=(-138.625,-96.762,349.625)mm  vel=0.000000 m/s (阈值 0.0020)  acc=0.000000 m/s² (阈值 0.0050)  tcpV=(0.0001,0.0002,-0.0000)  isStill=1
+[Force] 运动检测 #13: pos=(-138.625,-96.762,349.625)mm  tcp=(-138.625,-96.762,349.625)mm  vel=0.000000 m/s (阈值 0.0020)  acc=0.000000 m/s² (阈值 0.0050)  tcpV=(-0.0000,-0.0001,-0.0002)  isStill=1
+[Force] 运动检测 #14: pos=(-138.625,-96.762,349.625)mm  tcp=(-138.625,-96.762,349.625)mm  vel=0.000000 m/s (阈值 0.0020)  acc=0.000000 m/s² (阈值 0.0050)  tcpV=(0.0002,-0.0002,0.0000)  isStill=1
+[Force] 运动检测 #15: pos=(-138.625,-96.762,349.625)mm  tcp=(-138.625,-96.762,349.625)mm  vel=0.000000 m/s (阈值 0.0020)  acc=0.000000 m/s² (阈值 0.0050)  tcpV=(0.0001,0.0000,0.0004)  isStill=1
+[Force] 运动检测 #16: pos=(-138.625,-96.762,349.625)mm  tcp=(-138.625,-96.762,349.625)mm  vel=0.000000 m/s (阈值 0.0020)  acc=0.000000 m/s² (阈值 0.0050)  tcpV=(0.0000,0.0000,0.0003)  isStill=1
+[Force] 运动检测 #17: pos=(-138.625,-96.762,349.625)mm  tcp=(-138.625,-96.762,349.625)mm  vel=0.000000 m/s (阈值 0.0020)  acc=0.000000 m/s² (阈值 0.0050)  tcpV=(-0.0001,0.0001,0.0001)  isStill=1
+[Force] 运动检测 #18: pos=(-138.625,-96.762,349.625)mm  tcp=(-138.625,-96.762,349.625)mm  vel=0.000000 m/s (阈值 0.0020)  acc=0.000000 m/s² (阈值 0.0050)  tcpV=(-0.0000,-0.0000,-0.0003)  isStill=1
+[Force] 运动检测 #19: pos=(-138.625,-96.762,349.625)mm  tcp=(-138.625,-96.762,349.625)mm  vel=0.000000 m/s (阈值 0.0020)  acc=0.000000 m/s² (阈值 0.0050)  tcpV=(-0.0000,0.0002,0.0001)  isStill=1
+[Force] 运动检测 #20: pos=(-138.625,-96.762,349.625)mm  tcp=(-138.625,-96.762,349.625)mm  vel=0.000000 m/s (阈值 0.0020)  acc=0.000000 m/s² (阈值 0.0050)  tcpV=(-0.0002,0.0002,-0.0003)  isStill=1
+[Force] 运动检测 #21: pos=(-138.625,-96.762,349.625)mm  tcp=(-138.625,-96.762,349.625)mm  vel=0.000000 m/s (阈值 0.0020)  acc=0.000000 m/s² (阈值 0.0050)  tcpV=(0.0001,-0.0001,0.0005)  isStill=1
+[Force] 运动检测 #22: pos=(-138.625,-96.762,349.625)mm  tcp=(-138.625,-96.762,349.625)mm  vel=0.000000 m/s (阈值 0.0020)  acc=0.000000 m/s² (阈值 0.0050)  tcpV=(0.0002,-0.0002,0.0003)  isStill=1
+[Force] 运动检测 #23: pos=(-138.625,-96.762,349.625)mm  tcp=(-138.625,-96.762,349.625)mm  vel=0.000000 m/s (阈值 0.0020)  acc=0.000000 m/s² (阈值 0.0050)  tcpV=(-0.0000,-0.0000,0.0001)  isStill=1
+[Force] 运动检测 #24: pos=(-138.625,-96.762,349.625)mm  tcp=(-138.625,-96.762,349.625)mm  vel=0.000000 m/s (阈值 0.0020)  acc=0.000000 m/s² (阈值 0.0050)  tcpV=(0.0001,-0.0000,-0.0001)  isStill=1
+[Force] 运动检测 #25: pos=(-138.625,-96.762,349.625)mm  tcp=(-138.625,-96.762,349.625)mm  vel=0.000000 m/s (阈值 0.0020)  acc=0.000000 m/s² (阈值 0.0050)  tcpV=(-0.0000,0.0003,-0.0002)  isStill=1
+[Force] 运动检测 #26: pos=(-138.625,-96.762,349.625)mm  tcp=(-138.625,-96.762,349.625)mm  vel=0.000000 m/s (阈值 0.0020)  acc=0.000000 m/s² (阈值 0.0050)  tcpV=(0.0001,-0.0002,-0.0003)  isStill=1
+[Force] 运动检测 #27: pos=(-138.625,-96.762,349.625)mm  tcp=(-138.625,-96.762,349.625)mm  vel=0.000000 m/s (阈值 0.0020)  acc=0.000000 m/s² (阈值 0.0050)  tcpV=(-0.0001,-0.0000,0.0001)  isStill=1
+[Force] 运动检测 #28: pos=(-138.625,-96.762,349.625)mm  tcp=(-138.625,-96.762,349.625)mm  vel=0.000000 m/s (阈值 0.0020)  acc=0.000000 m/s² (阈值 0.0050)  tcpV=(-0.0001,-0.0001,0.0002)  isStill=1
+[Force] 运动检测 #29: pos=(-138.625,-96.762,349.625)mm  tcp=(-138.625,-96.762,349.625)mm  vel=0.000000 m/s (阈值 0.0020)  acc=0.000000 m/s² (阈值 0.0050)  tcpV=(0.0000,-0.0003,-0.0001)  isStill=1
+[Force] 运动检测 #30: pos=(-138.625,-96.762,349.625)mm  tcp=(-138.625,-96.762,349.625)mm  vel=0.000000 m/s (阈值 0.0020)  acc=0.000000 m/s² (阈值 0.0050)  tcpV=(-0.0001,0.0001,-0.0002)  isStill=1
+[Relay] Sent 200 position updates, last send=-1B
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【没有可用模型】本地补偿未启用 —— 不是"标定与机械臂不符"
+[Force] !!   未标定 -> 去标定 ('m' 采多姿态 + 's' 解 A, 再 'z' 调零);
+[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。
+[Force] !!   【两者的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它在 HapticCallback.cpp:168 由位置现算,
+[Force] !!    与 compensated 无关 —— 安全边界的推手还在, 只是不再有传感器力。)
+[Force] !! (没有模型可比较: 逐通道对比表不适用。上面那一段才是原因。)
+[Force] !! 处理: 先按 'm' 采多姿态 -> 's' 解出 A, 再按 'z' 调零存盘。
+[Relay] Sent 300 position updates, last send=-1B
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【没有可用模型】本地补偿未启用 —— 不是"标定与机械臂不符"
+[Force] !!   未标定 -> 去标定 ('m' 采多姿态 + 's' 解 A, 再 'z' 调零);
+[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。
+[Force] !!   【两者的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它在 HapticCallback.cpp:168 由位置现算,
+[Force] !!    与 compensated 无关 —— 安全边界的推手还在, 只是不再有传感器力。)
+[Force] !! (没有模型可比较: 逐通道对比表不适用。上面那一段才是原因。)
+[Force] !! 处理: 先按 'm' 采多姿态 -> 's' 解出 A, 再按 'z' 调零存盘。
+[Relay] Sent 400 position updates, last send=-1B
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【没有可用模型】本地补偿未启用 —— 不是"标定与机械臂不符"
+[Force] !!   未标定 -> 去标定 ('m' 采多姿态 + 's' 解 A, 再 'z' 调零);
+[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。
+[Force] !!   【两者的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它在 HapticCallback.cpp:168 由位置现算,
+[Force] !!    与 compensated 无关 —— 安全边界的推手还在, 只是不再有传感器力。)
+[Force] !! (没有模型可比较: 逐通道对比表不适用。上面那一段才是原因。)
+[Force] !! 处理: 先按 'm' 采多姿态 -> 's' 解出 A, 再按 'z' 调零存盘。
+[Relay] Sent 500 position updates, last send=-1B
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【没有可用模型】本地补偿未启用 —— 不是"标定与机械臂不符"
+[Force] !!   未标定 -> 去标定 ('m' 采多姿态 + 's' 解 A, 再 'z' 调零);
+[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。
+[Force] !!   【两者的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它在 HapticCallback.cpp:168 由位置现算,
+[Force] !!    与 compensated 无关 —— 安全边界的推手还在, 只是不再有传感器力。)
+[Force] !! (没有模型可比较: 逐通道对比表不适用。上面那一段才是原因。)
+[Force] !! 处理: 先按 'm' 采多姿态 -> 's' 解出 A, 再按 'z' 调零存盘。
+[Relay] Sent 600 position updates, last send=-1B
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【没有可用模型】本地补偿未启用 —— 不是"标定与机械臂不符"
+[Force] !!   未标定 -> 去标定 ('m' 采多姿态 + 's' 解 A, 再 'z' 调零);
+[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。
+[Force] !!   【两者的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它在 HapticCallback.cpp:168 由位置现算,
+[Force] !!    与 compensated 无关 —— 安全边界的推手还在, 只是不再有传感器力。)
+[Force] !! (没有模型可比较: 逐通道对比表不适用。上面那一段才是原因。)
+[Force] !! 处理: 先按 'm' 采多姿态 -> 's' 解出 A, 再按 'z' 调零存盘。
+[Relay] Sent 700 position updates, last send=-1B
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【没有可用模型】本地补偿未启用 —— 不是"标定与机械臂不符"
+[Force] !!   未标定 -> 去标定 ('m' 采多姿态 + 's' 解 A, 再 'z' 调零);
+[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。
+[Force] !!   【两者的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它在 HapticCallback.cpp:168 由位置现算,
+[Force] !!    与 compensated 无关 —— 安全边界的推手还在, 只是不再有传感器力。)
+[Force] !! (没有模型可比较: 逐通道对比表不适用。上面那一段才是原因。)
+[Force] !! 处理: 先按 'm' 采多姿态 -> 's' 解出 A, 再按 'z' 调零存盘。
+[Relay] Sent 800 position updates, last send=-1B
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【没有可用模型】本地补偿未启用 —— 不是"标定与机械臂不符"
+[Force] !!   未标定 -> 去标定 ('m' 采多姿态 + 's' 解 A, 再 'z' 调零);
+[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。
+[Force] !!   【两者的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它在 HapticCallback.cpp:168 由位置现算,
+[Force] !!    与 compensated 无关 —— 安全边界的推手还在, 只是不再有传感器力。)
+[Force] !! (没有模型可比较: 逐通道对比表不适用。上面那一段才是原因。)
+[Force] !! 处理: 先按 'm' 采多姿态 -> 's' 解出 A, 再按 'z' 调零存盘。
+[Relay] Sent 900 position updates, last send=-1B
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【没有可用模型】本地补偿未启用 —— 不是"标定与机械臂不符"
+[Force] !!   未标定 -> 去标定 ('m' 采多姿态 + 's' 解 A, 再 'z' 调零);
+[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。
+[Force] !!   【两者的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它在 HapticCallback.cpp:168 由位置现算,
+[Force] !!    与 compensated 无关 —— 安全边界的推手还在, 只是不再有传感器力。)
+[Force] !! (没有模型可比较: 逐通道对比表不适用。上面那一段才是原因。)
+[Force] !! 处理: 先按 'm' 采多姿态 -> 's' 解出 A, 再按 'z' 调零存盘。
+[Relay] Sent 1000 position updates, last send=-1B
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【没有可用模型】本地补偿未启用 —— 不是"标定与机械臂不符"
+[Force] !!   未标定 -> 去标定 ('m' 采多姿态 + 's' 解 A, 再 'z' 调零);
+[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。
+[Force] !!   【两者的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它在 HapticCallback.cpp:168 由位置现算,
+[Force] !!    与 compensated 无关 —— 安全边界的推手还在, 只是不再有传感器力。)
+[Force] !! (没有模型可比较: 逐通道对比表不适用。上面那一段才是原因。)
+[Force] !! 处理: 先按 'm' 采多姿态 -> 's' 解出 A, 再按 'z' 调零存盘。
+[Relay] Sent 1100 position updates, last send=-1B
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【没有可用模型】本地补偿未启用 —— 不是"标定与机械臂不符"
+[Force] !!   未标定 -> 去标定 ('m' 采多姿态 + 's' 解 A, 再 'z' 调零);
+[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。
+[Force] !!   【两者的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它在 HapticCallback.cpp:168 由位置现算,
+[Force] !!    与 compensated 无关 —— 安全边界的推手还在, 只是不再有传感器力。)
+[Force] !! (没有模型可比较: 逐通道对比表不适用。上面那一段才是原因。)
+[Force] !! 处理: 先按 'm' 采多姿态 -> 's' 解出 A, 再按 'z' 调零存盘。
+[Relay] Sent 1200 position updates, last send=-1B
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【没有可用模型】本地补偿未启用 —— 不是"标定与机械臂不符"
+[Force] !!   未标定 -> 去标定 ('m' 采多姿态 + 's' 解 A, 再 'z' 调零);
+[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。
+[Force] !!   【两者的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它在 HapticCallback.cpp:168 由位置现算,
+[Force] !!    与 compensated 无关 —— 安全边界的推手还在, 只是不再有传感器力。)
+[Force] !! (没有模型可比较: 逐通道对比表不适用。上面那一段才是原因。)
+[Force] !! 处理: 先按 'm' 采多姿态 -> 's' 解出 A, 再按 'z' 调零存盘。
+[Relay] Sent 1300 position updates, last send=-1B
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【没有可用模型】本地补偿未启用 —— 不是"标定与机械臂不符"
+[Force] !!   未标定 -> 去标定 ('m' 采多姿态 + 's' 解 A, 再 'z' 调零);
+[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。
+[Force] !!   【两者的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它在 HapticCallback.cpp:168 由位置现算,
+[Force] !!    与 compensated 无关 —— 安全边界的推手还在, 只是不再有传感器力。)
+[Force] !! (没有模型可比较: 逐通道对比表不适用。上面那一段才是原因。)
+[Force] !! 处理: 先按 'm' 采多姿态 -> 's' 解出 A, 再按 'z' 调零存盘。
+[Relay] Sent 1400 position updates, last send=-1B
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【没有可用模型】本地补偿未启用 —— 不是"标定与机械臂不符"
+[Force] !!   未标定 -> 去标定 ('m' 采多姿态 + 's' 解 A, 再 'z' 调零);
+[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。
+[Force] !!   【两者的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它在 HapticCallback.cpp:168 由位置现算,
+[Force] !!    与 compensated 无关 —— 安全边界的推手还在, 只是不再有传感器力。)
+[Force] !! (没有模型可比较: 逐通道对比表不适用。上面那一段才是原因。)
+[Force] !! 处理: 先按 'm' 采多姿态 -> 's' 解出 A, 再按 'z' 调零存盘。
+[Relay] Sent 1500 position updates, last send=-1B
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【没有可用模型】本地补偿未启用 —— 不是"标定与机械臂不符"
+[Force] !!   未标定 -> 去标定 ('m' 采多姿态 + 's' 解 A, 再 'z' 调零);
+[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。
+[Force] !!   【两者的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它在 HapticCallback.cpp:168 由位置现算,
+[Force] !!    与 compensated 无关 —— 安全边界的推手还在, 只是不再有传感器力。)
+[Force] !! (没有模型可比较: 逐通道对比表不适用。上面那一段才是原因。)
+[Force] !! 处理: 先按 'm' 采多姿态 -> 's' 解出 A, 再按 'z' 调零存盘。
+[Relay] Sent 1600 position updates, last send=-1B
+[Relay] Sent 1700 position updates, last send=-1B
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【没有可用模型】本地补偿未启用 —— 不是"标定与机械臂不符"
+[Force] !!   未标定 -> 去标定 ('m' 采多姿态 + 's' 解 A, 再 'z' 调零);
+[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。
+[Force] !!   【两者的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它在 HapticCallback.cpp:168 由位置现算,
+[Force] !!    与 compensated 无关 —— 安全边界的推手还在, 只是不再有传感器力。)
+[Force] !! (没有模型可比较: 逐通道对比表不适用。上面那一段才是原因。)
+[Force] !! 处理: 先按 'm' 采多姿态 -> 's' 解出 A, 再按 'z' 调零存盘。
+[Relay] Sent 1800 position updates, last send=-1B
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【没有可用模型】本地补偿未启用 —— 不是"标定与机械臂不符"
+[Force] !!   未标定 -> 去标定 ('m' 采多姿态 + 's' 解 A, 再 'z' 调零);
+[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。
+[Force] !!   【两者的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它在 HapticCallback.cpp:168 由位置现算,
+[Force] !!    与 compensated 无关 —— 安全边界的推手还在, 只是不再有传感器力。)
+[Force] !! (没有模型可比较: 逐通道对比表不适用。上面那一段才是原因。)
+[Force] !! 处理: 先按 'm' 采多姿态 -> 's' 解出 A, 再按 'z' 调零存盘。
+[Relay] Sent 1900 position updates, last send=-1B
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【没有可用模型】本地补偿未启用 —— 不是"标定与机械臂不符"
+[Force] !!   未标定 -> 去标定 ('m' 采多姿态 + 's' 解 A, 再 'z' 调零);
+[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。
+[Force] !!   【两者的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它在 HapticCallback.cpp:168 由位置现算,
+[Force] !!    与 compensated 无关 —— 安全边界的推手还在, 只是不再有传感器力。)
+[Force] !! (没有模型可比较: 逐通道对比表不适用。上面那一段才是原因。)
+[Force] !! 处理: 先按 'm' 采多姿态 -> 's' 解出 A, 再按 'z' 调零存盘。
+[Relay] Sent 2000 position updates, last send=-1B
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【没有可用模型】本地补偿未启用 —— 不是"标定与机械臂不符"
+[Force] !!   未标定 -> 去标定 ('m' 采多姿态 + 's' 解 A, 再 'z' 调零);
+[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。
+[Force] !!   【两者的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它在 HapticCallback.cpp:168 由位置现算,
+[Force] !!    与 compensated 无关 —— 安全边界的推手还在, 只是不再有传感器力。)
+[Force] !! (没有模型可比较: 逐通道对比表不适用。上面那一段才是原因。)
+[Force] !! 处理: 先按 'm' 采多姿态 -> 's' 解出 A, 再按 'z' 调零存盘。
+[Relay] Sent 2100 position updates, last send=-1B
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【没有可用模型】本地补偿未启用 —— 不是"标定与机械臂不符"
+[Force] !!   未标定 -> 去标定 ('m' 采多姿态 + 's' 解 A, 再 'z' 调零);
+[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。
+[Force] !!   【两者的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它在 HapticCallback.cpp:168 由位置现算,
+[Force] !!    与 compensated 无关 —— 安全边界的推手还在, 只是不再有传感器力。)
+[Force] !! (没有模型可比较: 逐通道对比表不适用。上面那一段才是原因。)
+[Force] !! 处理: 先按 'm' 采多姿态 -> 's' 解出 A, 再按 'z' 调零存盘。
+[Relay] Sent 2200 position updates, last send=-1B
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【没有可用模型】本地补偿未启用 —— 不是"标定与机械臂不符"
+[Force] !!   未标定 -> 去标定 ('m' 采多姿态 + 's' 解 A, 再 'z' 调零);
+[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。
+[Force] !!   【两者的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它在 HapticCallback.cpp:168 由位置现算,
+[Force] !!    与 compensated 无关 —— 安全边界的推手还在, 只是不再有传感器力。)
+[Force] !! (没有模型可比较: 逐通道对比表不适用。上面那一段才是原因。)
+[Force] !! 处理: 先按 'm' 采多姿态 -> 's' 解出 A, 再按 'z' 调零存盘。
+[Relay] Sent 2300 position updates, last send=-1B
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【没有可用模型】本地补偿未启用 —— 不是"标定与机械臂不符"
+[Force] !!   未标定 -> 去标定 ('m' 采多姿态 + 's' 解 A, 再 'z' 调零);
+[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。
+[Force] !!   【两者的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它在 HapticCallback.cpp:168 由位置现算,
+[Force] !!    与 compensated 无关 —— 安全边界的推手还在, 只是不再有传感器力。)
+[Force] !! (没有模型可比较: 逐通道对比表不适用。上面那一段才是原因。)
+[Force] !! 处理: 先按 'm' 采多姿态 -> 's' 解出 A, 再按 'z' 调零存盘。
+[Relay] Sent 2400 position updates, last send=-1B
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【没有可用模型】本地补偿未启用 —— 不是"标定与机械臂不符"
+[Force] !!   未标定 -> 去标定 ('m' 采多姿态 + 's' 解 A, 再 'z' 调零);
+[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。
+[Force] !!   【两者的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它在 HapticCallback.cpp:168 由位置现算,
+[Force] !!    与 compensated 无关 —— 安全边界的推手还在, 只是不再有传感器力。)
+[Force] !! (没有模型可比较: 逐通道对比表不适用。上面那一段才是原因。)
+[Force] !! 处理: 先按 'm' 采多姿态 -> 's' 解出 A, 再按 'z' 调零存盘。
+[Relay] Sent 2500 position updates, last send=-1B
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【没有可用模型】本地补偿未启用 —— 不是"标定与机械臂不符"
+[Force] !!   未标定 -> 去标定 ('m' 采多姿态 + 's' 解 A, 再 'z' 调零);
+[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。
+[Force] !!   【两者的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它在 HapticCallback.cpp:168 由位置现算,
+[Force] !!    与 compensated 无关 —— 安全边界的推手还在, 只是不再有传感器力。)
+[Force] !! (没有模型可比较: 逐通道对比表不适用。上面那一段才是原因。)
+[Force] !! 处理: 先按 'm' 采多姿态 -> 's' 解出 A, 再按 'z' 调零存盘。
+[Relay] Sent 2600 position updates, last send=-1B
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【没有可用模型】本地补偿未启用 —— 不是"标定与机械臂不符"
+[Force] !!   未标定 -> 去标定 ('m' 采多姿态 + 's' 解 A, 再 'z' 调零);
+[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。
+[Force] !!   【两者的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它在 HapticCallback.cpp:168 由位置现算,
+[Force] !!    与 compensated 无关 —— 安全边界的推手还在, 只是不再有传感器力。)
+[Force] !! (没有模型可比较: 逐通道对比表不适用。上面那一段才是原因。)
+[Force] !! 处理: 先按 'm' 采多姿态 -> 's' 解出 A, 再按 'z' 调零存盘。
+[Relay] Sent 2700 position updates, last send=-1B
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【没有可用模型】本地补偿未启用 —— 不是"标定与机械臂不符"
+[Force] !!   未标定 -> 去标定 ('m' 采多姿态 + 's' 解 A, 再 'z' 调零);
+[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。
+[Force] !!   【两者的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它在 HapticCallback.cpp:168 由位置现算,
+[Force] !!    与 compensated 无关 —— 安全边界的推手还在, 只是不再有传感器力。)
+[Force] !! (没有模型可比较: 逐通道对比表不适用。上面那一段才是原因。)
+[Force] !! 处理: 先按 'm' 采多姿态 -> 's' 解出 A, 再按 'z' 调零存盘。
+[Relay] Sent 2800 position updates, last send=-1B
+
+[BIAS] Mode ON — 笔尖悬空, 只改姿态(位置尽量不变), 每到一个姿态按 SPACE (采样 1s)
+       'd' 拖拽模式开关 (摆姿态用; 摆好一定要关掉再采样) / 'm' 退出并输出报告
+       's' 用这批数据【求解原始通道】, 只打印、不改动任何东西 (不写补偿 / 不写 json / 不下发机械臂)
+       'p' 【唯一】会把负载参数发给机械臂的键 —— 它只摆出安全规程与 这一次要发的命令,【要再按 'y' 才真正发出】; 按任何其他键取消。
+       ★ 重复对 (模型形式检验的尺子): 摆姿态 → SPACE 采样;
+         ★ 保持不动 → 按 'r' → 再按 SPACE 采一次（同一姿态）。
+         两次采样之间机械臂【不许移动】—— 'r' 配的是【上一次采样】, 一移动, 这一对量到的就是两个姿态之间的重力差, 不是复现性。
+         ★ 每一对都要【换一个姿态】: 挑 5 个以上姿态, 每个姿态采两次配成 一对; 不要在同一个姿态上连着配对 —— 那样相邻两对共用一次采样, 尺子的真实自由度只有约 2R/3, 而这里按对数 R 报。
+         ★ 为什么是 5 而不是 2~3: 力矩分支的冤枉率在 R=3 时实测 7~23%, 到 R=5 才降到 1% 量级 (力通道在 R=3 就已经是 0.05%, 两条门差得远)。
+         每一对再按 'r' 是【追加】一对 (尺子的自由度跟着涨): 模型正确时的假拒率 (α=0.9999) —— 力通道: R=1 约 2.1%、R=2 0.27%、R=3 0.05%;  力矩分支: R=3 约 7~23%、R=5 约 1~5% (随采集而变, 且是下界)。
+         同一姿态的两次采样之差是【姿态间复现性】: 模型形式检验 (残差是否超出这台设备复现一个姿态的能力) 就拿它当尺子。
+         每采完一对, 结算行会打出这一对的【尺子读数 σ_rep】: 它该与 's' 屏幕上的 rmsF 同量级 —— 明显偏大才是中间机械臂动过。
+         一对都没有的话, 模型形式无从判定, 求解会拒绝给参数 (不是少一个可有可无的步骤)。
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【没有可用模型】本地补偿未启用 —— 不是"标定与机械臂不符"
+[Force] !!   未标定 -> 去标定 ('m' 采多姿态 + 's' 解 A, 再 'z' 调零);
+[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。
+[Force] !!   【两者的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它在 HapticCallback.cpp:168 由位置现算,
+[Force] !!    与 compensated 无关 —— 安全边界的推手还在, 只是不再有传感器力。)
+[Force] !! (没有模型可比较: 逐通道对比表不适用。上面那一段才是原因。)
+[Force] !! 处理: 先按 'm' 采多姿态 -> 's' 解出 A, 再按 'z' 调零存盘。
+[Relay] Sent 2900 position updates, last send=-1B
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【没有可用模型】本地补偿未启用 —— 不是"标定与机械臂不符"
+[Force] !!   未标定 -> 去标定 ('m' 采多姿态 + 's' 解 A, 再 'z' 调零);
+[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。
+[Force] !!   【两者的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它在 HapticCallback.cpp:168 由位置现算,
+[Force] !!    与 compensated 无关 —— 安全边界的推手还在, 只是不再有传感器力。)
+[Force] !! (没有模型可比较: 逐通道对比表不适用。上面那一段才是原因。)
+[Force] !! 处理: 先按 'm' 采多姿态 -> 's' 解出 A, 再按 'z' 调零存盘。
+[Relay] Sent 3000 position updates, last send=-1B
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【没有可用模型】本地补偿未启用 —— 不是"标定与机械臂不符"
+[Force] !!   未标定 -> 去标定 ('m' 采多姿态 + 's' 解 A, 再 'z' 调零);
+[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。
+[Force] !!   【两者的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它在 HapticCallback.cpp:168 由位置现算,
+[Force] !!    与 compensated 无关 —— 安全边界的推手还在, 只是不再有传感器力。)
+[Force] !! (没有模型可比较: 逐通道对比表不适用。上面那一段才是原因。)
+[Force] !! 处理: 先按 'm' 采多姿态 -> 's' 解出 A, 再按 'z' 调零存盘。
+[Relay] Sent 3100 position updates, last send=-1B
+[Relay] Sent 3200 position updates, last send=-1B
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【没有可用模型】本地补偿未启用 —— 不是"标定与机械臂不符"
+[Force] !!   未标定 -> 去标定 ('m' 采多姿态 + 's' 解 A, 再 'z' 调零);
+[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。
+[Force] !!   【两者的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它在 HapticCallback.cpp:168 由位置现算,
+[Force] !!    与 compensated 无关 —— 安全边界的推手还在, 只是不再有传感器力。)
+[Force] !! (没有模型可比较: 逐通道对比表不适用。上面那一段才是原因。)
+[Force] !! 处理: 先按 'm' 采多姿态 -> 's' 解出 A, 再按 'z' 调零存盘。
+[Relay] Sent 3300 position updates, last send=-1B
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【没有可用模型】本地补偿未启用 —— 不是"标定与机械臂不符"
+[Force] !!   未标定 -> 去标定 ('m' 采多姿态 + 's' 解 A, 再 'z' 调零);
+[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。
+[Force] !!   【两者的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它在 HapticCallback.cpp:168 由位置现算,
+[Force] !!    与 compensated 无关 —— 安全边界的推手还在, 只是不再有传感器力。)
+[Force] !! (没有模型可比较: 逐通道对比表不适用。上面那一段才是原因。)
+[Force] !! 处理: 先按 'm' 采多姿态 -> 's' 解出 A, 再按 'z' 调零存盘。
+[Relay] Sent 3400 position updates, last send=-1B
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【没有可用模型】本地补偿未启用 —— 不是"标定与机械臂不符"
+[Force] !!   未标定 -> 去标定 ('m' 采多姿态 + 's' 解 A, 再 'z' 调零);
+[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。
+[Force] !!   【两者的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它在 HapticCallback.cpp:168 由位置现算,
+[Force] !!    与 compensated 无关 —— 安全边界的推手还在, 只是不再有传感器力。)
+[Force] !! (没有模型可比较: 逐通道对比表不适用。上面那一段才是原因。)
+[Force] !! 处理: 先按 'm' 采多姿态 -> 's' 解出 A, 再按 'z' 调零存盘。
+[Relay] Sent 3500 position updates, last send=-1B
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【没有可用模型】本地补偿未启用 —— 不是"标定与机械臂不符"
+[Force] !!   未标定 -> 去标定 ('m' 采多姿态 + 's' 解 A, 再 'z' 调零);
+[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。
+[Force] !!   【两者的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它在 HapticCallback.cpp:168 由位置现算,
+[Force] !!    与 compensated 无关 —— 安全边界的推手还在, 只是不再有传感器力。)
+[Force] !! (没有模型可比较: 逐通道对比表不适用。上面那一段才是原因。)
+[Force] !! 处理: 先按 'm' 采多姿态 -> 's' 解出 A, 再按 'z' 调零存盘。
+[Relay] Sent 3600 position updates, last send=-1B
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【没有可用模型】本地补偿未启用 —— 不是"标定与机械臂不符"
+[Force] !!   未标定 -> 去标定 ('m' 采多姿态 + 's' 解 A, 再 'z' 调零);
+[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。
+[Force] !!   【两者的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它在 HapticCallback.cpp:168 由位置现算,
+[Force] !!    与 compensated 无关 —— 安全边界的推手还在, 只是不再有传感器力。)
+[Force] !! (没有模型可比较: 逐通道对比表不适用。上面那一段才是原因。)
+[Force] !! 处理: 先按 'm' 采多姿态 -> 's' 解出 A, 再按 'z' 调零存盘。
+[Relay] Sent 3700 position updates, last send=-1B
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【没有可用模型】本地补偿未启用 —— 不是"标定与机械臂不符"
+[Force] !!   未标定 -> 去标定 ('m' 采多姿态 + 's' 解 A, 再 'z' 调零);
+[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。
+[Force] !!   【两者的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它在 HapticCallback.cpp:168 由位置现算,
+[Force] !!    与 compensated 无关 —— 安全边界的推手还在, 只是不再有传感器力。)
+[Force] !! (没有模型可比较: 逐通道对比表不适用。上面那一段才是原因。)
+[Force] !! 处理: 先按 'm' 采多姿态 -> 's' 解出 A, 再按 'z' 调零存盘。
+[Relay] Sent 3800 position updates, last send=-1B
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【没有可用模型】本地补偿未启用 —— 不是"标定与机械臂不符"
+[Force] !!   未标定 -> 去标定 ('m' 采多姿态 + 's' 解 A, 再 'z' 调零);
+[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。
+[Force] !!   【两者的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它在 HapticCallback.cpp:168 由位置现算,
+[Force] !!    与 compensated 无关 —— 安全边界的推手还在, 只是不再有传感器力。)
+[Force] !! (没有模型可比较: 逐通道对比表不适用。上面那一段才是原因。)
+[Force] !! 处理: 先按 'm' 采多姿态 -> 's' 解出 A, 再按 'z' 调零存盘。
+[Relay] Sent 3900 position updates, last send=-1B
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【没有可用模型】本地补偿未启用 —— 不是"标定与机械臂不符"
+[Force] !!   未标定 -> 去标定 ('m' 采多姿态 + 's' 解 A, 再 'z' 调零);
+[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。
+[Force] !!   【两者的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它在 HapticCallback.cpp:168 由位置现算,
+[Force] !!    与 compensated 无关 —— 安全边界的推手还在, 只是不再有传感器力。)
+[Force] !! (没有模型可比较: 逐通道对比表不适用。上面那一段才是原因。)
+[Force] !! 处理: 先按 'm' 采多姿态 -> 's' 解出 A, 再按 'z' 调零存盘。
+[Relay] Sent 4000 position updates, last send=-1B
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【没有可用模型】本地补偿未启用 —— 不是"标定与机械臂不符"
+[Force] !!   未标定 -> 去标定 ('m' 采多姿态 + 's' 解 A, 再 'z' 调零);
+[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。
+[Force] !!   【两者的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它在 HapticCallback.cpp:168 由位置现算,
+[Force] !!    与 compensated 无关 —— 安全边界的推手还在, 只是不再有传感器力。)
+[Force] !! (没有模型可比较: 逐通道对比表不适用。上面那一段才是原因。)
+[Force] !! 处理: 先按 'm' 采多姿态 -> 's' 解出 A, 再按 'z' 调零存盘。
+[Relay] Sent 4100 position updates, last send=-1B
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【没有可用模型】本地补偿未启用 —— 不是"标定与机械臂不符"
+[Force] !!   未标定 -> 去标定 ('m' 采多姿态 + 's' 解 A, 再 'z' 调零);
+[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。
+[Force] !!   【两者的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它在 HapticCallback.cpp:168 由位置现算,
+[Force] !!    与 compensated 无关 —— 安全边界的推手还在, 只是不再有传感器力。)
+[Force] !! (没有模型可比较: 逐通道对比表不适用。上面那一段才是原因。)
+[Force] !! 处理: 先按 'm' 采多姿态 -> 's' 解出 A, 再按 'z' 调零存盘。
+[Relay] Sent 4200 position updates, last send=-1B
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【没有可用模型】本地补偿未启用 —— 不是"标定与机械臂不符"
+[Force] !!   未标定 -> 去标定 ('m' 采多姿态 + 's' 解 A, 再 'z' 调零);
+[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。
+[Force] !!   【两者的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它在 HapticCallback.cpp:168 由位置现算,
+[Force] !!    与 compensated 无关 —— 安全边界的推手还在, 只是不再有传感器力。)
+[Force] !! (没有模型可比较: 逐通道对比表不适用。上面那一段才是原因。)
+[Force] !! 处理: 先按 'm' 采多姿态 -> 's' 解出 A, 再按 'z' 调零存盘。
+[Relay] Sent 4300 position updates, last send=-1B
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【没有可用模型】本地补偿未启用 —— 不是"标定与机械臂不符"
+[Force] !!   未标定 -> 去标定 ('m' 采多姿态 + 's' 解 A, 再 'z' 调零);
+[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。
+[Force] !!   【两者的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它在 HapticCallback.cpp:168 由位置现算,
+[Force] !!    与 compensated 无关 —— 安全边界的推手还在, 只是不再有传感器力。)
+[Force] !! (没有模型可比较: 逐通道对比表不适用。上面那一段才是原因。)
+[Force] !! 处理: 先按 'm' 采多姿态 -> 's' 解出 A, 再按 'z' 调零存盘。
+[Relay] Sent 4400 position updates, last send=-1B
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【没有可用模型】本地补偿未启用 —— 不是"标定与机械臂不符"
+[Force] !!   未标定 -> 去标定 ('m' 采多姿态 + 's' 解 A, 再 'z' 调零);
+[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。
+[Force] !!   【两者的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它在 HapticCallback.cpp:168 由位置现算,
+[Force] !!    与 compensated 无关 —— 安全边界的推手还在, 只是不再有传感器力。)
+[Force] !! (没有模型可比较: 逐通道对比表不适用。上面那一段才是原因。)
+[Force] !! 处理: 先按 'm' 采多姿态 -> 's' 解出 A, 再按 'z' 调零存盘。
+[Relay] Sent 4500 position updates, last send=-1B
+[Relay] Sent 4600 position updates, last send=-1B
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【没有可用模型】本地补偿未启用 —— 不是"标定与机械臂不符"
+[Force] !!   未标定 -> 去标定 ('m' 采多姿态 + 's' 解 A, 再 'z' 调零);
+[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。
+[Force] !!   【两者的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它在 HapticCallback.cpp:168 由位置现算,
+[Force] !!    与 compensated 无关 —— 安全边界的推手还在, 只是不再有传感器力。)
+[Force] !! (没有模型可比较: 逐通道对比表不适用。上面那一段才是原因。)
+[Force] !! 处理: 先按 'm' 采多姿态 -> 's' 解出 A, 再按 'z' 调零存盘。
+[Relay] Sent 4700 position updates, last send=-1B
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【没有可用模型】本地补偿未启用 —— 不是"标定与机械臂不符"
+[Force] !!   未标定 -> 去标定 ('m' 采多姿态 + 's' 解 A, 再 'z' 调零);
+[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。
+[Force] !!   【两者的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它在 HapticCallback.cpp:168 由位置现算,
+[Force] !!    与 compensated 无关 —— 安全边界的推手还在, 只是不再有传感器力。)
+[Force] !! (没有模型可比较: 逐通道对比表不适用。上面那一段才是原因。)
+[Force] !! 处理: 先按 'm' 采多姿态 -> 's' 解出 A, 再按 'z' 调零存盘。
+[Relay] Sent 4800 position updates, last send=-1B
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【没有可用模型】本地补偿未启用 —— 不是"标定与机械臂不符"
+[Force] !!   未标定 -> 去标定 ('m' 采多姿态 + 's' 解 A, 再 'z' 调零);
+[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。
+[Force] !!   【两者的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它在 HapticCallback.cpp:168 由位置现算,
+[Force] !!    与 compensated 无关 —— 安全边界的推手还在, 只是不再有传感器力。)
+[Force] !! (没有模型可比较: 逐通道对比表不适用。上面那一段才是原因。)
+[Force] !! 处理: 先按 'm' 采多姿态 -> 's' 解出 A, 再按 'z' 调零存盘。
+[Relay] Sent 4900 position updates, last send=-1B
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【没有可用模型】本地补偿未启用 —— 不是"标定与机械臂不符"
+[Force] !!   未标定 -> 去标定 ('m' 采多姿态 + 's' 解 A, 再 'z' 调零);
+[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。
+[Force] !!   【两者的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它在 HapticCallback.cpp:168 由位置现算,
+[Force] !!    与 compensated 无关 —— 安全边界的推手还在, 只是不再有传感器力。)
+[Force] !! (没有模型可比较: 逐通道对比表不适用。上面那一段才是原因。)
+[Force] !! 处理: 先按 'm' 采多姿态 -> 's' 解出 A, 再按 'z' 调零存盘。
+[Relay] Sent 5000 position updates, last send=-1B
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【没有可用模型】本地补偿未启用 —— 不是"标定与机械臂不符"
+[Force] !!   未标定 -> 去标定 ('m' 采多姿态 + 's' 解 A, 再 'z' 调零);
+[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。
+[Force] !!   【两者的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它在 HapticCallback.cpp:168 由位置现算,
+[Force] !!    与 compensated 无关 —— 安全边界的推手还在, 只是不再有传感器力。)
+[Force] !! (没有模型可比较: 逐通道对比表不适用。上面那一段才是原因。)
+[Force] !! 处理: 先按 'm' 采多姿态 -> 's' 解出 A, 再按 'z' 调零存盘。
+[Relay] Sent 5100 position updates, last send=-1B
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【没有可用模型】本地补偿未启用 —— 不是"标定与机械臂不符"
+[Force] !!   未标定 -> 去标定 ('m' 采多姿态 + 's' 解 A, 再 'z' 调零);
+[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。
+[Force] !!   【两者的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它在 HapticCallback.cpp:168 由位置现算,
+[Force] !!    与 compensated 无关 —— 安全边界的推手还在, 只是不再有传感器力。)
+[Force] !! (没有模型可比较: 逐通道对比表不适用。上面那一段才是原因。)
+[Force] !! 处理: 先按 'm' 采多姿态 -> 's' 解出 A, 再按 'z' 调零存盘。
+[Relay] Sent 5200 position updates, last send=-1B
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【没有可用模型】本地补偿未启用 —— 不是"标定与机械臂不符"
+[Force] !!   未标定 -> 去标定 ('m' 采多姿态 + 's' 解 A, 再 'z' 调零);
+[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。
+[Force] !!   【两者的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它在 HapticCallback.cpp:168 由位置现算,
+[Force] !!    与 compensated 无关 —— 安全边界的推手还在, 只是不再有传感器力。)
+[Force] !! (没有模型可比较: 逐通道对比表不适用。上面那一段才是原因。)
+[Force] !! 处理: 先按 'm' 采多姿态 -> 's' 解出 A, 再按 'z' 调零存盘。
+[Relay] Sent 5300 position updates, last send=-1B
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【没有可用模型】本地补偿未启用 —— 不是"标定与机械臂不符"
+[Force] !!   未标定 -> 去标定 ('m' 采多姿态 + 's' 解 A, 再 'z' 调零);
+[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。
+[Force] !!   【两者的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它在 HapticCallback.cpp:168 由位置现算,
+[Force] !!    与 compensated 无关 —— 安全边界的推手还在, 只是不再有传感器力。)
+[Force] !! (没有模型可比较: 逐通道对比表不适用。上面那一段才是原因。)
+[Force] !! 处理: 先按 'm' 采多姿态 -> 's' 解出 A, 再按 'z' 调零存盘。
+[Relay] Sent 5400 position updates, last send=-1B
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【没有可用模型】本地补偿未启用 —— 不是"标定与机械臂不符"
+[Force] !!   未标定 -> 去标定 ('m' 采多姿态 + 's' 解 A, 再 'z' 调零);
+[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。
+[Force] !!   【两者的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它在 HapticCallback.cpp:168 由位置现算,
+[Force] !!    与 compensated 无关 —— 安全边界的推手还在, 只是不再有传感器力。)
+[Force] !! (没有模型可比较: 逐通道对比表不适用。上面那一段才是原因。)
+[Force] !! 处理: 先按 'm' 采多姿态 -> 's' 解出 A, 再按 'z' 调零存盘。
+[Relay] Sent 5500 position updates, last send=-1B
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【没有可用模型】本地补偿未启用 —— 不是"标定与机械臂不符"
+[Force] !!   未标定 -> 去标定 ('m' 采多姿态 + 's' 解 A, 再 'z' 调零);
+[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。
+[Force] !!   【两者的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它在 HapticCallback.cpp:168 由位置现算,
+[Force] !!    与 compensated 无关 —— 安全边界的推手还在, 只是不再有传感器力。)
+[Force] !! (没有模型可比较: 逐通道对比表不适用。上面那一段才是原因。)
+[Force] !! 处理: 先按 'm' 采多姿态 -> 's' 解出 A, 再按 'z' 调零存盘。
+[Relay] Sent 5600 position updates, last send=-1B
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【没有可用模型】本地补偿未启用 —— 不是"标定与机械臂不符"
+[Force] !!   未标定 -> 去标定 ('m' 采多姿态 + 's' 解 A, 再 'z' 调零);
+[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。
+[Force] !!   【两者的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它在 HapticCallback.cpp:168 由位置现算,
+[Force] !!    与 compensated 无关 —— 安全边界的推手还在, 只是不再有传感器力。)
+[Force] !! (没有模型可比较: 逐通道对比表不适用。上面那一段才是原因。)
+[Force] !! 处理: 先按 'm' 采多姿态 -> 's' 解出 A, 再按 'z' 调零存盘。
+[Relay] Sent 5700 position updates, last send=-1B
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【没有可用模型】本地补偿未启用 —— 不是"标定与机械臂不符"
+[Force] !!   未标定 -> 去标定 ('m' 采多姿态 + 's' 解 A, 再 'z' 调零);
+[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。
+[Force] !!   【两者的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它在 HapticCallback.cpp:168 由位置现算,
+[Force] !!    与 compensated 无关 —— 安全边界的推手还在, 只是不再有传感器力。)
+[Force] !! (没有模型可比较: 逐通道对比表不适用。上面那一段才是原因。)
+[Force] !! 处理: 先按 'm' 采多姿态 -> 's' 解出 A, 再按 'z' 调零存盘。
+[Relay] Sent 5800 position updates, last send=-1B
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【没有可用模型】本地补偿未启用 —— 不是"标定与机械臂不符"
+[Force] !!   未标定 -> 去标定 ('m' 采多姿态 + 's' 解 A, 再 'z' 调零);
+[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。
+[Force] !!   【两者的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它在 HapticCallback.cpp:168 由位置现算,
+[Force] !!    与 compensated 无关 —— 安全边界的推手还在, 只是不再有传感器力。)
+[Force] !! (没有模型可比较: 逐通道对比表不适用。上面那一段才是原因。)
+[Force] !! 处理: 先按 'm' 采多姿态 -> 's' 解出 A, 再按 'z' 调零存盘。
+[Relay] Sent 5900 position updates, last send=-1B
+[Relay] Sent 6000 position updates, last send=-1B
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【没有可用模型】本地补偿未启用 —— 不是"标定与机械臂不符"
+[Force] !!   未标定 -> 去标定 ('m' 采多姿态 + 's' 解 A, 再 'z' 调零);
+[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。
+[Force] !!   【两者的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它在 HapticCallback.cpp:168 由位置现算,
+[Force] !!    与 compensated 无关 —— 安全边界的推手还在, 只是不再有传感器力。)
+[Force] !! (没有模型可比较: 逐通道对比表不适用。上面那一段才是原因。)
+[Force] !! 处理: 先按 'm' 采多姿态 -> 's' 解出 A, 再按 'z' 调零存盘。
+[Relay] Sent 6100 position updates, last send=-1B
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【没有可用模型】本地补偿未启用 —— 不是"标定与机械臂不符"
+[Force] !!   未标定 -> 去标定 ('m' 采多姿态 + 's' 解 A, 再 'z' 调零);
+[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。
+[Force] !!   【两者的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它在 HapticCallback.cpp:168 由位置现算,
+[Force] !!    与 compensated 无关 —— 安全边界的推手还在, 只是不再有传感器力。)
+[Force] !! (没有模型可比较: 逐通道对比表不适用。上面那一段才是原因。)
+[Force] !! 处理: 先按 'm' 采多姿态 -> 's' 解出 A, 再按 'z' 调零存盘。
+[Relay] Sent 6200 position updates, last send=-1B
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【没有可用模型】本地补偿未启用 —— 不是"标定与机械臂不符"
+[Force] !!   未标定 -> 去标定 ('m' 采多姿态 + 's' 解 A, 再 'z' 调零);
+[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。
+[Force] !!   【两者的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它在 HapticCallback.cpp:168 由位置现算,
+[Force] !!    与 compensated 无关 —— 安全边界的推手还在, 只是不再有传感器力。)
+[Force] !! (没有模型可比较: 逐通道对比表不适用。上面那一段才是原因。)
+[Force] !! 处理: 先按 'm' 采多姿态 -> 's' 解出 A, 再按 'z' 调零存盘。
+[Relay] Sent 6300 position updates, last send=-1B
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【没有可用模型】本地补偿未启用 —— 不是"标定与机械臂不符"
+[Force] !!   未标定 -> 去标定 ('m' 采多姿态 + 's' 解 A, 再 'z' 调零);
+[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。
+[Force] !!   【两者的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它在 HapticCallback.cpp:168 由位置现算,
+[Force] !!    与 compensated 无关 —— 安全边界的推手还在, 只是不再有传感器力。)
+[Force] !! (没有模型可比较: 逐通道对比表不适用。上面那一段才是原因。)
+[Force] !! 处理: 先按 'm' 采多姿态 -> 's' 解出 A, 再按 'z' 调零存盘。
+[Relay] Sent 6400 position updates, last send=-1B
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【没有可用模型】本地补偿未启用 —— 不是"标定与机械臂不符"
+[Force] !!   未标定 -> 去标定 ('m' 采多姿态 + 's' 解 A, 再 'z' 调零);
+[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。
+[Force] !!   【两者的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它在 HapticCallback.cpp:168 由位置现算,
+[Force] !!    与 compensated 无关 —— 安全边界的推手还在, 只是不再有传感器力。)
+[Force] !! (没有模型可比较: 逐通道对比表不适用。上面那一段才是原因。)
+[Force] !! 处理: 先按 'm' 采多姿态 -> 's' 解出 A, 再按 'z' 调零存盘。
+[Relay] Sent 6500 position updates, last send=-1B
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【没有可用模型】本地补偿未启用 —— 不是"标定与机械臂不符"
+[Force] !!   未标定 -> 去标定 ('m' 采多姿态 + 's' 解 A, 再 'z' 调零);
+[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。
+[Force] !!   【两者的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它在 HapticCallback.cpp:168 由位置现算,
+[Force] !!    与 compensated 无关 —— 安全边界的推手还在, 只是不再有传感器力。)
+[Force] !! (没有模型可比较: 逐通道对比表不适用。上面那一段才是原因。)
+[Force] !! 处理: 先按 'm' 采多姿态 -> 's' 解出 A, 再按 'z' 调零存盘。
+[Relay] Sent 6600 position updates, last send=-1B
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【没有可用模型】本地补偿未启用 —— 不是"标定与机械臂不符"
+[Force] !!   未标定 -> 去标定 ('m' 采多姿态 + 's' 解 A, 再 'z' 调零);
+[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。
+[Force] !!   【两者的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它在 HapticCallback.cpp:168 由位置现算,
+[Force] !!    与 compensated 无关 —— 安全边界的推手还在, 只是不再有传感器力。)
+[Force] !! (没有模型可比较: 逐通道对比表不适用。上面那一段才是原因。)
+[Force] !! 处理: 先按 'm' 采多姿态 -> 's' 解出 A, 再按 'z' 调零存盘。
+****************************************
+This is the DEVELOPER EDITION of OPENHAPTICS, commercial distribution is prohibited
+Please contact 3D Systems to obtain a commercial license
+****************************************
+^C

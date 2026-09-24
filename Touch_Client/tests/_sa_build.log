@@ -1,0 +1,17 @@
+用于 x64 的 Microsoft (R) C/C++ 优化编译器 19.44.35228 版
+版权所有(C) Microsoft Corporation。保留所有权利。
+
+test_singularity_avoidance.cpp
+test_singularity_avoidance.cpp(5): warning C4005: “TEST_SINGAVOID”: 宏重定义
+test_singularity_avoidance.cpp(5): note: 之前在命令行上声明的“TEST_SINGAVOID”
+SingularityAvoidance.cpp
+Kinematics.cpp
+正在生成代码...
+Microsoft (R) Incremental Linker Version 14.44.35228.0
+Copyright (C) Microsoft Corporation.  All rights reserved.
+
+/out:test_singularity_avoidance.exe 
+test_singularity_avoidance.obj 
+SingularityAvoidance.obj 
+Kinematics.obj 
+BUILD_EXIT=0

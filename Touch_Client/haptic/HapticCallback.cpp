@@ -7,8 +7,6 @@
 #include "../config/Config.h"
 #include "../safety/ConstraintForce.h"
 #include "../safety/SafetyPredictor.h"
-#include "../force/ForcePipeline.h"   // ★ 2026-09-24: viscousDamping（环路阻尼）
-#include <chrono>                   // ★ 同上：阻尼的速度基线要用 steady_clock 微秒（GetTickCount 粒度 15.6ms 不够）
 #include <HDU/hduVector.h>
 #include <iostream>
 #include <cmath>
@@ -165,35 +163,6 @@ HDCallbackCode HDCALLBACK hapticCallback(void* pUserData) {
                 totalForce[2] = app.forceData.hapticOut[2];
             }
             LeaveCriticalSection(&app.forceDataMutex);
-
-            // ===== 8a-2. ★★ 2026-09-24 深夜：**粘性阻尼项**（环路阻尼）=====
-            //   病与合规性论证见 Config::TOUCH_VISC_DAMPING 那一大段（一句话：重压时机械臂
-            //   左右晃是"力推手柄 → 手柄动 → 位置映射忠实转发 → 臂动又产生横向力"的自持环路；
-            //   而力反馈倍率有规格 1~3 ⇒ 不能靠降增益；粘性项只对运动响应、**不改静态倍率** ✓）。
-            //   位置在 8e（逐轴夹 ±3.3N）【之前】⇒ 它也会被那个夹子管住 ✓
-            //   ⚠ 速度必须用【≥20ms 的基线】：本回调 ~1kHz，相邻两帧只差 ~7µm（器件分辨率 ~10µm）
-            //     ⇒ 逐帧差分的量化噪声就有 ~10mm/s，与真实速度（实测 12~50mm/s）同量级
-            //     ⇒ 那样注入的是噪声、不是阻尼。20ms 基线 ⇒ 量化噪声 ~0.5mm/s ✓
-            //   ⚠ 时间戳用 steady_clock 微秒：GetTickCount 粒度 15.6ms，配 20ms 基线会 ±78% 误差。
-            {
-                static bool s_dmpInit = false;
-                static hduVector3Dd s_dmpPrevPos;
-                static std::chrono::steady_clock::time_point s_dmpPrevT;
-                static double s_dmpVel[3] = {0.0, 0.0, 0.0};
-                const auto nowT = std::chrono::steady_clock::now();
-                if (!s_dmpInit) {
-                    s_dmpInit = true; s_dmpPrevPos = localDevicePos; s_dmpPrevT = nowT;
-                } else {
-                    const double dt = std::chrono::duration<double>(nowT - s_dmpPrevT).count();
-                    if (dt >= 0.020) {
-                        for (int i = 0; i < 3; i++) s_dmpVel[i] = (localDevicePos[i] - s_dmpPrevPos[i]) / dt;
-                        s_dmpPrevPos = localDevicePos; s_dmpPrevT = nowT;
-                    }
-                }
-                double damp[3];
-                ForcePipeline::viscousDamping(s_dmpVel, Config::TOUCH_VISC_DAMPING, damp);
-                for (int i = 0; i < 3; i++) totalForce[i] += damp[i];
-            }
 
             // ===== ★★ 8b/8c/8d 虚拟约束力（触觉安全提示）—— 2026-09-21 由用户拍板【全部关闭】=====
             // 关掉的是哪三组、为什么关、以及【代价与补偿措施】, 全部写在

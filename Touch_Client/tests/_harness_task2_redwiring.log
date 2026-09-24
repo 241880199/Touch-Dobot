@@ -1,0 +1,2179 @@
+================================================
+  Touch-Dobot Unit Tests
+================================================
+
+================================================
+  Force Compensation Tests
+================================================
+
+--- Building test_force_compensation ---
+
+D:\Projects\Touch\Touch_Client\tests>rem 2026-09-22: guard the vcvarsall call -- PATH grows ~1350 chars per call and cmd dies at ~8191, 
+
+D:\Projects\Touch\Touch_Client\tests>rem   so a second unguarded call in the same session can abort the rest of run_tests.bat. 
+
+D:\Projects\Touch\Touch_Client\tests>rem   With this guard, vcvarsall runs at most once per cmd session. (ASCII only -- see 
+
+D:\Projects\Touch\Touch_Client\tests>rem   build_force_pipeline_test.bat's note about non-ASCII comments in .bat files.) 
+
+D:\Projects\Touch\Touch_Client\tests>if not defined VCINSTALLDIR call "D:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat" x64 
+'vswhere.exe' is not recognized as an internal or external command,
+operable program or batch file.
+**********************************************************************
+** Visual Studio 2022 Developer Command Prompt v17.0
+** Copyright (c) 2025 Microsoft Corporation
+**********************************************************************
+[vcvarsall.bat] Environment initialized for: 'x64'
+用于 x64 的 Microsoft (R) C/C++ 优化编译器 19.44.35228 版
+版权所有(C) Microsoft Corporation。保留所有权利。
+
+test_force_compensation.cpp
+ForceCompensation.cpp
+ForceCalibration.cpp
+CalibStore.cpp
+TcpCalibration.cpp
+正在生成代码...
+Microsoft (R) Incremental Linker Version 14.44.35228.0
+Copyright (C) Microsoft Corporation.  All rights reserved.
+
+/out:test_force_compensation.exe 
+test_force_compensation.obj 
+ForceCompensation.obj 
+ForceCalibration.obj 
+CalibStore.obj 
+TcpCalibration.obj 
+BUILD_EXIT=0
+  Build OK
+
+=== test_force_compensation.exe ===
+=== ForceCompensation + Calibration Tests ===
+  motion_still... PASS
+  motion_moving... PASS
+  comp_uncalibrated_refuses... PASS
+[Force] 一致性闸门: 放行 (本地全量模型与【参考量】在【投票通道】上一致; 参考量本帧【可用】)
+  comp_gravity_only... PASS
+[Force] 一致性闸门: 放行 (本地全量模型与【参考量】在【投票通道】上一致; 参考量本帧【可用】)
+  comp_gravity_goes_through_A... PASS
+[Force] 一致性闸门: 放行 (本地全量模型与【参考量】在【投票通道】上一致; 参考量本帧【可用】)
+[Force] 一致性闸门: 放行 (本地全量模型与【参考量】在【投票通道】上一致; 参考量本帧【可用】)
+  comp_moment_is_cross_of_Ag... PASS
+[Force] 一致性闸门: 放行 (本地全量模型与【参考量】在【投票通道】上一致; 参考量本帧【可用】)
+  guard_reference_is_the_current_derived_channel... PASS
+[Force] 一致性闸门: 放行 (本地全量模型与【参考量】在【投票通道】上一致; 参考量本帧【可用】)
+  guard_passes_when_consistent... PASS
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【有模型, 但与机械臂对不上】两边估计的不是同一个外力
+[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。
+[Force] !!   【三种原因的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它由【位置】现算 (SafetyPredictor::computeConstraintForce,
+[Force] !!    在触觉回调里对当前位置求一次), 与 compensated 无关 —— 安全边界的推手还在,
+[Force] !!    只是不再有传感器力。)
+[Force] !! 本帧姿态: X=+0.000 Y=+0.000 Z=+0.000  Rx=+0.000 Ry=+0.000 Rz=+0.000  (mm / deg) —— 读下面那六个数要连着它一起抄
+[Force] !! 逐通道结果 (EMA 差 = compensated − 【参考量】; 单位见各行标签)
+[Force] !!   ⚠ 只有【投票通道】参与判决; 标着【不投票】的那四行【照报但不算】
+[Force] !!     (依据见 g_guardVote 段: Fz 的秩 2 依据未复测; 力矩无一致态)。
+[Force] !!   行末的「与 @576」= compensated − @576 —— 只报不判 (诊断侧, 判据不看它)
+[Force] !!   Fx(N)     -2.0000  容差 1.2464  超限  <== 触发 └ 与 @576:   +0.0000 (只报不判)
+[Force] !!   Fy(N)     -0.0500  容差 1.2464  在限内        └ 与 @576:   +0.0000 (只报不判)
+[Force] !!   Fz(N)     +0.0000  容差 1.2464  【不投票】 (照报不判; 依据与代价见 g_guardVote 段)
+[Force] !!   Mx(Nm)    +0.0000  容差 0.0300  【不投票】 (照报不判; 依据与代价见 g_guardVote 段)
+[Force] !!   My(Nm)    +0.0000  容差 0.0300  【不投票】 (照报不判; 依据与代价见 g_guardVote 段)
+[Force] !!   Mz(Nm)    +0.0000  容差 0.0300  【不投票】 (照报不判; 依据与代价见 g_guardVote 段)
+[Force] !! 处理: 查负载参数有没有真的发进机械臂 (Task 8), 或重跑离线一致性检查。
+[Force] !!   【不要】靠改容差把它压过去 —— 容差是由实测导出的。
+  guard_refuses_when_inconsistent... PASS
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【有模型, 但与机械臂对不上】两边估计的不是同一个外力
+[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。
+[Force] !!   【三种原因的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它由【位置】现算 (SafetyPredictor::computeConstraintForce,
+[Force] !!    在触觉回调里对当前位置求一次), 与 compensated 无关 —— 安全边界的推手还在,
+[Force] !!    只是不再有传感器力。)
+[Force] !! 本帧姿态: X=+0.000 Y=+0.000 Z=+0.000  Rx=+0.000 Ry=+0.000 Rz=+0.000  (mm / deg) —— 读下面那六个数要连着它一起抄
+[Force] !! 逐通道结果 (EMA 差 = compensated − 【参考量】; 单位见各行标签)
+[Force] !!   ⚠ 只有【投票通道】参与判决; 标着【不投票】的那四行【照报但不算】
+[Force] !!     (依据见 g_guardVote 段: Fz 的秩 2 依据未复测; 力矩无一致态)。
+[Force] !!   行末的「与 @576」= compensated − @576 —— 只报不判 (诊断侧, 判据不看它)
+[Force] !!   Fx(N)     -5.0000  容差 1.2464  超限  <== 触发 └ 与 @576:   +0.0000 (只报不判)
+[Force] !!   Fy(N)     +0.0000  容差 1.2464  在限内        └ 与 @576:   +0.0000 (只报不判)
+[Force] !!   Fz(N)     -9.8100  容差 1.2464  【不投票】 (照报不判; 依据与代价见 g_guardVote 段)
+[Force] !!   Mx(Nm)    +0.0000  容差 0.0300  【不投票】 (照报不判; 依据与代价见 g_guardVote 段)
+[Force] !!   My(Nm)    +0.0000  容差 0.0300  【不投票】 (照报不判; 依据与代价见 g_guardVote 段)
+[Force] !!   Mz(Nm)    +0.0000  容差 0.0300  【不投票】 (照报不判; 依据与代价见 g_guardVote 段)
+[Force] !! 处理: 查负载参数有没有真的发进机械臂 (Task 8), 或重跑离线一致性检查。
+[Force] !!   【不要】靠改容差把它压过去 —— 容差是由实测导出的。
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【参考量不可用】判据那一侧【没有数据】—— 不是"标定与机械臂不符", 也不是"两边对不上"
+[Force] !!   参考量这一路没有数据 -> 去查【为什么没有】。本帧这两个数现在是: 六维力在线状态 @1037 = 0 (只有 1 算在线), 帧陈旧 = 0。
+[Force] !!     · 30004 帧还在不在来 (判据是 fd.isStale / Config::FORCE_STALE_MS);
+[Force] !!     · 机械臂自报的六维力在线状态 (@1037) 是不是 1 (只有 1 算在线)。
+[Force] !!   ⚠ 【不要】去重标模型、也【不要】去查负载参数有没有发进去:
+[Force] !!     那两个动作都以"存在一个可比的参考读数"为前提, 而这里没有。
+[Force] !!   【三种原因的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它由【位置】现算 (SafetyPredictor::computeConstraintForce,
+[Force] !!    在触觉回调里对当前位置求一次), 与 compensated 无关 —— 安全边界的推手还在,
+[Force] !!    只是不再有传感器力。)
+[Force] !! 本帧姿态: X=+0.000 Y=+0.000 Z=+0.000  Rx=+0.000 Ry=+0.000 Rz=+0.000  (mm / deg) —— 读下面那六个数要连着它一起抄
+[Force] !! (参考量这一路没有数据, 没有比过: 逐通道对比表不适用。上面那一段才是原因。)
+[Force] !! 处理: 把参考量这一路的数据找回来 (30004 帧 / 六维力在线状态), 然后等它恢复 —— 本闸门会自动放行。
+  guard_two_causes_are_distinguishable... PASS
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【参考量不可用】判据那一侧【没有数据】—— 不是"标定与机械臂不符", 也不是"两边对不上"
+[Force] !!   参考量这一路没有数据 -> 去查【为什么没有】。本帧这两个数现在是: 六维力在线状态 @1037 = 0 (只有 1 算在线), 帧陈旧 = 0。
+[Force] !!     · 30004 帧还在不在来 (判据是 fd.isStale / Config::FORCE_STALE_MS);
+[Force] !!     · 机械臂自报的六维力在线状态 (@1037) 是不是 1 (只有 1 算在线)。
+[Force] !!   ⚠ 【不要】去重标模型、也【不要】去查负载参数有没有发进去:
+[Force] !!     那两个动作都以"存在一个可比的参考读数"为前提, 而这里没有。
+[Force] !!   【三种原因的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它由【位置】现算 (SafetyPredictor::computeConstraintForce,
+[Force] !!    在触觉回调里对当前位置求一次), 与 compensated 无关 —— 安全边界的推手还在,
+[Force] !!    只是不再有传感器力。)
+[Force] !! 本帧姿态: X=+0.000 Y=+0.000 Z=+0.000  Rx=+0.000 Ry=+0.000 Rz=+0.000  (mm / deg) —— 读下面那六个数要连着它一起抄
+[Force] !! (参考量这一路没有数据, 没有比过: 逐通道对比表不适用。上面那一段才是原因。)
+[Force] !! 处理: 把参考量这一路的数据找回来 (30004 帧 / 六维力在线状态), 然后等它恢复 —— 本闸门会自动放行。
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【参考量不可用】判据那一侧【没有数据】—— 不是"标定与机械臂不符", 也不是"两边对不上"
+[Force] !!   参考量这一路没有数据 -> 去查【为什么没有】。本帧这两个数现在是: 六维力在线状态 @1037 = -1 (只有 1 算在线), 帧陈旧 = 0。
+[Force] !!     · 30004 帧还在不在来 (判据是 fd.isStale / Config::FORCE_STALE_MS);
+[Force] !!     · 机械臂自报的六维力在线状态 (@1037) 是不是 1 (只有 1 算在线)。
+[Force] !!   ⚠ 【不要】去重标模型、也【不要】去查负载参数有没有发进去:
+[Force] !!     那两个动作都以"存在一个可比的参考读数"为前提, 而这里没有。
+[Force] !!   【三种原因的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它由【位置】现算 (SafetyPredictor::computeConstraintForce,
+[Force] !!    在触觉回调里对当前位置求一次), 与 compensated 无关 —— 安全边界的推手还在,
+[Force] !!    只是不再有传感器力。)
+[Force] !! 本帧姿态: X=+0.000 Y=+0.000 Z=+0.000  Rx=+0.000 Ry=+0.000 Rz=+0.000  (mm / deg) —— 读下面那六个数要连着它一起抄
+[Force] !! (参考量这一路没有数据, 没有比过: 逐通道对比表不适用。上面那一段才是原因。)
+[Force] !! 处理: 把参考量这一路的数据找回来 (30004 帧 / 六维力在线状态), 然后等它恢复 —— 本闸门会自动放行。
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【参考量不可用】判据那一侧【没有数据】—— 不是"标定与机械臂不符", 也不是"两边对不上"
+[Force] !!   参考量这一路没有数据 -> 去查【为什么没有】。本帧这两个数现在是: 六维力在线状态 @1037 = 1 (只有 1 算在线), 帧陈旧 = 1。
+[Force] !!     · 30004 帧还在不在来 (判据是 fd.isStale / Config::FORCE_STALE_MS);
+[Force] !!     · 机械臂自报的六维力在线状态 (@1037) 是不是 1 (只有 1 算在线)。
+[Force] !!   ⚠ 【不要】去重标模型、也【不要】去查负载参数有没有发进去:
+[Force] !!     那两个动作都以"存在一个可比的参考读数"为前提, 而这里没有。
+[Force] !!   【三种原因的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它由【位置】现算 (SafetyPredictor::computeConstraintForce,
+[Force] !!    在触觉回调里对当前位置求一次), 与 compensated 无关 —— 安全边界的推手还在,
+[Force] !!    只是不再有传感器力。)
+[Force] !! 本帧姿态: X=+0.000 Y=+0.000 Z=+0.000  Rx=+0.000 Ry=+0.000 Rz=+0.000  (mm / deg) —— 读下面那六个数要连着它一起抄
+[Force] !! (参考量这一路没有数据, 没有比过: 逐通道对比表不适用。上面那一段才是原因。)
+[Force] !! 处理: 把参考量这一路的数据找回来 (30004 帧 / 六维力在线状态), 然后等它恢复 —— 本闸门会自动放行。
+[Force] 一致性闸门: 放行 (本地全量模型与【参考量】在【投票通道】上一致; 参考量本帧【可用】)
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【有模型, 但与机械臂对不上】两边估计的不是同一个外力
+[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。
+[Force] !!   【三种原因的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它由【位置】现算 (SafetyPredictor::computeConstraintForce,
+[Force] !!    在触觉回调里对当前位置求一次), 与 compensated 无关 —— 安全边界的推手还在,
+[Force] !!    只是不再有传感器力。)
+[Force] !! 本帧姿态: X=+0.000 Y=+0.000 Z=+0.000  Rx=+0.000 Ry=+0.000 Rz=+0.000  (mm / deg) —— 读下面那六个数要连着它一起抄
+[Force] !! 逐通道结果 (EMA 差 = compensated − 【参考量】; 单位见各行标签)
+[Force] !!   ⚠ 只有【投票通道】参与判决; 标着【不投票】的那四行【照报但不算】
+[Force] !!     (依据见 g_guardVote 段: Fz 的秩 2 依据未复测; 力矩无一致态)。
+[Force] !!   行末的「与 @576」= compensated − @576 —— 只报不判 (诊断侧, 判据不看它)
+[Force] !!   Fx(N)     -2.0000  容差 1.2464  超限  <== 触发 └ 与 @576:   +0.0000 (只报不判)
+[Force] !!   Fy(N)     +0.0000  容差 1.2464  在限内        └ 与 @576:   +0.0000 (只报不判)
+[Force] !!   Fz(N)     +0.0000  容差 1.2464  【不投票】 (照报不判; 依据与代价见 g_guardVote 段)
+[Force] !!   Mx(Nm)    +0.0000  容差 0.0300  【不投票】 (照报不判; 依据与代价见 g_guardVote 段)
+[Force] !!   My(Nm)    +0.0000  容差 0.0300  【不投票】 (照报不判; 依据与代价见 g_guardVote 段)
+[Force] !!   Mz(Nm)    +0.0000  容差 0.0300  【不投票】 (照报不判; 依据与代价见 g_guardVote 段)
+[Force] !! 处理: 查负载参数有没有真的发进机械臂 (Task 8), 或重跑离线一致性检查。
+[Force] !!   【不要】靠改容差把它压过去 —— 容差是由实测导出的。
+  guard_reference_unavailable_does_not_pass... PASS
+  guard_unavailable_first_refusal_prints_the_two_values... PASS
+  guard_error_code_mapping... PASS
+[Force] 一致性闸门: 放行 (本地全量模型与【参考量】在【投票通道】上一致; 参考量本帧【可用】)
+  guard_fz_reported_but_not_voted... PASS
+[Force] 一致性闸门: 放行 (本地全量模型与【参考量】在【投票通道】上一致; 参考量本帧【可用】)
+  guard_moment_channel_reports_but_does_not_vote... PASS
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【有模型, 但与机械臂对不上】两边估计的不是同一个外力
+[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。
+[Force] !!   【三种原因的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它由【位置】现算 (SafetyPredictor::computeConstraintForce,
+[Force] !!    在触觉回调里对当前位置求一次), 与 compensated 无关 —— 安全边界的推手还在,
+[Force] !!    只是不再有传感器力。)
+[Force] !! 本帧姿态: X=+0.000 Y=+0.000 Z=+0.000  Rx=+0.000 Ry=+0.000 Rz=+0.000  (mm / deg) —— 读下面那六个数要连着它一起抄
+[Force] !! 逐通道结果 (EMA 差 = compensated − 【参考量】; 单位见各行标签)
+[Force] !!   ⚠ 只有【投票通道】参与判决; 标着【不投票】的那四行【照报但不算】
+[Force] !!     (依据见 g_guardVote 段: Fz 的秩 2 依据未复测; 力矩无一致态)。
+[Force] !!   行末的「与 @576」= compensated − @576 —— 只报不判 (诊断侧, 判据不看它)
+[Force] !!   Fx(N)     -5.0000  容差 1.2464  超限  <== 触发 └ 与 @576:   +0.0000 (只报不判)
+[Force] !!   Fy(N)     +0.0000  容差 1.2464  在限内        └ 与 @576:   +0.0000 (只报不判)
+[Force] !!   Fz(N)     +0.0000  容差 1.2464  【不投票】 (照报不判; 依据与代价见 g_guardVote 段)
+[Force] !!   Mx(Nm)    +0.0000  容差 0.0300  【不投票】 (照报不判; 依据与代价见 g_guardVote 段)
+[Force] !!   My(Nm)    +0.0000  容差 0.0300  【不投票】 (照报不判; 依据与代价见 g_guardVote 段)
+[Force] !!   Mz(Nm)    +0.0000  容差 0.0300  【不投票】 (照报不判; 依据与代价见 g_guardVote 段)
+[Force] !! 处理: 查负载参数有没有真的发进机械臂 (Task 8), 或重跑离线一致性检查。
+[Force] !!   【不要】靠改容差把它压过去 —— 容差是由实测导出的。
+  guard_force_channels_still_vote... PASS
+[Force] 一致性闸门: 放行 (本地全量模型与【参考量】在【投票通道】上一致; 参考量本帧【可用】)
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【有模型, 但与机械臂对不上】两边估计的不是同一个外力
+[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。
+[Force] !!   【三种原因的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它由【位置】现算 (SafetyPredictor::computeConstraintForce,
+[Force] !!    在触觉回调里对当前位置求一次), 与 compensated 无关 —— 安全边界的推手还在,
+[Force] !!    只是不再有传感器力。)
+[Force] !! 本帧姿态: X=+0.000 Y=+0.000 Z=+0.000  Rx=+0.000 Ry=+0.000 Rz=+0.000  (mm / deg) —— 读下面那六个数要连着它一起抄
+[Force] !! 逐通道结果 (EMA 差 = compensated − 【参考量】; 单位见各行标签)
+[Force] !!   ⚠ 只有【投票通道】参与判决; 标着【不投票】的那四行【照报但不算】
+[Force] !!     (依据见 g_guardVote 段: Fz 的秩 2 依据未复测; 力矩无一致态)。
+[Force] !!   行末的「与 @576」= compensated − @576 —— 只报不判 (诊断侧, 判据不看它)
+[Force] !!   Fx(N)     +0.0000  容差 1.2464  在限内        └ 与 @576:   +0.5000 (只报不判)
+[Force] !!   Fy(N)     +0.0000  容差 1.2464  在限内        └ 与 @576:   +0.0000 (只报不判)
+[Force] !!   Fz(N)     +0.0000  容差 1.2464  【不投票】 (照报不判; 依据与代价见 g_guardVote 段)
+[Force] !!   Mx(Nm)       +nan  容差 0.0300  【不投票】 (照报不判; 依据与代价见 g_guardVote 段)
+[Force] !!   My(Nm)    +0.0000  容差 0.0300  【不投票】 (照报不判; 依据与代价见 g_guardVote 段)
+[Force] !!   Mz(Nm)    +0.0000  容差 0.0300  【不投票】 (照报不判; 依据与代价见 g_guardVote 段)
+[Force] !! 处理: 查负载参数有没有真的发进机械臂 (Task 8), 或重跑离线一致性检查。
+[Force] !!   【不要】靠改容差把它压过去 —— 容差是由实测导出的。
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【有模型, 但与机械臂对不上】两边估计的不是同一个外力
+[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。
+[Force] !!   【三种原因的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它由【位置】现算 (SafetyPredictor::computeConstraintForce,
+[Force] !!    在触觉回调里对当前位置求一次), 与 compensated 无关 —— 安全边界的推手还在,
+[Force] !!    只是不再有传感器力。)
+[Force] !! 本帧姿态: X=+0.000 Y=+0.000 Z=+0.000  Rx=+0.000 Ry=+0.000 Rz=+0.000  (mm / deg) —— 读下面那六个数要连着它一起抄
+[Force] !! 逐通道结果 (EMA 差 = compensated − 【参考量】; 单位见各行标签)
+[Force] !!   ⚠ 只有【投票通道】参与判决; 标着【不投票】的那四行【照报但不算】
+[Force] !!     (依据见 g_guardVote 段: Fz 的秩 2 依据未复测; 力矩无一致态)。
+[Force] !!   行末的「与 @576」= compensated − @576 —— 只报不判 (诊断侧, 判据不看它)
+[Force] !!   Fx(N)     +0.0000  容差 1.2464  在限内        └ 与 @576:   +0.5000 (只报不判)
+[Force] !!   Fy(N)     +0.0000  容差 1.2464  在限内        └ 与 @576:   +0.0000 (只报不判)
+[Force] !!   Fz(N)        +nan  容差 1.2464  【不投票】 (照报不判; 依据与代价见 g_guardVote 段)
+[Force] !!   Mx(Nm)    +0.0000  容差 0.0300  【不投票】 (照报不判; 依据与代价见 g_guardVote 段)
+[Force] !!   My(Nm)    +0.0000  容差 0.0300  【不投票】 (照报不判; 依据与代价见 g_guardVote 段)
+[Force] !!   Mz(Nm)    +0.0000  容差 0.0300  【不投票】 (照报不判; 依据与代价见 g_guardVote 段)
+[Force] !! 处理: 查负载参数有没有真的发进机械臂 (Task 8), 或重跑离线一致性检查。
+[Force] !!   【不要】靠改容差把它压过去 —— 容差是由实测导出的。
+  guard_nonfinite_refuses_even_on_nonvoting_channel... PASS
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【有模型, 但与机械臂对不上】两边估计的不是同一个外力
+[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。
+[Force] !!   【三种原因的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它由【位置】现算 (SafetyPredictor::computeConstraintForce,
+[Force] !!    在触觉回调里对当前位置求一次), 与 compensated 无关 —— 安全边界的推手还在,
+[Force] !!    只是不再有传感器力。)
+[Force] !! 本帧姿态: X=+0.000 Y=+0.000 Z=+0.000  Rx=+0.000 Ry=+0.000 Rz=+0.000  (mm / deg) —— 读下面那六个数要连着它一起抄
+[Force] !! 逐通道结果 (EMA 差 = compensated − 【参考量】; 单位见各行标签)
+[Force] !!   ⚠ 只有【投票通道】参与判决; 标着【不投票】的那四行【照报但不算】
+[Force] !!     (依据见 g_guardVote 段: Fz 的秩 2 依据未复测; 力矩无一致态)。
+[Force] !!   行末的「与 @576」= compensated − @576 —— 只报不判 (诊断侧, 判据不看它)
+[Force] !!   Fx(N)     +0.0000  容差 1.2464  在限内        └ 与 @576:   +0.5000 (只报不判)
+[Force] !!   Fy(N)        +nan  容差 1.2464  在限内        └ 与 @576:   +0.0000 (只报不判)
+[Force] !!   Fz(N)     +0.0000  容差 1.2464  【不投票】 (照报不判; 依据与代价见 g_guardVote 段)
+[Force] !!   Mx(Nm)    +0.0000  容差 0.0300  【不投票】 (照报不判; 依据与代价见 g_guardVote 段)
+[Force] !!   My(Nm)    +0.0000  容差 0.0300  【不投票】 (照报不判; 依据与代价见 g_guardVote 段)
+[Force] !!   Mz(Nm)    +0.0000  容差 0.0300  【不投票】 (照报不判; 依据与代价见 g_guardVote 段)
+[Force] !! 处理: 查负载参数有没有真的发进机械臂 (Task 8), 或重跑离线一致性检查。
+[Force] !!   【不要】靠改容差把它压过去 —— 容差是由实测导出的。
+[Force] 一致性闸门: 放行 (本地全量模型与【参考量】在【投票通道】上一致; 参考量本帧【可用】)
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【有模型, 但与机械臂对不上】两边估计的不是同一个外力
+[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。
+[Force] !!   【三种原因的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它由【位置】现算 (SafetyPredictor::computeConstraintForce,
+[Force] !!    在触觉回调里对当前位置求一次), 与 compensated 无关 —— 安全边界的推手还在,
+[Force] !!    只是不再有传感器力。)
+[Force] !! 本帧姿态: X=+0.000 Y=+0.000 Z=+0.000  Rx=+0.000 Ry=+0.000 Rz=+0.000  (mm / deg) —— 读下面那六个数要连着它一起抄
+[Force] !! 逐通道结果 (EMA 差 = compensated − 【参考量】; 单位见各行标签)
+[Force] !!   ⚠ 只有【投票通道】参与判决; 标着【不投票】的那四行【照报但不算】
+[Force] !!     (依据见 g_guardVote 段: Fz 的秩 2 依据未复测; 力矩无一致态)。
+[Force] !!   行末的「与 @576」= compensated − @576 —— 只报不判 (诊断侧, 判据不看它)
+[Force] !!   Fx(N)     +0.0000  容差 1.2464  在限内        └ 与 @576:   +0.5000 (只报不判)
+[Force] !!   Fy(N)        +nan  容差 1.2464  在限内        └ 与 @576:   +0.0000 (只报不判)
+[Force] !!   Fz(N)     +0.0000  容差 1.2464  【不投票】 (照报不判; 依据与代价见 g_guardVote 段)
+[Force] !!   Mx(Nm)    +0.0000  容差 0.0300  【不投票】 (照报不判; 依据与代价见 g_guardVote 段)
+[Force] !!   My(Nm)    +0.0000  容差 0.0300  【不投票】 (照报不判; 依据与代价见 g_guardVote 段)
+[Force] !!   Mz(Nm)    +0.0000  容差 0.0300  【不投票】 (照报不判; 依据与代价见 g_guardVote 段)
+[Force] !! 处理: 查负载参数有没有真的发进机械臂 (Task 8), 或重跑离线一致性检查。
+[Force] !!   【不要】靠改容差把它压过去 —— 容差是由实测导出的。
+  guard_recovers_after_a_nonfinite_frame... PASS
+[Force] 一致性闸门: 放行 (本地全量模型与【参考量】在【投票通道】上一致; 参考量本帧【可用】)
+  guard_transition_always_prints_block_repeat_is_throttled... PASS
+  guard_default_report_claims_no_mask... PASS
+[Force] 一致性闸门: 放行 (本地全量模型与【参考量】在【投票通道】上一致; 参考量本帧【可用】)
+[Force] !! ============ 一致性闸门: 拒绝传递数据 ============
+[Force] !! 原因: 【有模型, 但与机械臂对不上】两边估计的不是同一个外力
+[Force] !!   标定了但对不上 -> 去查负载参数有没有真的发进机械臂 (Task 8)。
+[Force] !!   【三种原因的处置一样 (都拒绝), 但要做的事不同, 所以原因必须分开报】。
+[Force] !! compensated[] 已【全 6 个分量置零】 —— 下游 ForcePipeline 由它推
+[Force] !!   filtered / hapticOut / F| 帧, 所以【传感器力那一条路】断了。
+[Force] !!   (虚拟约束力【不受影响】: 它由【位置】现算 (SafetyPredictor::computeConstraintForce,
+[Force] !!    在触觉回调里对当前位置求一次), 与 compensated 无关 —— 安全边界的推手还在,
+[Force] !!    只是不再有传感器力。)
+[Force] !! 本帧姿态: X=+0.000 Y=+0.000 Z=+0.000  Rx=+0.000 Ry=+0.000 Rz=+0.000  (mm / deg) —— 读下面那六个数要连着它一起抄
+[Force] !! 逐通道结果 (EMA 差 = compensated − 【参考量】; 单位见各行标签)
+[Force] !!   ⚠ 只有【投票通道】参与判决; 标着【不投票】的那四行【照报但不算】
+[Force] !!     (依据见 g_guardVote 段: Fz 的秩 2 依据未复测; 力矩无一致态)。
+[Force] !!   行末的「与 @576」= compensated − @576 —— 只报不判 (诊断侧, 判据不看它)
+[Force] !!   Fx(N)     +1.2472  容差 1.2464  超限  <== 触发 └ 与 @576:   +0.0000 (只报不判)
+[Force] !!   Fy(N)     +0.0000  容差 1.2464  在限内        └ 与 @576:   +0.0000 (只报不判)
+[Force] !!   Fz(N)     +0.0000  容差 1.2464  【不投票】 (照报不判; 依据与代价见 g_guardVote 段)
+[Force] !!   Mx(Nm)    +0.0000  容差 0.0300  【不投票】 (照报不判; 依据与代价见 g_guardVote 段)
+[Force] !!   My(Nm)    +0.0000  容差 0.0300  【不投票】 (照报不判; 依据与代价见 g_guardVote 段)
+[Force] !!   Mz(Nm)    +0.0000  容差 0.0300  【不投票】 (照报不判; 依据与代价见 g_guardVote 段)
+[Force] !! 处理: 查负载参数有没有真的发进机械臂 (Task 8), 或重跑离线一致性检查。
+[Force] !!   【不要】靠改容差把它压过去 —— 容差是由实测导出的。
+  guard_ema_needs_sustained_mismatch... PASS
+[Force] 一致性闸门: 放行 (本地全量模型与【参考量】在【投票通道】上一致; 参考量本帧【可用】)
+[Force] 一致性闸门: 放行 (本地全量模型与【参考量】在【投票通道】上一致; 参考量本帧【可用】)
+  zero_only_no_motion... [Force] ZERO started — keep robot still for 2s (前 0.5s 静默期不采样, 之后 2s 才累计)...
+        (TARE only: no motion phase, drag mode NOT enabled)...
+[Force] TARE done: biasF=(-0.480, -1.350, -4.140) N  biasM=(+0.0100, -0.0200, +0.0050) Nm
+[Force]   (全量模型: 已从零偏扣掉 A·g=(+0.000, +0.000, +4.120) N 与 c_s×(A·g)=(+0.0000, +0.0000, +0.0000) Nm ⇒ 零偏比 @1304 原始读数小约 4N, 不是异常)
+[Force] ZERO complete (A / c_s kept, mass scale 0.4200 kg): force bias=(-0.480,-1.350,-4.140) N, torque bias=(+0.0100,-0.0200,+0.0050) Nm
+[Force] Saved force_calib.json
+PASS
+[Force] 一致性闸门: 放行 (本地全量模型与【参考量】在【投票通道】上一致; 参考量本帧【可用】)
+  zero_abort_not_applied... [Force] ZERO started — keep robot still for 2s (前 0.5s 静默期不采样, 之后 2s 才累计)...
+        (TARE only: no motion phase, drag mode NOT enabled)...
+[Force] Calibration ABORTED (was: Zeroing... (keep still))
+PASS
+  sweep_still_enters_motion... [Force] Calibration started — TARE phase (keep robot still for 2s = 0.5s 静默期 + 2s 累计)...
+[Force] TARE done: biasF=(+0.000, +0.000, -4.120) N  biasM=(+0.0000, +0.0000, +0.0000) Nm
+[Force]   (全量模型: 已从零偏扣掉 A·g=(+0.000, +0.000, +4.120) N 与 c_s×(A·g)=(+0.0000, +0.0000, +0.0000) Nm ⇒ 零偏比 @1304 原始读数小约 4N, 不是异常)
+[Force] MOTION phase: move robot with varying speed + direction, then press SPACE
+[Force] Calibration ABORTED (was: Motion cal... (move robot, SPACE to stop))
+PASS
+  zero_restartable... [Force] ZERO started — keep robot still for 2s (前 0.5s 静默期不采样, 之后 2s 才累计)...
+        (TARE only: no motion phase, drag mode NOT enabled)...
+[Force] TARE done: biasF=(+0.100, +0.200, -3.820) N  biasM=(+0.0000, +0.0000, +0.0000) Nm
+[Force]   (全量模型: 已从零偏扣掉 A·g=(+0.000, +0.000, +4.120) N 与 c_s×(A·g)=(+0.0000, +0.0000, +0.0000) Nm ⇒ 零偏比 @1304 原始读数小约 4N, 不是异常)
+[Force] ZERO complete (A / c_s kept, mass scale 0.4200 kg): force bias=(+0.100,+0.200,-3.820) N, torque bias=(+0.0000,+0.0000,+0.0000) Nm
+[Force] Saved force_calib.json
+[Force] ZERO started — keep robot still for 2s (前 0.5s 静默期不采样, 之后 2s 才累计)...
+        (TARE only: no motion phase, drag mode NOT enabled)...
+[Force] Calibration ABORTED (was: Zeroing... (keep still))
+[Force] Calibration started — TARE phase (keep robot still for 2s = 0.5s 静默期 + 2s 累计)...
+[Force] Calibration ABORTED (was: Taring... (keep still))
+PASS
+  calib_tare_timing_follows_injected_dt... [Force] ZERO started — keep robot still for 2s (前 0.5s 静默期不采样, 之后 2s 才累计)...
+        (TARE only: no motion phase, drag mode NOT enabled)...
+[Force] TARE done: biasF=(-0.480, -1.350, -4.140) N  biasM=(+0.0100, -0.0200, +0.0050) Nm
+[Force]   (全量模型: 已从零偏扣掉 A·g=(+0.000, +0.000, +4.120) N 与 c_s×(A·g)=(+0.0000, +0.0000, +0.0000) Nm ⇒ 零偏比 @1304 原始读数小约 4N, 不是异常)
+[Force] ZERO complete (A / c_s kept, mass scale 0.4200 kg): force bias=(-0.480,-1.350,-4.140) N, torque bias=(+0.0100,-0.0200,+0.0050) Nm
+[Force] Saved force_calib.json
+PASS
+  calib_tare_gap_guard_no_finalize... [Force] ZERO started — keep robot still for 2s (前 0.5s 静默期不采样, 之后 2s 才累计)...
+        (TARE only: no motion phase, drag mode NOT enabled)...
+[Force] WARNING: 两次轮询间隔 3.00s (> 1.00s) —— 疑似轮询停过一段。
+        本帧的经过时间当【没测到】(dt = 0), 相位计时器不跟着跳。
+[Force] Calibration ABORTED (was: Zeroing... (keep still))
+PASS
+  calib_tare_min_samples_guard... [Force] ZERO started — keep robot still for 2s (前 0.5s 静默期不采样, 之后 2s 才累计)...
+        (TARE only: no motion phase, drag mode NOT enabled)...
+[Force] WARNING: TARE 只收到 3 帧 (< 5) —— 疑似轮询停过一段。
+        继续采集, 收够再定稿 (不拿单帧零偏落盘)。
+[Force] TARE done: biasF=(-0.480, -1.350, -4.140) N  biasM=(+0.0100, -0.0200, +0.0050) Nm
+[Force]   (全量模型: 已从零偏扣掉 A·g=(+0.000, +0.000, +4.120) N 与 c_s×(A·g)=(+0.0000, +0.0000, +0.0000) Nm ⇒ 零偏比 @1304 原始读数小约 4N, 不是异常)
+[Force] ZERO complete (A / c_s kept, mass scale 0.4200 kg): force bias=(-0.480,-1.350,-4.140) N, torque bias=(+0.0100,-0.0200,+0.0050) Nm
+[Force] Saved force_calib.json
+PASS
+[Force] !! setCalibration 【拒绝安装】: A 全为 0 (没有重力模型)
+[Force] !!   本地补偿保持【未启用】—— 输出置零并报 ERR_FORCE_UNCALIBRATED。
+[Force] !!   一份没有重力项 (或秩亏) 的模型不会报错, 只会安静地算错, 所以不收。
+[Force] !!   处理: 按 'm' 采多姿态 -> 's' 解出 A (至少 4 个朝向不同的姿态), 再 'z' 调零。
+[Force] !! setCalibration 【拒绝安装】: A 数值退化: |det A| / ||A||^3 = 0 <= 0.001 (接近完全秩亏: 该比值对'标量质量 x 正交'恒为 0.19245, 本门限约等于条件数 354)
+[Force] !!   本地补偿保持【未启用】—— 输出置零并报 ERR_FORCE_UNCALIBRATED。
+[Force] !!   一份没有重力项 (或秩亏) 的模型不会报错, 只会安静地算错, 所以不收。
+[Force] !!   处理: 按 'm' 采多姿态 -> 's' 解出 A (至少 4 个朝向不同的姿态), 再 'z' 调零。
+[Force] !! setCalibration 【拒绝安装】: A 的第 4 个元素不是有限数 (NaN/Inf)
+[Force] !!   本地补偿保持【未启用】—— 输出置零并报 ERR_FORCE_UNCALIBRATED。
+[Force] !!   一份没有重力项 (或秩亏) 的模型不会报错, 只会安静地算错, 所以不收。
+[Force] !!   处理: 按 'm' 采多姿态 -> 's' 解出 A (至少 4 个朝向不同的姿态), 再 'z' 调零。
+[Force] !! setCalibration 【拒绝安装】: A 全为 0 (没有重力模型)
+[Force] !!   本地补偿保持【未启用】—— 输出置零并报 ERR_FORCE_UNCALIBRATED。
+[Force] !!   一份没有重力项 (或秩亏) 的模型不会报错, 只会安静地算错, 所以不收。
+[Force] !!   处理: 按 'm' 采多姿态 -> 's' 解出 A (至少 4 个朝向不同的姿态), 再 'z' 调零。
+  setcalib_rejects_zero_and_degenerate_A... PASS
+  calib_file_roundtrip... PASS
+[Force] !! force_calib.json 【格式不兼容, 已拒绝】: version=2 (本版要 3; version 2 是旧的 mass_kg + 零偏格式)
+[Force] !!   文件: force_calib.json
+[Force] !!   本版 (Task 6 起) 期望 version=3 的全量模型: a_matrix(9) + bias_force_n(3) + bias_torque_nm(3) + com_sensor_m(3)。
+[Force] !!   旧格式 (version 2: mass_kg + 零偏) 【不能】拿新版读 —— 它没有 A, 读进来会得到一份【没有重力项】的模型,
+[Force] !!   而补偿后的读数依旧是 N, 不会报错 —— 那正是本项目最怕的"安静地错"。
+[Force] !!   处理: 本地补偿【未启用】。先按 'm' 采多姿态 → 's' 解出 A, 再按 'z' 调零存盘。
+  calib_file_rejects_old_format... PASS
+[Force] !! force_calib.json 【格式不兼容, 已拒绝】: 文件里没有 version 字段 (是 version 1 的旧文件, 或根本不是本文件)
+[Force] !!   文件: force_calib.json
+[Force] !!   本版 (Task 6 起) 期望 version=3 的全量模型: a_matrix(9) + bias_force_n(3) + bias_torque_nm(3) + com_sensor_m(3)。
+[Force] !!   旧格式 (version 2: mass_kg + 零偏) 【不能】拿新版读 —— 它没有 A, 读进来会得到一份【没有重力项】的模型,
+[Force] !!   而补偿后的读数依旧是 N, 不会报错 —— 那正是本项目最怕的"安静地错"。
+[Force] !!   处理: 本地补偿【未启用】。先按 'm' 采多姿态 → 's' 解出 A, 再按 'z' 调零存盘。
+  calib_file_rejects_no_version... PASS
+[Force] !! force_calib.json 写着 version=3, 但 a_matrix 读不出来 —— 文件被截断或改坏了。本地补偿【未启用】。
+  calib_file_rejects_truncated... PASS
+[Force] !! force_calib.json 【模型不可用, 已拒绝装载】: A 全为 0 (没有重力模型)
+[Force] !!   文件: force_calib.json
+[Force] !!   本地补偿【未启用】(不是"静默地当作没标定": 运行时闸门会以
+[Force] !!   ERR_FORCE_UNCALIBRATED 每帧拒绝传数据, 并在 stderr 上说出这一段原因)。
+[Force] !!   处理: 按 'm' 采多姿态 (至少 4 个朝向不同的姿态) -> 's' 解出 A, 再 'z' 调零存盘。
+[Force] !! force_calib.json 【模型不可用, 已拒绝装载】: A 数值退化: |det A| / ||A||^3 = 0 <= 0.001 (接近完全秩亏: 该比值对'标量质量 x 正交'恒为 0.19245, 本门限约等于条件数 354)
+[Force] !!   文件: force_calib.json
+[Force] !!   本地补偿【未启用】(不是"静默地当作没标定": 运行时闸门会以
+[Force] !!   ERR_FORCE_UNCALIBRATED 每帧拒绝传数据, 并在 stderr 上说出这一段原因)。
+[Force] !!   处理: 按 'm' 采多姿态 (至少 4 个朝向不同的姿态) -> 's' 解出 A, 再 'z' 调零存盘。
+[Force] !! force_calib.json 【模型不可用, 已拒绝装载】: A 的第 4 个元素不是有限数 (NaN/Inf)
+[Force] !!   文件: force_calib.json
+[Force] !!   本地补偿【未启用】(不是"静默地当作没标定": 运行时闸门会以
+[Force] !!   ERR_FORCE_UNCALIBRATED 每帧拒绝传数据, 并在 stderr 上说出这一段原因)。
+[Force] !!   处理: 按 'm' 采多姿态 (至少 4 个朝向不同的姿态) -> 's' 解出 A, 再 'z' 调零存盘。
+[Force] !! force_calib.json 的 bias_force_n[1] 不是有限数 —— 本地补偿【未启用】。
+  calib_file_rejects_unusable_A... PASS
+[Force] !! setCalibration 【拒绝安装】: A 全为 0 (没有重力模型)
+[Force] !!   本地补偿保持【未启用】—— 输出置零并报 ERR_FORCE_UNCALIBRATED。
+[Force] !!   一份没有重力项 (或秩亏) 的模型不会报错, 只会安静地算错, 所以不收。
+[Force] !!   处理: 按 'm' 采多姿态 -> 's' 解出 A (至少 4 个朝向不同的姿态), 再 'z' 调零。
+[Force] !! force_calib.json 【模型不可用, 已拒绝装载】: A 全为 0 (没有重力模型)
+[Force] !!   文件: force_calib.json
+[Force] !!   本地补偿【未启用】(不是"静默地当作没标定": 运行时闸门会以
+[Force] !!   ERR_FORCE_UNCALIBRATED 每帧拒绝传数据, 并在 stderr 上说出这一段原因)。
+[Force] !!   处理: 按 'm' 采多姿态 (至少 4 个朝向不同的姿态) -> 's' 解出 A, 再 'z' 调零存盘。
+  save_writes_unusable_model_but_load_rejects... PASS
+  zero_drift_normal_is_a_conclusion... PASS
+  zero_drift_over_threshold_is_a_conclusion... PASS
+  zero_drift_exactly_at_threshold_is_normal... PASS
+  zero_drift_not_done_after_full_wait... PASS
+  zero_drift_waiting_stays_silent... PASS
+  zero_drift_insufficient_samples_speaks... PASS
+  install_then_reload_roundtrip... PASS
+
+Results: 42 passed, 0 failed
+  [OK]
+
+================================================
+  Relay / Logger / Calibration Standalone Tests
+================================================
+
+--- Building test_relay_command_parser ---
+
+D:\Projects\Touch\Touch_Client\tests>rem 2026-09-22: guard the vcvarsall call -- PATH grows ~1350 chars per call and cmd dies at ~8191, 
+
+D:\Projects\Touch\Touch_Client\tests>rem   so a second unguarded call in the same session can abort the rest of run_tests.bat. 
+
+D:\Projects\Touch\Touch_Client\tests>rem   With this guard, vcvarsall runs at most once per cmd session. (ASCII only -- see 
+
+D:\Projects\Touch\Touch_Client\tests>rem   build_force_pipeline_test.bat's note about non-ASCII comments in .bat files.) 
+
+D:\Projects\Touch\Touch_Client\tests>if not defined VCINSTALLDIR call "D:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat" x64 
+
+D:\Projects\Touch\Touch_Client\tests>cd /d "D:\Projects\Touch\Touch_Client\tests" 
+
+D:\Projects\Touch\Touch_Client\tests>cl /EHsc /std:c++17 /D_CRT_SECURE_NO_WARNINGS /D_WINSOCK_DEPRECATED_NO_WARNINGS test_relay_command_parser.cpp ..\relay\RelayCommandParser.cpp /Fe:test_relay_command_parser.exe 
+用于 x64 的 Microsoft (R) C/C++ 优化编译器 19.44.35228 版
+版权所有(C) Microsoft Corporation。保留所有权利。
+
+test_relay_command_parser.cpp
+RelayCommandParser.cpp
+正在生成代码...
+Microsoft (R) Incremental Linker Version 14.44.35228.0
+Copyright (C) Microsoft Corporation.  All rights reserved.
+
+/out:test_relay_command_parser.exe 
+test_relay_command_parser.obj 
+RelayCommandParser.obj 
+
+D:\Projects\Touch\Touch_Client\tests>echo BUILD_EXIT=0 
+BUILD_EXIT=0
+  Build OK
+
+=== test_relay_command_parser.exe ===
+=== RelayCommandParser Tests ===
+  ff_on... PASS
+  ff_off... PASS
+  ff_on_with_newline... PASS
+  ff_on_with_crlf... PASS
+  ff_leading_whitespace... PASS
+  ff_invalid_digit... PASS
+  ff_trailing_garbage... PASS
+  ff_missing_value... PASS
+  empty... PASS
+  null... PASS
+  unknown_command... PASS
+  rg_valid... PASS
+  rg_range_not_checked_here... PASS
+  rg_missing_value_out_param... PASS
+  rg_invalid... PASS
+  zero_command... PASS
+  rg_not_confused_with_ff... PASS
+
+17 passed, 0 failed
+  [OK]
+
+--- Building test_force_logger ---
+
+D:\Projects\Touch\Touch_Client\tests>rem 2026-09-22: guard the vcvarsall call -- PATH grows ~1350 chars per call and cmd dies at ~8191, 
+
+D:\Projects\Touch\Touch_Client\tests>rem   so a second unguarded call in the same session can abort the rest of run_tests.bat. 
+
+D:\Projects\Touch\Touch_Client\tests>rem   With this guard, vcvarsall runs at most once per cmd session. (ASCII only -- see 
+
+D:\Projects\Touch\Touch_Client\tests>rem   build_force_pipeline_test.bat's note about non-ASCII comments in .bat files.) 
+
+D:\Projects\Touch\Touch_Client\tests>if not defined VCINSTALLDIR call "D:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat" x64 
+
+D:\Projects\Touch\Touch_Client\tests>cd /d "D:\Projects\Touch\Touch_Client\tests" 
+
+D:\Projects\Touch\Touch_Client\tests>cl /EHsc /std:c++17 /D_CRT_SECURE_NO_WARNINGS /D_WINSOCK_DEPRECATED_NO_WARNINGS test_force_logger.cpp ..\force\ForceLogger.cpp /Fe:test_force_logger.exe 
+用于 x64 的 Microsoft (R) C/C++ 优化编译器 19.44.35228 版
+版权所有(C) Microsoft Corporation。保留所有权利。
+
+test_force_logger.cpp
+ForceLogger.cpp
+正在生成代码...
+Microsoft (R) Incremental Linker Version 14.44.35228.0
+Copyright (C) Microsoft Corporation.  All rights reserved.
+
+/out:test_force_logger.exe 
+test_force_logger.obj 
+ForceLogger.obj 
+
+D:\Projects\Touch\Touch_Client\tests>echo BUILD_EXIT=0 
+BUILD_EXIT=0
+  Build OK
+
+=== test_force_logger.exe ===
+=== ForceLogger Tests ===
+  format_basic... PASS
+  ff_enabled_is_column_14_not_last... PASS
+  is_still_matches_input... PASS
+  acc_precision... PASS
+  format_negative... PASS
+  format_truncation_returns_needed... PASS
+  full_line_fits_default_buffer... PASS
+
+7 passed, 0 failed
+  [OK]
+
+--- Building test_tcp_calibration ---
+
+D:\Projects\Touch\Touch_Client\tests>rem 2026-09-22: guard the vcvarsall call -- PATH grows ~1350 chars per call and cmd dies at ~8191, 
+
+D:\Projects\Touch\Touch_Client\tests>rem   so a second unguarded call in the same session can abort the rest of run_tests.bat. 
+
+D:\Projects\Touch\Touch_Client\tests>rem   With this guard, vcvarsall runs at most once per cmd session. (ASCII only -- see 
+
+D:\Projects\Touch\Touch_Client\tests>rem   build_force_pipeline_test.bat's note about non-ASCII comments in .bat files.) 
+
+D:\Projects\Touch\Touch_Client\tests>if not defined VCINSTALLDIR call "D:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat" x64 
+
+D:\Projects\Touch\Touch_Client\tests>cd /d "D:\Projects\Touch\Touch_Client\tests" 
+
+D:\Projects\Touch\Touch_Client\tests>cl /EHsc /std:c++17 /D_CRT_SECURE_NO_WARNINGS /D_WINSOCK_DEPRECATED_NO_WARNINGS test_tcp_calibration.cpp ..\calibration\TcpCalibration.cpp /Fe:test_tcp_calibration.exe 
+用于 x64 的 Microsoft (R) C/C++ 优化编译器 19.44.35228 版
+版权所有(C) Microsoft Corporation。保留所有权利。
+
+test_tcp_calibration.cpp
+TcpCalibration.cpp
+正在生成代码...
+Microsoft (R) Incremental Linker Version 14.44.35228.0
+Copyright (C) Microsoft Corporation.  All rights reserved.
+
+/out:test_tcp_calibration.exe 
+test_tcp_calibration.obj 
+TcpCalibration.obj 
+
+D:\Projects\Touch\Touch_Client\tests>echo BUILD_EXIT=0 
+BUILD_EXIT=0
+  Build OK
+
+=== test_tcp_calibration.exe ===
+=== TcpCalibration Tests ===
+  rpy_identity... PASS
+  rpy_rz90... PASS
+  apply_zero_offset... PASS
+  apply_rotated_offset... PASS
+  solve_recovers_offset... PASS
+  solve_insufficient... PASS
+  solve_degenerate_same_orientation... PASS
+
+7 passed, 0 failed
+  [OK]
+
+--- Building test_force_pipeline ---
+
+D:\Projects\Touch\Touch_Client\tests>rem 2026-09-22: guard the vcvarsall call -- PATH grows ~1350 chars per call and cmd dies at ~8191, 
+
+D:\Projects\Touch\Touch_Client\tests>rem   so a second unguarded call in the same session can abort the rest of run_tests.bat. 
+
+D:\Projects\Touch\Touch_Client\tests>rem   With this guard, vcvarsall runs at most once per cmd session. (ASCII only -- see 
+
+D:\Projects\Touch\Touch_Client\tests>rem   build_force_pipeline_test.bat's note about non-ASCII comments in .bat files.) 
+
+D:\Projects\Touch\Touch_Client\tests>if not defined VCINSTALLDIR call "D:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat" x64 
+
+D:\Projects\Touch\Touch_Client\tests>cd /d "D:\Projects\Touch\Touch_Client\tests" 
+
+D:\Projects\Touch\Touch_Client\tests>rem 2026-09-21: this script did NOT exist. test_force_pipeline.cpp's header said 
+
+D:\Projects\Touch\Touch_Client\tests>rem   "Build: see task-10-brief for exact command" -- and that brief lives under 
+
+D:\Projects\Touch\Touch_Client\tests>rem   .superpowers/sdd/ which is gitignored, so the build command was never on disk. 
+
+D:\Projects\Touch\Touch_Client\tests>rem   That is exactly how a test rots: an .exe from July was sitting here with the OLD 
+
+D:\Projects\Touch\Touch_Client\tests>rem   FORCE_REFLECTION_GAIN baked in, so running it would have verified nothing. 
+
+D:\Projects\Touch\Touch_Client\tests>rem   (Same class as the project's "what is not on disk does not exist".) 
+
+D:\Projects\Touch\Touch_Client\tests>rem Linked in on purpose: ForcePipeline.cpp is the unit under test. 
+
+D:\Projects\Touch\Touch_Client\tests>rem 2026-09-22: ForceTuning.cpp added (ForcePipeline now reads its gain from there); 
+
+D:\Projects\Touch\Touch_Client\tests>rem   CalibStore.cpp satisfies the linker for ForceTuning's CalibStore::fileFor references. 
+
+D:\Projects\Touch\Touch_Client\tests>rem   Without these two the link fails -- and a failed link must NOT be mistaken for a pass. 
+
+D:\Projects\Touch\Touch_Client\tests>rem NOTE: keep this file ASCII-only. Non-ASCII comments in a .bat get mis-decoded by 
+
+D:\Projects\Touch\Touch_Client\tests>rem cmd.exe under a non-UTF-8 codepage and can silently swallow the following line. 
+
+D:\Projects\Touch\Touch_Client\tests>cl /EHsc /std:c++17 /I"D:\Projects\Touch\OpenHaptics\Developer\3.5.0\include" /I"D:\Projects\Touch\OpenHaptics\Developer\3.5.0\utilities\include" /DWIN32 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /D_WINSOCK_DEPRECATED_NO_WARNINGS test_force_pipeline.cpp ..\force\ForcePipeline.cpp ..\force\ForceTuning.cpp ..\core\CalibStore.cpp /Fe:test_force_pipeline.exe 
+用于 x64 的 Microsoft (R) C/C++ 优化编译器 19.44.35228 版
+版权所有(C) Microsoft Corporation。保留所有权利。
+
+test_force_pipeline.cpp
+ForcePipeline.cpp
+ForceTuning.cpp
+CalibStore.cpp
+正在生成代码...
+Microsoft (R) Incremental Linker Version 14.44.35228.0
+Copyright (C) Microsoft Corporation.  All rights reserved.
+
+/out:test_force_pipeline.exe 
+test_force_pipeline.obj 
+ForcePipeline.obj 
+ForceTuning.obj 
+CalibStore.obj 
+
+D:\Projects\Touch\Touch_Client\tests>echo BUILD_EXIT=0 
+BUILD_EXIT=0
+  Build OK
+
+=== test_force_pipeline.exe ===
+=== ForcePipeline Unit Tests ===
+  residual_deadzone... PASS
+  gain_actually_changes_output... PASS
+  gain_ramp_is_gradual... PASS
+  saturation_sensor_n... PASS
+  soft_deadzone_no_jump... PASS
+  soft_deadzone_shared_and_smooth... PASS
+  saturation... PASS
+  coord_transform... PASS
+PASS
+  filter_convergence... PASS
+  stale_detection... PASS
+  jitter_accumulators_are_fed_and_distinct... PASS
+
+Results: 12 passed, 0 failed
+  [OK]
+
+--- Building test_feedback_parser ---
+
+D:\Projects\Touch\Touch_Client\tests>rem 2026-09-22: guard the vcvarsall call -- PATH grows ~1350 chars per call and cmd dies at ~8191, 
+
+D:\Projects\Touch\Touch_Client\tests>rem   so a second unguarded call in the same session can abort the rest of run_tests.bat. 
+
+D:\Projects\Touch\Touch_Client\tests>rem   With this guard, vcvarsall runs at most once per cmd session. (ASCII only -- see 
+
+D:\Projects\Touch\Touch_Client\tests>rem   build_force_pipeline_test.bat's note about non-ASCII comments in .bat files.) 
+
+D:\Projects\Touch\Touch_Client\tests>if not defined VCINSTALLDIR call "D:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat" x64 
+
+D:\Projects\Touch\Touch_Client\tests>cd /d "D:\Projects\Touch\Touch_Client\tests" 
+
+D:\Projects\Touch\Touch_Client\tests>cl /EHsc /std:c++17 /I"D:\Projects\Touch\OpenHaptics\Developer\3.5.0\include" /I"D:\Projects\Touch\OpenHaptics\Developer\3.5.0\utilities\include" /DWIN32 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /D_WINSOCK_DEPRECATED_NO_WARNINGS test_feedback_parser.cpp ..\relay\FeedbackParser.cpp /Fe:test_feedback_parser.exe 
+用于 x64 的 Microsoft (R) C/C++ 优化编译器 19.44.35228 版
+版权所有(C) Microsoft Corporation。保留所有权利。
+
+test_feedback_parser.cpp
+FeedbackParser.cpp
+正在生成代码...
+Microsoft (R) Incremental Linker Version 14.44.35228.0
+Copyright (C) Microsoft Corporation.  All rights reserved.
+
+/out:test_feedback_parser.exe 
+test_feedback_parser.obj 
+FeedbackParser.obj 
+
+D:\Projects\Touch\Touch_Client\tests>echo BUILD_EXIT=0 
+BUILD_EXIT=0
+  Build OK
+
+=== test_feedback_parser.exe ===
+=== FeedbackParser Tests ===
+  isSuccess_ok... PASS
+  isSuccess_error... PASS
+  isSuccess_null... PASS
+  isSuccess_empty... PASS
+  extractData_normal... PASS
+  extractData_single... PASS
+  extractData_no_braces... PASS
+  extractData_empty_braces... PASS
+  extractData_null... PASS
+  parsePose_valid... PASS
+  parsePose_negative... PASS
+  parsePose_invalid... PASS
+  parsePose_no_braces... PASS
+  parseAngle_valid... PASS
+  parseAngle_invalid... PASS
+  parseMode_valid... PASS
+  parseMode_invalid... PASS
+  extractErrorCode_hex... PASS
+  extractErrorCode_decimal... PASS
+  extractErrorCode_success... PASS
+  extractErrorCode_null... PASS
+  mapErrorCode_workspace... PASS
+  mapErrorCode_jointlimit... PASS
+  mapErrorCode_singular... PASS
+  mapErrorCode_collision... PASS
+  mapErrorCode_unknown... PASS
+  error_response_hex_format... PASS
+  newline_in_response... PASS
+
+28 passed, 0 failed
+  [OK]
+
+--- Building test_escalation ---
+
+D:\Projects\Touch\Touch_Client\tests>rem 2026-09-22: guard the vcvarsall call -- PATH grows ~1350 chars per call and cmd dies at ~8191, 
+
+D:\Projects\Touch\Touch_Client\tests>rem   so a second unguarded call in the same session can abort the rest of run_tests.bat. 
+
+D:\Projects\Touch\Touch_Client\tests>rem   With this guard, vcvarsall runs at most once per cmd session. (ASCII only -- see 
+
+D:\Projects\Touch\Touch_Client\tests>rem   build_force_pipeline_test.bat's note about non-ASCII comments in .bat files.) 
+
+D:\Projects\Touch\Touch_Client\tests>if not defined VCINSTALLDIR call "D:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat" x64 
+
+D:\Projects\Touch\Touch_Client\tests>cd /d "D:\Projects\Touch\Touch_Client\tests" 
+
+D:\Projects\Touch\Touch_Client\tests>cl /EHsc /std:c++17 /I"D:\Projects\Touch\OpenHaptics\Developer\3.5.0\include" /I"D:\Projects\Touch\OpenHaptics\Developer\3.5.0\utilities\include" /DWIN32 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /D_WINSOCK_DEPRECATED_NO_WARNINGS test_escalation.cpp /Fe:test_escalation.exe 
+用于 x64 的 Microsoft (R) C/C++ 优化编译器 19.44.35228 版
+版权所有(C) Microsoft Corporation。保留所有权利。
+
+test_escalation.cpp
+Microsoft (R) Incremental Linker Version 14.44.35228.0
+Copyright (C) Microsoft Corporation.  All rights reserved.
+
+/out:test_escalation.exe 
+test_escalation.obj 
+
+D:\Projects\Touch\Touch_Client\tests>echo BUILD_EXIT=0 
+BUILD_EXIT=0
+  Build OK
+
+=== test_escalation.exe ===
+=== EscalationTracker Tests ===
+  initial_state... PASS
+  record_first_error... PASS
+  record_same_error_accumulates... PASS
+  record_different_error_resets... PASS
+  shouldEscalate_warn_to_degrade... PASS
+  shouldEscalate_degrade_to_reject... PASS
+  shouldEscalate_reject_no_escalation... PASS
+  shouldEscalate_respects_min_warn_time... PASS
+  shouldDeescalate_moving_away... PASS
+  shouldDeescalate_moving_toward... PASS
+  shouldDeescalate_not_escalated... PASS
+  onClear_resets_after_threshold... PASS
+  onClear_interrupted_by_error... PASS
+  reset_full_cleanup... PASS
+  all_error_codes_have_severity... PASS
+
+15 passed, 0 failed
+  [OK]
+
+--- Building test_kinematics ---
+
+D:\Projects\Touch\Touch_Client\tests>rem 2026-09-22: guard the vcvarsall call -- PATH grows ~1350 chars per call and cmd dies at ~8191, 
+
+D:\Projects\Touch\Touch_Client\tests>rem   so a second unguarded call in the same session can abort the rest of run_tests.bat. 
+
+D:\Projects\Touch\Touch_Client\tests>rem   With this guard, vcvarsall runs at most once per cmd session. (ASCII only -- see 
+
+D:\Projects\Touch\Touch_Client\tests>rem   build_force_pipeline_test.bat's note about non-ASCII comments in .bat files.) 
+
+D:\Projects\Touch\Touch_Client\tests>if not defined VCINSTALLDIR call "D:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat" x64 
+
+D:\Projects\Touch\Touch_Client\tests>cd /d "D:\Projects\Touch\Touch_Client\tests" 
+
+D:\Projects\Touch\Touch_Client\tests>cl /EHsc /std:c++17 /I"D:\Projects\Touch\OpenHaptics\Developer\3.5.0\include" /I"D:\Projects\Touch\OpenHaptics\Developer\3.5.0\utilities\include" /DWIN32 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /D_WINSOCK_DEPRECATED_NO_WARNINGS test_kinematics.cpp ..\robot\Kinematics.cpp /Fe:test_kinematics.exe 
+用于 x64 的 Microsoft (R) C/C++ 优化编译器 19.44.35228 版
+版权所有(C) Microsoft Corporation。保留所有权利。
+
+test_kinematics.cpp
+Kinematics.cpp
+正在生成代码...
+Microsoft (R) Incremental Linker Version 14.44.35228.0
+Copyright (C) Microsoft Corporation.  All rights reserved.
+
+/out:test_kinematics.exe 
+test_kinematics.obj 
+Kinematics.obj 
+
+D:\Projects\Touch\Touch_Client\tests>echo BUILD_EXIT=0 
+BUILD_EXIT=0
+  Build OK
+
+=== test_kinematics.exe ===
+=== Kinematics Tests ===
+  fk_all_zeros... PASS
+  fk_forward_equals_joint_positions... PASS
+  fk_j1_z_invariant... PASS
+  fk_non_constant... PASS
+  jacobian_consistency... PASS
+  jacobian_second_config... PASS
+  condition_number_finite... PASS
+  condition_number_singular_config... PASS
+  condition_number_ratio_ok... PASS
+  ik_roundtrip_exact_seed... PASS
+  ik_roundtrip_perturbed_seed... PASS
+  ik_workspace_center... PASS
+  ik_unreachable_target... PASS
+  ik_within_joint_limits... PASS
+  joint_limits_all_ok... PASS
+  joint_limits_j3_boundary... PASS
+  joint_limits_j1_full_range... PASS
+  compose_transform_valid... PASS
+
+18 passed, 0 failed
+  [OK]
+
+--- Building test_coord_safety ---
+
+D:\Projects\Touch\Touch_Client\tests>rem 2026-09-22: guard the vcvarsall call -- PATH grows ~1350 chars per call and cmd dies at ~8191, 
+
+D:\Projects\Touch\Touch_Client\tests>rem   so a second unguarded call in the same session can abort the rest of run_tests.bat. 
+
+D:\Projects\Touch\Touch_Client\tests>rem   With this guard, vcvarsall runs at most once per cmd session. (ASCII only -- see 
+
+D:\Projects\Touch\Touch_Client\tests>rem   build_force_pipeline_test.bat's note about non-ASCII comments in .bat files.) 
+
+D:\Projects\Touch\Touch_Client\tests>if not defined VCINSTALLDIR call "D:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat" x64 
+
+D:\Projects\Touch\Touch_Client\tests>cd /d "D:\Projects\Touch\Touch_Client\tests" 
+
+D:\Projects\Touch\Touch_Client\tests>rem NOTE 2026-09-21: CalibrationIO.cpp was MISSING from this link. CoordinateTransform.h declares 
+
+D:\Projects\Touch\Touch_Client\tests>rem   Calibration::enabled / R / t as extern, and SafetyBoundary.h includes it, so the link failed 
+
+D:\Projects\Touch\Touch_Client\tests>rem   with 3 unresolved externals -- meaning this suite had NEVER been buildable as scripted (its 
+
+D:\Projects\Touch\Touch_Client\tests>rem   .exe was stale-or-absent, i.e. running it verified nothing). The definitions live in 
+
+D:\Projects\Touch\Touch_Client\tests>rem   calibration/CalibrationIO.cpp, which needs nothing beyond CoordinateTransform.h + libc. 
+
+D:\Projects\Touch\Touch_Client\tests>rem NOTE: keep this file ASCII-only. Non-ASCII comments in a .bat get mis-decoded by cmd.exe 
+
+D:\Projects\Touch\Touch_Client\tests>rem under a non-UTF-8 codepage and can silently swallow the following line. 
+
+D:\Projects\Touch\Touch_Client\tests>cl /EHsc /std:c++17 /I"D:\Projects\Touch\OpenHaptics\Developer\3.5.0\include" /I"D:\Projects\Touch\OpenHaptics\Developer\3.5.0\utilities\include" /DWIN32 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /D_WINSOCK_DEPRECATED_NO_WARNINGS test_coord_safety.cpp ../calibration/CalibrationIO.cpp /Fe:test_coord_safety.exe 
+用于 x64 的 Microsoft (R) C/C++ 优化编译器 19.44.35228 版
+版权所有(C) Microsoft Corporation。保留所有权利。
+
+test_coord_safety.cpp
+CalibrationIO.cpp
+正在生成代码...
+Microsoft (R) Incremental Linker Version 14.44.35228.0
+Copyright (C) Microsoft Corporation.  All rights reserved.
+
+/out:test_coord_safety.exe 
+test_coord_safety.obj 
+CalibrationIO.obj 
+
+D:\Projects\Touch\Touch_Client\tests>echo BUILD_EXIT=0 
+BUILD_EXIT=0
+  Build OK
+
+=== test_coord_safety.exe ===
+=== CoordinateTransform + SafetyBoundary Tests ===
+  ct_identity_origin... PASS
+  ct_basic_mapping... PASS
+  ct_all_negative... PASS
+  ct_mixed_signs... PASS
+  ct_hdu_vector... PASS
+  delta_positive... PASS
+  delta_negative... PASS
+  delta_zero... PASS
+  target_basic... PASS
+  target_zero_delta... PASS
+  ct_roundtrip... PASS
+  sb_inside_no_clamp... PASS
+  sb_x_exceeds_max... [Safety] 目标超出安全边界，已钳位。原目标: (999,0,300)
+PASS
+  sb_x_below_min... [Safety] 目标超出安全边界，已钳位。原目标: (-999,0,300)
+PASS
+  sb_y_exceeds_max... [Safety] 目标超出安全边界，已钳位。原目标: (0,999,300)
+PASS
+  sb_y_below_min... [Safety] 目标超出安全边界，已钳位。原目标: (0,-999,300)
+PASS
+  sb_z_exceeds_max... [Safety] 目标超出安全边界，已钳位。原目标: (0,0,999)
+PASS
+  sb_z_below_min... [Safety] 目标超出安全边界，已钳位。原目标: (0,0,-999)
+PASS
+  sb_multiple_axes_clamped... [Safety] 目标超出安全边界，已钳位。原目标: (999,-999,999)
+PASS
+  sb_at_exact_boundary... PASS
+  sf_center_full_speed... PASS
+  sf_near_xmax_boundary... PASS
+  sf_at_boundary_min_speed... PASS
+  sf_beyond_boundary_min_speed... PASS
+  sf_half_buffer... PASS
+  vec3_length... PASS
+  vec3_operators... PASS
+
+Results: 27 passed, 0 failed
+  [OK]
+
+--- Building test_safety_core ---
+
+D:\Projects\Touch\Touch_Client\tests>rem NOTE: keep this file ASCII-only. Non-ASCII comments in a .bat get mis-decoded by 
+
+D:\Projects\Touch\Touch_Client\tests>rem cmd.exe under a non-UTF-8 codepage and can silently swallow the following line. 
+
+D:\Projects\Touch\Touch_Client\tests>rem Reuse the toolchain if a parent script already ran vcvarsall. Every vcvarsall 
+
+D:\Projects\Touch\Touch_Client\tests>rem call appends to PATH again, and after ~4 nested calls (measured 2026-09-22: 
+
+D:\Projects\Touch\Touch_Client\tests>rem run_tests.bat -> build_*.bat -> vcvarsall) PATH overflows cmd's 8191-char 
+
+D:\Projects\Touch\Touch_Client\tests>rem command-line limit and vcvarsall dies with "The input line is too long.", 
+
+D:\Projects\Touch\Touch_Client\tests>rem which aborts the rest of run_tests.bat. This suite is the 5th build step in 
+
+D:\Projects\Touch\Touch_Client\tests>rem run_tests.bat, so without this guard it is the one that tips over. 
+
+D:\Projects\Touch\Touch_Client\tests>if not defined VCINSTALLDIR call "D:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat" x64 
+
+D:\Projects\Touch\Touch_Client\tests>cd /d "D:\Projects\Touch\Touch_Client\tests" 
+
+D:\Projects\Touch\Touch_Client\tests>rem NOTE 2026-09-22: this script did NOT exist, and RobotDiagnostics.cpp calls 
+
+D:\Projects\Touch\Touch_Client\tests>rem   RelayCore::instance().reportDiagnostic(...). The link therefore failed with 
+
+D:\Projects\Touch\Touch_Client\tests>rem   LNK2019 (RelayCore::instance / RelayCore::reportDiagnostic), so the .exe on 
+
+D:\Projects\Touch\Touch_Client\tests>rem   disk was from 2026-07-25 -- OLDER than test_safety_core.cpp itself -- while 
+
+D:\Projects\Touch\Touch_Client\tests>rem   RobotStateMachine.cpp (07-26) and RobotError.h (09-21) had changed since. 
+
+D:\Projects\Touch\Touch_Client\tests>rem   run_tests.bat only ran it, never rebuilt it, so its "7 passed, 1 failed" was 
+
+D:\Projects\Touch\Touch_Client\tests>rem   zero information about the current code. Same class as build_coord_safety_test.bat 
+
+D:\Projects\Touch\Touch_Client\tests>rem   missing a .cpp: running the suite verified nothing. 
+
+D:\Projects\Touch\Touch_Client\tests>rem TEST_NO_RELAY_CORE compiles that one transmit call out (see RobotDiagnostics.cpp); 
+
+D:\Projects\Touch\Touch_Client\tests>rem   file logging and the in-memory counters are unaffected. Same shape as the 
+
+D:\Projects\Touch\Touch_Client\tests>rem   TEST_SINGAVOID guard in SingularityAvoidance.cpp. 
+
+D:\Projects\Touch\Touch_Client\tests>cl /EHsc /std:c++17 /I"D:\Projects\Touch\OpenHaptics\Developer\3.5.0\include" /I"D:\Projects\Touch\OpenHaptics\Developer\3.5.0\utilities\include" /DWIN32 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /D_WINSOCK_DEPRECATED_NO_WARNINGS /DTEST_NO_RELAY_CORE test_safety_core.cpp ..\safety\RobotStateMachine.cpp ..\safety\RobotDiagnostics.cpp /Fe:test_safety_core.exe 
+用于 x64 的 Microsoft (R) C/C++ 优化编译器 19.44.35228 版
+版权所有(C) Microsoft Corporation。保留所有权利。
+
+test_safety_core.cpp
+RobotStateMachine.cpp
+RobotDiagnostics.cpp
+正在生成代码...
+Microsoft (R) Incremental Linker Version 14.44.35228.0
+Copyright (C) Microsoft Corporation.  All rights reserved.
+
+/out:test_safety_core.exe 
+test_safety_core.obj 
+RobotStateMachine.obj 
+RobotDiagnostics.obj 
+
+D:\Projects\Touch\Touch_Client\tests>echo BUILD_EXIT=0 
+BUILD_EXIT=0
+  Build OK
+
+=== test_safety_core.exe ===
+=== Safety Core Unit Tests ===
+  state_transition_chain... [StateMachine] DISCONNECTED → CONNECTED
+[StateMachine] CONNECTED → READY
+[StateMachine] READY → RUNNING
+[StateMachine] RUNNING → DEGRADED (3 consecutive ERR_CYLINDRICAL_WARN)
+[StateMachine] RUNNING → DEGRADED
+[StateMachine] DEGRADED → RUNNING (operator moved away)
+[StateMachine] DEGRADED → RUNNING
+PASS
+  fatal_callback... [StateMachine] DISCONNECTED → CONNECTED
+[StateMachine] CONNECTED → READY
+[StateMachine] READY → FATAL
+PASS
+  can_move_guard... [StateMachine] DISCONNECTED → CONNECTED
+[StateMachine] CONNECTED → READY
+[StateMachine] READY → RUNNING
+[StateMachine] RUNNING → DEGRADED (3 consecutive ERR_CYLINDRICAL_WARN)
+[StateMachine] RUNNING → DEGRADED
+[StateMachine] DEGRADED → RECOVERING
+PASS
+  speed_factor... [StateMachine] DISCONNECTED → CONNECTED
+[StateMachine] CONNECTED → READY
+[StateMachine] READY → RUNNING
+[StateMachine] RUNNING → DEGRADED (3 consecutive ERR_CYLINDRICAL_WARN)
+[StateMachine] RUNNING → DEGRADED
+[StateMachine] DEGRADED → FATAL: ERR_EMERGENCY_STOP
+[StateMachine] DEGRADED → FATAL
+PASS
+  escalation_warn_to_degrade... PASS
+  escalation_different_error_resets... PASS
+  deescalation_reverse_motion... PASS
+  deescalation_clear_frames... PASS
+
+Results: 8 passed, 0 failed
+  [OK]
+
+--- Building test_session_report ---
+
+D:\Projects\Touch\Touch_Client\tests>if not defined VCINSTALLDIR call "D:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat" x64 
+
+D:\Projects\Touch\Touch_Client\tests>cd /d "D:\Projects\Touch\Touch_Client\tests" 
+
+D:\Projects\Touch\Touch_Client\tests>cl /EHsc /std:c++17 /utf-8 /D_CRT_SECURE_NO_WARNINGS test_session_report.cpp /Fe:test_session_report.exe 
+用于 x64 的 Microsoft (R) C/C++ 优化编译器 19.44.35228 版
+版权所有(C) Microsoft Corporation。保留所有权利。
+
+test_session_report.cpp
+Microsoft (R) Incremental Linker Version 14.44.35228.0
+Copyright (C) Microsoft Corporation.  All rights reserved.
+
+/out:test_session_report.exe 
+test_session_report.obj 
+
+D:\Projects\Touch\Touch_Client\tests>echo BUILD_EXIT=0 
+BUILD_EXIT=0
+  Build OK
+
+=== test_session_report.exe ===
+BEFORE-WINDOW (不该被收进窗口)
+AFTER-WINDOW (应当只出现在控制台上, 不进任何窗口)
+STILL-ALIVE (窗口没搭起来, 这一行照旧出去)
+=== SessionReport Tests ===
+  block_header_format... PASS
+  block_wraps_body_verbatim... PASS
+  block_closes_fence_when_body_has_no_trailing_newline... PASS
+  block_trailer_goes_after_the_fence... PASS
+  block_wraps_a_real_console_screen_verbatim... PASS
+  payload_d_section_prints_both_sign_conventions... PASS
+  payload_d_section_qualifies_a_rejected_fit... PASS
+  payload_d_section_negative_cs_prints_no_fabricated_signs... PASS
+  append_preserves_existing_bytes... PASS
+  append_creates_missing_file... PASS
+  append_on_unreadable_file_reports_failure_without_truncating... PASS
+  solve_path_prints_only_through_the_sink... PASS
+  reject_line_does_not_restate_the_library_verdict... PASS
+  gate_both_directions_are_pinned... PASS
+  stderr_capture_roundtrip_and_restore... PASS
+  stderr_capture_begin_failure_leaves_stderr_alone... PASS
+  stderr_capture_end_read_failure_keeps_the_bytes... PASS
+  stderr_capture_end_read_error_is_a_failure_not_eof... PASS
+  stderr_capture_leftover_survives_a_second_begin... PASS
+  capture_tmp_path_is_unique_and_recognizable... PASS
+
+20 passed, 0 failed
+  [OK]
+
+--- Building test_noise_probe ---
+
+D:\Projects\Touch\Touch_Client\tests>rem 2026-09-22: guard the vcvarsall call -- PATH grows ~1350 chars per call and cmd dies at ~8191, 
+
+D:\Projects\Touch\Touch_Client\tests>rem   so a second unguarded call in the same session can abort the rest of run_tests.bat. 
+
+D:\Projects\Touch\Touch_Client\tests>rem   With this guard, vcvarsall runs at most once per cmd session. (ASCII only -- see 
+
+D:\Projects\Touch\Touch_Client\tests>rem   build_force_pipeline_test.bat's note about non-ASCII comments in .bat files.) 
+
+D:\Projects\Touch\Touch_Client\tests>if not defined VCINSTALLDIR call "D:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat" x64 
+
+D:\Projects\Touch\Touch_Client\tests>cd /d "D:\Projects\Touch\Touch_Client\tests" 
+
+D:\Projects\Touch\Touch_Client\tests>rem NoiseProbe.h is a pure header (no .cpp to link) -- that is deliberate: the statistics that 
+
+D:\Projects\Touch\Touch_Client\tests>rem decide "does averaging buy anything" must be testable without a socket, a robot, or OpenHaptics. 
+
+D:\Projects\Touch\Touch_Client\tests>rem NOTE: keep this file ASCII-only. Non-ASCII comments in a .bat get mis-decoded by cmd.exe 
+
+D:\Projects\Touch\Touch_Client\tests>rem under a non-UTF-8 codepage and can silently swallow the following line. 
+
+D:\Projects\Touch\Touch_Client\tests>cl /EHsc /std:c++17 /I"D:\Projects\Touch\OpenHaptics\Developer\3.5.0\include" /I"D:\Projects\Touch\OpenHaptics\Developer\3.5.0\utilities\include" /DWIN32 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /D_WINSOCK_DEPRECATED_NO_WARNINGS test_noise_probe.cpp /Fe:test_noise_probe.exe 
+用于 x64 的 Microsoft (R) C/C++ 优化编译器 19.44.35228 版
+版权所有(C) Microsoft Corporation。保留所有权利。
+
+test_noise_probe.cpp
+Microsoft (R) Incremental Linker Version 14.44.35228.0
+Copyright (C) Microsoft Corporation.  All rights reserved.
+
+/out:test_noise_probe.exe 
+test_noise_probe.obj 
+
+D:\Projects\Touch\Touch_Client\tests>echo BUILD_EXIT=0 
+BUILD_EXIT=0
+  Build OK
+
+=== test_noise_probe.exe ===
+=== NoiseProbe Unit Tests ===
+  mean_sd_known... PASS
+  complete_blocks_only... PASS
+  white_falls_as_inverse_sqrt_k... PASS
+  slow_band_limited_does_not_fall... PASS
+  autocorr_distinguishes... PASS
+
+Results: 5 passed, 0 failed
+  [OK]
+
+================================================
+  Force Tuning Tests
+================================================
+
+--- Building test_force_tuning ---
+
+D:\Projects\Touch\Touch_Client\tests>rem 2026-09-22: guard the vcvarsall call -- PATH grows ~1350 chars per call and cmd dies at ~8191, 
+
+D:\Projects\Touch\Touch_Client\tests>rem   so a second unguarded call in the same session can abort the rest of run_tests.bat. 
+
+D:\Projects\Touch\Touch_Client\tests>if not defined VCINSTALLDIR call "D:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat" x64 
+
+D:\Projects\Touch\Touch_Client\tests>cd /d "D:\Projects\Touch\Touch_Client\tests" 
+
+D:\Projects\Touch\Touch_Client\tests>rem Linked in on purpose: ForceTuning.cpp is the unit under test; CalibStore.cpp satisfies 
+
+D:\Projects\Touch\Touch_Client\tests>rem   the linker for the CalibStore::fileFor references inside loadOnStartup/tick. 
+
+D:\Projects\Touch\Touch_Client\tests>rem   ForcePipeline.cpp is NOT linked here -- Task 2 has its own test for the wiring. 
+
+D:\Projects\Touch\Touch_Client\tests>rem NOTE: keep this file ASCII-only. Non-ASCII comments in a .bat get mis-decoded by 
+
+D:\Projects\Touch\Touch_Client\tests>rem cmd.exe under a non-UTF-8 codepage and can silently swallow the following line. 
+
+D:\Projects\Touch\Touch_Client\tests>cl /EHsc /std:c++17 /I"D:\Projects\Touch\OpenHaptics\Developer\3.5.0\include" /I"D:\Projects\Touch\OpenHaptics\Developer\3.5.0\utilities\include" /DWIN32 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /D_WINSOCK_DEPRECATED_NO_WARNINGS test_force_tuning.cpp ..\force\ForceTuning.cpp ..\core\CalibStore.cpp /Fe:test_force_tuning.exe 
+用于 x64 的 Microsoft (R) C/C++ 优化编译器 19.44.35228 版
+版权所有(C) Microsoft Corporation。保留所有权利。
+
+test_force_tuning.cpp
+ForceTuning.cpp
+CalibStore.cpp
+正在生成代码...
+Microsoft (R) Incremental Linker Version 14.44.35228.0
+Copyright (C) Microsoft Corporation.  All rights reserved.
+
+/out:test_force_tuning.exe 
+test_force_tuning.obj 
+ForceTuning.obj 
+CalibStore.obj 
+
+D:\Projects\Touch\Touch_Client\tests>echo BUILD_EXIT=0 
+BUILD_EXIT=0
+  Build OK
+
+=== test_force_tuning.exe ===
+=== ForceTuning Tests ===
+  parse_ok... PASS
+  parse_wrong_version... PASS
+  parse_missing_version... PASS
+  parse_out_of_range... PASS
+  parse_nan_inf... PASS
+  parse_garbage... PASS
+  set_gain_bounds... PASS
+  static_initial_value_is_legal... PASS
+  save_load_roundtrip... PASS
+  missing_file_is_quiet_false... PASS
+[Tuning] !! force_tuning.json 【不可用, 已忽略】: _tuning_test_tmp.json
+[Tuning] !!   期望 { "version": 1, "reflection_gain": <100..300 之间的有限数> }
+[Tuning] !!   处置: 本次用 Config.h 的默认值。要重建这份文件, 在 MATLAB 上拖一下滑条即可。
+  corrupt_file_rejected... PASS
+  tick_at_debounces_persistence... [Tuning] 力反射增益已落盘: 150.0
+PASS
+  tick_at_does_not_rewrite_when_clean... [Tuning] 力反射增益已落盘: 160.0
+PASS
+
+13 passed, 0 failed
+  [OK]
+
+================================================
+  Calibration / Kinematics / Safety Standalone Tests
+================================================
+
+--- Building test_calibration ---
+
+D:\Projects\Touch\Touch_Client\tests>rem 2026-09-22: guard the vcvarsall call -- PATH grows ~1350 chars per call and cmd dies at ~8191, 
+
+D:\Projects\Touch\Touch_Client\tests>rem   so a second unguarded call in the same session can abort the rest of run_tests.bat. 
+
+D:\Projects\Touch\Touch_Client\tests>rem   With this guard, vcvarsall runs at most once per cmd session. (ASCII only -- see 
+
+D:\Projects\Touch\Touch_Client\tests>rem   build_force_pipeline_test.bat's note about non-ASCII comments in .bat files.) 
+
+D:\Projects\Touch\Touch_Client\tests>if not defined VCINSTALLDIR call "D:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat" x64 
+
+D:\Projects\Touch\Touch_Client\tests>cd /d "D:\Projects\Touch\Touch_Client\tests" 
+
+D:\Projects\Touch\Touch_Client\tests>cl /EHsc /std:c++17 /I"D:\Projects\Touch\OpenHaptics\Developer\3.5.0\include" /I"D:\Projects\Touch\OpenHaptics\Developer\3.5.0\utilities\include" /DWIN32 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /D_WINSOCK_DEPRECATED_NO_WARNINGS test_calibration.cpp ..\calibration\CalibrationSolver.cpp /Fe:test_calibration.exe 
+用于 x64 的 Microsoft (R) C/C++ 优化编译器 19.44.35228 版
+版权所有(C) Microsoft Corporation。保留所有权利。
+
+test_calibration.cpp
+CalibrationSolver.cpp
+正在生成代码...
+Microsoft (R) Incremental Linker Version 14.44.35228.0
+Copyright (C) Microsoft Corporation.  All rights reserved.
+
+/out:test_calibration.exe 
+test_calibration.obj 
+CalibrationSolver.obj 
+
+D:\Projects\Touch\Touch_Client\tests>echo BUILD_EXIT=0 
+BUILD_EXIT=0
+  Build OK
+
+=== test_calibration.exe ===
+=== Kabsch-Umeyama Solver Tests ===
+  identity... PASS
+  translation... PASS
+  rotation_z90... PASS
+  combined_transform... PASS
+  reflection_correction... PASS
+  noisy_data... PASS
+  minimal_3points... PASS
+  too_few_points... PASS
+
+Results: 8 passed, 0 failed
+  [OK]
+
+--- Building test_calib_store ---
+
+D:\Projects\Touch\Touch_Client\tests>rem 2026-09-22: guard the vcvarsall call -- PATH grows ~1350 chars per call and cmd dies at ~8191, 
+
+D:\Projects\Touch\Touch_Client\tests>rem   so a second unguarded call in the same session can abort the rest of run_tests.bat. 
+
+D:\Projects\Touch\Touch_Client\tests>rem   With this guard, vcvarsall runs at most once per cmd session. (ASCII only -- see 
+
+D:\Projects\Touch\Touch_Client\tests>rem   build_force_pipeline_test.bat's note about non-ASCII comments in .bat files.) 
+
+D:\Projects\Touch\Touch_Client\tests>if not defined VCINSTALLDIR call "D:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat" x64 
+
+D:\Projects\Touch\Touch_Client\tests>cd /d "D:\Projects\Touch\Touch_Client\tests" 
+
+D:\Projects\Touch\Touch_Client\tests>cl /EHsc /std:c++17 /D_CRT_SECURE_NO_WARNINGS test_calib_store.cpp ..\core\CalibStore.cpp /Fe:test_calib_store.exe 
+用于 x64 的 Microsoft (R) C/C++ 优化编译器 19.44.35228 版
+版权所有(C) Microsoft Corporation。保留所有权利。
+
+test_calib_store.cpp
+CalibStore.cpp
+正在生成代码...
+Microsoft (R) Incremental Linker Version 14.44.35228.0
+Copyright (C) Microsoft Corporation.  All rights reserved.
+
+/out:test_calib_store.exe 
+test_calib_store.obj 
+CalibStore.obj 
+
+D:\Projects\Touch\Touch_Client\tests>echo BUILD_EXIT=0 
+BUILD_EXIT=0
+  Build OK
+
+=== test_calib_store.exe ===
+=== CalibStore Tests ===
+  derive_dir_normal... PASS
+  derive_dir_shallow... PASS
+  derive_dir_bad_input... PASS
+
+3 passed, 0 failed
+  [OK]
+
+--- Building test_frame_layout ---
+
+D:\Projects\Touch\Touch_Client\tests>rem 2026-09-22: guard the vcvarsall call -- PATH grows ~1350 chars per call and cmd dies at ~8191, 
+
+D:\Projects\Touch\Touch_Client\tests>rem   so a second unguarded call in the same session can abort the rest of run_tests.bat. 
+
+D:\Projects\Touch\Touch_Client\tests>rem   With this guard, vcvarsall runs at most once per cmd session. (ASCII only -- see 
+
+D:\Projects\Touch\Touch_Client\tests>rem   build_force_pipeline_test.bat's note about non-ASCII comments in .bat files.) 
+
+D:\Projects\Touch\Touch_Client\tests>if not defined VCINSTALLDIR call "D:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat" x64 
+
+D:\Projects\Touch\Touch_Client\tests>cd /d "D:\Projects\Touch\Touch_Client\tests" 
+
+D:\Projects\Touch\Touch_Client\tests>rem FrameLayout.h is a pure header (no .cpp to link) -- that is exactly why the predicate was 
+
+D:\Projects\Touch\Touch_Client\tests>rem extracted as a pure function: this test needs no socket and no OpenHaptics. The two 
+
+D:\Projects\Touch\Touch_Client\tests>rem OpenHaptics /I paths are kept so that a future edit pulling in AppState.h needs no change here. 
+
+D:\Projects\Touch\Touch_Client\tests>rem NOTE: keep this file ASCII-only. Non-ASCII comments in a .bat get mis-decoded by cmd.exe 
+
+D:\Projects\Touch\Touch_Client\tests>rem under a non-UTF-8 codepage and can silently swallow the following line. 
+
+D:\Projects\Touch\Touch_Client\tests>rem NOTE 2026-09-23: ../calibration/CalibrationIO.cpp is REQUIRED as of this date. Two cases at the 
+
+D:\Projects\Touch\Touch_Client\tests>rem   end of test_frame_layout.cpp now call touchToRobotMatrix / convertTouchToRobot, and 
+
+D:\Projects\Touch\Touch_Client\tests>rem   CoordinateTransform.h declares Calibration::enabled / R / t as extern -- their DEFINITIONS 
+
+D:\Projects\Touch\Touch_Client\tests>rem   live in calibration/CalibrationIO.cpp. Without it the link dies with exactly 3 unresolved 
+
+D:\Projects\Touch\Touch_Client\tests>rem   externals (LNK2019 x3 + LNK1120; measured 2026-09-23 before this line was added). Same root 
+
+D:\Projects\Touch\Touch_Client\tests>rem   cause as the note in build_coord_safety_test.bat -- see also test_coord_safety.cpp lines 6-10. 
+
+D:\Projects\Touch\Touch_Client\tests>cl /EHsc /std:c++17 /I"D:\Projects\Touch\OpenHaptics\Developer\3.5.0\include" /I"D:\Projects\Touch\OpenHaptics\Developer\3.5.0\utilities\include" /DWIN32 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /D_WINSOCK_DEPRECATED_NO_WARNINGS test_frame_layout.cpp ../calibration/CalibrationIO.cpp /Fe:test_frame_layout.exe 
+用于 x64 的 Microsoft (R) C/C++ 优化编译器 19.44.35228 版
+版权所有(C) Microsoft Corporation。保留所有权利。
+
+test_frame_layout.cpp
+CalibrationIO.cpp
+正在生成代码...
+Microsoft (R) Incremental Linker Version 14.44.35228.0
+Copyright (C) Microsoft Corporation.  All rights reserved.
+
+/out:test_frame_layout.exe 
+test_frame_layout.obj 
+CalibrationIO.obj 
+
+D:\Projects\Touch\Touch_Client\tests>echo BUILD_EXIT=0 
+BUILD_EXIT=0
+  Build OK
+
+=== test_frame_layout.exe ===
+--- FrameLayout (30004 帧自检) ---
+  readU64LE... PASS
+  little_endian_ok... PASS
+  big_endian_ok... PASS
+  no_magic... PASS
+  off_by_one_byte... PASS
+  magic_shifted_by_one... PASS
+  len_short_of_magic... PASS
+  len_one_short... PASS
+  len_one_long... PASS
+  null_buffer... PASS
+  all_ff_frame_rejected... PASS
+  all_zero_frame_rejected... PASS
+  touch_to_robot_matrix_is_the_position_mapping... PASS
+  touch_to_robot_matrix_is_orthonormal... PASS
+
+Results: 14 passed, 0 failed
+  [OK]
+
+--- Building test_inertia_identification ---
+
+D:\Projects\Touch\Touch_Client\tests>rem 2026-09-22: guard the vcvarsall call -- PATH grows ~1350 chars per call and cmd dies at ~8191, 
+
+D:\Projects\Touch\Touch_Client\tests>rem   so a second unguarded call in the same session can abort the rest of run_tests.bat. 
+
+D:\Projects\Touch\Touch_Client\tests>rem   With this guard, vcvarsall runs at most once per cmd session. (ASCII only -- see 
+
+D:\Projects\Touch\Touch_Client\tests>rem   build_force_pipeline_test.bat's note about non-ASCII comments in .bat files.) 
+
+D:\Projects\Touch\Touch_Client\tests>if not defined VCINSTALLDIR call "D:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat" x64 
+
+D:\Projects\Touch\Touch_Client\tests>cd /d "D:\Projects\Touch\Touch_Client\tests" 
+
+D:\Projects\Touch\Touch_Client\tests>cl /EHsc /std:c++17 /I"D:\Projects\Touch\OpenHaptics\Developer\3.5.0\include" /I"D:\Projects\Touch\OpenHaptics\Developer\3.5.0\utilities\include" /DWIN32 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /D_WINSOCK_DEPRECATED_NO_WARNINGS test_inertia_identification.cpp ..\force\InertiaIdentification.cpp ..\calibration\TcpCalibration.cpp /Fe:test_inertia_identification.exe 
+用于 x64 的 Microsoft (R) C/C++ 优化编译器 19.44.35228 版
+版权所有(C) Microsoft Corporation。保留所有权利。
+
+test_inertia_identification.cpp
+InertiaIdentification.cpp
+TcpCalibration.cpp
+正在生成代码...
+Microsoft (R) Incremental Linker Version 14.44.35228.0
+Copyright (C) Microsoft Corporation.  All rights reserved.
+
+/out:test_inertia_identification.exe 
+test_inertia_identification.obj 
+InertiaIdentification.obj 
+TcpCalibration.obj 
+
+D:\Projects\Touch\Touch_Client\tests>echo BUILD_EXIT=0 
+BUILD_EXIT=0
+  Build OK
+
+=== test_inertia_identification.exe ===
+InertiaIdentification tests
+--- 坐标系约定 / 零运动一致性 ---
+  test_zero_motion_reduces_to_static... [Inertia] 线性层失败: 力矩设计矩阵秩亏 (JᵀJ 最小特征值 0 ≤ 0) —— 这段激励动不到全部六个分量 (单轴往复不够)。
+[Inertia] 谐波阶数 K=0 (BIC 从 0..6 里选, 通道按各自标准差归一化): 解释 0 / 剩 3.611e-12 (无量纲 rms), 采样 400 点 @ 0.5 Hz
+[Inertia] 运动学检查(独立来源,【判据】线性三分量): 拟合速度 rms 0 mm/s vs TCPSpeedActual rms 0 mm/s -> 差 0 mm/s (门限 = 两者较小的 0)
+[Inertia] 运动学检查(独立来源, 角速度那一半: 【诊断量, 不进 ok】—— @672 的坐标系未确认, 见头文件): 拟合 rms 0 度/s vs TCPSpeedActual rms 0 度/s -> 差 0 度/s (若把它当门, 门限会是两者较小的 0)
+[Inertia] I_O = [ 0  0  0;  0  0  0;  0  0  0] kg·m^2   (cond=inf)
+[Inertia] σ = [Ixx 0, Iyy 0, Izz 0, Ixy 0, Ixz 0, Iyz 0], σmax 0 vs 张量量级 0
+[Inertia] 主惯量 (升序) 0 / 0 / 0 kg·m^2, 三角不等式余量 0
+[Inertia] 残差: 力矩 0 N·m (惯性力矩信号 0 N·m, 带外噪底【上界】 1.082e-16 N·m = 力矩通道到 1 阶谐波拟合的带外残差 (拐点已找到; 但这只说明残差不再随阶数下降, 不等于带内信号已吃干净 —— 尺子始终是【上界】, 见头文件 noiseFloorUpperBound)), 力 3.205e-17 N (惯性力信号 0 N)
+[Inertia] 失配度: 力矩残差 / 噪底 = 0 (门 1.123 = 1 + 3.0·sqrt(2/1191))
+[Inertia] 自检拒绝(运动学): 拟合速度与 TCPSpeedActual 的差 0 mm/s 不小于两者的较小者 0 mm/s, 或谐波模型剩得比解释得多 (3.611e-12 >= 0) —— 这段数据不是【已知频率的那个运动】, 微分不可信。 (角速度那一半只报不判, 见上面那条诊断: 差 0 度/s)
+[Inertia] 自检拒绝(激发不足): σmax 0 vs 张量量级 0 kg·m^2, 惯性力矩信号 0 N·m vs 噪底 1.082e-16 N·m (尺子状态 0) —— 参数定不下来, 或运动产生的惯性力矩压不过实测噪底。
+[Inertia] 自检拒绝(非物理): 主惯量 0 / 0 / 0 kg·m^2 —— 绕一点的惯量张量必【正定】; 主惯量出现非正值, 多半是 力矩通道的惯性项符号约定反了 (解出来的是 −I_O)。
+[Inertia] 自检拒绝(运动学, 力通道): 力残差 3.205e-17 N ≥ 惯性力信号 0 N —— 传感器看到的惯性力解释不了实测残差。
+[Inertia] 【拒绝给出惯量】: 上面的 I_O 只供诊断, 不得下发给机械臂。
+[Inertia] 线性层失败: 力矩设计矩阵秩亏 (JᵀJ 最小特征值 0 ≤ 0) —— 这段激励动不到全部六个分量 (单轴往复不够)。
+[Inertia] 谐波阶数 K=0 (BIC 从 0..6 里选, 通道按各自标准差归一化): 解释 0 / 剩 3.611e-12 (无量纲 rms), 采样 400 点 @ 0.5 Hz
+[Inertia] 运动学检查(独立来源,【判据】线性三分量): 拟合速度 rms 0 mm/s vs TCPSpeedActual rms 0 mm/s -> 差 0 mm/s (门限 = 两者较小的 0)
+[Inertia] 运动学检查(独立来源, 角速度那一半: 【诊断量, 不进 ok】—— @672 的坐标系未确认, 见头文件): 拟合 rms 0 度/s vs TCPSpeedActual rms 0 度/s -> 差 0 度/s (若把它当门, 门限会是两者较小的 0)
+[Inertia] I_O = [ 0  0  0;  0  0  0;  0  0  0] kg·m^2   (cond=inf)
+[Inertia] σ = [Ixx 0, Iyy 0, Izz 0, Ixy 0, Ixz 0, Iyz 0], σmax 0 vs 张量量级 0
+[Inertia] 主惯量 (升序) 0 / 0 / 0 kg·m^2, 三角不等式余量 0
+[Inertia] 残差: 力矩 0.0002136 N·m (惯性力矩信号 0 N·m, 带外噪底【上界】 6.33e-17 N·m = 力矩通道到 1 阶谐波拟合的带外残差 (拐点已找到; 但这只说明残差不再随阶数下降, 不等于带内信号已吃干净 —— 尺子始终是【上界】, 见头文件 noiseFloorUpperBound)), 力 0.02136 N (惯性力信号 0 N)
+[Inertia] 失配度: 力矩残差 / 噪底 = 3.375e+12 (门 1.123 = 1 + 3.0·sqrt(2/1191))
+[Inertia] 自检拒绝(运动学): 拟合速度与 TCPSpeedActual 的差 0 mm/s 不小于两者的较小者 0 mm/s, 或谐波模型剩得比解释得多 (3.611e-12 >= 0) —— 这段数据不是【已知频率的那个运动】, 微分不可信。 (角速度那一半只报不判, 见上面那条诊断: 差 0 度/s)
+[Inertia] 自检拒绝(激发不足): σmax 0 vs 张量量级 0 kg·m^2, 惯性力矩信号 0 N·m vs 噪底 6.33e-17 N·m (尺子状态 0) —— 参数定不下来, 或运动产生的惯性力矩压不过实测噪底。
+[Inertia] 自检拒绝(失配度): 力矩残差 0.0002136 N·m / 噪底 6.33e-17 N·m = 3.375e+12 ≥ 门 1.123 —— 残差里除了噪声还有别的东西, 也就是【模型形式对不上】 (通道约定各向异性、运动学量算错、或力矩通道的别的干扰)。
+[Inertia] 自检拒绝(非物理): 主惯量 0 / 0 / 0 kg·m^2 —— 绕一点的惯量张量必【正定】; 主惯量出现非正值, 多半是 力矩通道的惯性项符号约定反了 (解出来的是 −I_O)。
+[Inertia] 自检拒绝(运动学, 力通道): 力残差 0.02136 N ≥ 惯性力信号 0 N —— 传感器看到的惯性力解释不了实测残差。
+[Inertia] 【拒绝给出惯量】: 上面的 I_O 只供诊断, 不得下发给机械臂。
+PASS
+--- 合成恢复 ---
+  test_recovers_inertia_parity_plus... [Inertia] 谐波阶数 K=2 (BIC 从 0..6 里选, 通道按各自标准差归一化): 解释 0.9993 / 剩 0.0008852 (无量纲 rms), 采样 750 点 @ 0.5 Hz
+[Inertia] 运动学检查(独立来源,【判据】线性三分量): 拟合速度 rms 33.05 mm/s vs TCPSpeedActual rms 33.05 mm/s -> 差 0.002839 mm/s (门限 = 两者较小的 33.05)
+[Inertia] 运动学检查(独立来源, 角速度那一半: 【诊断量, 不进 ok】—— @672 的坐标系未确认, 见头文件): 拟合 rms 26.3 度/s vs TCPSpeedActual rms 26.3 度/s -> 差 0.001787 度/s (若把它当门, 门限会是两者较小的 26.3)
+[Inertia] I_O = [ 0.00846981  0.000109523 -0.000111983;  0.000109523  0.0146635  0.000322686; -0.000111983  0.000322686  0.0151996] kg·m^2   (cond=4.725)
+[Inertia] σ = [Ixx 6.66e-05, Iyy 8.12e-05, Izz 2.64e-05, Ixy 6.23e-05, Ixz 2.62e-05, Iyz 2.63e-05], σmax 8.12e-05 vs 张量量级 0.0228
+[Inertia] 主惯量 (升序) 0.00846581 / 0.0145156 / 0.0153515 kg·m^2, 三角不等式余量 0.00763
+[Inertia] 残差: 力矩 0.002284 N·m (惯性力矩信号 0.03202 N·m, 带外噪底【上界】 0.002307 N·m = 力矩通道到 3 阶谐波拟合的带外残差 (拐点已找到; 但这只说明残差不再随阶数下降, 不等于带内信号已吃干净 —— 尺子始终是【上界】, 见头文件 noiseFloorUpperBound)), 力 0.002312 N (惯性力信号 0.06802 N)
+[Inertia] 失配度: 力矩残差 / 噪底 = 0.9897 (门 1.09 = 1 + 3.0·sqrt(2/2229))
+[Inertia] 全部自检通过。⚠ 这是绕【传感器测量原点】的 I_O; 发机械臂要的是绕法兰面的, 中间两次平行轴平移必须显式做 (后续任务)。
+PASS
+  test_recovers_inertia_parity_minus... [Inertia] 谐波阶数 K=2 (BIC 从 0..6 里选, 通道按各自标准差归一化): 解释 0.9993 / 剩 0.0008852 (无量纲 rms), 采样 750 点 @ 0.5 Hz
+[Inertia] 运动学检查(独立来源,【判据】线性三分量): 拟合速度 rms 33.05 mm/s vs TCPSpeedActual rms 33.05 mm/s -> 差 0.002839 mm/s (门限 = 两者较小的 33.05)
+[Inertia] 运动学检查(独立来源, 角速度那一半: 【诊断量, 不进 ok】—— @672 的坐标系未确认, 见头文件): 拟合 rms 26.3 度/s vs TCPSpeedActual rms 26.3 度/s -> 差 0.001787 度/s (若把它当门, 门限会是两者较小的 26.3)
+[Inertia] I_O = [ 0.00849237  7.80492e-05 -6.27861e-05;  7.80492e-05  0.014656  0.000263657; -6.27861e-05  0.000263657  0.0152106] kg·m^2   (cond=4.851)
+[Inertia] σ = [Ixx 6.91e-05, Iyy 8.25e-05, Izz 2.55e-05, Ixy 5.67e-05, Ixz 2.44e-05, Iyz 2.91e-05], σmax 8.25e-05 vs 张量量级 0.0228
+[Inertia] 主惯量 (升序) 0.00849073 / 0.0145522 / 0.0153161 kg·m^2, 三角不等式余量 0.00773
+[Inertia] 残差: 力矩 0.002282 N·m (惯性力矩信号 0.03349 N·m, 带外噪底【上界】 0.002309 N·m = 力矩通道到 3 阶谐波拟合的带外残差 (拐点已找到; 但这只说明残差不再随阶数下降, 不等于带内信号已吃干净 —— 尺子始终是【上界】, 见头文件 noiseFloorUpperBound)), 力 0.002311 N (惯性力信号 0.06438 N)
+[Inertia] 失配度: 力矩残差 / 噪底 = 0.9885 (门 1.09 = 1 + 3.0·sqrt(2/2229))
+[Inertia] 全部自检通过。⚠ 这是绕【传感器测量原点】的 I_O; 发机械臂要的是绕法兰面的, 中间两次平行轴平移必须显式做 (后续任务)。
+PASS
+  test_moment_equation_is_exactly_linear... [Inertia] 谐波阶数 K=2 (BIC 从 0..6 里选, 通道按各自标准差归一化): 解释 0.999 / 剩 3.943e-14 (无量纲 rms), 采样 500 点 @ 0.5 Hz
+[Inertia] 运动学检查(独立来源,【判据】线性三分量): 拟合速度 rms 33.05 mm/s vs TCPSpeedActual rms 33.05 mm/s -> 差 3.486e-13 mm/s (门限 = 两者较小的 33.05)
+[Inertia] 运动学检查(独立来源, 角速度那一半: 【诊断量, 不进 ok】—— @672 的坐标系未确认, 见头文件): 拟合 rms 26.3 度/s vs TCPSpeedActual rms 26.3 度/s -> 差 1.958e-14 度/s (若把它当门, 门限会是两者较小的 26.3)
+[Inertia] I_O = [ 0.0085  0.0002 -0.0001;  0.0002  0.0145  0.0003; -0.0001  0.0003  0.0152] kg·m^2   (cond=4.852)
+[Inertia] σ = [Ixx 2.12e-08, Iyy 2.53e-08, Izz 7.82e-09, Ixy 1.74e-08, Ixz 7.49e-09, Iyz 8.93e-09], σmax 2.53e-08 vs 张量量级 0.0227
+[Inertia] 主惯量 (升序) 0.00849154 / 0.0143974 / 0.0153111 kg·m^2, 三角不等式余量 0.00758
+[Inertia] 残差: 力矩 5.761e-17 N·m (惯性力矩信号 0.03347 N·m, 带外噪底【上界】 5.781e-07 N·m = 力矩通道到 6 阶谐波拟合的带外残差 (⚠ 阶数搜到底仍在降: 里面还混着带内信号, 这把尺子偏松)), 力 8.278e-16 N (惯性力信号 0.06438 N)
+[Inertia] 失配度: 力矩残差 / 噪底 = 9.966e-11 (门 1.111 = 1 + 3.0·sqrt(2/1461))
+[Inertia] 全部自检通过。⚠ 这是绕【传感器测量原点】的 I_O; 发机械臂要的是绕法兰面的, 中间两次平行轴平移必须显式做 (后续任务)。
+[Inertia] 谐波阶数 K=2 (BIC 从 0..6 里选, 通道按各自标准差归一化): 解释 0.999 / 剩 3.943e-14 (无量纲 rms), 采样 500 点 @ 0.5 Hz
+[Inertia] 运动学检查(独立来源,【判据】线性三分量): 拟合速度 rms 33.05 mm/s vs TCPSpeedActual rms 33.05 mm/s -> 差 3.486e-13 mm/s (门限 = 两者较小的 33.05)
+[Inertia] 运动学检查(独立来源, 角速度那一半: 【诊断量, 不进 ok】—— @672 的坐标系未确认, 见头文件): 拟合 rms 26.3 度/s vs TCPSpeedActual rms 26.3 度/s -> 差 1.958e-14 度/s (若把它当门, 门限会是两者较小的 26.3)
+[Inertia] I_O = [ 0.03145  0.00074 -0.00037;  0.00074  0.05365  0.00111; -0.00037  0.00111  0.05624] kg·m^2   (cond=4.852)
+[Inertia] σ = [Ixx 7.14e-08, Iyy 8.51e-08, Izz 2.63e-08, Ixy 5.86e-08, Ixz 2.52e-08, Iyz 3.01e-08], σmax 8.51e-08 vs 张量量级 0.0839
+[Inertia] 主惯量 (升序) 0.0314187 / 0.0532704 / 0.0566509 kg·m^2, 三角不等式余量 0.028
+[Inertia] 残差: 力矩 2.309e-16 N·m (惯性力矩信号 0.1238 N·m, 带外噪底【上界】 1.947e-06 N·m = 力矩通道到 6 阶谐波拟合的带外残差 (⚠ 阶数搜到底仍在降: 里面还混着带内信号, 这把尺子偏松)), 力 8.278e-16 N (惯性力信号 0.06438 N)
+[Inertia] 失配度: 力矩残差 / 噪底 = 1.186e-10 (门 1.111 = 1 + 3.0·sqrt(2/1461))
+[Inertia] 全部自检通过。⚠ 这是绕【传感器测量原点】的 I_O; 发机械臂要的是绕法兰面的, 中间两次平行轴平移必须显式做 (后续任务)。
+PASS
+  test_sigma_is_calibrated... [Inertia] 谐波阶数 K=2 (BIC 从 0..6 里选, 通道按各自标准差归一化): 解释 0.9993 / 剩 0.0008932 (无量纲 rms), 采样 750 点 @ 0.5 Hz
+[Inertia] 运动学检查(独立来源,【判据】线性三分量): 拟合速度 rms 33.05 mm/s vs TCPSpeedActual rms 33.05 mm/s -> 差 0.002017 mm/s (门限 = 两者较小的 33.05)
+[Inertia] 运动学检查(独立来源, 角速度那一半: 【诊断量, 不进 ok】—— @672 的坐标系未确认, 见头文件): 拟合 rms 26.3 度/s vs TCPSpeedActual rms 26.3 度/s -> 差 0.001745 度/s (若把它当门, 门限会是两者较小的 26.3)
+[Inertia] I_O = [ 0.00859429  0.000122808 -0.0001132;  0.000122808  0.0144581  0.000307245; -0.0001132  0.000307245  0.0152104] kg·m^2   (cond=4.852)
+[Inertia] σ = [Ixx 6.93e-05, Iyy 8.26e-05, Izz 2.56e-05, Ixy 5.68e-05, Ixz 2.45e-05, Iyz 2.92e-05], σmax 8.26e-05 vs 张量量级 0.0227
+[Inertia] 主惯量 (升序) 0.00858955 / 0.0143527 / 0.0153206 kg·m^2, 三角不等式余量 0.00762
+[Inertia] 残差: 力矩 0.002296 N·m (惯性力矩信号 0.03347 N·m, 带外噪底【上界】 0.002313 N·m = 力矩通道到 3 阶谐波拟合的带外残差 (拐点已找到; 但这只说明残差不再随阶数下降, 不等于带内信号已吃干净 —— 尺子始终是【上界】, 见头文件 noiseFloorUpperBound)), 力 0.002315 N (惯性力信号 0.06438 N)
+[Inertia] 失配度: 力矩残差 / 噪底 = 0.9926 (门 1.09 = 1 + 3.0·sqrt(2/2229))
+[Inertia] 全部自检通过。⚠ 这是绕【传感器测量原点】的 I_O; 发机械臂要的是绕法兰面的, 中间两次平行轴平移必须显式做 (后续任务)。
+[Inertia] 谐波阶数 K=2 (BIC 从 0..6 里选, 通道按各自标准差归一化): 解释 0.9993 / 剩 0.0008789 (无量纲 rms), 采样 750 点 @ 0.5 Hz
+[Inertia] 运动学检查(独立来源,【判据】线性三分量): 拟合速度 rms 33.05 mm/s vs TCPSpeedActual rms 33.05 mm/s -> 差 0.001488 mm/s (门限 = 两者较小的 33.05)
+[Inertia] 运动学检查(独立来源, 角速度那一半: 【诊断量, 不进 ok】—— @672 的坐标系未确认, 见头文件): 拟合 rms 26.3 度/s vs TCPSpeedActual rms 26.3 度/s -> 差 0.002078 度/s (若把它当门, 门限会是两者较小的 26.3)
+[Inertia] I_O = [ 0.00839274  0.000227856 -0.000128538;  0.000227856  0.0144877  0.000326259; -0.000128538  0.000326259  0.0152263] kg·m^2   (cond=4.851)
+[Inertia] σ = [Ixx 6.96e-05, Iyy 8.3e-05, Izz 2.57e-05, Ixy 5.71e-05, Ixz 2.46e-05, Iyz 2.93e-05], σmax 8.3e-05 vs 张量量级 0.0226
+[Inertia] 主惯量 (升序) 0.00838133 / 0.0143754 / 0.01535 kg·m^2, 三角不等式余量 0.00741
+[Inertia] 残差: 力矩 0.002298 N·m (惯性力矩信号 0.03352 N·m, 带外噪底【上界】 0.002323 N·m = 力矩通道到 3 阶谐波拟合的带外残差 (拐点已找到; 但这只说明残差不再随阶数下降, 不等于带内信号已吃干净 —— 尺子始终是【上界】, 见头文件 noiseFloorUpperBound)), 力 0.002267 N (惯性力信号 0.06438 N)
+[Inertia] 失配度: 力矩残差 / 噪底 = 0.9891 (门 1.09 = 1 + 3.0·sqrt(2/2229))
+[Inertia] 全部自检通过。⚠ 这是绕【传感器测量原点】的 I_O; 发机械臂要的是绕法兰面的, 中间两次平行轴平移必须显式做 (后续任务)。
+[Inertia] 谐波阶数 K=2 (BIC 从 0..6 里选, 通道按各自标准差归一化): 解释 0.9993 / 剩 0.0008997 (无量纲 rms), 采样 750 点 @ 0.5 Hz
+[Inertia] 运动学检查(独立来源,【判据】线性三分量): 拟合速度 rms 33.05 mm/s vs TCPSpeedActual rms 33.05 mm/s -> 差 0.001494 mm/s (门限 = 两者较小的 33.05)
+[Inertia] 运动学检查(独立来源, 角速度那一半: 【诊断量, 不进 ok】—— @672 的坐标系未确认, 见头文件): 拟合 rms 26.3 度/s vs TCPSpeedActual rms 26.3 度/s -> 差 0.001401 度/s (若把它当门, 门限会是两者较小的 26.3)
+[Inertia] I_O = [ 0.00855462  0.000207523 -0.000109875;  0.000207523  0.0145942  0.000276235; -0.000109875  0.000276235  0.0152017] kg·m^2   (cond=4.851)
+[Inertia] σ = [Ixx 6.96e-05, Iyy 8.29e-05, Izz 2.57e-05, Ixy 5.71e-05, Ixz 2.46e-05, Iyz 2.93e-05], σmax 8.29e-05 vs 张量量级 0.0227
+[Inertia] 主惯量 (升序) 0.00854536 / 0.0144966 / 0.0153087 kg·m^2, 三角不等式余量 0.00773
+[Inertia] 残差: 力矩 0.002297 N·m (惯性力矩信号 0.03349 N·m, 带外噪底【上界】 0.002323 N·m = 力矩通道到 3 阶谐波拟合的带外残差 (拐点已找到; 但这只说明残差不再随阶数下降, 不等于带内信号已吃干净 —— 尺子始终是【上界】, 见头文件 noiseFloorUpperBound)), 力 0.002296 N (惯性力信号 0.06438 N)
+[Inertia] 失配度: 力矩残差 / 噪底 = 0.9889 (门 1.09 = 1 + 3.0·sqrt(2/2229))
+[Inertia] 全部自检通过。⚠ 这是绕【传感器测量原点】的 I_O; 发机械臂要的是绕法兰面的, 中间两次平行轴平移必须显式做 (后续任务)。
+[Inertia] 谐波阶数 K=2 (BIC 从 0..6 里选, 通道按各自标准差归一化): 解释 0.9993 / 剩 0.0008927 (无量纲 rms), 采样 750 点 @ 0.5 Hz
+[Inertia] 运动学检查(独立来源,【判据】线性三分量): 拟合速度 rms 33.05 mm/s vs TCPSpeedActual rms 33.05 mm/s -> 差 0.00188 mm/s (门限 = 两者较小的 33.05)
+[Inertia] 运动学检查(独立来源, 角速度那一半: 【诊断量, 不进 ok】—— @672 的坐标系未确认, 见头文件): 拟合 rms 26.3 度/s vs TCPSpeedActual rms 26.3 度/s -> 差 0.002496 度/s (若把它当门, 门限会是两者较小的 26.3)
+[Inertia] I_O = [ 0.0085539  0.000169459 -0.000124631;  0.000169459  0.0144458  0.000348956; -0.000124631  0.000348956  0.0151827] kg·m^2   (cond=4.851)
+[Inertia] σ = [Ixx 7.06e-05, Iyy 8.41e-05, Izz 2.6e-05, Ixy 5.79e-05, Ixz 2.49e-05, Iyz 2.97e-05], σmax 8.41e-05 vs 张量量级 0.0226
+[Inertia] 主惯量 (升序) 0.0085463 / 0.014314 / 0.0153221 kg·m^2, 三角不等式余量 0.00754
+[Inertia] 残差: 力矩 0.002334 N·m (惯性力矩信号 0.03345 N·m, 带外噪底【上界】 0.002356 N·m = 力矩通道到 3 阶谐波拟合的带外残差 (拐点已找到; 但这只说明残差不再随阶数下降, 不等于带内信号已吃干净 —— 尺子始终是【上界】, 见头文件 noiseFloorUpperBound)), 力 0.002326 N (惯性力信号 0.06437 N)
+[Inertia] 失配度: 力矩残差 / 噪底 = 0.9905 (门 1.09 = 1 + 3.0·sqrt(2/2229))
+[Inertia] 全部自检通过。⚠ 这是绕【传感器测量原点】的 I_O; 发机械臂要的是绕法兰面的, 中间两次平行轴平移必须显式做 (后续任务)。
+[Inertia] 谐波阶数 K=2 (BIC 从 0..6 里选, 通道按各自标准差归一化): 解释 0.9993 / 剩 0.000882 (无量纲 rms), 采样 750 点 @ 0.5 Hz
+[Inertia] 运动学检查(独立来源,【判据】线性三分量): 拟合速度 rms 33.05 mm/s vs TCPSpeedActual rms 33.05 mm/s -> 差 0.001543 mm/s (门限 = 两者较小的 33.05)
+[Inertia] 运动学检查(独立来源, 角速度那一半: 【诊断量, 不进 ok】—— @672 的坐标系未确认, 见头文件): 拟合 rms 26.3 度/s vs TCPSpeedActual rms 26.3 度/s -> 差 0.002326 度/s (若把它当门, 门限会是两者较小的 26.3)
+[Inertia] I_O = [ 0.00847853  0.000225123 -0.000138565;  0.000225123  0.0144649  0.000280286; -0.000138565  0.000280286  0.0151657] kg·m^2   (cond=4.852)
+[Inertia] σ = [Ixx 7.12e-05, Iyy 8.49e-05, Izz 2.63e-05, Ixy 5.84e-05, Ixz 2.52e-05, Iyz 3e-05], σmax 8.49e-05 vs 张量量级 0.0226
+[Inertia] 主惯量 (升序) 0.00846676 / 0.0143779 / 0.0152645 kg·m^2, 三角不等式余量 0.00758
+[Inertia] 残差: 力矩 0.00234 N·m (惯性力矩信号 0.03338 N·m, 带外噪底【上界】 0.002378 N·m = 力矩通道到 3 阶谐波拟合的带外残差 (拐点已找到; 但这只说明残差不再随阶数下降, 不等于带内信号已吃干净 —— 尺子始终是【上界】, 见头文件 noiseFloorUpperBound)), 力 0.002312 N (惯性力信号 0.06438 N)
+[Inertia] 失配度: 力矩残差 / 噪底 = 0.984 (门 1.09 = 1 + 3.0·sqrt(2/2229))
+[Inertia] 全部自检通过。⚠ 这是绕【传感器测量原点】的 I_O; 发机械臂要的是绕法兰面的, 中间两次平行轴平移必须显式做 (后续任务)。
+[Inertia] 谐波阶数 K=2 (BIC 从 0..6 里选, 通道按各自标准差归一化): 解释 0.9993 / 剩 0.0008948 (无量纲 rms), 采样 750 点 @ 0.5 Hz
+[Inertia] 运动学检查(独立来源,【判据】线性三分量): 拟合速度 rms 33.05 mm/s vs TCPSpeedActual rms 33.05 mm/s -> 差 0.002125 mm/s (门限 = 两者较小的 33.05)
+[Inertia] 运动学检查(独立来源, 角速度那一半: 【诊断量, 不进 ok】—— @672 的坐标系未确认, 见头文件): 拟合 rms 26.3 度/s vs TCPSpeedActual rms 26.3 度/s -> 差 0.001719 度/s (若把它当门, 门限会是两者较小的 26.3)
+[Inertia] I_O = [ 0.00846824  0.00019744 -8.7191e-05;  0.00019744  0.0145113  0.000265602; -8.7191e-05  0.000265602  0.0152318] kg·m^2   (cond=4.852)
+[Inertia] σ = [Ixx 6.93e-05, Iyy 8.27e-05, Izz 2.56e-05, Ixy 5.69e-05, Ixz 2.45e-05, Iyz 2.92e-05], σmax 8.27e-05 vs 张量量级 0.0227
+[Inertia] 主惯量 (升序) 0.00846043 / 0.0144317 / 0.0153192 kg·m^2, 三角不等式余量 0.00757
+[Inertia] 残差: 力矩 0.002293 N·m (惯性力矩信号 0.0335 N·m, 带外噪底【上界】 0.002315 N·m = 力矩通道到 3 阶谐波拟合的带外残差 (拐点已找到; 但这只说明残差不再随阶数下降, 不等于带内信号已吃干净 —— 尺子始终是【上界】, 见头文件 noiseFloorUpperBound)), 力 0.002297 N (惯性力信号 0.06438 N)
+[Inertia] 失配度: 力矩残差 / 噪底 = 0.9903 (门 1.09 = 1 + 3.0·sqrt(2/2229))
+[Inertia] 全部自检通过。⚠ 这是绕【传感器测量原点】的 I_O; 发机械臂要的是绕法兰面的, 中间两次平行轴平移必须显式做 (后续任务)。
+[Inertia] 谐波阶数 K=2 (BIC 从 0..6 里选, 通道按各自标准差归一化): 解释 0.9993 / 剩 0.0008909 (无量纲 rms), 采样 750 点 @ 0.5 Hz
+[Inertia] 运动学检查(独立来源,【判据】线性三分量): 拟合速度 rms 33.05 mm/s vs TCPSpeedActual rms 33.05 mm/s -> 差 0.002623 mm/s (门限 = 两者较小的 33.05)
+[Inertia] 运动学检查(独立来源, 角速度那一半: 【诊断量, 不进 ok】—— @672 的坐标系未确认, 见头文件): 拟合 rms 26.3 度/s vs TCPSpeedActual rms 26.3 度/s -> 差 0.002003 度/s (若把它当门, 门限会是两者较小的 26.3)
+[Inertia] I_O = [ 0.00853442  0.000160103 -0.000106887;  0.000160103  0.0145426  0.000261973; -0.000106887  0.000261973  0.0151822] kg·m^2   (cond=4.851)
+[Inertia] σ = [Ixx 6.89e-05, Iyy 8.22e-05, Izz 2.54e-05, Ixy 5.66e-05, Ixz 2.44e-05, Iyz 2.91e-05], σmax 8.22e-05 vs 张量量级 0.0227
+[Inertia] 主惯量 (升序) 0.00852821 / 0.0144549 / 0.0152761 kg·m^2, 三角不等式余量 0.00771
+[Inertia] 残差: 力矩 0.00229 N·m (惯性力矩信号 0.03342 N·m, 带外噪底【上界】 0.002303 N·m = 力矩通道到 3 阶谐波拟合的带外残差 (拐点已找到; 但这只说明残差不再随阶数下降, 不等于带内信号已吃干净 —— 尺子始终是【上界】, 见头文件 noiseFloorUpperBound)), 力 0.002305 N (惯性力信号 0.06438 N)
+[Inertia] 失配度: 力矩残差 / 噪底 = 0.9944 (门 1.09 = 1 + 3.0·sqrt(2/2229))
+[Inertia] 全部自检通过。⚠ 这是绕【传感器测量原点】的 I_O; 发机械臂要的是绕法兰面的, 中间两次平行轴平移必须显式做 (后续任务)。
+[Inertia] 谐波阶数 K=2 (BIC 从 0..6 里选, 通道按各自标准差归一化): 解释 0.9993 / 剩 0.000881 (无量纲 rms), 采样 750 点 @ 0.5 Hz
+[Inertia] 运动学检查(独立来源,【判据】线性三分量): 拟合速度 rms 33.05 mm/s vs TCPSpeedActual rms 33.05 mm/s -> 差 0.002222 mm/s (门限 = 两者较小的 33.05)
+[Inertia] 运动学检查(独立来源, 角速度那一半: 【诊断量, 不进 ok】—— @672 的坐标系未确认, 见头文件): 拟合 rms 26.3 度/s vs TCPSpeedActual rms 26.3 度/s -> 差 0.002836 度/s (若把它当门, 门限会是两者较小的 26.3)
+[Inertia] I_O = [ 0.00846133  0.000195106 -0.000125631;  0.000195106  0.0145427  0.000310863; -0.000125631  0.000310863  0.0151613] kg·m^2   (cond=4.851)
+[Inertia] σ = [Ixx 7.1e-05, Iyy 8.47e-05, Izz 2.62e-05, Ixy 5.83e-05, Ixz 2.51e-05, Iyz 2.99e-05], σmax 8.47e-05 vs 张量量级 0.0227
+[Inertia] 主惯量 (升序) 0.00845233 / 0.0144222 / 0.0152908 kg·m^2, 三角不等式余量 0.00758
+[Inertia] 残差: 力矩 0.002351 N·m (惯性力矩信号 0.03341 N·m, 带外噪底【上界】 0.002372 N·m = 力矩通道到 3 阶谐波拟合的带外残差 (拐点已找到; 但这只说明残差不再随阶数下降, 不等于带内信号已吃干净 —— 尺子始终是【上界】, 见头文件 noiseFloorUpperBound)), 力 0.002326 N (惯性力信号 0.06438 N)
+[Inertia] 失配度: 力矩残差 / 噪底 = 0.9912 (门 1.09 = 1 + 3.0·sqrt(2/2229))
+[Inertia] 全部自检通过。⚠ 这是绕【传感器测量原点】的 I_O; 发机械臂要的是绕法兰面的, 中间两次平行轴平移必须显式做 (后续任务)。
+[Inertia] 谐波阶数 K=2 (BIC 从 0..6 里选, 通道按各自标准差归一化): 解释 0.9993 / 剩 0.0009 (无量纲 rms), 采样 750 点 @ 0.5 Hz
+[Inertia] 运动学检查(独立来源,【判据】线性三分量): 拟合速度 rms 33.05 mm/s vs TCPSpeedActual rms 33.05 mm/s -> 差 0.002233 mm/s (门限 = 两者较小的 33.05)
+[Inertia] 运动学检查(独立来源, 角速度那一半: 【诊断量, 不进 ok】—— @672 的坐标系未确认, 见头文件): 拟合 rms 26.3 度/s vs TCPSpeedActual rms 26.3 度/s -> 差 0.001706 度/s (若把它当门, 门限会是两者较小的 26.3)
+[Inertia] I_O = [ 0.0085122  0.000224694 -0.000130944;  0.000224694  0.0144265  0.000331074; -0.000130944  0.000331074  0.0151796] kg·m^2   (cond=4.851)
+[Inertia] σ = [Ixx 7.08e-05, Iyy 8.44e-05, Izz 2.61e-05, Ixy 5.81e-05, Ixz 2.5e-05, Iyz 2.98e-05], σmax 8.44e-05 vs 张量量级 0.0226
+[Inertia] 主惯量 (升序) 0.00850059 / 0.014313 / 0.0153047 kg·m^2, 三角不等式余量 0.00751
+[Inertia] 残差: 力矩 0.002337 N·m (惯性力矩信号 0.03343 N·m, 带外噪底【上界】 0.002365 N·m = 力矩通道到 3 阶谐波拟合的带外残差 (拐点已找到; 但这只说明残差不再随阶数下降, 不等于带内信号已吃干净 —— 尺子始终是【上界】, 见头文件 noiseFloorUpperBound)), 力 0.002321 N (惯性力信号 0.06438 N)
+[Inertia] 失配度: 力矩残差 / 噪底 = 0.9882 (门 1.09 = 1 + 3.0·sqrt(2/2229))
+[Inertia] 全部自检通过。⚠ 这是绕【传感器测量原点】的 I_O; 发机械臂要的是绕法兰面的, 中间两次平行轴平移必须显式做 (后续任务)。
+[Inertia] 谐波阶数 K=2 (BIC 从 0..6 里选, 通道按各自标准差归一化): 解释 0.9993 / 剩 0.0008888 (无量纲 rms), 采样 750 点 @ 0.5 Hz
+[Inertia] 运动学检查(独立来源,【判据】线性三分量): 拟合速度 rms 33.05 mm/s vs TCPSpeedActual rms 33.05 mm/s -> 差 0.002304 mm/s (门限 = 两者较小的 33.05)
+[Inertia] 运动学检查(独立来源, 角速度那一半: 【诊断量, 不进 ok】—— @672 的坐标系未确认, 见头文件): 拟合 rms 26.3 度/s vs TCPSpeedActual rms 26.3 度/s -> 差 0.00203 度/s (若把它当门, 门限会是两者较小的 26.3)
+[Inertia] I_O = [ 0.00844352  0.000250843 -0.000131404;  0.000250843  0.0145632  0.000206703; -0.000131404  0.000206703  0.0151831] kg·m^2   (cond=4.852)
+[Inertia] σ = [Ixx 6.9e-05, Iyy 8.23e-05, Izz 2.55e-05, Ixy 5.67e-05, Ixz 2.44e-05, Iyz 2.91e-05], σmax 8.23e-05 vs 张量量级 0.0227
+[Inertia] 主惯量 (升序) 0.00843036 / 0.0145133 / 0.0152461 kg·m^2, 三角不等式余量 0.0077
+[Inertia] 残差: 力矩 0.002301 N·m (惯性力矩信号 0.0334 N·m, 带外噪底【上界】 0.002306 N·m = 力矩通道到 3 阶谐波拟合的带外残差 (拐点已找到; 但这只说明残差不再随阶数下降, 不等于带内信号已吃干净 —— 尺子始终是【上界】, 见头文件 noiseFloorUpperBound)), 力 0.002294 N (惯性力信号 0.06438 N)
+[Inertia] 失配度: 力矩残差 / 噪底 = 0.998 (门 1.09 = 1 + 3.0·sqrt(2/2229))
+[Inertia] 全部自检通过。⚠ 这是绕【传感器测量原点】的 I_O; 发机械臂要的是绕法兰面的, 中间两次平行轴平移必须显式做 (后续任务)。
+[Inertia] 谐波阶数 K=2 (BIC 从 0..6 里选, 通道按各自标准差归一化): 解释 0.9993 / 剩 0.000881 (无量纲 rms), 采样 750 点 @ 0.5 Hz
+[Inertia] 运动学检查(独立来源,【判据】线性三分量): 拟合速度 rms 33.05 mm/s vs TCPSpeedActual rms 33.05 mm/s -> 差 0.002203 mm/s (门限 = 两者较小的 33.05)
+[Inertia] 运动学检查(独立来源, 角速度那一半: 【诊断量, 不进 ok】—— @672 的坐标系未确认, 见头文件): 拟合 rms 26.3 度/s vs TCPSpeedActual rms 26.3 度/s -> 差 0.002356 度/s (若把它当门, 门限会是两者较小的 26.3)
+[Inertia] I_O = [ 0.00858255  0.000161267 -6.63436e-05;  0.000161267  0.0144163  0.000304085; -6.63436e-05  0.000304085  0.0152298] kg·m^2   (cond=4.851)
+[Inertia] σ = [Ixx 6.95e-05, Iyy 8.29e-05, Izz 2.57e-05, Ixy 5.71e-05, Ixz 2.46e-05, Iyz 2.93e-05], σmax 8.29e-05 vs 张量量级 0.0227
+[Inertia] 主惯量 (升序) 0.00857725 / 0.0143205 / 0.015331 kg·m^2, 三角不等式余量 0.00757
+[Inertia] 残差: 力矩 0.002309 N·m (惯性力矩信号 0.03349 N·m, 带外噪底【上界】 0.002323 N·m = 力矩通道到 3 阶谐波拟合的带外残差 (拐点已找到; 但这只说明残差不再随阶数下降, 不等于带内信号已吃干净 —— 尺子始终是【上界】, 见头文件 noiseFloorUpperBound)), 力 0.002295 N (惯性力信号 0.06438 N)
+[Inertia] 失配度: 力矩残差 / 噪底 = 0.9944 (门 1.09 = 1 + 3.0·sqrt(2/2229))
+[Inertia] 全部自检通过。⚠ 这是绕【传感器测量原点】的 I_O; 发机械臂要的是绕法兰面的, 中间两次平行轴平移必须显式做 (后续任务)。
+[Inertia] 谐波阶数 K=2 (BIC 从 0..6 里选, 通道按各自标准差归一化): 解释 0.9993 / 剩 0.0008857 (无量纲 rms), 采样 750 点 @ 0.5 Hz
+[Inertia] 运动学检查(独立来源,【判据】线性三分量): 拟合速度 rms 33.05 mm/s vs TCPSpeedActual rms 33.05 mm/s -> 差 0.002413 mm/s (门限 = 两者较小的 33.05)
+[Inertia] 运动学检查(独立来源, 角速度那一半: 【诊断量, 不进 ok】—— @672 的坐标系未确认, 见头文件): 拟合 rms 26.3 度/s vs TCPSpeedActual rms 26.3 度/s -> 差 0.001784 度/s (若把它当门, 门限会是两者较小的 26.3)
+[Inertia] I_O = [ 0.00853407  0.000209182 -0.000117738;  0.000209182  0.0146051  0.000294487; -0.000117738  0.000294487  0.0151985] kg·m^2   (cond=4.851)
+[Inertia] σ = [Ixx 6.94e-05, Iyy 8.27e-05, Izz 2.56e-05, Ixy 5.69e-05, Ixz 2.45e-05, Iyz 2.92e-05], σmax 8.27e-05 vs 张量量级 0.0227
+[Inertia] 主惯量 (升序) 0.00852442 / 0.0144933 / 0.01532 kg·m^2, 三角不等式余量 0.0077
+[Inertia] 残差: 力矩 0.002296 N·m (惯性力矩信号 0.0335 N·m, 带外噪底【上界】 0.002317 N·m = 力矩通道到 3 阶谐波拟合的带外残差 (拐点已找到; 但这只说明残差不再随阶数下降, 不等于带内信号已吃干净 —— 尺子始终是【上界】, 见头文件 noiseFloorUpperBound)), 力 0.002339 N (惯性力信号 0.06438 N)
+[Inertia] 失配度: 力矩残差 / 噪底 = 0.9908 (门 1.09 = 1 + 3.0·sqrt(2/2229))
+[Inertia] 全部自检通过。⚠ 这是绕【传感器测量原点】的 I_O; 发机械臂要的是绕法兰面的, 中间两次平行轴平移必须显式做 (后续任务)。
+[Inertia] 谐波阶数 K=2 (BIC 从 0..6 里选, 通道按各自标准差归一化): 解释 0.9993 / 剩 0.0008942 (无量纲 rms), 采样 750 点 @ 0.5 Hz
+[Inertia] 运动学检查(独立来源,【判据】线性三分量): 拟合速度 rms 33.05 mm/s vs TCPSpeedActual rms 33.05 mm/s -> 差 0.001969 mm/s (门限 = 两者较小的 33.05)
+[Inertia] 运动学检查(独立来源, 角速度那一半: 【诊断量, 不进 ok】—— @672 的坐标系未确认, 见头文件): 拟合 rms 26.3 度/s vs TCPSpeedActual rms 26.3 度/s -> 差 0.003185 度/s (若把它当门, 门限会是两者较小的 26.3)
+[Inertia] I_O = [ 0.00850758  0.000254595 -9.81028e-05;  0.000254595  0.0143039  0.000318144; -9.81028e-05  0.000318144  0.0151834] kg·m^2   (cond=4.851)
+[Inertia] σ = [Ixx 6.96e-05, Iyy 8.3e-05, Izz 2.57e-05, Ixy 5.71e-05, Ixz 2.46e-05, Iyz 2.93e-05], σmax 8.3e-05 vs 张量量级 0.0225
+[Inertia] 主惯量 (升序) 0.00849454 / 0.0142139 / 0.0152865 kg·m^2, 三角不等式余量 0.00742
+[Inertia] 残差: 力矩 0.002306 N·m (惯性力矩信号 0.03339 N·m, 带外噪底【上界】 0.002324 N·m = 力矩通道到 3 阶谐波拟合的带外残差 (拐点已找到; 但这只说明残差不再随阶数下降, 不等于带内信号已吃干净 —— 尺子始终是【上界】, 见头文件 noiseFloorUpperBound)), 力 0.002317 N (惯性力信号 0.06438 N)
+[Inertia] 失配度: 力矩残差 / 噪底 = 0.9922 (门 1.09 = 1 + 3.0·sqrt(2/2229))
+[Inertia] 全部自检通过。⚠ 这是绕【传感器测量原点】的 I_O; 发机械臂要的是绕法兰面的, 中间两次平行轴平移必须显式做 (后续任务)。
+[Inertia] 谐波阶数 K=2 (BIC 从 0..6 里选, 通道按各自标准差归一化): 解释 0.9993 / 剩 0.0008913 (无量纲 rms), 采样 750 点 @ 0.5 Hz
+[Inertia] 运动学检查(独立来源,【判据】线性三分量): 拟合速度 rms 33.05 mm/s vs TCPSpeedActual rms 33.05 mm/s -> 差 0.001259 mm/s (门限 = 两者较小的 33.05)
+[Inertia] 运动学检查(独立来源, 角速度那一半: 【诊断量, 不进 ok】—— @672 的坐标系未确认, 见头文件): 拟合 rms 26.3 度/s vs TCPSpeedActual rms 26.3 度/s -> 差 0.002872 度/s (若把它当门, 门限会是两者较小的 26.3)
+[Inertia] I_O = [ 0.00849156  0.000243118 -0.000111825;  0.000243118  0.0144324  0.000284499; -0.000111825  0.000284499  0.0152133] kg·m^2   (cond=4.852)
+[Inertia] σ = [Ixx 7.09e-05, Iyy 8.46e-05, Izz 2.62e-05, Ixy 5.82e-05, Ixz 2.51e-05, Iyz 2.99e-05], σmax 8.46e-05 vs 张量量级 0.0226
+[Inertia] 主惯量 (升序) 0.00847936 / 0.0143518 / 0.0153061 kg·m^2, 三角不等式余量 0.00753
+[Inertia] 残差: 力矩 0.002344 N·m (惯性力矩信号 0.03347 N·m, 带外噪底【上界】 0.002368 N·m = 力矩通道到 3 阶谐波拟合的带外残差 (拐点已找到; 但这只说明残差不再随阶数下降, 不等于带内信号已吃干净 —— 尺子始终是【上界】, 见头文件 noiseFloorUpperBound)), 力 0.002315 N (惯性力信号 0.06438 N)
+[Inertia] 失配度: 力矩残差 / 噪底 = 0.9897 (门 1.09 = 1 + 3.0·sqrt(2/2229))
+[Inertia] 全部自检通过。⚠ 这是绕【传感器测量原点】的 I_O; 发机械臂要的是绕法兰面的, 中间两次平行轴平移必须显式做 (后续任务)。
+[Inertia] 谐波阶数 K=2 (BIC 从 0..6 里选, 通道按各自标准差归一化): 解释 0.9993 / 剩 0.0008861 (无量纲 rms), 采样 750 点 @ 0.5 Hz
+[Inertia] 运动学检查(独立来源,【判据】线性三分量): 拟合速度 rms 33.05 mm/s vs TCPSpeedActual rms 33.05 mm/s -> 差 0.002358 mm/s (门限 = 两者较小的 33.05)
+[Inertia] 运动学检查(独立来源, 角速度那一半: 【诊断量, 不进 ok】—— @672 的坐标系未确认, 见头文件): 拟合 rms 26.3 度/s vs TCPSpeedActual rms 26.3 度/s -> 差 0.001788 度/s (若把它当门, 门限会是两者较小的 26.3)
+[Inertia] I_O = [ 0.00858655  0.000276401 -8.33489e-05;  0.000276401  0.0144953  0.000277939; -8.33489e-05  0.000277939  0.0152331] kg·m^2   (cond=4.852)
+[Inertia] σ = [Ixx 7.02e-05, Iyy 8.37e-05, Izz 2.59e-05, Ixy 5.76e-05, Ixz 2.48e-05, Iyz 2.96e-05], σmax 8.37e-05 vs 张量量级 0.0227
+[Inertia] 主惯量 (升序) 0.00857226 / 0.0144166 / 0.0153261 kg·m^2, 三角不等式余量 0.00766
+[Inertia] 残差: 力矩 0.002332 N·m (惯性力矩信号 0.03354 N·m, 带外噪底【上界】 0.002344 N·m = 力矩通道到 3 阶谐波拟合的带外残差 (拐点已找到; 但这只说明残差不再随阶数下降, 不等于带内信号已吃干净 —— 尺子始终是【上界】, 见头文件 noiseFloorUpperBound)), 力 0.002321 N (惯性力信号 0.06438 N)
+[Inertia] 失配度: 力矩残差 / 噪底 = 0.9949 (门 1.09 = 1 + 3.0·sqrt(2/2229))
+[Inertia] 全部自检通过。⚠ 这是绕【传感器测量原点】的 I_O; 发机械臂要的是绕法兰面的, 中间两次平行轴平移必须显式做 (后续任务)。
+[Inertia] 谐波阶数 K=2 (BIC 从 0..6 里选, 通道按各自标准差归一化): 解释 0.9993 / 剩 0.0008946 (无量纲 rms), 采样 750 点 @ 0.5 Hz
+[Inertia] 运动学检查(独立来源,【判据】线性三分量): 拟合速度 rms 33.05 mm/s vs TCPSpeedActual rms 33.05 mm/s -> 差 0.002125 mm/s (门限 = 两者较小的 33.05)
+[Inertia] 运动学检查(独立来源, 角速度那一半: 【诊断量, 不进 ok】—— @672 的坐标系未确认, 见头文件): 拟合 rms 26.3 度/s vs TCPSpeedActual rms 26.3 度/s -> 差 0.00202 度/s (若把它当门, 门限会是两者较小的 26.3)
+[Inertia] I_O = [ 0.00850378  0.000127971 -8.6536e-05;  0.000127971  0.0146123  0.000294522; -8.6536e-05  0.000294522  0.0151974] kg·m^2   (cond=4.852)
+[Inertia] σ = [Ixx 7e-05, Iyy 8.35e-05, Izz 2.58e-05, Ixy 5.75e-05, Ixz 2.47e-05, Iyz 2.95e-05], σmax 8.35e-05 vs 张量量级 0.0227
+[Inertia] 主惯量 (升序) 0.00849981 / 0.0144936 / 0.0153201 kg·m^2, 三角不等式余量 0.00767
+[Inertia] 残差: 力矩 0.002321 N·m (惯性力矩信号 0.03349 N·m, 带外噪底【上界】 0.002338 N·m = 力矩通道到 3 阶谐波拟合的带外残差 (拐点已找到; 但这只说明残差不再随阶数下降, 不等于带内信号已吃干净 —— 尺子始终是【上界】, 见头文件 noiseFloorUpperBound)), 力 0.002335 N (惯性力信号 0.06438 N)
+[Inertia] 失配度: 力矩残差 / 噪底 = 0.9925 (门 1.09 = 1 + 3.0·sqrt(2/2229))
+[Inertia] 全部自检通过。⚠ 这是绕【传感器测量原点】的 I_O; 发机械臂要的是绕法兰面的, 中间两次平行轴平移必须显式做 (后续任务)。
+(归一化误差 rms = 0.913879, max|z| = 3.20681) PASS
+--- 通道响应各向异性 (真实器件的常态) ---
+  test_anisotropic_response_is_flagged... [Inertia] 谐波阶数 K=2 (BIC 从 0..6 里选, 通道按各自标准差归一化): 解释 0.9993 / 剩 2.447e-14 (无量纲 rms), 采样 750 点 @ 0.5 Hz
+[Inertia] 运动学检查(独立来源,【判据】线性三分量): 拟合速度 rms 33.05 mm/s vs TCPSpeedActual rms 33.05 mm/s -> 差 1.994e-13 mm/s (门限 = 两者较小的 33.05)
+[Inertia] 运动学检查(独立来源, 角速度那一半: 【诊断量, 不进 ok】—— @672 的坐标系未确认, 见头文件): 拟合 rms 26.3 度/s vs TCPSpeedActual rms 26.3 度/s -> 差 5.904e-14 度/s (若把它当门, 门限会是两者较小的 26.3)
+[Inertia] I_O = [ 0.00845725  3.43801e-05 -1.14174e-07;  3.43801e-05  0.00849538 -8.9383e-08; -1.14174e-07 -8.9383e-08  0.000410314] kg·m^2   (cond=4.987)
+[Inertia] σ = [Ixx 2.91e-08, Iyy 4.7e-08, Izz 1.15e-08, Ixy 2.98e-08, Ixz 1.07e-08, Iyz 1.04e-08], σmax 4.7e-08 vs 张量量级 0.012
+[Inertia] 主惯量 (升序) 0.000410314 / 0.008437 / 0.00851563 kg·m^2, 三角不等式余量 0.000332
+[Inertia] 残差: 力矩 1.489e-05 N·m (惯性力矩信号 0.009467 N·m, 带外噪底【上界】 1.122e-06 N·m = 力矩通道到 5 阶谐波拟合的带外残差 (拐点已找到; 但这只说明残差不再随阶数下降, 不等于带内信号已吃干净 —— 尺子始终是【上界】, 见头文件 noiseFloorUpperBound)), 力 0.0004969 N (惯性力信号 0.06787 N)
+[Inertia] 失配度: 力矩残差 / 噪底 = 13.27 (门 1.09 = 1 + 3.0·sqrt(2/2217))
+[Inertia] 自检拒绝(失配度): 力矩残差 1.489e-05 N·m / 噪底 1.122e-06 N·m = 13.27 ≥ 门 1.09 —— 残差里除了噪声还有别的东西, 也就是【模型形式对不上】 (通道约定各向异性、运动学量算错、或力矩通道的别的干扰)。
+[Inertia] 【拒绝给出惯量】: 上面的 I_O 只供诊断, 不得下发给机械臂。
+[Inertia] 谐波阶数 K=2 (BIC 从 0..6 里选, 通道按各自标准差归一化): 解释 0.9993 / 剩 0.0008852 (无量纲 rms), 采样 750 点 @ 0.5 Hz
+[Inertia] 运动学检查(独立来源,【判据】线性三分量): 拟合速度 rms 33.05 mm/s vs TCPSpeedActual rms 33.05 mm/s -> 差 0.002839 mm/s (门限 = 两者较小的 33.05)
+[Inertia] 运动学检查(独立来源, 角速度那一半: 【诊断量, 不进 ok】—— @672 的坐标系未确认, 见头文件): 拟合 rms 26.3 度/s vs TCPSpeedActual rms 26.3 度/s -> 差 0.001787 度/s (若把它当门, 门限会是两者较小的 26.3)
+[Inertia] I_O = [ 0.00840522 -7.42544e-05  7.82631e-06; -7.42544e-05  0.00880544 -7.48206e-06;  7.82631e-06 -7.48206e-06  0.00041021] kg·m^2   (cond=4.987)
+[Inertia] σ = [Ixx 5.92e-05, Iyy 9.55e-05, Izz 2.34e-05, Ixy 6.05e-05, Ixz 2.18e-05, Iyz 2.12e-05], σmax 9.55e-05 vs 张量量级 0.0122
+[Inertia] 主惯量 (升序) 0.000410196 / 0.00839189 / 0.00881878 kg·m^2, 三角不等式余量 -1.67e-05
+[Inertia] 残差: 力矩 0.002283 N·m (惯性力矩信号 0.009482 N·m, 带外噪底【上界】 0.002279 N·m = 力矩通道到 3 阶谐波拟合的带外残差 (拐点已找到; 但这只说明残差不再随阶数下降, 不等于带内信号已吃干净 —— 尺子始终是【上界】, 见头文件 noiseFloorUpperBound)), 力 0.002311 N (惯性力信号 0.06787 N)
+[Inertia] 失配度: 力矩残差 / 噪底 = 1.002 (门 1.09 = 1 + 3.0·sqrt(2/2229))
+[Inertia] 全部自检通过。⚠ 这是绕【传感器测量原点】的 I_O; 发机械臂要的是绕法兰面的, 中间两次平行轴平移必须显式做 (后续任务)。
+(无噪声: 主惯量偏差 1.36563%, 失配度 13.2681, 已拒绝 | 同噪声水平: 偏差 2.38922%, 失配度 1.00204) PASS
+--- 拒绝 ---
+  test_rejects_wrong_excitation_frequency... [Inertia] 线性层失败: 力矩设计矩阵秩亏 (JᵀJ 最小特征值 0 ≤ 0) —— 这段激励动不到全部六个分量 (单轴往复不够)。
+[Inertia] 谐波阶数 K=0 (BIC 从 0..6 里选, 通道按各自标准差归一化): 解释 0.9993 / 剩 0.9993 (无量纲 rms), 采样 750 点 @ 1.25 Hz
+[Inertia] 运动学检查(独立来源,【判据】线性三分量): 拟合速度 rms 0 mm/s vs TCPSpeedActual rms 33.05 mm/s -> 差 33.05 mm/s (门限 = 两者较小的 0)
+[Inertia] 运动学检查(独立来源, 角速度那一半: 【诊断量, 不进 ok】—— @672 的坐标系未确认, 见头文件): 拟合 rms 0 度/s vs TCPSpeedActual rms 25.59 度/s -> 差 25.59 度/s (若把它当门, 门限会是两者较小的 0)
+[Inertia] I_O = [ 0  0  0;  0  0  0;  0  0  0] kg·m^2   (cond=inf)
+[Inertia] σ = [Ixx 0, Iyy 0, Izz 0, Ixy 0, Ixz 0, Iyz 0], σmax 0 vs 张量量级 0
+[Inertia] 主惯量 (升序) 0 / 0 / 0 kg·m^2, 三角不等式余量 0
+[Inertia] 残差: 力矩 0.04663 N·m (惯性力矩信号 0 N·m, 带外噪底【上界】 0.04608 N·m = 力矩通道到 1 阶谐波拟合的带外残差 (拐点已找到; 但这只说明残差不再随阶数下降, 不等于带内信号已吃干净 —— 尺子始终是【上界】, 见头文件 noiseFloorUpperBound)), 力 0.444 N (惯性力信号 0 N)
+[Inertia] 失配度: 力矩残差 / 噪底 = 1.012 (门 1.09 = 1 + 3.0·sqrt(2/2241))
+[Inertia] 自检拒绝(运动学): 拟合速度与 TCPSpeedActual 的差 33.05 mm/s 不小于两者的较小者 0 mm/s, 或谐波模型剩得比解释得多 (0.9993 >= 0.9993) —— 这段数据不是【已知频率的那个运动】, 微分不可信。 (角速度那一半只报不判, 见上面那条诊断: 差 25.59 度/s)
+[Inertia] 自检拒绝(激发不足): σmax 0 vs 张量量级 0 kg·m^2, 惯性力矩信号 0 N·m vs 噪底 0.04608 N·m (尺子状态 0) —— 参数定不下来, 或运动产生的惯性力矩压不过实测噪底。
+[Inertia] 自检拒绝(非物理): 主惯量 0 / 0 / 0 kg·m^2 —— 绕一点的惯量张量必【正定】; 主惯量出现非正值, 多半是 力矩通道的惯性项符号约定反了 (解出来的是 −I_O)。
+[Inertia] 自检拒绝(运动学, 力通道): 力残差 0.444 N ≥ 惯性力信号 0 N —— 传感器看到的惯性力解释不了实测残差。
+[Inertia] 【拒绝给出惯量】: 上面的 I_O 只供诊断, 不得下发给机械臂。
+[Inertia] 谐波阶数 K=2 (BIC 从 0..6 里选, 通道按各自标准差归一化): 解释 0.9993 / 剩 2.447e-14 (无量纲 rms), 采样 750 点 @ 0.5 Hz
+[Inertia] 运动学检查(独立来源,【判据】线性三分量): 拟合速度 rms 33.05 mm/s vs TCPSpeedActual rms 33.05 mm/s -> 差 1.994e-13 mm/s (门限 = 两者较小的 33.05)
+[Inertia] 运动学检查(独立来源, 角速度那一半: 【诊断量, 不进 ok】—— @672 的坐标系未确认, 见头文件): 拟合 rms 26.3 度/s vs TCPSpeedActual rms 26.3 度/s -> 差 5.904e-14 度/s (若把它当门, 门限会是两者较小的 26.3)
+[Inertia] I_O = [ 0.0085  0.0002 -0.0001;  0.0002  0.0145  0.0003; -0.0001  0.0003  0.0152] kg·m^2   (cond=4.852)
+[Inertia] σ = [Ixx 1.73e-08, Iyy 2.06e-08, Izz 6.39e-09, Ixy 1.42e-08, Ixz 6.12e-09, Iyz 7.29e-09], σmax 2.06e-08 vs 张量量级 0.0227
+[Inertia] 主惯量 (升序) 0.00849154 / 0.0143974 / 0.0153111 kg·m^2, 三角不等式余量 0.00758
+[Inertia] 残差: 力矩 1.202e-16 N·m (惯性力矩信号 0.03347 N·m, 带外噪底【上界】 5.781e-07 N·m = 力矩通道到 6 阶谐波拟合的带外残差 (⚠ 阶数搜到底仍在降: 里面还混着带内信号, 这把尺子偏松)), 力 1.045e-15 N (惯性力信号 0.06438 N)
+[Inertia] 失配度: 力矩残差 / 噪底 = 2.079e-10 (门 1.09 = 1 + 3.0·sqrt(2/2211))
+[Inertia] 全部自检通过。⚠ 这是绕【传感器测量原点】的 I_O; 发机械臂要的是绕法兰面的, 中间两次平行轴平移必须显式做 (后续任务)。
+PASS
+  test_rejects_corrupted_speed_channel... [Inertia] 谐波阶数 K=2 (BIC 从 0..6 里选, 通道按各自标准差归一化): 解释 0.9993 / 剩 2.447e-14 (无量纲 rms), 采样 750 点 @ 0.5 Hz
+[Inertia] 运动学检查(独立来源,【判据】线性三分量): 拟合速度 rms 33.05 mm/s vs TCPSpeedActual rms 233.3 mm/s -> 差 230.9 mm/s (门限 = 两者较小的 33.05)
+[Inertia] 运动学检查(独立来源, 角速度那一半: 【诊断量, 不进 ok】—— @672 的坐标系未确认, 见头文件): 拟合 rms 26.3 度/s vs TCPSpeedActual rms 26.3 度/s -> 差 5.904e-14 度/s (若把它当门, 门限会是两者较小的 26.3)
+[Inertia] I_O = [ 0.0085  0.0002 -0.0001;  0.0002  0.0145  0.0003; -0.0001  0.0003  0.0152] kg·m^2   (cond=4.852)
+[Inertia] σ = [Ixx 1.73e-08, Iyy 2.06e-08, Izz 6.39e-09, Ixy 1.42e-08, Ixz 6.12e-09, Iyz 7.29e-09], σmax 2.06e-08 vs 张量量级 0.0227
+[Inertia] 主惯量 (升序) 0.00849154 / 0.0143974 / 0.0153111 kg·m^2, 三角不等式余量 0.00758
+[Inertia] 残差: 力矩 1.202e-16 N·m (惯性力矩信号 0.03347 N·m, 带外噪底【上界】 5.781e-07 N·m = 力矩通道到 6 阶谐波拟合的带外残差 (⚠ 阶数搜到底仍在降: 里面还混着带内信号, 这把尺子偏松)), 力 1.045e-15 N (惯性力信号 0.06438 N)
+[Inertia] 失配度: 力矩残差 / 噪底 = 2.079e-10 (门 1.09 = 1 + 3.0·sqrt(2/2211))
+[Inertia] 自检拒绝(运动学): 拟合速度与 TCPSpeedActual 的差 230.9 mm/s 不小于两者的较小者 33.05 mm/s, 或谐波模型剩得比解释得多 (2.447e-14 >= 0.9993) —— 这段数据不是【已知频率的那个运动】, 微分不可信。 (角速度那一半只报不判, 见上面那条诊断: 差 5.904e-14 度/s)
+[Inertia] 【拒绝给出惯量】: 上面的 I_O 只供诊断, 不得下发给机械臂。
+PASS
+  test_angular_speed_diagnostic_is_reported_not_gated... [Inertia] 谐波阶数 K=2 (BIC 从 0..6 里选, 通道按各自标准差归一化): 解释 0.9993 / 剩 2.447e-14 (无量纲 rms), 采样 750 点 @ 0.5 Hz
+[Inertia] 运动学检查(独立来源,【判据】线性三分量): 拟合速度 rms 33.05 mm/s vs TCPSpeedActual rms 33.05 mm/s -> 差 1.994e-13 mm/s (门限 = 两者较小的 33.05)
+[Inertia] 运动学检查(独立来源, 角速度那一半: 【诊断量, 不进 ok】—— @672 的坐标系未确认, 见头文件): 拟合 rms 26.3 度/s vs TCPSpeedActual rms 26.3 度/s -> 差 5.904e-14 度/s (若把它当门, 门限会是两者较小的 26.3)
+[Inertia] I_O = [ 0.0085  0.0002 -0.0001;  0.0002  0.0145  0.0003; -0.0001  0.0003  0.0152] kg·m^2   (cond=4.852)
+[Inertia] σ = [Ixx 1.73e-08, Iyy 2.06e-08, Izz 6.39e-09, Ixy 1.42e-08, Ixz 6.12e-09, Iyz 7.29e-09], σmax 2.06e-08 vs 张量量级 0.0227
+[Inertia] 主惯量 (升序) 0.00849154 / 0.0143974 / 0.0153111 kg·m^2, 三角不等式余量 0.00758
+[Inertia] 残差: 力矩 1.202e-16 N·m (惯性力矩信号 0.03347 N·m, 带外噪底【上界】 5.781e-07 N·m = 力矩通道到 6 阶谐波拟合的带外残差 (⚠ 阶数搜到底仍在降: 里面还混着带内信号, 这把尺子偏松)), 力 1.045e-15 N (惯性力信号 0.06438 N)
+[Inertia] 失配度: 力矩残差 / 噪底 = 2.079e-10 (门 1.09 = 1 + 3.0·sqrt(2/2211))
+[Inertia] 全部自检通过。⚠ 这是绕【传感器测量原点】的 I_O; 发机械臂要的是绕法兰面的, 中间两次平行轴平移必须显式做 (后续任务)。
+[Inertia] 谐波阶数 K=2 (BIC 从 0..6 里选, 通道按各自标准差归一化): 解释 0.9993 / 剩 2.447e-14 (无量纲 rms), 采样 750 点 @ 0.5 Hz
+[Inertia] 运动学检查(独立来源,【判据】线性三分量): 拟合速度 rms 33.05 mm/s vs TCPSpeedActual rms 33.05 mm/s -> 差 1.994e-13 mm/s (门限 = 两者较小的 33.05)
+[Inertia] 运动学检查(独立来源, 角速度那一半: 【诊断量, 不进 ok】—— @672 的坐标系未确认, 见头文件): 拟合 rms 26.3 度/s vs TCPSpeedActual rms 520.3 度/s -> 差 519.6 度/s (若把它当门, 门限会是两者较小的 26.3)
+[Inertia] I_O = [ 0.0085  0.0002 -0.0001;  0.0002  0.0145  0.0003; -0.0001  0.0003  0.0152] kg·m^2   (cond=4.852)
+[Inertia] σ = [Ixx 1.73e-08, Iyy 2.06e-08, Izz 6.39e-09, Ixy 1.42e-08, Ixz 6.12e-09, Iyz 7.29e-09], σmax 2.06e-08 vs 张量量级 0.0227
+[Inertia] 主惯量 (升序) 0.00849154 / 0.0143974 / 0.0153111 kg·m^2, 三角不等式余量 0.00758
+[Inertia] 残差: 力矩 1.202e-16 N·m (惯性力矩信号 0.03347 N·m, 带外噪底【上界】 5.781e-07 N·m = 力矩通道到 6 阶谐波拟合的带外残差 (⚠ 阶数搜到底仍在降: 里面还混着带内信号, 这把尺子偏松)), 力 1.045e-15 N (惯性力信号 0.06438 N)
+[Inertia] 失配度: 力矩残差 / 噪底 = 2.079e-10 (门 1.09 = 1 + 3.0·sqrt(2/2211))
+[Inertia] 全部自检通过。⚠ 这是绕【传感器测量原点】的 I_O; 发机械臂要的是绕法兰面的, 中间两次平行轴平移必须显式做 (后续任务)。
+PASS
+  test_rejects_single_axis_excitation... [Inertia] 线性层失败: 力矩设计矩阵秩亏 (JᵀJ 最小特征值 -9.3376e-15 ≤ 0) —— 这段激励动不到全部六个分量 (单轴往复不够)。
+[Inertia] 谐波阶数 K=1 (BIC 从 0..6 里选, 通道按各自标准差归一化): 解释 0.9992 / 剩 1.607e-12 (无量纲 rms), 采样 600 点 @ 0.5 Hz
+[Inertia] 运动学检查(独立来源,【判据】线性三分量): 拟合速度 rms 5.322e-13 mm/s vs TCPSpeedActual rms 0 mm/s -> 差 5.322e-13 mm/s (门限 = 两者较小的 0)
+[Inertia] 运动学检查(独立来源, 角速度那一半: 【诊断量, 不进 ok】—— @672 的坐标系未确认, 见头文件): 拟合 rms 15.27 度/s vs TCPSpeedActual rms 15.27 度/s -> 差 1.708e-14 度/s (若把它当门, 门限会是两者较小的 15.27)
+[Inertia] I_O = [ 0  0  0;  0  0  0;  0  0  0] kg·m^2   (cond=inf)
+[Inertia] σ = [Ixx 0, Iyy 0, Izz 0, Ixy 0, Ixz 0, Iyz 0], σmax 0 vs 张量量级 0
+[Inertia] 主惯量 (升序) 0 / 0 / 0 kg·m^2, 三角不等式余量 0
+[Inertia] 残差: 力矩 0.01299 N·m (惯性力矩信号 0 N·m, 带外噪底【上界】 2.385e-17 N·m = 力矩通道到 2 阶谐波拟合的带外残差 (拐点已找到; 但这只说明残差不再随阶数下降, 不等于带内信号已吃干净 —— 尺子始终是【上界】, 见头文件 noiseFloorUpperBound)), 力 7.86e-16 N (惯性力信号 0.005026 N)
+[Inertia] 失配度: 力矩残差 / 噪底 = 5.448e+14 (门 1.1 = 1 + 3.0·sqrt(2/1785))
+[Inertia] 自检拒绝(运动学): 拟合速度与 TCPSpeedActual 的差 5.322e-13 mm/s 不小于两者的较小者 0 mm/s, 或谐波模型剩得比解释得多 (1.607e-12 >= 0.9992) —— 这段数据不是【已知频率的那个运动】, 微分不可信。 (角速度那一半只报不判, 见上面那条诊断: 差 1.708e-14 度/s)
+[Inertia] 自检拒绝(激发不足): σmax 0 vs 张量量级 0 kg·m^2, 惯性力矩信号 0 N·m vs 噪底 2.385e-17 N·m (尺子状态 0) —— 参数定不下来, 或运动产生的惯性力矩压不过实测噪底。
+[Inertia] 自检拒绝(失配度): 力矩残差 0.01299 N·m / 噪底 2.385e-17 N·m = 5.448e+14 ≥ 门 1.1 —— 残差里除了噪声还有别的东西, 也就是【模型形式对不上】 (通道约定各向异性、运动学量算错、或力矩通道的别的干扰)。
+[Inertia] 自检拒绝(非物理): 主惯量 0 / 0 / 0 kg·m^2 —— 绕一点的惯量张量必【正定】; 主惯量出现非正值, 多半是 力矩通道的惯性项符号约定反了 (解出来的是 −I_O)。
+[Inertia] 【拒绝给出惯量】: 上面的 I_O 只供诊断, 不得下发给机械臂。
+PASS
+  test_rejects_nonphysical_negative_inertia... [Inertia] 谐波阶数 K=3 (BIC 从 0..6 里选, 通道按各自标准差归一化): 解释 0.9992 / 剩 2.962e-14 (无量纲 rms), 采样 600 点 @ 0.5 Hz
+[Inertia] 运动学检查(独立来源,【判据】线性三分量): 拟合速度 rms 32.58 mm/s vs TCPSpeedActual rms 32.58 mm/s -> 差 3.867e-13 mm/s (门限 = 两者较小的 32.58)
+[Inertia] 运动学检查(独立来源, 角速度那一半: 【诊断量, 不进 ok】—— @672 的坐标系未确认, 见头文件): 拟合 rms 25.94 度/s vs TCPSpeedActual rms 25.94 度/s -> 差 4.285e-14 度/s (若把它当门, 门限会是两者较小的 25.94)
+[Inertia] I_O = [-0.0085 -0.0002  0.0001; -0.0002 -0.0145 -0.0003;  0.0001 -0.0003 -0.0152] kg·m^2   (cond=5.209)
+[Inertia] σ = [Ixx 1.49e-08, Iyy 1.85e-08, Izz 5.47e-09, Ixy 1.27e-08, Ixz 5.29e-09, Iyz 6.4e-09], σmax 1.85e-08 vs 张量量级 0.0227
+[Inertia] 主惯量 (升序) -0.0153111 / -0.0143974 / -0.00849154 kg·m^2, 三角不等式余量 -0.0212
+[Inertia] 残差: 力矩 7.542e-17 N·m (惯性力矩信号 0.03383 N·m, 带外噪底【上界】 4.441e-07 N·m = 力矩通道到 6 阶谐波拟合的带外残差 (⚠ 阶数搜到底仍在降: 里面还混着带内信号, 这把尺子偏松)), 力 1.118e-15 N (惯性力信号 0.06541 N)
+[Inertia] 失配度: 力矩残差 / 噪底 = 1.698e-10 (门 1.101 = 1 + 3.0·sqrt(2/1761))
+[Inertia] 自检拒绝(非物理): 主惯量 -0.01531 / -0.0144 / -0.008492 kg·m^2 —— 绕一点的惯量张量必【正定】; 主惯量出现非正值, 多半是 力矩通道的惯性项符号约定反了 (解出来的是 −I_O)。
+[Inertia] 【拒绝给出惯量】: 上面的 I_O 只供诊断, 不得下发给机械臂。
+PASS
+  test_order_at_search_limit_is_not_a_dead_end... [Inertia] 谐波阶数 K=6 (BIC 从 0..6 里选, 通道按各自标准差归一化): 解释 0.9993 / 剩 0.0008809 (无量纲 rms), 采样 750 点 @ 0.5 Hz
+[Inertia] 运动学检查(独立来源,【判据】线性三分量): 拟合速度 rms 60.59 mm/s vs TCPSpeedActual rms 60.59 mm/s -> 差 0.008089 mm/s (门限 = 两者较小的 60.59)
+[Inertia] 运动学检查(独立来源, 角速度那一半: 【诊断量, 不进 ok】—— @672 的坐标系未确认, 见头文件): 拟合 rms 56.87 度/s vs TCPSpeedActual rms 56.87 度/s -> 差 0.009286 度/s (若把它当门, 门限会是两者较小的 56.87)
+[Inertia] I_O = [ 0.00852818  0.000201336 -0.000103914;  0.000201336  0.0145128  0.000298396; -0.000103914  0.000298396  0.0151996] kg·m^2   (cond=11.62)
+[Inertia] σ = [Ixx 0.000321, Iyy 0.000319, Izz 4.51e-05, Ixy 0.000235, Ixz 7.34e-05, Iyz 8.62e-05], σmax 0.000321 vs 张量量级 0.0227
+[Inertia] 主惯量 (升序) 0.00851947 / 0.0144099 / 0.0153112 kg·m^2, 三角不等式余量 0.00762
+[Inertia] 残差: 力矩 0.002287 N·m (惯性力矩信号 0.2694 N·m, 带外噪底【上界】 0.03215 N·m = 力矩通道到 6 阶谐波拟合的带外残差 (⚠ 阶数搜到底仍在降: 里面还混着带内信号, 这把尺子偏松)), 力 0.002313 N (惯性力信号 0.4474 N)
+[Inertia] 失配度: 力矩残差 / 噪底 = 0.07113 (门 1.09 = 1 + 3.0·sqrt(2/2211))
+[Inertia] 全部自检通过。⚠ 这是绕【传感器测量原点】的 I_O; 发机械臂要的是绕法兰面的, 中间两次平行轴平移必须显式做 (后续任务)。
+(尺子 0.0321472 N·m = 6 阶残差, 失配度 0.0711312) PASS
+
+12 passed, 0 failed
+  [OK]
+
+--- Building test_self_collision ---
+
+D:\Projects\Touch\Touch_Client\tests>rem 2026-09-22: guard the vcvarsall call -- PATH grows ~1350 chars per call and cmd dies at ~8191, 
+
+D:\Projects\Touch\Touch_Client\tests>rem   so a second unguarded call in the same session can abort the rest of run_tests.bat. 
+
+D:\Projects\Touch\Touch_Client\tests>rem   With this guard, vcvarsall runs at most once per cmd session. (ASCII only -- see 
+
+D:\Projects\Touch\Touch_Client\tests>rem   build_force_pipeline_test.bat's note about non-ASCII comments in .bat files.) 
+
+D:\Projects\Touch\Touch_Client\tests>if not defined VCINSTALLDIR call "D:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat" x64 
+
+D:\Projects\Touch\Touch_Client\tests>cd /d "D:\Projects\Touch\Touch_Client\tests" 
+
+D:\Projects\Touch\Touch_Client\tests>cl /EHsc /std:c++17 /I"D:\Projects\Touch\OpenHaptics\Developer\3.5.0\include" /I"D:\Projects\Touch\OpenHaptics\Developer\3.5.0\utilities\include" /DWIN32 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /D_WINSOCK_DEPRECATED_NO_WARNINGS test_self_collision.cpp ..\robot\Kinematics.cpp ..\safety\SelfCollision.cpp /Fe:test_self_collision.exe 
+用于 x64 的 Microsoft (R) C/C++ 优化编译器 19.44.35228 版
+版权所有(C) Microsoft Corporation。保留所有权利。
+
+test_self_collision.cpp
+Kinematics.cpp
+SelfCollision.cpp
+正在生成代码...
+Microsoft (R) Incremental Linker Version 14.44.35228.0
+Copyright (C) Microsoft Corporation.  All rights reserved.
+
+/out:test_self_collision.exe 
+test_self_collision.obj 
+Kinematics.obj 
+SelfCollision.obj 
+
+D:\Projects\Touch\Touch_Client\tests>echo BUILD_EXIT=0 
+BUILD_EXIT=0
+  Build OK
+
+=== test_self_collision.exe ===
+=== SelfCollision Unit Tests ===
+  safe_config_no_warning...  (dist=369.0mm) PASS
+  wrist_near_base_warns...  (dist=50.0mm, pair=J5/J1) PASS
+  reject_when_extremely_close...  (dist=10.0mm) PASS
+  tcp_near_base_warns...  (dist=58.3mm, pair=J6/J0) PASS
+  min_dist_tracks_closest_pair...  (dist=102.0mm, J6/J2) PASS
+  orientation_roundtrip_safe...  (max warnings across 8 orientations: 0, dist range OK) PASS
+
+Results: 6 passed, 0 failed
+  [OK]
+
+--- Building test_singularity_avoidance ---
+用于 x64 的 Microsoft (R) C/C++ 优化编译器 19.44.35228 版
+版权所有(C) Microsoft Corporation。保留所有权利。
+
+test_singularity_avoidance.cpp
+test_singularity_avoidance.cpp(5): warning C4005: “TEST_SINGAVOID”: 宏重定义
+test_singularity_avoidance.cpp(5): note: 之前在命令行上声明的“TEST_SINGAVOID”
+SingularityAvoidance.cpp
+Kinematics.cpp
+正在生成代码...
+Microsoft (R) Incremental Linker Version 14.44.35228.0
+Copyright (C) Microsoft Corporation.  All rights reserved.
+
+/out:test_singularity_avoidance.exe 
+test_singularity_avoidance.obj 
+SingularityAvoidance.obj 
+Kinematics.obj 
+BUILD_EXIT=0
+  Build OK
+
+=== test_singularity_avoidance.exe ===
+=== SingularityAvoidance Tests (Phase 2) ===
+
+  Test1: pos_before=(-73.02,-246.14,708.64) pos_after=(-73.63,-246.12,708.48)
+  Test2: orient=(-93.84,-49.28,-117.17)
+  Test3: orient near Z=(0.00,0.00,0.00)
+  Test4: delta_in=(2.00,-1.00,1.50) delta_out=(2.00,-1.00,1.50) tcpAdj=(5.00,0.00,0.00)
+  Test5: mag_in=8.66 mag_out=8.66 tcpAdj=(5.00,0.00,0.00)
+  Test6: pos_in=(1.00,-0.50,2.00) pos_out=(6.00,-0.50,2.00)
+  Test7: J5=60.0 → mag_out=5.00
+  Test7: J5=30.0 → mag_out=5.00
+  Test7: J5=10.0 → mag_out=5.00
+  Test7: J5=5.0 → mag_out=5.00
+  Test7: J5=1.0 → mag_out=3.91
+  Test7: J5=0.5 → mag_out=3.54
+  Test8: repulsion=(2.759,-0.047,-0.022) mag=2.759
+  Test9: repulsion_mag=3.000 (expect finite, ≤ 3.3N)
+  Test10: r_elbow=0.0 mm
+  Test10: tcpAdj=(5.00,0.00,0.00) mag=5.00
+  Test11: r_elbow=0.0, dampMag=8.66, repMag=2.13
+  Test12: tcpAdj mag=5.000 mm (grad_step=0.30, stress test)
+
+=== 12/12 tests passed ===
+  [OK]
+
+--- Building test_button2_mapping ---
+
+D:\Projects\Touch\Touch_Client\tests>rem 2026-09-22: guard the vcvarsall call -- PATH grows ~1350 chars per call and cmd dies at ~8191, 
+
+D:\Projects\Touch\Touch_Client\tests>rem   so a second unguarded call in the same session can abort the rest of run_tests.bat. 
+
+D:\Projects\Touch\Touch_Client\tests>rem   With this guard, vcvarsall runs at most once per cmd session. (ASCII only -- see 
+
+D:\Projects\Touch\Touch_Client\tests>rem   build_force_pipeline_test.bat's note about non-ASCII comments in .bat files.) 
+
+D:\Projects\Touch\Touch_Client\tests>if not defined VCINSTALLDIR call "D:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat" x64 
+
+D:\Projects\Touch\Touch_Client\tests>cd /d "D:\Projects\Touch\Touch_Client\tests" 
+
+D:\Projects\Touch\Touch_Client\tests>rem The two OpenHaptics /I paths are needed because relay/CoordinateTransform.h includes HDU. 
+
+D:\Projects\Touch\Touch_Client\tests>rem ../calibration/TcpCalibration.cpp is REQUIRED: test_button2_mapping.cpp calls 
+
+D:\Projects\Touch\Touch_Client\tests>rem   TcpCalibration::rpyToMatrix, whose DEFINITION lives there. Same root cause as the note in 
+
+D:\Projects\Touch\Touch_Client\tests>rem   build_coord_safety_test.bat (missing .cpp -> LNK2019) and the note in 
+
+D:\Projects\Touch\Touch_Client\tests>rem   build_frame_layout_test.bat about calibration/CalibrationIO.cpp. 
+
+D:\Projects\Touch\Touch_Client\tests>rem NOTE: keep this file ASCII-only. Non-ASCII comments in a .bat get mis-decoded by cmd.exe 
+
+D:\Projects\Touch\Touch_Client\tests>rem under a non-UTF-8 codepage and can silently swallow the following line. 
+
+D:\Projects\Touch\Touch_Client\tests>cl /EHsc /std:c++17 /I"D:\Projects\Touch\OpenHaptics\Developer\3.5.0\include" /I"D:\Projects\Touch\OpenHaptics\Developer\3.5.0\utilities\include" /DWIN32 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /D_WINSOCK_DEPRECATED_NO_WARNINGS test_button2_mapping.cpp ../relay/Button2Mapping.cpp ../calibration/TcpCalibration.cpp /Fe:test_button2_mapping.exe 
+用于 x64 的 Microsoft (R) C/C++ 优化编译器 19.44.35228 版
+版权所有(C) Microsoft Corporation。保留所有权利。
+
+test_button2_mapping.cpp
+Button2Mapping.cpp
+TcpCalibration.cpp
+正在生成代码...
+Microsoft (R) Incremental Linker Version 14.44.35228.0
+Copyright (C) Microsoft Corporation.  All rights reserved.
+
+/out:test_button2_mapping.exe 
+test_button2_mapping.obj 
+Button2Mapping.obj 
+TcpCalibration.obj 
+
+D:\Projects\Touch\Touch_Client\tests>echo BUILD_EXIT=0 
+BUILD_EXIT=0
+  Build OK
+
+=== test_button2_mapping.exe ===
+--- Button2Mapping (按钮2 姿态映射：真旋转合成) ---
+  no_motion_returns_reference... PASS
+  left_right_is_yaw_about_base_Y... PASS
+  fore_aft_is_pitch_about_base_X... PASS
+  twist_is_roll_about_base_Z... PASS
+  large_tilt_is_exact... PASS
+  offset_is_clamped_by_rotation_angle... PASS
+  gimbal_lock_picks_a_canonical_representative... PASS
+  gimbal_lock_plus90_side_is_exact... PASS
+  multi_axis_offset_is_clamped_by_rotation_angle... PASS
+  nonfinite_guard_covers_all_three_argument_positions... PASS
+  target_stays_near_reference_across_the_rx_seam... PASS
+
+Results: 11 passed, 0 failed
+  [OK]
+
+--- Building test_jitter_stats ---
+
+D:\Projects\Touch\Touch_Client\tests>rem 2026-09-22: guard the vcvarsall call -- PATH grows ~1350 chars per call and cmd dies at ~8191, 
+
+D:\Projects\Touch\Touch_Client\tests>rem   so a second unguarded call in the same session can abort the rest of run_tests.bat. 
+
+D:\Projects\Touch\Touch_Client\tests>if not defined VCINSTALLDIR call "D:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat" x64 
+
+D:\Projects\Touch\Touch_Client\tests>cd /d "D:\Projects\Touch\Touch_Client\tests" 
+
+D:\Projects\Touch\Touch_Client\tests>rem JitterStats.h is a PURE header (inline implementation, no .cpp to link) -- that is the whole 
+
+D:\Projects\Touch\Touch_Client\tests>rem   point of Task 1 of the jitter plan: the statistics must be unit-testable without the 
+
+D:\Projects\Touch\Touch_Client\tests>rem   pipeline, the socket or OpenHaptics. Nothing else is linked here on purpose; if this suite 
+
+D:\Projects\Touch\Touch_Client\tests>rem   ever needs a second translation unit, that means the accumulator stopped being pure. 
+
+D:\Projects\Touch\Touch_Client\tests>rem NOTE: keep this file ASCII-only. Non-ASCII comments in a .bat get mis-decoded by cmd.exe 
+
+D:\Projects\Touch\Touch_Client\tests>rem under a non-UTF-8 codepage and can silently swallow the following line. 
+
+D:\Projects\Touch\Touch_Client\tests>cl /EHsc /std:c++17 /DWIN32 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS test_jitter_stats.cpp /Fe:test_jitter_stats.exe 
+用于 x64 的 Microsoft (R) C/C++ 优化编译器 19.44.35228 版
+版权所有(C) Microsoft Corporation。保留所有权利。
+
+test_jitter_stats.cpp
+Microsoft (R) Incremental Linker Version 14.44.35228.0
+Copyright (C) Microsoft Corporation.  All rights reserved.
+
+/out:test_jitter_stats.exe 
+test_jitter_stats.obj 
+
+D:\Projects\Touch\Touch_Client\tests>echo BUILD_EXIT=0 
+BUILD_EXIT=0
+  Build OK
+
+=== test_jitter_stats.exe ===
+--- JitterStats (抖动诊断累加器) ---
+  constant_sequence_sd_is_exactly_zero... PASS
+  known_sequence_mean_and_sd... PASS
+  fracAbove_uses_magnitude_and_includes_boundary... PASS
+  fracAbove_boundary_just_below_is_excluded... PASS
+  fracAbove_zero_threshold_counts_zeros... PASS
+  fracAbove_unarmed_returns_minus_one_not_zero... PASS
+  fracAbove_armed_after_frames_returns_minus_one... PASS
+  empty_returns_zero_no_division_by_zero... PASS
+  single_sample_sd_is_zero... PASS
+  axes_are_independent... PASS
+  reset_clears_everything... PASS
+  out_of_range_axis_is_guarded... PASS
+
+Results: 12 passed, 0 failed
+  [OK]
+
+--- Building test_button2_joint ---
+
+D:\Projects\Touch\Touch_Client\tests>rem 2026-09-23: guard the vcvarsall call -- PATH grows ~1350 chars per call and cmd dies at ~8191, 
+
+D:\Projects\Touch\Touch_Client\tests>rem   so a second unguarded call in the same session can abort the rest of run_tests.bat. 
+
+D:\Projects\Touch\Touch_Client\tests>rem   With this guard, vcvarsall runs at most once per cmd session. 
+
+D:\Projects\Touch\Touch_Client\tests>if not defined VCINSTALLDIR call "D:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat" x64 
+
+D:\Projects\Touch\Touch_Client\tests>cd /d "D:\Projects\Touch\Touch_Client\tests" 
+
+D:\Projects\Touch\Touch_Client\tests>rem 2026-09-23 fix2: this suite NOW needs the OpenHaptics /I paths and one extra .cpp. The old 
+
+D:\Projects\Touch\Touch_Client\tests>rem   comment here said the opposite ("needs NO /I paths at all -- if a future edit ever needs 
+
+D:\Projects\Touch\Touch_Client\tests>rem   one, that means the mapping stopped being pure"). The mapping did NOT stop being pure. 
+
+D:\Projects\Touch\Touch_Client\tests>rem   What changed: the hookup-layer predicates (isTrustworthyJointRef / clampJointStep) were 
+
+D:\Projects\Touch\Touch_Client\tests>rem   extracted out of RelayCore.cpp into relay/Button2Joint.{h,cpp} -- RelayCore.cpp is compiled 
+
+D:\Projects\Touch\Touch_Client\tests>rem   by no test suite, so those two had no test coverage at all, and one of them is plain 
+
+D:\Projects\Touch\Touch_Client\tests>rem   arithmetic. isTrustworthyJointRef calls Kinematics::isWithinJointLimits, and that header 
+
+D:\Projects\Touch\Touch_Client\tests>rem   chain reaches <HDU/hduVector.h>: 
+
+D:\Projects\Touch\Touch_Client\tests>rem       relay/Button2Joint.cpp -> robot/Kinematics.h -> relay/CoordinateTransform.h -> HDU 
+
+D:\Projects\Touch\Touch_Client\tests>rem   hence the two /I paths, and hence Kinematics.cpp must be linked for that symbol. 
+
+D:\Projects\Touch\Touch_Client\tests>rem   Still pure in the sense that mattered (no socket, no appState, no OpenHaptics CALLS) -- but 
+
+D:\Projects\Touch\Touch_Client\tests>rem   no longer header-free, so the old "think twice" rule is restated here (2026-09-23 fix2, 
+
+D:\Projects\Touch\Touch_Client\tests>rem   review finding 3). It used to read: think twice before making it depend on anything that is 
+
+D:\Projects\Touch\Touch_Client\tests>rem   NOT itself a pure translation unit. That is the WRONG criterion. The right question is 
+
+D:\Projects\Touch\Touch_Client\tests>rem   TRANSITIVE: what does the HEADER drag in, and is its link closure already satisfied? 
+
+D:\Projects\Touch\Touch_Client\tests>rem   Reason "is this unit pure?" fails: a pure unit's HEADERS can carry INLINE functions that 
+
+D:\Projects\Touch\Touch_Client\tests>rem   reference externs, and CALLING such an inline is what creates the link-time dependency. 
+
+D:\Projects\Touch\Touch_Client\tests>rem   Worked example, this very chain: relay/CoordinateTransform.h declares "extern bool enabled;" 
+
+D:\Projects\Touch\Touch_Client\tests>rem   (line 24) and "extern double R[9];" (line 25) inside namespace Calibration, and the INLINE 
+
+D:\Projects\Touch\Touch_Client\tests>rem   convertTouchToRobot (line 57) reads both. So a file that includes that header and calls that 
+
+D:\Projects\Touch\Touch_Client\tests>rem   inline needs those symbols at link time, even though every translation unit involved is pure. 
+
+D:\Projects\Touch\Touch_Client\tests>rem   Not hypothetical: it is exactly why build_coord_safety_test.bat must also compile the .cpp 
+
+D:\Projects\Touch\Touch_Client\tests>rem   that DEFINES them (calibration/CalibrationIO.cpp, "namespace Calibration" at line 7) or take 
+
+D:\Projects\Touch\Touch_Client\tests>rem   LNK2019 x3 -- see test_coord_safety.cpp lines 6-10 for the recorded, reproduced failure. 
+
+D:\Projects\Touch\Touch_Client\tests>rem   Checked here, so the next reader does not have to: Button2Joint.cpp, Kinematics.cpp and 
+
+D:\Projects\Touch\Touch_Client\tests>rem   test_button2_joint.cpp all reach CoordinateTransform.h (via robot/Kinematics.h), yet NONE of 
+
+D:\Projects\Touch\Touch_Client\tests>rem   the three calls convertTouchToRobot (grep: no hit in any of them) -- the inline is never 
+
+D:\Projects\Touch\Touch_Client\tests>rem   instantiated, those Calibration:: symbols are never referenced, so CalibrationIO.cpp is NOT 
+
+D:\Projects\Touch\Touch_Client\tests>rem   needed here. Kinematics.cpp itself needs nothing but <cmath> and <cstring> either (no 
+
+D:\Projects\Touch\Touch_Client\tests>rem   Calibration:: reference at all -- checked). 
+
+D:\Projects\Touch\Touch_Client\tests>rem   CORRECTION (2026-09-23): the line here used to say "CoordinateTransform.cpp is NOT linked" -- 
+
+D:\Projects\Touch\Touch_Client\tests>rem   no such file exists in this repo (verified). The DEFINITIONS of those externs live in 
+
+D:\Projects\Touch\Touch_Client\tests>rem   calibration/CalibrationIO.cpp. That .cpp is the one that is not linked here. 
+
+D:\Projects\Touch\Touch_Client\tests>rem   Cf. build_button2_mapping_test.bat, which DOES link a calibration .cpp (TcpCalibration.cpp) 
+
+D:\Projects\Touch\Touch_Client\tests>rem   for a symbol its test actually calls -- the same transitive rule, applied that way. 
+
+D:\Projects\Touch\Touch_Client\tests>rem NOTE: keep this file ASCII-only. Non-ASCII comments in a .bat get mis-decoded by cmd.exe 
+
+D:\Projects\Touch\Touch_Client\tests>rem under a non-UTF-8 codepage and can silently swallow the following line. 
+
+D:\Projects\Touch\Touch_Client\tests>cl /EHsc /std:c++17 /I"D:\Projects\Touch\OpenHaptics\Developer\3.5.0\include" /I"D:\Projects\Touch\OpenHaptics\Developer\3.5.0\utilities\include" /DWIN32 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS test_button2_joint.cpp ../relay/Button2Joint.cpp ../robot/Kinematics.cpp /Fe:test_button2_joint.exe 
+用于 x64 的 Microsoft (R) C/C++ 优化编译器 19.44.35228 版
+版权所有(C) Microsoft Corporation。保留所有权利。
+
+test_button2_joint.cpp
+Button2Joint.cpp
+Kinematics.cpp
+正在生成代码...
+Microsoft (R) Incremental Linker Version 14.44.35228.0
+Copyright (C) Microsoft Corporation.  All rights reserved.
+
+/out:test_button2_joint.exe 
+test_button2_joint.obj 
+Button2Joint.obj 
+Kinematics.obj 
+
+D:\Projects\Touch\Touch_Client\tests>echo BUILD_EXIT=0 
+BUILD_EXIT=0
+  Build OK
+
+=== test_button2_joint.exe ===
+--- Button2Joint (按钮2 关节空间映射：笔杆 Euler 增量 -> 关节增量) ---
+  each_stylus_axis_moves_exactly_one_joint... PASS
+  no_motion_returns_reference... PASS
+  signature_has_no_position_input... PASS
+  oversized_stylus_rotation_is_clamped_per_joint... PASS
+  deadzone_swallows_tiny_offset_and_keeps_the_boundary... PASS
+  nonfinite_guard_covers_all_argument_positions... PASS
+  three_axes_at_once_are_independent_at_large_angles... PASS
+  deadzone_is_per_axis_not_by_magnitude... PASS
+  sign_constants_are_unit_signs... PASS
+  trustworthy_ref_is_accepted... PASS
+  all_zero_ref_is_rejected... PASS
+  out_of_limits_ref_is_rejected... PASS
+  nan_ref_is_accepted_by_this_predicate... PASS
+  five_zeros_and_a_tiny_value_is_still_trustworthy... PASS
+  clamp_step_zero_offset_changes_nothing... PASS
+  clamp_step_limits_a_large_offset_per_axis... PASS
+  accumulator_reaches_a_large_target_over_several_frames... PASS
+
+Results: 17 passed, 0 failed
+  [OK]
+
+--- Building test_gain_readback_policy ---
+
+D:\Projects\Touch\Touch_Client\tests>rem 2026-09-22: guard the vcvarsall call -- PATH grows ~1350 chars per call and cmd dies at ~8191, 
+
+D:\Projects\Touch\Touch_Client\tests>rem   so a second unguarded call in the same session can abort the rest of run_tests.bat. 
+
+D:\Projects\Touch\Touch_Client\tests>rem   With this guard, vcvarsall runs at most once per cmd session. (ASCII only -- see 
+
+D:\Projects\Touch\Touch_Client\tests>rem   build_force_pipeline_test.bat's note about non-ASCII comments in .bat files.) 
+
+D:\Projects\Touch\Touch_Client\tests>if not defined VCINSTALLDIR call "D:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat" x64 
+
+D:\Projects\Touch\Touch_Client\tests>cd /d "D:\Projects\Touch\Touch_Client\tests" 
+
+D:\Projects\Touch\Touch_Client\tests>rem GainReadbackPolicy.h is a PURE header (inline implementation, no .cpp to link) -- same shape 
+
+D:\Projects\Touch\Touch_Client\tests>rem   as JitterStats.h. Nothing else is linked on purpose; if this suite ever needs a second 
+
+D:\Projects\Touch\Touch_Client\tests>rem   translation unit, that means the policy stopped being pure. 
+
+D:\Projects\Touch\Touch_Client\tests>cl /EHsc /std:c++17 /DWIN32 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS test_gain_readback_policy.cpp /Fe:test_gain_readback_policy.exe 
+用于 x64 的 Microsoft (R) C/C++ 优化编译器 19.44.35228 版
+版权所有(C) Microsoft Corporation。保留所有权利。
+
+test_gain_readback_policy.cpp
+Microsoft (R) Incremental Linker Version 14.44.35228.0
+Copyright (C) Microsoft Corporation.  All rights reserved.
+
+/out:test_gain_readback_policy.exe 
+test_gain_readback_policy.obj 
+
+D:\Projects\Touch\Touch_Client\tests>echo BUILD_EXIT=0 
+BUILD_EXIT=0
+  Build OK
+
+=== test_gain_readback_policy.exe ===
+=== GainReadbackPolicy Tests ===
+  force_true_always_sends... FAIL: gainReportDecision(true, 120.0, 120.0, 1000, 999, W) == GainReport::Send
+  unchanged_value_is_skipped... PASS
+  too_soon_is_skipped... PASS
+  window_boundary... PASS
+  clock_wraparound... PASS
+
+4 passed, 1 failed
+  [FAIL]
+
+================================================
+  Tests complete
+================================================
+================================================
+  Summary: 23 of 25 suites accounted for - 22 OK, 1 FAILED
+================================================
+
+  [NOT RUN] 2 of the 25 test_*.cpp in this repo are not built or run here:
+
+    test_constraint_force
+    test_payload_calibration
+
+  Why each of those is excluded (every name printed above needs a line
+  here -- NOTRUN_LIST is the source of truth for WHICH suites are
+  excluded, this paragraph is only the REASON):
+
+    test_constraint_force
+      Its build script is ignored by Touch_Client/tests/.gitignore line 1, so
+      it is NOT in HEAD -- nothing COMMITTED can build this suite's exe.
+      (Undecided; see the gap note further up this file.)
+
+    test_payload_calibration
+      Has a DELIBERATELY RED assertion: its fixture carries no reference-
+      channel columns, so the case cannot be decided either way. Wiring it
+      in would make this harness exit non-zero forever. Known, not a bug.
+
+  The line above therefore means: 22 passed, 1 failed, out of the
+  25 test_*.cpp in this repo (2 of which this harness does not run).
+  It does NOT mean every suite in this repository is green.
+  (The six suites with working-but-never-called build scripts -- calib_store,
+   calibration, frame_layout, inertia_identification, self_collision,
+   singularity_avoidance -- were wired into "build then run" on 2026-09-23
+   and are counted in the 23 above, not in this block.)
+================================================
+
+
+  Suites accounted: 25 of 25 (ran 23 + not-run 2)    Exit code: 1

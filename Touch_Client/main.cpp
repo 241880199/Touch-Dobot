@@ -3080,39 +3080,6 @@ namespace ForceNoiseProbe {
         // ⚠ 用 steady_clock 微秒: GetTickCount 的粒度是 ~15.6 ms, 【分辨不出】8 ms 的帧间隔 ——
         //   而那正是这里要量的东西 (文档说 8 ms, 从没实测过)。
         const double spanMs = (double)(buf[n - 1].tickUs - buf[0].tickUs) / 1000.0;
-
-        // ★ 2026-09-24: **顺手把这段波形落盘** —— 统计量答不了"粘滑 / 白噪声 / 机械振动"这个问题，
-        //   波形能：锯齿（慢升快落）= 粘滑的极限环 · 随机游走 = 宽带噪声 · 准正弦 = 机械振动。
-        //   三者对修法的含义完全不同（前者可用滞环打散，后两者只能整形）。
-        //   追加写 + 块头（与 calib_poses 那套同风格）⇒ 多次按键能攒在同一份里。
-        //   ⚠ 环里只有 1024 帧（≈8.2 s @125Hz）⇒ **每按一次只带走最近那 8 秒**。
-        //   ⚠ 相对路径（与 FORCE_LOG_PATH 同一约定）⇒ 从 x64/Release 启动就落在那边。
-        {
-            FILE* wf = fopen("force_wave.csv", "a");
-            if (wf) {
-                SYSTEMTIME st; GetLocalTime(&st);
-                fprintf(wf, "# wave %04d-%02d-%02d %02d:%02d:%02d.%03d  frames=%d\n",
-                        st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond,
-                        st.wMilliseconds, n);
-                fprintf(wf, "# t_us,raw_x,raw_y,raw_z,filt_x,filt_y,filt_z,tgt_x_mm,tgt_y_mm,tgt_z_mm,tgt_rx_deg,tgt_ry_deg,tgt_rz_deg,act_x_mm,act_y_mm,act_z_mm,act_rx_deg,act_ry_deg,act_rz_deg,dev_x_mm,dev_y_mm,dev_z_mm\n");
-                for (int i = 0; i < n; i++) {
-                    fprintf(wf, "%llu,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,"
-                                "%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f\n",
-                            buf[i].tickUs, buf[i].f[0], buf[i].f[1], buf[i].f[2],
-                            buf[i].g[0], buf[i].g[1], buf[i].g[2],
-                            buf[i].tgt[0], buf[i].tgt[1], buf[i].tgt[2],
-                            buf[i].tgt[3], buf[i].tgt[4], buf[i].tgt[5],
-                            buf[i].act[0], buf[i].act[1], buf[i].act[2],
-                            buf[i].act[3], buf[i].act[4], buf[i].act[5],
-                            buf[i].dev[0], buf[i].dev[1], buf[i].dev[2]);
-                }
-                fclose(wf);
-                std::cout << "  [ok] 波形已追加到 force_wave.csv（" << n << " 帧）" << std::endl;
-            } else {
-                std::cout << "  [warn] 波形落盘失败（force_wave.csv 打不开）" << std::endl;
-            }
-        }
-
         double maxGapMs = 0.0;
         for (int i = 1; i < n; i++) {
             const double d = (double)(buf[i].tickUs - buf[i - 1].tickUs) / 1000.0;

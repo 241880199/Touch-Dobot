@@ -203,8 +203,7 @@ function relay_gui()
 
     % -- Row 3: 滤波力 --
     pnlFF = uigridlayout(glMid, [4 1]);
-    pnlFF.RowHeight = {22, 44, 40, '1x'};   % ★ 2026-09-24: 第 2 行 26→44 —— 现场反馈「力反馈开关太小」
-                                               %   （开关是本轮 A/B 判别的主控件：关掉它可判「力反馈闭环」）
+    pnlFF.RowHeight = {22, 44, 40, '1x'};   % ★ 2026-09-24: 第 2 行 26→44（现场反馈「力反馈开关太小」）
     pnlFF.Padding = [4 0 4 2];  pnlFF.RowSpacing = 0;
     pnlFF.BackgroundColor = clr.bg_panel;
     pnlFF.Layout.Row = 3;  pnlFF.Layout.Column = 1;

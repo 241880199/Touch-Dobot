@@ -1,0 +1,538 @@
+=== Touch-Dobot Digital Twin System v3.0 ===
+Robot: 192.168.101.11
+Touch: enabled
+Safety: X[-300,250] Y[-350,250] Z[140,500]
+[Tuning] 力反射增益 = 120.0 (来源: D:\Projects\Touch\Touch_Client\calib\force_tuning.json)
+Initializing Touch device...
+Touch 设备初始化成功
+[Payload] Loaded payload_calib.json (mass=0.404kg, com=(0.3,-0.1,68.7)mm, 6 poses, psi=90deg, sign_z=+1)
+Initializing robot via Relay...
+已连接使能端口 29999
+已连接运动端口 30003
+[StateMachine] DISCONNECTED → CONNECTED
+[Relay] GUI reporting 【已重连】到 127.0.0.1:8888
+[Relay] 使能 EnableRobot(0.404,0.3,-0.1,68.7)  (实机标定值)
+[Relay] 机械臂使能成功
+[Relay] 机械臂状态正常 (mode=0)
+[Relay] GetPose retry 1/5...
+[Relay] 基准位姿: (-137.583,-284.581,355.111)
+[StateMachine] CONNECTED → READY
+[Relay] GUI reporting 【未连接】—— 127.0.0.1:8888 上没有在听 (MATLAB relay_gui 没在跑?)
+[Relay]   影响: P| / J| / RP| / C| / FB| 全部发不出去 (位置 / 关节角 / 实际位姿 / 命令回显 / 反馈回显)。
+[Relay]   不影响: 机械臂控制、力数据采集 (@576/@720/@1304)、一致性闸门、本地补偿 —— 它们都不走这条 socket。
+[Relay]   要恢复: 在 MATLAB 那一侧起 relay_gui 即可 —— ★ 本程序会【自动按秒重连】, 不必重启 (2026-09-21 起; 从前是只在启动时连一次, 所以那时确实要重启)。
+[Force] Loaded force_calib.json (mass scale=0.419631kg, bias=-18.1778,-2.44562,0.869821N, c_s=(0.0361314,1.08794,55.4161)mm)
+[Force] Reader thread started, connecting to port 30004...
+[Force] Connected to realtime port 30004
+[Force] Reader thread receiving at 125Hz...
+[Force] 30004 帧自检通过: TestValue @48 = 0x0123456789ABCDEF (小端字节序) ⇒ 帧布局与我们的假设一致
+[Relay] 机械臂实际负载 (【首个合格帧】的快照): load=0.404 kg  center=(0.3, -0.1, 68.7) mm
+[Force] 一致性闸门: 放行 (本地全量模型与【参考量】在【投票通道】上一致; 参考量本帧【可用】)
+[STL] Binary: 42500 triangles
+[STL] Binary: 5004 triangles
+[STL] Binary: 11932 triangles
+[STL] Binary: 15904 triangles
+[STL] Binary: 4810 triangles
+[STL] Binary: 4898 triangles
+[STL] Binary: 8976 triangles
+[RobotModel] STL models loaded (models/cr3)
+[Calib] No calibration file, using default axis mapping
+[TCP] No tcp_calib.json — press 't' to calibrate TCP offset
+
+System ready.
+  q/ESC: quit
+  Touch button 1: control robot
+
+
+############################################################
+##  ⚠⚠  触觉安全提示已关闭  (Config::FORCE_CONSTRAINT_FORCES_ENABLED = false)
+##   虚拟约束力已【全部】停用 —— 现在【没有任何】推力提示:
+##     · 靠近安全边界 (SAFE_X/Y/Z)
+##     · 靠近圆柱奇异 (半径 < 80mm)
+##     · 靠近工作空间边缘 (半径 > 550mm)
+##     · 靠近历史报警点 (真报过警的位置)
+##   ⇒ 请靠【视觉】与【报警指示灯】判断危险。
+##   (机械臂自身的碰撞检测与安全皮肤由机械臂侧做, 不受本开关影响。)
+##   本横幅每 60 秒复报一次。
+############################################################
+
+[Force] 运动检测 #01: pos=(-137.583,-284.581,355.111)mm  tcp=(-137.583,-284.581,355.111)mm  vel=0.000000 m/s (阈值 0.0020)  acc=0.000000 m/s² (阈值 0.0050)  tcpV=(0.0001,-0.0000,-0.0000)  isStill=1
+[Force] 运动检测 #02: pos=(-137.583,-284.581,355.111)mm  tcp=(-137.583,-284.581,355.111)mm  vel=0.000000 m/s (阈值 0.0020)  acc=0.000000 m/s² (阈值 0.0050)  tcpV=(0.0004,0.0000,0.0006)  isStill=1
+[Force] 运动检测 #03: pos=(-137.583,-284.581,355.111)mm  tcp=(-137.583,-284.581,355.111)mm  vel=0.000000 m/s (阈值 0.0020)  acc=0.000000 m/s² (阈值 0.0050)  tcpV=(-0.0000,-0.0001,-0.0002)  isStill=1
+[Force] 运动检测 #04: pos=(-137.583,-284.581,355.111)mm  tcp=(-137.583,-284.581,355.111)mm  vel=0.000000 m/s (阈值 0.0020)  acc=0.000000 m/s² (阈值 0.0050)  tcpV=(-0.0004,0.0000,0.0001)  isStill=1
+[Force] 运动检测 #05: pos=(-137.583,-284.581,355.111)mm  tcp=(-137.583,-284.581,355.111)mm  vel=0.000000 m/s (阈值 0.0020)  acc=0.000000 m/s² (阈值 0.0050)  tcpV=(-0.0002,0.0002,-0.0003)  isStill=1
+[Force] 运动检测 #06: pos=(-137.583,-284.581,355.111)mm  tcp=(-137.583,-284.581,355.111)mm  vel=0.000000 m/s (阈值 0.0020)  acc=0.000000 m/s² (阈值 0.0050)  tcpV=(0.0000,0.0000,0.0000)  isStill=1
+[Force] 运动检测 #07: pos=(-137.583,-284.581,355.111)mm  tcp=(-137.583,-284.581,355.111)mm  vel=0.000000 m/s (阈值 0.0020)  acc=0.000000 m/s² (阈值 0.0050)  tcpV=(0.0001,-0.0001,0.0003)  isStill=1
+[Force] 运动检测 #08: pos=(-137.583,-284.581,355.111)mm  tcp=(-137.583,-284.581,355.111)mm  vel=0.000000 m/s (阈值 0.0020)  acc=0.000000 m/s² (阈值 0.0050)  tcpV=(-0.0000,-0.0001,-0.0004)  isStill=1
+[Force] 运动检测 #09: pos=(-137.583,-284.581,355.111)mm  tcp=(-137.583,-284.581,355.111)mm  vel=0.000000 m/s (阈值 0.0020)  acc=0.000000 m/s² (阈值 0.0050)  tcpV=(-0.0000,-0.0001,-0.0002)  isStill=1
+[Force] 运动检测 #10: pos=(-137.583,-284.581,355.111)mm  tcp=(-137.583,-284.581,355.111)mm  vel=0.000000 m/s (阈值 0.0020)  acc=0.000000 m/s² (阈值 0.0050)  tcpV=(0.0001,0.0003,0.0002)  isStill=1
+[Force] 运动检测 #11: pos=(-137.583,-284.581,355.111)mm  tcp=(-137.583,-284.581,355.111)mm  vel=0.000000 m/s (阈值 0.0020)  acc=0.000000 m/s² (阈值 0.0050)  tcpV=(0.0000,0.0000,0.0000)  isStill=1
+[Force] 运动检测 #12: pos=(-137.583,-284.581,355.111)mm  tcp=(-137.583,-284.581,355.111)mm  vel=0.000000 m/s (阈值 0.0020)  acc=0.000000 m/s² (阈值 0.0050)  tcpV=(0.0000,0.0000,0.0000)  isStill=1
+[Force] 运动检测 #13: pos=(-137.583,-284.581,355.111)mm  tcp=(-137.583,-284.581,355.111)mm  vel=0.000000 m/s (阈值 0.0020)  acc=0.000000 m/s² (阈值 0.0050)  tcpV=(0.0004,-0.0000,-0.0001)  isStill=1
+[Force] 运动检测 #14: pos=(-137.583,-284.581,355.111)mm  tcp=(-137.583,-284.581,355.111)mm  vel=0.000000 m/s (阈值 0.0020)  acc=0.000000 m/s² (阈值 0.0050)  tcpV=(-0.0001,-0.0002,-0.0006)  isStill=1
+[Force] 运动检测 #15: pos=(-137.583,-284.581,355.111)mm  tcp=(-137.583,-284.581,355.111)mm  vel=0.000000 m/s (阈值 0.0020)  acc=0.000000 m/s² (阈值 0.0050)  tcpV=(0.0002,-0.0001,0.0000)  isStill=1
+[Force] 运动检测 #16: pos=(-137.583,-284.581,355.111)mm  tcp=(-137.583,-284.581,355.111)mm  vel=0.000000 m/s (阈值 0.0020)  acc=0.000000 m/s² (阈值 0.0050)  tcpV=(-0.0003,0.0003,0.0003)  isStill=1
+[Force] 运动检测 #17: pos=(-137.583,-284.581,355.111)mm  tcp=(-137.583,-284.581,355.111)mm  vel=0.000000 m/s (阈值 0.0020)  acc=0.000000 m/s² (阈值 0.0050)  tcpV=(0.0001,0.0002,0.0003)  isStill=1
+[Force] 运动检测 #18: pos=(-137.583,-284.581,355.111)mm  tcp=(-137.583,-284.581,355.111)mm  vel=0.000000 m/s (阈值 0.0020)  acc=0.000000 m/s² (阈值 0.0050)  tcpV=(0.0004,-0.0002,0.0001)  isStill=1
+[Force] 零偏漂移检查: 补偿后读数 0.151808 N, 正常 (< 0.5 N)
+[Force] 运动检测 #19: pos=(-137.583,-284.581,355.111)mm  tcp=(-137.583,-284.581,355.111)mm  vel=0.000000 m/s (阈值 0.0020)  acc=0.000000 m/s² (阈值 0.0050)  tcpV=(0.0000,0.0000,0.0000)  isStill=1
+[Force] 运动检测 #20: pos=(-137.583,-284.581,355.111)mm  tcp=(-137.583,-284.581,355.111)mm  vel=0.000000 m/s (阈值 0.0020)  acc=0.000000 m/s² (阈值 0.0050)  tcpV=(0.0002,-0.0000,0.0004)  isStill=1
+[Force] 运动检测 #21: pos=(-137.583,-284.581,355.111)mm  tcp=(-137.583,-284.581,355.111)mm  vel=0.000000 m/s (阈值 0.0020)  acc=0.000000 m/s² (阈值 0.0050)  tcpV=(-0.0001,0.0002,0.0003)  isStill=1
+[Force] 运动检测 #22: pos=(-137.583,-284.581,355.111)mm  tcp=(-137.583,-284.581,355.111)mm  vel=0.000000 m/s (阈值 0.0020)  acc=0.000000 m/s² (阈值 0.0050)  tcpV=(-0.0004,0.0001,0.0003)  isStill=1
+[Force] 运动检测 #23: pos=(-137.583,-284.581,355.111)mm  tcp=(-137.583,-284.581,355.111)mm  vel=0.000000 m/s (阈值 0.0020)  acc=0.000000 m/s² (阈值 0.0050)  tcpV=(0.0003,-0.0002,0.0001)  isStill=1
+[Force] 运动检测 #24: pos=(-137.583,-284.581,355.111)mm  tcp=(-137.583,-284.581,355.111)mm  vel=0.000000 m/s (阈值 0.0020)  acc=0.000000 m/s² (阈值 0.0050)  tcpV=(0.0003,-0.0002,0.0001)  isStill=1
+[Force] 运动检测 #25: pos=(-137.583,-284.581,355.111)mm  tcp=(-137.583,-284.581,355.111)mm  vel=0.000000 m/s (阈值 0.0020)  acc=0.000000 m/s² (阈值 0.0050)  tcpV=(0.0002,-0.0002,-0.0002)  isStill=1
+[Force] 运动检测 #26: pos=(-137.583,-284.581,355.111)mm  tcp=(-137.583,-284.581,355.111)mm  vel=0.000000 m/s (阈值 0.0020)  acc=0.000000 m/s² (阈值 0.0050)  tcpV=(0.0002,-0.0002,0.0003)  isStill=1
+[Force] 运动检测 #27: pos=(-137.583,-284.581,355.111)mm  tcp=(-137.583,-284.581,355.111)mm  vel=0.000000 m/s (阈值 0.0020)  acc=0.000000 m/s² (阈值 0.0050)  tcpV=(0.0000,0.0001,0.0002)  isStill=1
+[Force] 运动检测 #28: pos=(-137.583,-284.581,355.111)mm  tcp=(-137.583,-284.581,355.111)mm  vel=0.000000 m/s (阈值 0.0020)  acc=0.000000 m/s² (阈值 0.0050)  tcpV=(-0.0001,0.0001,0.0003)  isStill=1
+[Force] 运动检测 #29: pos=(-137.583,-284.581,355.111)mm  tcp=(-137.583,-284.581,355.111)mm  vel=0.000000 m/s (阈值 0.0020)  acc=0.000000 m/s² (阈值 0.0050)  tcpV=(0.0000,0.0002,-0.0002)  isStill=1
+[Force] 运动检测 #30: pos=(-137.583,-284.581,355.111)mm  tcp=(-137.583,-284.581,355.111)mm  vel=0.000000 m/s (阈值 0.0020)  acc=0.000000 m/s² (阈值 0.0050)  tcpV=(-0.0001,0.0000,0.0000)  isStill=1
+
+############################################################
+##  ⚠⚠  触觉安全提示已关闭  (Config::FORCE_CONSTRAINT_FORCES_ENABLED = false)
+##   虚拟约束力已【全部】停用 —— 现在【没有任何】推力提示:
+##     · 靠近安全边界 (SAFE_X/Y/Z)
+##     · 靠近圆柱奇异 (半径 < 80mm)
+##     · 靠近工作空间边缘 (半径 > 550mm)
+##     · 靠近历史报警点 (真报过警的位置)
+##   ⇒ 请靠【视觉】与【报警指示灯】判断危险。
+##   (机械臂自身的碰撞检测与安全皮肤由机械臂侧做, 不受本开关影响。)
+##   本横幅每 60 秒复报一次。
+############################################################
+
+[StateMachine] READY → RUNNING
+[Relay] Button PRESS  — target start=(-137.583,-284.581,355.111)
+[Relay] Hold button + move Touch (incremental mode)
+[StateMachine] RUNNING → READY
+[Relay] Button RELEASE — motion stopped
+[StateMachine] READY → RUNNING
+[Relay] Button PRESS  — target start=(-173.92,-335.819,326.228)
+[Relay] Hold button + move Touch (incremental mode)
+[StateMachine] RUNNING → READY
+[Relay] Button RELEASE — motion stopped
+[StateMachine] READY → RUNNING
+[Relay] Button PRESS  — target start=(-193.97,-335.64,286.28)
+[Relay] Hold button + move Touch (incremental mode)
+[Relay] Motion sends: 50 ok, 0 fail  target=(-194.481,-336.217,290.461) orient=(179.88,0.6,-99.48)
+[Relay] Motion sends: 100 ok, 0 fail  target=(-220.621,-364.379,210.547) orient=(179.96,0.779999,-99.2701)
+[Haptic] Force applied: (1.12202, -0, -0.420041) N  mag=1.19807  stale=0  button1=1  button2=0
+[Relay] Motion sends: 150 ok, 0 fail  target=(-208.431,-320.683,215.813) orient=(179.96,0.78,-99.27)
+[Haptic] Force applied: (0.0131632, -0, 7.4831e-09) N  mag=0.0131632  stale=0  button1=1  button2=0
+[Relay] Motion sends: 200 ok, 0 fail  target=(-169.322,-368.863,215.723) orient=(-179.95,0.78,-99.18)
+[Haptic] Force applied: (-1.10836e-05, -0, -0.145249) N  mag=0.145249  stale=0  button1=1  button2=0
+[StateMachine] RUNNING → READY
+[Relay] Button RELEASE — motion stopped
+[StateMachine] READY → RUNNING
+[Relay] Button PRESS  — target start=(-118.259,-321.838,253.836)
+[Relay] Hold button + move Touch (incremental mode)
+[Relay] Motion sends: 250 ok, 0 fail  target=(-105.141,-314.101,240.909) orient=(-179.95,0.78,-99.18)
+[Haptic] Force applied: (0.0414741, -0, 0.022692) N  mag=0.0472761  stale=0  button1=1  button2=0
+[Relay] Motion sends: 300 ok, 0 fail  target=(-31.0912,-298.22,224.453) orient=(-179.93,0.960056,-99.3001)
+[Haptic] Force applied: (0.0895041, -0, 0.000221778) N  mag=0.0895044  stale=0  button1=1  button2=0
+[Haptic] Force applied: (0.115739, -0, -0.141919) N  mag=0.18313  stale=0  button1=1  button2=0
+[Relay] Motion sends: 350 ok, 0 fail  target=(-47.4478,-348.012,213.349) orient=(-179.849,0.991073,-99.3)
+[Haptic] Force applied: (-0.0422169, -0, -0.0365542) N  mag=0.0558433  stale=0  button1=1  button2=0
+[StateMachine] RUNNING → READY
+[Relay] Button RELEASE — motion stopped
+[StateMachine] READY → RUNNING
+[Relay] Button PRESS  — target start=(-103.61,-304.23,255.91)
+[Relay] Hold button + move Touch (incremental mode)
+[Relay] Motion sends: 400 ok, 0 fail  target=(-71.3789,-299.205,247.589) orient=(-179.85,0.99,-99.27)
+[StateMachine] RUNNING → READY
+[Relay] Button RELEASE — motion stopped
+[StateMachine] READY → RUNNING
+[Relay] Button PRESS  — target start=(-38.5899,-310.02,273.2)
+[Relay] Hold button + move Touch (incremental mode)
+[StateMachine] RUNNING → READY
+[Relay] Button RELEASE — motion stopped
+[StateMachine] READY → RUNNING
+[Relay] Button PRESS  — target start=(19.77,-311.88,256.55)
+[Relay] Hold button + move Touch (incremental mode)
+[Relay] Motion sends: 450 ok, 0 fail  target=(-8.57577,-316.646,220.567) orient=(-179.5,1.34,-99.27)
+[Haptic] Force applied: (0.115293, -0, 0.054903) N  mag=0.127698  stale=0  button1=1  button2=0
+[Relay] Motion sends: 500 ok, 0 fail  target=(13.3982,-315.101,230.354) orient=(-179.5,1.34,-99.14)
+[StateMachine] RUNNING → READY
+[Relay] Button RELEASE — motion stopped
+[StateMachine] READY → RUNNING
+[Relay] Button PRESS  — target start=(9.0501,-298.2,281.89)
+[Relay] Hold button + move Touch (incremental mode)
+[StateMachine] RUNNING → READY
+[Relay] Button RELEASE — motion stopped
+
+############################################################
+##  ⚠⚠  触觉安全提示已关闭  (Config::FORCE_CONSTRAINT_FORCES_ENABLED = false)
+##   虚拟约束力已【全部】停用 —— 现在【没有任何】推力提示:
+##     · 靠近安全边界 (SAFE_X/Y/Z)
+##     · 靠近圆柱奇异 (半径 < 80mm)
+##     · 靠近工作空间边缘 (半径 > 550mm)
+##     · 靠近历史报警点 (真报过警的位置)
+##   ⇒ 请靠【视觉】与【报警指示灯】判断危险。
+##   (机械臂自身的碰撞检测与安全皮肤由机械臂侧做, 不受本开关影响。)
+##   本横幅每 60 秒复报一次。
+############################################################
+
+
+############################################################
+##  ⚠⚠  触觉安全提示已关闭  (Config::FORCE_CONSTRAINT_FORCES_ENABLED = false)
+##   虚拟约束力已【全部】停用 —— 现在【没有任何】推力提示:
+##     · 靠近安全边界 (SAFE_X/Y/Z)
+##     · 靠近圆柱奇异 (半径 < 80mm)
+##     · 靠近工作空间边缘 (半径 > 550mm)
+##     · 靠近历史报警点 (真报过警的位置)
+##   ⇒ 请靠【视觉】与【报警指示灯】判断危险。
+##   (机械臂自身的碰撞检测与安全皮肤由机械臂侧做, 不受本开关影响。)
+##   本横幅每 60 秒复报一次。
+############################################################
+
+[StateMachine] READY → RUNNING
+[Relay] Button PRESS  — target start=(7.8701,-293.89,330.92)
+[Relay] Hold button + move Touch (incremental mode)
+[Relay] Motion sends: 550 ok, 0 fail  target=(-13.5112,-351.193,351.143) orient=(-179.34,1.34,-99.0213)
+[StateMachine] RUNNING → READY
+[Relay] Button RELEASE — motion stopped
+[StateMachine] READY → RUNNING
+[Relay] Button PRESS  — target start=(-20.7599,-358.55,334.53)
+[Relay] Hold button + move Touch (incremental mode)
+[StateMachine] RUNNING → READY
+[Relay] Button RELEASE — motion stopped
+[StateMachine] READY → RUNNING
+[Relay] Button PRESS  — target start=(-83.5801,-380.23,275.2)
+[Relay] Hold button + move Touch (incremental mode)
+[Haptic] Force applied: (-0.0536722, -0, 5.39102e-05) N  mag=0.0536722  stale=0  button1=1  button2=0
+[Relay] Motion sends: 600 ok, 0 fail  target=(-85.9645,-379.999,271.179) orient=(-179.01,1.53,-98.9982)
+[Relay] Motion sends: 650 ok, 0 fail  target=(-101.178,-385.169,219.696) orient=(-179.09,1.56,-98.9812)
+[Haptic] Force applied: (-0.106936, -0, -0.0906249) N  mag=0.140172  stale=0  button1=1  button2=0
+[Relay] Motion sends: 700 ok, 0 fail  target=(-62.8588,-381.605,213.918) orient=(-179.12,1.56,-98.9693)
+[Haptic] Force applied: (-0.663122, -0, -0.162387) N  mag=0.682715  stale=0  button1=1  button2=0
+[Relay] Motion sends: 750 ok, 0 fail  target=(-23.4636,-376.566,212.389) orient=(-179.08,1.56,-98.8862)
+[Haptic] Force applied: (-0.683731, -0, -0.517781) N  mag=0.857662  stale=0  button1=1  button2=0
+[Relay] Motion sends: 800 ok, 0 fail  target=(16.0327,-365.622,212.846) orient=(-179.059,1.58098,-98.9603)
+[Haptic] Force applied: (-0.439235, -0, -0.398906) N  mag=0.593341  stale=0  button1=1  button2=0
+[StateMachine] RUNNING → READY
+[Relay] Button RELEASE — motion stopped
+[StateMachine] READY → RUNNING
+[Relay] Button PRESS  — target start=(27.3399,-364.25,216.51)
+[Relay] Hold button + move Touch (incremental mode)
+[Relay] Motion sends: 850 ok, 0 fail  target=(31.2655,-349.761,308.912) orient=(-179.06,1.58,-98.96)
+[StateMachine] RUNNING → READY
+[Relay] Button RELEASE — motion stopped
+
+############################################################
+##  ⚠⚠  触觉安全提示已关闭  (Config::FORCE_CONSTRAINT_FORCES_ENABLED = false)
+##   虚拟约束力已【全部】停用 —— 现在【没有任何】推力提示:
+##     · 靠近安全边界 (SAFE_X/Y/Z)
+##     · 靠近圆柱奇异 (半径 < 80mm)
+##     · 靠近工作空间边缘 (半径 > 550mm)
+##     · 靠近历史报警点 (真报过警的位置)
+##   ⇒ 请靠【视觉】与【报警指示灯】判断危险。
+##   (机械臂自身的碰撞检测与安全皮肤由机械臂侧做, 不受本开关影响。)
+##   本横幅每 60 秒复报一次。
+############################################################
+
+[StateMachine] READY → RUNNING
+[Relay] Button PRESS  — target start=(31.2699,-349.76,308.91)
+[Relay] Hold button + move Touch (incremental mode)
+[StateMachine] RUNNING → READY
+[Relay] Button RELEASE — motion stopped
+[StateMachine] READY → RUNNING
+[Relay] Button PRESS  — target start=(31.27,-349.81,309.22)
+[Relay] Hold button + move Touch (incremental mode)
+[StateMachine] RUNNING → READY
+[Relay] Button RELEASE — motion stopped
+[StateMachine] READY → RUNNING
+[Relay] Button PRESS  — target start=(-9.7201,-365.17,280.65)
+[Relay] Hold button + move Touch (incremental mode)
+[Haptic] Force applied: (0.00523563, 0, -0.257811) N  mag=0.257864  stale=0  button1=1  button2=0
+[StateMachine] RUNNING → READY
+[Relay] Button RELEASE — motion stopped
+[StateMachine] READY → RUNNING
+[Relay] Button PRESS  — target start=(-26.7199,-344.92,250.79)
+[Relay] Hold button + move Touch (incremental mode)
+[Relay] Motion sends: 900 ok, 0 fail  target=(-34.1111,-343.662,244.393) orient=(-178.69,1.95,-98.8)
+[Haptic] Force applied: (-0.493385, -0, -0.353402) N  mag=0.606895  stale=0  button1=1  button2=0
+[Relay] Motion sends: 950 ok, 0 fail  target=(16.5948,-339.171,215.64) orient=(-178.67,1.97003,-98.8419)
+[Haptic] Force applied: (-0.320537, -0, -0.59549) N  mag=0.676278  stale=0  button1=1  button2=0
+[Relay] Motion sends: 1000 ok, 0 fail  target=(4.15127,-341.036,222.69) orient=(-178.67,1.97,-98.84)
+[Haptic] Force applied: (-0.130583, -0, -0.0386592) N  mag=0.136186  stale=0  button1=1  button2=0
+[Relay] Motion sends: 1050 ok, 0 fail  target=(16.0564,-345.749,238.921) orient=(-178.56,2.08,-98.7798)
+[Haptic] Force applied: (-0.0072935, -0, -0.673661) N  mag=0.6737  stale=0  button1=1  button2=0
+[Relay] Motion sends: 1100 ok, 0 fail  target=(20.742,-385.502,216.928) orient=(-178.545,2.08,-98.78)
+[Haptic] Force applied: (-0.0120209, -0, -0.0191965) N  mag=0.0226497  stale=0  button1=1  button2=0
+[Relay] Motion sends: 1150 ok, 0 fail  target=(36.5093,-312.673,256.343) orient=(-178.55,2.08,-98.77)
+[StateMachine] RUNNING → READY
+[Relay] Button RELEASE — motion stopped
+[StateMachine] READY → RUNNING
+[Relay] Button PRESS  — target start=(36.5101,-312.67,256.34)
+[Relay] Hold button + move Touch (incremental mode)
+[StateMachine] RUNNING → READY
+[Relay] Button RELEASE — motion stopped
+[StateMachine] READY → RUNNING
+[Relay] Button PRESS  — target start=(30.7901,-293.35,244.84)
+[Relay] Hold button + move Touch (incremental mode)
+[Haptic] Force applied: (-0.00144862, -0, -0.126999) N  mag=0.127008  stale=0  button1=1  button2=0
+[Relay] Motion sends: 1200 ok, 0 fail  target=(63.446,-294.754,216.647) orient=(-178.55,2.08,-98.6952)
+[Haptic] Force applied: (-1.12178e-05, -0, -0.546657) N  mag=0.546657  stale=0  button1=1  button2=0
+[Relay] Motion sends: 1250 ok, 0 fail  target=(56.5013,-297.028,234.838) orient=(-178.47,2.16,-98.7)
+[Haptic] Force applied: (-0.0181469, -0, -0.40464) N  mag=0.405047  stale=0  button1=1  button2=0
+[Relay] Motion sends: 1300 ok, 0 fail  target=(30.5889,-346.731,215.724) orient=(-178.47,2.16,-98.63)
+[Haptic] Force applied: (-6.97403e-06, -0, -0.0407679) N  mag=0.0407679  stale=0  button1=1  button2=0
+[StateMachine] RUNNING → READY
+[Relay] Button RELEASE — motion stopped
+[StateMachine] READY → RUNNING
+[Relay] Button PRESS  — target start=(58.5799,-278.22,318.06)
+[Relay] Hold button + move Touch (incremental mode)
+[Relay] Motion sends: 1350 ok, 0 fail  target=(51.9335,-270.117,360.653) orient=(-178.39,2.16,-97.7955)
+[StateMachine] RUNNING → READY
+[Relay] Button RELEASE — motion stopped
+[StateMachine] READY → RUNNING
+[Relay] Button PRESS  — target start=(51.9301,-270.12,360.65)
+[Relay] Hold button + move Touch (incremental mode)
+[StateMachine] RUNNING → READY
+[Relay] Button RELEASE — motion stopped
+
+############################################################
+##  ⚠⚠  触觉安全提示已关闭  (Config::FORCE_CONSTRAINT_FORCES_ENABLED = false)
+##   虚拟约束力已【全部】停用 —— 现在【没有任何】推力提示:
+##     · 靠近安全边界 (SAFE_X/Y/Z)
+##     · 靠近圆柱奇异 (半径 < 80mm)
+##     · 靠近工作空间边缘 (半径 > 550mm)
+##     · 靠近历史报警点 (真报过警的位置)
+##   ⇒ 请靠【视觉】与【报警指示灯】判断危险。
+##   (机械臂自身的碰撞检测与安全皮肤由机械臂侧做, 不受本开关影响。)
+##   本横幅每 60 秒复报一次。
+############################################################
+
+
+############################################################
+##  ⚠⚠  触觉安全提示已关闭  (Config::FORCE_CONSTRAINT_FORCES_ENABLED = false)
+##   虚拟约束力已【全部】停用 —— 现在【没有任何】推力提示:
+##     · 靠近安全边界 (SAFE_X/Y/Z)
+##     · 靠近圆柱奇异 (半径 < 80mm)
+##     · 靠近工作空间边缘 (半径 > 550mm)
+##     · 靠近历史报警点 (真报过警的位置)
+##   ⇒ 请靠【视觉】与【报警指示灯】判断危险。
+##   (机械臂自身的碰撞检测与安全皮肤由机械臂侧做, 不受本开关影响。)
+##   本横幅每 60 秒复报一次。
+############################################################
+
+
+############################################################
+##  ⚠⚠  触觉安全提示已关闭  (Config::FORCE_CONSTRAINT_FORCES_ENABLED = false)
+##   虚拟约束力已【全部】停用 —— 现在【没有任何】推力提示:
+##     · 靠近安全边界 (SAFE_X/Y/Z)
+##     · 靠近圆柱奇异 (半径 < 80mm)
+##     · 靠近工作空间边缘 (半径 > 550mm)
+##     · 靠近历史报警点 (真报过警的位置)
+##   ⇒ 请靠【视觉】与【报警指示灯】判断危险。
+##   (机械臂自身的碰撞检测与安全皮肤由机械臂侧做, 不受本开关影响。)
+##   本横幅每 60 秒复报一次。
+############################################################
+
+[StateMachine] READY → RUNNING
+[Relay] Button PRESS  — target start=(54.6999,-252.03,399.86)
+[Relay] Hold button + move Touch (incremental mode)
+[StateMachine] RUNNING → READY
+[Relay] Button RELEASE — motion stopped
+[StateMachine] READY → RUNNING
+[Relay] Button PRESS  — target start=(0.280004,-263.5,398.68)
+[Relay] Hold button + move Touch (incremental mode)
+[Haptic] Force applied: (0.0049267, -0, -0.0635884) N  mag=0.0637789  stale=0  button1=1  button2=0
+[StateMachine] RUNNING → READY
+[Relay] Button RELEASE — motion stopped
+[StateMachine] READY → RUNNING
+[Relay] Button PRESS  — target start=(-78.86,-270.29,401.58)
+[Relay] Hold button + move Touch (incremental mode)
+[Relay] Motion sends: 1400 ok, 0 fail  target=(-86.8767,-273.751,392.079) orient=(-178.39,2.16,-97.8)
+[Haptic] Force applied: (0.0121414, -0, -0.00711099) N  mag=0.0140705  stale=0  button1=1  button2=0
+[StateMachine] RUNNING → READY
+[Relay] Button RELEASE — motion stopped
+[StateMachine] READY → RUNNING
+[Relay] Button PRESS  — target start=(-159.57,-295.72,390.89)
+[Relay] Hold button + move Touch (incremental mode)
+[Haptic] Force applied: (0.116328, -0, -0.0959002) N  mag=0.150762  stale=0  button1=1  button2=0
+[Relay] Motion sends: 1450 ok, 0 fail  target=(-205.44,-322.595,336.101) orient=(-178.39,2.16,-97.8)
+[StateMachine] RUNNING → READY
+[Relay] Button RELEASE — motion stopped
+[StateMachine] READY → RUNNING
+[Relay] Button PRESS  — target start=(-204.45,-322.7,335.25)
+[Relay] Hold button + move Touch (incremental mode)
+[Haptic] Force applied: (-0.138972, -0, 0.0110015) N  mag=0.139407  stale=0  button1=1  button2=0
+[StateMachine] RUNNING → READY
+[Relay] Button RELEASE — motion stopped
+[StateMachine] READY → RUNNING
+[Relay] Button PRESS  — target start=(-228.27,-327.34,273.77)
+[Relay] Hold button + move Touch (incremental mode)
+[Relay] Motion sends: 1500 ok, 0 fail  target=(-229.185,-325.827,248.104) orient=(-178.38,2.17,-97.79)
+[Haptic] Force applied: (0.0067264, -0, -0.0455205) N  mag=0.0460148  stale=0  button1=1  button2=0
+[Relay] Motion sends: 1550 ok, 0 fail  target=(-232.805,-326.121,214.027) orient=(-178.39,2.15,-97.78)
+[Haptic] Force applied: (0.812183, -0, 0.133944) N  mag=0.823153  stale=0  button1=1  button2=0
+[Relay] Motion sends: 1600 ok, 0 fail  target=(-227.284,-323.839,212.381) orient=(-178.374,2.15,-97.76)
+[Haptic] Force applied: (0.12316, -0, 0.1171) N  mag=0.169943  stale=0  button1=1  button2=0
+[Relay] Motion sends: 1650 ok, 0 fail  target=(-229.114,-325.998,213.586) orient=(-178.37,2.2,-97.75)
+[Haptic] Force applied: (0.618884, -0, 0.59997) N  mag=0.861963  stale=0  button1=1  button2=0
+[Haptic] Force applied: (0.00223656, -0, 0.439908) N  mag=0.439913  stale=0  button1=1  button2=0
+[Relay] Motion sends: 1700 ok, 0 fail  target=(-228.335,-326.317,213.694) orient=(-178.36,2.2,-97.76)
+[Haptic] Force applied: (0.0305559, -0, 0.473632) N  mag=0.474617  stale=0  button1=1  button2=0
+[Relay] Motion sends: 1750 ok, 0 fail  target=(-222.905,-327.043,214.099) orient=(-178.36,2.2,-97.76)
+[Haptic] Force applied: (0.000966742, -0, 0.398985) N  mag=0.398986  stale=0  button1=1  button2=0
+[Haptic] Force applied: (-0.23579, -0, -0.334978) N  mag=0.409643  stale=0  button1=1  button2=0
+[Relay] Motion sends: 1800 ok, 0 fail  target=(-202.872,-324.14,212.931) orient=(-178.36,2.2,-97.76)
+[Haptic] Force applied: (-0.490257, -0, -0.140218) N  mag=0.509915  stale=0  button1=1  button2=0
+[Relay] Motion sends: 1850 ok, 0 fail  target=(-182.887,-321.563,213.95) orient=(-178.312,2.14,-97.7)
+[Haptic] Force applied: (-0.505699, -0, -0.0101896) N  mag=0.505801  stale=0  button1=1  button2=0
+[Relay] Motion sends: 1900 ok, 0 fail  target=(-155.16,-314.643,214.561) orient=(-178.335,2.14,-97.7356)
+[Haptic] Force applied: (-0.55208, -0, -0.00857245) N  mag=0.552147  stale=0  button1=1  button2=0
+[Haptic] Force applied: (-0.424464, -0, 0.00263241) N  mag=0.424472  stale=0  button1=1  button2=0
+[Relay] Motion sends: 1950 ok, 0 fail  target=(-132.111,-313.899,215.567) orient=(-178.324,2.15001,-97.734)
+[Haptic] Force applied: (-0.420154, -0, -0.000581215) N  mag=0.420155  stale=0  button1=1  button2=0
+[Relay] Motion sends: 2000 ok, 0 fail  target=(-98.8385,-308.703,216.484) orient=(-178.33,2.15802,-97.75)
+[Haptic] Force applied: (-0.0256883, -0, -0.00257348) N  mag=0.0258169  stale=0  button1=1  button2=0
+[Relay] Motion sends: 2050 ok, 0 fail  target=(-75.0347,-303.016,217.118) orient=(-178.277,2.13,-97.6971)
+[Haptic] Force applied: (-0.10037, -0, 0.0218992) N  mag=0.102731  stale=0  button1=1  button2=0
+[Relay] Motion sends: 2100 ok, 0 fail  target=(-75.0347,-311.779,239.823) orient=(-178.23,2.15355,-97.65)
+[Haptic] Force applied: (-0.0638979, -0, 0.0755709) N  mag=0.0989641  stale=0  button1=1  button2=0
+[Haptic] Force applied: (-0.000215987, -0, 0.0375441) N  mag=0.0375447  stale=0  button1=1  button2=0
+[Relay] Motion sends: 2150 ok, 0 fail  target=(-87.6369,-304.89,317.946) orient=(-178.174,2.15,-97.5944)
+[StateMachine] RUNNING → READY
+[Relay] Button RELEASE — motion stopped
+
+############################################################
+##  ⚠⚠  触觉安全提示已关闭  (Config::FORCE_CONSTRAINT_FORCES_ENABLED = false)
+##   虚拟约束力已【全部】停用 —— 现在【没有任何】推力提示:
+##     · 靠近安全边界 (SAFE_X/Y/Z)
+##     · 靠近圆柱奇异 (半径 < 80mm)
+##     · 靠近工作空间边缘 (半径 > 550mm)
+##     · 靠近历史报警点 (真报过警的位置)
+##   ⇒ 请靠【视觉】与【报警指示灯】判断危险。
+##   (机械臂自身的碰撞检测与安全皮肤由机械臂侧做, 不受本开关影响。)
+##   本横幅每 60 秒复报一次。
+############################################################
+
+
+############################################################
+##  ⚠⚠  触觉安全提示已关闭  (Config::FORCE_CONSTRAINT_FORCES_ENABLED = false)
+##   虚拟约束力已【全部】停用 —— 现在【没有任何】推力提示:
+##     · 靠近安全边界 (SAFE_X/Y/Z)
+##     · 靠近圆柱奇异 (半径 < 80mm)
+##     · 靠近工作空间边缘 (半径 > 550mm)
+##     · 靠近历史报警点 (真报过警的位置)
+##   ⇒ 请靠【视觉】与【报警指示灯】判断危险。
+##   (机械臂自身的碰撞检测与安全皮肤由机械臂侧做, 不受本开关影响。)
+##   本横幅每 60 秒复报一次。
+############################################################
+
+
+############################################################
+##  ⚠⚠  触觉安全提示已关闭  (Config::FORCE_CONSTRAINT_FORCES_ENABLED = false)
+##   虚拟约束力已【全部】停用 —— 现在【没有任何】推力提示:
+##     · 靠近安全边界 (SAFE_X/Y/Z)
+##     · 靠近圆柱奇异 (半径 < 80mm)
+##     · 靠近工作空间边缘 (半径 > 550mm)
+##     · 靠近历史报警点 (真报过警的位置)
+##   ⇒ 请靠【视觉】与【报警指示灯】判断危险。
+##   (机械臂自身的碰撞检测与安全皮肤由机械臂侧做, 不受本开关影响。)
+##   本横幅每 60 秒复报一次。
+############################################################
+
+
+############################################################
+##  ⚠⚠  触觉安全提示已关闭  (Config::FORCE_CONSTRAINT_FORCES_ENABLED = false)
+##   虚拟约束力已【全部】停用 —— 现在【没有任何】推力提示:
+##     · 靠近安全边界 (SAFE_X/Y/Z)
+##     · 靠近圆柱奇异 (半径 < 80mm)
+##     · 靠近工作空间边缘 (半径 > 550mm)
+##     · 靠近历史报警点 (真报过警的位置)
+##   ⇒ 请靠【视觉】与【报警指示灯】判断危险。
+##   (机械臂自身的碰撞检测与安全皮肤由机械臂侧做, 不受本开关影响。)
+##   本横幅每 60 秒复报一次。
+############################################################
+
+
+############################################################
+##  ⚠⚠  触觉安全提示已关闭  (Config::FORCE_CONSTRAINT_FORCES_ENABLED = false)
+##   虚拟约束力已【全部】停用 —— 现在【没有任何】推力提示:
+##     · 靠近安全边界 (SAFE_X/Y/Z)
+##     · 靠近圆柱奇异 (半径 < 80mm)
+##     · 靠近工作空间边缘 (半径 > 550mm)
+##     · 靠近历史报警点 (真报过警的位置)
+##   ⇒ 请靠【视觉】与【报警指示灯】判断危险。
+##   (机械臂自身的碰撞检测与安全皮肤由机械臂侧做, 不受本开关影响。)
+##   本横幅每 60 秒复报一次。
+############################################################
+
+
+############################################################
+##  ⚠⚠  触觉安全提示已关闭  (Config::FORCE_CONSTRAINT_FORCES_ENABLED = false)
+##   虚拟约束力已【全部】停用 —— 现在【没有任何】推力提示:
+##     · 靠近安全边界 (SAFE_X/Y/Z)
+##     · 靠近圆柱奇异 (半径 < 80mm)
+##     · 靠近工作空间边缘 (半径 > 550mm)
+##     · 靠近历史报警点 (真报过警的位置)
+##   ⇒ 请靠【视觉】与【报警指示灯】判断危险。
+##   (机械臂自身的碰撞检测与安全皮肤由机械臂侧做, 不受本开关影响。)
+##   本横幅每 60 秒复报一次。
+############################################################
+
+
+############################################################
+##  ⚠⚠  触觉安全提示已关闭  (Config::FORCE_CONSTRAINT_FORCES_ENABLED = false)
+##   虚拟约束力已【全部】停用 —— 现在【没有任何】推力提示:
+##     · 靠近安全边界 (SAFE_X/Y/Z)
+##     · 靠近圆柱奇异 (半径 < 80mm)
+##     · 靠近工作空间边缘 (半径 > 550mm)
+##     · 靠近历史报警点 (真报过警的位置)
+##   ⇒ 请靠【视觉】与【报警指示灯】判断危险。
+##   (机械臂自身的碰撞检测与安全皮肤由机械臂侧做, 不受本开关影响。)
+##   本横幅每 60 秒复报一次。
+############################################################
+
+
+############################################################
+##  ⚠⚠  触觉安全提示已关闭  (Config::FORCE_CONSTRAINT_FORCES_ENABLED = false)
+##   虚拟约束力已【全部】停用 —— 现在【没有任何】推力提示:
+##     · 靠近安全边界 (SAFE_X/Y/Z)
+##     · 靠近圆柱奇异 (半径 < 80mm)
+##     · 靠近工作空间边缘 (半径 > 550mm)
+##     · 靠近历史报警点 (真报过警的位置)
+##   ⇒ 请靠【视觉】与【报警指示灯】判断危险。
+##   (机械臂自身的碰撞检测与安全皮肤由机械臂侧做, 不受本开关影响。)
+##   本横幅每 60 秒复报一次。
+############################################################
+
+
+############################################################
+##  ⚠⚠  触觉安全提示已关闭  (Config::FORCE_CONSTRAINT_FORCES_ENABLED = false)
+##   虚拟约束力已【全部】停用 —— 现在【没有任何】推力提示:
+##     · 靠近安全边界 (SAFE_X/Y/Z)
+##     · 靠近圆柱奇异 (半径 < 80mm)
+##     · 靠近工作空间边缘 (半径 > 550mm)
+##     · 靠近历史报警点 (真报过警的位置)
+##   ⇒ 请靠【视觉】与【报警指示灯】判断危险。
+##   (机械臂自身的碰撞检测与安全皮肤由机械臂侧做, 不受本开关影响。)
+##   本横幅每 60 秒复报一次。
+############################################################
+
+
+############################################################
+##  ⚠⚠  触觉安全提示已关闭  (Config::FORCE_CONSTRAINT_FORCES_ENABLED = false)
+##   虚拟约束力已【全部】停用 —— 现在【没有任何】推力提示:
+##     · 靠近安全边界 (SAFE_X/Y/Z)
+##     · 靠近圆柱奇异 (半径 < 80mm)
+##     · 靠近工作空间边缘 (半径 > 550mm)
+##     · 靠近历史报警点 (真报过警的位置)
+##   ⇒ 请靠【视觉】与【报警指示灯】判断危险。
+##   (机械臂自身的碰撞检测与安全皮肤由机械臂侧做, 不受本开关影响。)
+##   本横幅每 60 秒复报一次。
+############################################################
+
+
+Shutting down...
+Disabling robot...
+[Relay] GUI reporting 【已重连】到 127.0.0.1:8888
+[Force] Realtime port disconnected
+[Force] Realtime recv failed, reconnecting...
+[StateMachine] READY → DISCONNECTED
+****************************************
+This is the DEVELOPER EDITION of OPENHAPTICS, commercial distribution is prohibited
+Please contact 3D Systems to obtain a commercial license
+****************************************

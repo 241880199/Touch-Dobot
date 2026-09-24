@@ -1,0 +1,18 @@
+
+D:\Projects\Touch\Touch_Client\tests>rem THROWAWAY probe build (2026-09-24, offline batch Task 1). Delete when done. 
+
+D:\Projects\Touch\Touch_Client\tests>rem Keep ASCII-only: non-ASCII comments get mis-decoded and can swallow the next line. 
+
+D:\Projects\Touch\Touch_Client\tests>if not defined VCINSTALLDIR call "D:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat" x64 
+'vswhere.exe' is not recognized as an internal or external command,
+operable program or batch file.
+**********************************************************************
+** Visual Studio 2022 Developer Command Prompt v17.0
+** Copyright (c) 2025 Microsoft Corporation
+**********************************************************************
+[vcvarsall.bat] Environment initialized for: 'x64'
+_t1_flake_probe.cpp
+ForceTuning.cpp
+CalibStore.cpp
+正在生成代码...
+BUILD_EXIT=0

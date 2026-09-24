@@ -1,0 +1,179 @@
+=== Touch-Dobot Digital Twin System v3.0 ===
+Robot: 192.168.101.11
+Touch: enabled
+Safety: X[-300,250] Y[-350,250] Z[140,500]
+[Tuning] 力反射增益 = 120.0 (来源: D:\Projects\Touch\Touch_Client\calib\force_tuning.json)
+Initializing Touch device...
+Touch 设备初始化成功
+[Payload] Loaded payload_calib.json (mass=0.404kg, com=(0.3,-0.1,68.7)mm, 6 poses, psi=90deg, sign_z=+1)
+Initializing robot via Relay...
+已连接使能端口 29999
+已连接运动端口 30003
+[StateMachine] DISCONNECTED → CONNECTED
+[Relay] GUI reporting 【已重连】到 127.0.0.1:8888
+[Relay] 使能 EnableRobot(0.404,0.3,-0.1,68.7)  (实机标定值)
+[Relay] 机械臂使能成功
+[Relay] 机械臂状态正常 (mode=0)
+[Relay] GetPose retry 1/5...
+[Relay] 基准位姿: (-174.05,-197.21,352)
+[StateMachine] CONNECTED → READY
+[StateMachine] READY → RUNNING
+[Relay] Button PRESS  — target start=(-174.05,-197.21,352)
+[Relay] Hold button + move Touch (incremental mode)
+[Relay] GUI reporting 【未连接】—— 127.0.0.1:8888 上没有在听 (MATLAB relay_gui 没在跑?)
+[Relay]   影响: P| / J| / RP| / C| / FB| 全部发不出去 (位置 / 关节角 / 实际位姿 / 命令回显 / 反馈回显)。
+[Relay]   不影响: 机械臂控制、力数据采集 (@576/@720/@1304)、一致性闸门、本地补偿 —— 它们都不走这条 socket。
+[Relay]   要恢复: 在 MATLAB 那一侧起 relay_gui 即可 —— ★ 本程序会【自动按秒重连】, 不必重启 (2026-09-21 起; 从前是只在启动时连一次, 所以那时确实要重启)。
+[Force] Loaded force_calib.json (mass scale=0.419631kg, bias=-18.36,-2.63383,0.857266N, c_s=(0.0361314,1.08794,55.4161)mm)
+[Force] Reader thread started, connecting to port 30004...
+[Force] Connected to realtime port 30004
+[Force] Reader thread receiving at 125Hz...
+[Force] 30004 帧自检通过: TestValue @48 = 0x0123456789ABCDEF (小端字节序) ⇒ 帧布局与我们的假设一致
+[Relay] 机械臂实际负载 (【首个合格帧】的快照): load=0.404 kg  center=(0.3, -0.1, 68.7) mm
+[Force] 重力项姿态源 = GetPose 仪表盘（FORCE_POSE_ORIENT_FROM_624 = false，一行回滚态）；位置源 = GetPose 仪表盘（刻意不换，见 RelayCore.cpp 那段）
+[Force] 一致性闸门: 放行 (本地全量模型与【参考量】在【投票通道】上一致; 参考量本帧【可用】)
+[STL] Binary: 42500 triangles
+[STL] Binary: 5004 triangles
+[STL] Binary: 11932 triangles
+[STL] Binary: 15904 triangles
+[STL] Binary: 4810 triangles
+[STL] Binary: 4898 triangles
+[STL] Binary: 8976 triangles
+[RobotModel] STL models loaded (models/cr3)
+[Calib] No calibration file, using default axis mapping
+[TCP] No tcp_calib.json — press 't' to calibrate TCP offset
+
+System ready.
+  q/ESC: quit
+  Touch button 1: control robot
+
+
+############################################################
+##  ⚠⚠  触觉安全提示已关闭  (Config::FORCE_CONSTRAINT_FORCES_ENABLED = false)
+##   虚拟约束力已【全部】停用 —— 现在【没有任何】推力提示:
+##     · 靠近安全边界 (SAFE_X/Y/Z)
+##     · 靠近圆柱奇异 (半径 < 80mm)
+##     · 靠近工作空间边缘 (半径 > 550mm)
+##     · 靠近历史报警点 (真报过警的位置)
+##   ⇒ 请靠【视觉】与【报警指示灯】判断危险。
+##   (机械臂自身的碰撞检测与安全皮肤由机械臂侧做, 不受本开关影响。)
+##   本横幅每 60 秒复报一次。
+############################################################
+
+[StateMachine] RUNNING → READY
+[Relay] Button RELEASE — motion stopped
+[StateMachine] READY → RUNNING
+[Relay] Button PRESS  — target start=(-189.32,-209.72,368.27)
+[Relay] Hold button + move Touch (incremental mode)
+[Haptic] Force applied: (0.491113, -0, -0.423672) N  mag=0.648606  stale=0  button1=1  button2=0
+[Relay] Motion sends: 50 ok, 0 fail  target=(-133.233,-186.678,359.602) orient=(-170.87,-1.62999,-104.38)  cmd=ServoP(-133.23,-186.68,359.60,-170.87,-1.63,-104.38)
+[Force] 运动检测 #00: pos=(-148.320,-193.493,359.572)mm  tcp=(-135.025,-188.255,359.651)mm  vel=0.108785 m/s (阈值 0.0020)  acc=0.041383 m/s² (阈值 0.0050)  tcpV=(0.0879,0.0395,0.0038)  isStill=0  posR=(-170.870,-1.630,-104.380)  tcpR=(-170.869,-1.630,-104.380)
+[Force] 运动检测 #01: pos=(-125.030,-184.981,359.898)mm  tcp=(-123.370,-184.266,359.865)mm  vel=0.108785 m/s (阈值 0.0020)  acc=0.041383 m/s² (阈值 0.0050)  tcpV=(0.0614,0.0290,-0.0050)  isStill=0  posR=(-170.870,-1.630,-104.380)  tcpR=(-170.872,-1.630,-104.375)
+[Force] 运动检测 #02: pos=(-125.030,-184.981,359.898)mm  tcp=(-122.485,-183.785,359.835)mm  vel=0.093229 m/s (阈值 0.0020)  acc=0.071690 m/s² (阈值 0.0050)  tcpV=(0.0487,0.0298,-0.0034)  isStill=0  posR=(-170.870,-1.630,-104.380)  tcpR=(-170.870,-1.637,-104.372)
+[Force] 运动检测 #03: pos=(-125.030,-184.981,359.898)mm  tcp=(-121.814,-183.344,359.758)mm  vel=0.093229 m/s (阈值 0.0020)  acc=0.071690 m/s² (阈值 0.0050)  tcpV=(0.0349,0.0254,-0.0049)  isStill=0  posR=(-170.870,-1.630,-104.380)  tcpR=(-170.869,-1.637,-104.372)
+[Force] 运动检测 #04: pos=(-125.030,-184.981,359.898)mm  tcp=(-121.370,-182.992,359.682)mm  vel=0.093229 m/s (阈值 0.0020)  acc=0.071690 m/s² (阈值 0.0050)  tcpV=(0.0220,0.0178,-0.0038)  isStill=0  posR=(-170.870,-1.630,-104.380)  tcpR=(-170.869,-1.636,-104.373)
+[Force] 运动检测 #05: pos=(-125.030,-184.981,359.898)mm  tcp=(-121.047,-182.706,359.618)mm  vel=0.093229 m/s (阈值 0.0020)  acc=0.071690 m/s² (阈值 0.0050)  tcpV=(0.0071,0.0059,-0.0012)  isStill=0  posR=(-170.870,-1.630,-104.380)  tcpR=(-170.869,-1.635,-104.377)
+[Force] 运动检测 #06: pos=(-125.030,-184.981,359.898)mm  tcp=(-120.984,-182.646,359.567)mm  vel=0.093229 m/s (阈值 0.0020)  acc=0.071690 m/s² (阈值 0.0050)  tcpV=(0.0007,0.0022,-0.0057)  isStill=0  posR=(-170.870,-1.630,-104.380)  tcpR=(-170.869,-1.635,-104.378)
+[Force] 运动检测 #07: pos=(-121.217,-182.572,359.008)mm  tcp=(-121.234,-182.483,358.819)mm  vel=0.093229 m/s (阈值 0.0020)  acc=0.071690 m/s² (阈值 0.0050)  tcpV=(0.0015,0.0052,-0.0015)  isStill=0  posR=(-170.870,-1.630,-104.380)  tcpR=(-170.874,-1.619,-104.377)
+[Force] 运动检测 #08: pos=(-121.217,-182.572,359.008)mm  tcp=(-120.053,-181.991,357.902)mm  vel=0.026722 m/s (阈值 0.0020)  acc=0.054417 m/s² (阈值 0.0050)  tcpV=(-0.0002,-0.0053,-0.0071)  isStill=0  posR=(-170.870,-1.630,-104.380)  tcpR=(-170.869,-1.633,-104.380)
+[Force] 运动检测 #09: pos=(-120.522,-182.587,357.556)mm  tcp=(-121.463,-183.036,357.531)mm  vel=0.007356 m/s (阈值 0.0020)  acc=0.029943 m/s² (阈值 0.0050)  tcpV=(-0.0295,-0.0140,0.0026)  isStill=0  posR=(-170.870,-1.630,-104.380)  tcpR=(-170.876,-1.615,-104.371)
+[Force] 运动检测 #10: pos=(-120.522,-182.587,357.556)mm  tcp=(-121.931,-183.300,357.571)mm  vel=0.007356 m/s (阈值 0.0020)  acc=0.029943 m/s² (阈值 0.0050)  tcpV=(-0.0294,-0.0188,0.0003)  isStill=0  posR=(-170.870,-1.630,-104.380)  tcpR=(-170.875,-1.620,-104.375)
+[Force] 运动检测 #11: pos=(-120.522,-182.587,357.556)mm  tcp=(-122.407,-183.638,357.573)mm  vel=0.007356 m/s (阈值 0.0020)  acc=0.029943 m/s² (阈值 0.0050)  tcpV=(-0.0295,-0.0218,-0.0006)  isStill=0  posR=(-170.870,-1.630,-104.380)  tcpR=(-170.872,-1.629,-104.376)
+[Force] 运动检测 #12: pos=(-120.522,-182.587,357.556)mm  tcp=(-124.382,-184.937,357.358)mm  vel=0.007356 m/s (阈值 0.0020)  acc=0.029943 m/s² (阈值 0.0050)  tcpV=(-0.0241,-0.0112,0.0018)  isStill=0  posR=(-170.870,-1.630,-104.380)  tcpR=(-170.868,-1.620,-104.378)
+[Force] 运动检测 #13: pos=(-125.477,-185.533,357.292)mm  tcp=(-125.869,-185.814,357.209)mm  vel=0.007356 m/s (阈值 0.0020)  acc=0.029943 m/s² (阈值 0.0050)  tcpV=(-0.0151,-0.0093,-0.0001)  isStill=0  posR=(-170.825,-1.630,-104.380)  tcpR=(-170.830,-1.628,-104.378)
+[Force] 运动检测 #14: pos=(-125.477,-185.533,357.292)mm  tcp=(-126.147,-185.983,357.197)mm  vel=0.028426 m/s (阈值 0.0020)  acc=0.108832 m/s² (阈值 0.0050)  tcpV=(-0.0205,-0.0109,-0.0019)  isStill=0  posR=(-170.825,-1.630,-104.380)  tcpR=(-170.833,-1.634,-104.376)
+[Force] 运动检测 #15: pos=(-125.477,-185.533,357.292)mm  tcp=(-128.791,-187.393,356.998)mm  vel=0.028426 m/s (阈值 0.0020)  acc=0.108832 m/s² (阈值 0.0050)  tcpV=(-0.0542,-0.0247,-0.0023)  isStill=0  posR=(-170.825,-1.630,-104.380)  tcpR=(-170.846,-1.632,-104.375)
+[Force] 运动检测 #16: pos=(-132.489,-188.538,356.916)mm  tcp=(-133.692,-188.836,356.895)mm  vel=0.028426 m/s (阈值 0.0020)  acc=0.108832 m/s² (阈值 0.0050)  tcpV=(-0.0781,-0.0204,0.0003)  isStill=0  posR=(-170.840,-1.630,-104.380)  tcpR=(-170.838,-1.627,-104.378)
+[Force] 零偏漂移检查: 补偿后读数 0.419341 N, 正常 (< 0.5 N)
+[Force] 运动检测 #17: pos=(-132.489,-188.538,356.916)mm  tcp=(-140.645,-190.561,356.915)mm  vel=0.044406 m/s (阈值 0.0020)  acc=0.149157 m/s² (阈值 0.0050)  tcpV=(-0.0791,-0.0154,-0.0061)  isStill=0  posR=(-170.840,-1.630,-104.380)  tcpR=(-170.835,-1.627,-104.384)
+[Force] 运动检测 #18: pos=(-132.489,-188.538,356.916)mm  tcp=(-141.933,-190.769,356.885)mm  vel=0.044406 m/s (阈值 0.0020)  acc=0.149157 m/s² (阈值 0.0050)  tcpV=(-0.0819,-0.0092,-0.0026)  isStill=0  posR=(-170.840,-1.630,-104.380)  tcpR=(-170.835,-1.628,-104.381)
+[Force] 运动检测 #19: pos=(-146.037,-191.429,356.643)mm  tcp=(-148.572,-191.902,356.388)mm  vel=0.081029 m/s (阈值 0.0020)  acc=0.164260 m/s² (阈值 0.0050)  tcpV=(-0.0607,-0.0145,-0.0024)  isStill=0  posR=(-170.836,-1.630,-104.380)  tcpR=(-170.837,-1.628,-104.381)
+[Force] 运动检测 #20: pos=(-146.037,-191.429,356.643)mm  tcp=(-150.017,-192.407,356.278)mm  vel=0.081029 m/s (阈值 0.0020)  acc=0.164260 m/s² (阈值 0.0050)  tcpV=(-0.0602,-0.0226,-0.0042)  isStill=0  posR=(-170.836,-1.630,-104.380)  tcpR=(-170.838,-1.634,-104.379)
+[Force] 运动检测 #21: pos=(-146.037,-191.429,356.643)mm  tcp=(-155.552,-194.831,355.986)mm  vel=0.081029 m/s (阈值 0.0020)  acc=0.164260 m/s² (阈值 0.0050)  tcpV=(-0.0718,-0.0287,-0.0032)  isStill=0  posR=(-170.836,-1.630,-104.380)  tcpR=(-170.838,-1.628,-104.378)
+[Force] 运动检测 #22: pos=(-164.661,-198.314,355.983)mm  tcp=(-166.349,-198.953,356.008)mm  vel=0.081029 m/s (阈值 0.0020)  acc=0.164260 m/s² (阈值 0.0050)  tcpV=(-0.0851,-0.0324,-0.0026)  isStill=0  posR=(-170.839,-1.630,-104.380)  tcpR=(-170.840,-1.632,-104.378)
+[Force] 运动检测 #23: pos=(-164.661,-198.314,355.983)mm  tcp=(-167.721,-199.459,356.005)mm  vel=0.074688 m/s (阈值 0.0020)  acc=0.168027 m/s² (阈值 0.0050)  tcpV=(-0.0861,-0.0311,0.0031)  isStill=0  posR=(-170.839,-1.630,-104.380)  tcpR=(-170.840,-1.629,-104.378)
+[Force] 运动检测 #24: pos=(-164.661,-198.314,355.983)mm  tcp=(-169.118,-199.939,356.007)mm  vel=0.074688 m/s (阈值 0.0020)  acc=0.168027 m/s² (阈值 0.0050)  tcpV=(-0.0894,-0.0290,-0.0035)  isStill=0  posR=(-170.839,-1.630,-104.380)  tcpR=(-170.840,-1.628,-104.378)
+[Force] 运动检测 #25: pos=(-164.661,-198.314,355.983)mm  tcp=(-170.905,-200.529,356.027)mm  vel=0.074688 m/s (阈值 0.0020)  acc=0.168027 m/s² (阈值 0.0050)  tcpV=(-0.0895,-0.0300,0.0011)  isStill=0  posR=(-170.839,-1.630,-104.380)  tcpR=(-170.840,-1.630,-104.380)
+[Force] 运动检测 #26: pos=(-164.661,-198.314,355.983)mm  tcp=(-172.335,-201.003,356.028)mm  vel=0.074688 m/s (阈值 0.0020)  acc=0.168027 m/s² (阈值 0.0050)  tcpV=(-0.0902,-0.0277,0.0013)  isStill=0  posR=(-170.839,-1.630,-104.380)  tcpR=(-170.840,-1.629,-104.380)
+[Force] 运动检测 #27: pos=(-164.661,-198.314,355.983)mm  tcp=(-173.780,-201.454,356.007)mm  vel=0.074688 m/s (阈值 0.0020)  acc=0.168027 m/s² (阈值 0.0050)  tcpV=(-0.0900,-0.0271,-0.0019)  isStill=0  posR=(-170.839,-1.630,-104.380)  tcpR=(-170.840,-1.627,-104.377)
+[Force] 运动检测 #28: pos=(-164.661,-198.314,355.983)mm  tcp=(-175.238,-201.893,355.984)mm  vel=0.074688 m/s (阈值 0.0020)  acc=0.168027 m/s² (阈值 0.0050)  tcpV=(-0.0897,-0.0266,-0.0004)  isStill=0  posR=(-170.839,-1.630,-104.380)  tcpR=(-170.839,-1.623,-104.378)
+[Force] 运动检测 #29: pos=(-179.968,-203.284,356.027)mm  tcp=(-181.785,-203.821,356.036)mm  vel=0.074688 m/s (阈值 0.0020)  acc=0.168027 m/s² (阈值 0.0050)  tcpV=(-0.0923,-0.0248,0.0012)  isStill=0  posR=(-170.840,-1.630,-104.380)  tcpR=(-170.839,-1.631,-104.379)
+[Haptic] Force applied: (0.477352, -0, -0.469063) N  mag=0.669242  stale=0  button1=1  button2=0
+[Relay] Motion sends: 100 ok, 0 fail  target=(-216.837,-215.338,360.902) orient=(-170.84,-1.63,-104.38)  cmd=ServoP(-216.84,-215.34,360.90,-170.84,-1.63,-104.38)
+[StateMachine] RUNNING → READY
+[Relay] Button RELEASE — motion stopped
+[StateMachine] READY → RUNNING
+[Relay] Button2 PRESS — orient ref=(-50.7105,7.60774,-17.2046) robot ref=(-170.84,-1.61002,-104.36)
+[Relay] Button2 PRESS — joint ref=(-109.478,16.2429,-90.3957,-15.0771,99.7846,-95.4907)  [joint-space: ServoJ]
+[Relay] Button2 PRESS — latched mode: JOINT-SPACE (ServoJ for the whole hold)
+[Haptic] Force applied: (0.830411, 0, -0.492571) N  mag=0.96551  stale=0  button1=0  button2=1
+[Force] 运动检测 #31: pos=(-206.927,-209.448,364.966)mm  tcp=(-207.332,-209.359,365.014)mm  vel=0.018248 m/s (阈值 0.0020)  acc=0.022622 m/s² (阈值 0.0050)  tcpV=(-0.0165,0.0037,0.0020)  isStill=0  posR=(-177.993,-3.819,-107.357)  tcpR=(-178.210,-3.835,-107.483)
+[Relay] Motion sends: 150 ok, 0 fail  target=(-191.935,-205.811,359.95) orient=(-178.204,-6.6817,-101.421)  cmd=ServoJ(-109.4783,16.2429,-90.3957,-12.3484,92.1935,-90.9818,0.1,50,500)
+[StateMachine] RUNNING → READY
+[Relay] Button2 RELEASE — all motion stopped
+[StateMachine] READY → RUNNING
+[Relay] Button PRESS  — target start=(-207.29,-207.434,362.735)
+[Relay] Hold button + move Touch (incremental mode)
+[StateMachine] RUNNING → READY
+[Relay] Button RELEASE — motion stopped
+[StateMachine] READY → RUNNING
+[Relay] Button PRESS  — target start=(-211.32,-204.45,399.13)
+[Relay] Hold button + move Touch (incremental mode)
+[Haptic] Force applied: (0.635448, 0, -0.165963) N  mag=0.656764  stale=0  button1=1  button2=0
+[StateMachine] RUNNING → READY
+[Relay] Button RELEASE — motion stopped
+[StateMachine] READY → RUNNING
+[Relay] Button PRESS  — target start=(-147.761,-188.98,390.311)
+[Relay] Hold button + move Touch (incremental mode)
+[Relay] Motion sends: 200 ok, 0 fail  target=(-151.437,-188.277,387.812) orient=(-178.43,-2.73,-108.69)  cmd=ServoP(-151.44,-188.28,387.81,-178.43,-2.73,-108.69)
+[Haptic] Force applied: (0.632151, 0, -0.754461) N  mag=0.98429  stale=0  button1=1  button2=0
+[StateMachine] RUNNING → READY
+[Relay] Button RELEASE — motion stopped
+[StateMachine] READY → RUNNING
+[Relay] Button PRESS  — target start=(-147.41,-205.81,381.62)
+[Relay] Hold button + move Touch (incremental mode)
+[Relay] Motion sends: 250 ok, 0 fail  target=(-132.799,-267.33,365.239) orient=(-178.43,-2.73,-108.47)  cmd=ServoP(-132.80,-267.33,365.24,-178.43,-2.73,-108.47)
+[Haptic] Force applied: (-0.0753246, 0, -0.700231) N  mag=0.704271  stale=0  button1=1  button2=0
+[StateMachine] RUNNING → READY
+[Relay] Button RELEASE — motion stopped
+[StateMachine] READY → RUNNING
+[Relay] Button PRESS  — target start=(-127.65,-226.28,361.39)
+[Relay] Hold button + move Touch (incremental mode)
+[StateMachine] RUNNING → READY
+[Relay] Button RELEASE — motion stopped
+[StateMachine] READY → RUNNING
+[Relay] Button PRESS  — target start=(-120.2,-180.841,364.752)
+[Relay] Hold button + move Touch (incremental mode)
+[Haptic] Force applied: (0.746002, -0, -0.0111833) N  mag=0.746086  stale=0  button1=1  button2=0
+[StateMachine] RUNNING → READY
+[Relay] Button RELEASE — motion stopped
+[StateMachine] READY → RUNNING
+[Relay] Button PRESS  — target start=(-140.12,-137.5,406.89)
+[Relay] Hold button + move Touch (incremental mode)
+[Relay] Motion sends: 300 ok, 0 fail  target=(-139.655,-136.095,411.14) orient=(-178.43,-2.73,-108.47)  cmd=ServoP(-139.66,-136.09,411.14,-178.43,-2.73,-108.47)
+[Haptic] Force applied: (0.220718, -0, -0.0865585) N  mag=0.237084  stale=0  button1=1  button2=0
+[StateMachine] RUNNING → READY
+[Relay] Button RELEASE — motion stopped
+[StateMachine] READY → RUNNING
+[Relay] Button PRESS  — target start=(-108.34,-120.55,401.11)
+[Relay] Hold button + move Touch (incremental mode)
+[Haptic] Force applied: (0.00978506, 0, -0.019425) N  mag=0.0217503  stale=0  button1=1  button2=0
+[Relay] Motion sends: 350 ok, 0 fail  target=(-68.1606,-113.231,392.032) orient=(-178.428,-2.7328,-108.47)  cmd=ServoP(-68.16,-113.23,392.03,-178.43,-2.73,-108.47)
+
+[Relay] !!! 检测到机械臂报警 (mode=9) !!!
+[StateMachine] RUNNING → FATAL: ERR_ALARM_MODE9
+[StateMachine] RUNNING → FATAL
+[Safety] FATAL: robot disabled by state machine
+[Safety] Alarm recorded at (-92.3428,-120.785,394.737) -- total alarms: 1
+[Relay] 自动启动脱困流程...
+[脱困] 检测到报警，开始诊断...
+[脱困] 末端位姿: X=-92.343 Y=-120.785 Z=394.737 Rx=-178.426 Ry=-2.73577 Rz=-108.471
+[脱困] 关节角: J1=-68.2607 J2=46.4315 J3=-89.238 J4=-44.0432 J5=89.7679 J6=-50.3072
+[脱困] 未检测到关节限位, 可能是其他原因
+[Relay] 脱困失败，按 'e' 重试或重启程序
+[Relay] Button RELEASE — motion stopped
+****************************************
+This is the DEVELOPER EDITION of OPENHAPTICS, commercial distribution is prohibited
+Please contact 3D Systems to obtain a commercial license
+****************************************
+^C
