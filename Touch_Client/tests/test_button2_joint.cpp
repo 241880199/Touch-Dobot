@@ -34,6 +34,10 @@
 #include "../relay/Button2Joint.h"
 #include "../config/Config.h"
 #include "../robot/Kinematics.h"   // ⑫：关节限位常数（给 isTrustworthyJointRef 导出期望值）
+// ★ 2026-09-24：⑦ 与 ⑱ 要用 `TcpCalibration::rpyToMatrix` **造输入**（把"绕器件某轴转 δ"
+//   翻成欧拉三元组）。它也是欧拉约定的唯一真相源 ⇒ 测试侧不复写一份约定。
+//   ⚠ 这也是构建脚本要多链 `../calibration/TcpCalibration.cpp` 的原因。
+#include "../calibration/TcpCalibration.h"   // ⑫：关节限位常数（给 isTrustworthyJointRef 导出期望值）
 
 static int g_passed = 0, g_failed = 0;
 
@@ -54,17 +58,70 @@ typedef void (*Btn2JointFn)(const double*, const double*, const double*, double*
 static Btn2JointFn g_pinnedSignature = &button2JointTarget;
 
 // ===== 用例 =====
+// ===== 测试侧的【输入构造器】（不是被测逻辑）=====
+// 造出"在 ref 姿态上再绕【器件某根轴】转 deg"所对应的欧拉三元组。
+// ⚠ 它只用到 `TcpCalibration::rpyToMatrix`（欧拉约定的唯一真相源）+ 一个绕单轴的
+//   旋转矩阵 + 一个矩阵→ZYX 欧拉的反解。**被测那一段（ΔR → 旋转向量 → 关节）不在这里。**
+// ⚠ 它自带一个可复核的前提：调用方可以用 rpyToMatrix 把造出来的三元组还原成矩阵、与
+//   `R_ref·R_axis(δ)` 对比（⑦ 与 ⑱ 都这么自检）—— 构造器错了会让下游用例变成空转，
+//   所以"构造成功"这件事必须被断言，不能只靠"我看着对"。
+static void bodyAxisMatrix(int axis, double deg, double R[9]) {
+    const double k = 3.14159265358979323846 / 180.0;
+    const double a = deg * k, ca = cos(a), sa = sin(a);
+    for (int i = 0; i < 9; ++i) R[i] = 0.0;
+    if (axis == 0)      { R[0] = 1; R[4] = ca; R[5] = -sa; R[7] = sa;  R[8] = ca; }
+    else if (axis == 1) { R[0] = ca; R[2] = sa; R[4] = 1; R[6] = -sa; R[8] = ca; }
+    else                { R[0] = ca; R[1] = -sa; R[3] = sa; R[4] = ca; R[8] = 1; }
+}
+
+static void matMul3(const double A[9], const double B[9], double out[9]) {
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 3; ++c) {
+            double s = 0.0;
+            for (int k = 0; k < 3; ++k) s += A[r * 3 + k] * B[k * 3 + c];
+            out[r * 3 + c] = s;
+        }
+}
+
+// 矩阵 → ZYX 欧拉（度）。与 HapticCallback 的提取式同构（那里是列主序下标）。
+static void matToZyRpy(const double R[9], double rpy[3]) {
+    double sy = -R[6];
+    if (sy > 1.0) sy = 1.0;
+    if (sy < -1.0) sy = -1.0;
+    const double ry = asin(sy);
+    double rx, rz;
+    if (fabs(cos(ry)) > 1e-9) { rx = atan2(R[7], R[8]); rz = atan2(R[3], R[0]); }
+    else                      { rx = atan2(-R[7], R[4]); rz = 0.0; }
+    const double k = 180.0 / 3.14159265358979323846;
+    rpy[0] = rx * k; rpy[1] = ry * k; rpy[2] = rz * k;
+}
+
+static void bodyAxisEuler(const double refRpy[3], int axis, double deg, double outRpy[3]) {
+    double Rref[9], Rax[9], Rc[9];
+    TcpCalibration::rpyToMatrix(refRpy[0], refRpy[1], refRpy[2], Rref);
+    bodyAxisMatrix(axis, deg, Rax);
+    matMul3(Rref, Rax, Rc);          // Rc = R_ref · R_axis(deg)
+    matToZyRpy(Rc, outRpy);
+}
+
+
 
 // ① ★ 结构判据（本方案的核心，且与符号无关）：一次只动笔杆一根轴 ⇒ 恰好一个关节动。
-//    三条都写全（Rx/Rz/Ry），因为"只查一条"放过的是整个映射表：Rx→J4 对而 Rz→J5 错、
-//    或 Rz/Ry 对调的写法，都能在只查一条时全绿。
+//    三条都写全，因为"只查一条"放过的是整个映射表：对而对、或两路对调的写法，
+//    都能在只查一条时全绿。
+//    ⚠★ 2026-09-24：**源轴换成了"器件轴"**。在 refS = 全 0（= 单位矩阵）时，
+//      `cur = (δ,0,0)` ⇒ R_cur = Rx(δ) ⇒ rv = (δ,0,0) ⇒ **器件 X**；
+//      `cur = (0,δ,0)` ⇒ Ry(δ) ⇒ **器件 Y**；`cur = (0,0,δ)` ⇒ Rz(δ) ⇒ **器件 Z**。
+//      ⇒ 与从前"逐欧拉差(Rx→J4 · Rz→J5 · Ry→J6)"相比，**Y 与 Z 两路的期望互换了** ——
+//        这是刻意的规格变更（现场实测：左右摆=器件 Y、自转=器件 Z），不是笔误。
 static void test_each_stylus_axis_moves_exactly_one_joint() {
     TEST(each_stylus_axis_moves_exactly_one_joint);
     const double ref[6] = {10, 20, 30, 40, 50, 60};
     const double refS[3] = {0, 0, 0};
     double out[6];
 
-    // (a) 前后摆：笔杆 Rx +10 ⇒ 只有 J4 动
+    // (a) 前后摆 = 绕【器件 X】转 +10 ⇒ 只有 J4 动（这一路从前就是对的：
+    //     R·Rx(δ) 只是把最内层那个欧拉角加 δ ⇒ 绕器件 X ≡ ΔRx 是恒等式）
     {
         const double cur[3] = {+10.0, 0, 0};
         button2JointTarget(ref, refS, cur, out);
@@ -76,9 +133,9 @@ static void test_each_stylus_axis_moves_exactly_one_joint() {
         CHECK(fabs(out[2] - ref[2]) < 1e-9);            // J3 逐位不变
     }
 
-    // (b) 左右摆：笔杆 Rz −10 ⇒ 只有 J5 动
+    // (b) 左右摆 = 绕【器件 Y】转 −10 ⇒ 只有 J5 动
     {
-        const double cur[3] = {0, 0, -10.0};
+        const double cur[3] = {0, -10.0, 0};
         button2JointTarget(ref, refS, cur, out);
         CHECK(fabs(out[4] - ref[4]) > 1e-6);            // J5 动了
         CHECK(fabs(out[3] - ref[3]) < 1e-9);            // J4 没动
@@ -88,9 +145,9 @@ static void test_each_stylus_axis_moves_exactly_one_joint() {
         CHECK(fabs(out[2] - ref[2]) < 1e-9);
     }
 
-    // (c) 自转：笔杆 Ry +10 ⇒ 只有 J6 动
+    // (c) 自转 = 绕【器件 Z】转 +10 ⇒ 只有 J6 动
     {
-        const double cur[3] = {0, +10.0, 0};
+        const double cur[3] = {0, 0, +10.0};
         button2JointTarget(ref, refS, cur, out);
         CHECK(fabs(out[5] - ref[5]) > 1e-6);            // J6 动了
         CHECK(fabs(out[3] - ref[3]) < 1e-9);            // J4 没动
@@ -134,51 +191,55 @@ static void test_signature_has_no_position_input() {
     PASS();
 }
 
-// ④ 偏移限幅：笔杆转过**上限的 2 倍**（> ORIENT_MAX_OFFSET_DEG）⇒ 关节增量**恰为**上限。
-//    ⚠ 符号按 Config::BTN2_J4_SIGN 表达（Task 3 改符号后本用例仍应绿）。
-//    ⚠ 这条断的是【关节增量】，不是末端姿态的任何量 —— 常数在这里换了语义，
-//      见 Button2Joint.h「单位变了」那一段。
-//    ⚠ 【输入从常数导出，别硬编码 170】原版写死 `+170.0`。那在"上限今天 = 150"时成立，
-//      但**上限一变就红，而且红得像"钳位坏了"**（其实是常数被调大了）—— 又一处"常数是脆的"。
-//      取 `2 × 上限`：既【一定】超限，又不必知道上限的现值（上限翻倍/减半都仍成立）。
-//    ⚠ 断言仍写成"恰为 ORIENT_MAX_OFFSET_DEG"（**不是**"= 输入"）—— 后者会在"没夹"时
-//      也红不了（输入 = 输出），等于对常数恒真，把这条变成空转。
+// ④ 偏移限幅：笔杆转过的角度**超过上限** ⇒ 关节增量**恰为**上限。
+//    ⚠★ 2026-09-24 换了实现之后，本用例的**输入构造**必须跟着换：
+//      真 ΔR 的旋转向量**量程天然 ≤180°**（取的是主值旋转）⇒ 原版那句
+//      `overCap = 2 × 上限 = 300°` 会被折成 −60°，**根本超不了限** ⇒ 用例会变成假红。
+//      现在取 `θ = (180 + 上限)/2`：在 上限 < 180 的前提下它【一定】> 上限且 ≤ 180。
+//      ⚠ 前提 `上限 < 180` 由下面的自检钉住；上限若被提到 ≥180，这条用例**本就不可构造**，
+//        那时该做的是重新设计这条用例，而不是让它悄悄变绿。
+//    ⚠ 断言仍写成"恰为 ORIENT_MAX_OFFSET_DEG"（不是"= 输入"）—— 后者在"没夹"时也红不了。
 static void test_oversized_stylus_rotation_is_clamped_per_joint() {
     TEST(oversized_stylus_rotation_is_clamped_per_joint);
     const double ref[6] = {0, 0, 0, 40, 50, 60};
     const double refS[3] = {0, 0, 0};
-    const double overCap = 2.0 * Config::ORIENT_MAX_OFFSET_DEG;   // 一定超过上限
+    const double cap = Config::ORIENT_MAX_OFFSET_DEG;
+    const double overCap = (180.0 + cap) * 0.5;      // 一定 > cap，且 <= 180
     double out[6];
 
-    // 自检：输入确实**超过**上限。上限若被改成 0 或负数，这一句先红 ——
-    //   否则下面三条会因为"根本没超"而变成空转（2×0 = 0 不超 0）。
-    CHECK(overCap > Config::ORIENT_MAX_OFFSET_DEG);
+    CHECK(cap < 180.0);                              // ★ 前提：否则"超限"不可构造
+    CHECK(overCap > cap);                            // 输入确实超过上限
+    CHECK(overCap <= 180.0 + 1e-9);                  // 且仍在旋转向量的量程内
 
-    // (a) 前后摆 +2×上限 ⇒ J4 增量 = 符号 × 上限
+    // (a) 器件 X 转过 overCap ⇒ J4 增量 = 符号 × 上限
     {
         const double cur[3] = {+overCap, 0, 0};
         button2JointTarget(ref, refS, cur, out);
         CHECK(fabs(out[3] - ref[3]) > 1e-6);
-        CHECK(fabs(fabs(out[3] - ref[3]) - Config::ORIENT_MAX_OFFSET_DEG) < 1e-9);
-        CHECK(fabs((out[3] - ref[3]) - Config::BTN2_J4_SIGN * Config::ORIENT_MAX_OFFSET_DEG) < 1e-9);
+        CHECK(fabs(fabs(out[3] - ref[3]) - cap) < 1e-6);
+        CHECK(fabs((out[3] - ref[3]) - Config::BTN2_J4_SIGN * cap) < 1e-6);
         CHECK(fabs(out[4] - ref[4]) < 1e-9);            // 限幅只碰它自己那一路
         CHECK(fabs(out[5] - ref[5]) < 1e-9);
     }
 
-    // (b) 反向：前后摆 −2×上限 ⇒ J4 增量 = 符号 × (−上限)
+    // (b) 反向 ⇒ J4 增量 = 符号 × (−上限)
     {
         const double cur[3] = {-overCap, 0, 0};
         button2JointTarget(ref, refS, cur, out);
-        CHECK(fabs((out[3] - ref[3]) + Config::BTN2_J4_SIGN * Config::ORIENT_MAX_OFFSET_DEG) < 1e-9);
+        CHECK(fabs((out[3] - ref[3]) + Config::BTN2_J4_SIGN * cap) < 1e-6);
     }
 
-    // (c) 三个轴同时超限 ⇒ 三路各自夹到上限（逐关节夹，不是合成量）
+    // (c) 器件 Y 与 Z 两路同样夹住（各自单独来一遍 —— 旋转向量**不可能**让三轴同时超限，
+    //     因为 |rv| ≤ 180 而 3×cap 已 > 180 ⇒ 原版那句"三轴同时超限"在新语义下不可构造）。
     {
-        const double cur[3] = {+overCap, -overCap, +overCap};
-        button2JointTarget(ref, refS, cur, out);
-        CHECK(fabs(fabs(out[3] - ref[3]) - Config::ORIENT_MAX_OFFSET_DEG) < 1e-9);   // Rx -> J4
-        CHECK(fabs(fabs(out[4] - ref[4]) - Config::ORIENT_MAX_OFFSET_DEG) < 1e-9);   // Rz -> J5
-        CHECK(fabs(fabs(out[5] - ref[5]) - Config::ORIENT_MAX_OFFSET_DEG) < 1e-9);   // Ry -> J6
+        const double curY[3] = {0, -overCap, 0};
+        button2JointTarget(ref, refS, curY, out);
+        CHECK(fabs(fabs(out[4] - ref[4]) - cap) < 1e-6);
+        CHECK(fabs(out[3] - ref[3]) < 1e-9);
+        const double curZ[3] = {0, 0, +overCap};
+        button2JointTarget(ref, refS, curZ, out);
+        CHECK(fabs(fabs(out[5] - ref[5]) - cap) < 1e-6);
+        CHECK(fabs(out[4] - ref[4]) < 1e-9);
     }
     PASS();
 }
@@ -206,15 +267,42 @@ static void test_deadzone_swallows_tiny_offset_and_keeps_the_boundary() {
     // (b) 自检：0.01° 确实【小于】门限（否则 (a) 什么都没证明）
     CHECK(0.01 < dz);
 
-    // (c) 恰好等于门限 ⇒ 放行，且增量恰为 符号×（那一根源轴的偏移）
-    //     ⚠ 三根源轴**取不同正负**（Rx +dz / Ry −dz / Rz +dz）：这样"哪根源轴接到哪个关节"
-    //       在这一条里也是可区分的 —— 若 Rz 与 Ry 被接反，cur[1]≠cur[2] ⇒ 符号对不上 ⇒ 红。
+    // (c) 恰好等于门限 ⇒ 放行，且**单轴**时增量恰为 符号×偏移（单轴是精确的：
+    //     refS 全 0、cur 只有一维 ⇒ R_cur = R_axis(dz) ⇒ rv 就只有那一维 = dz）。
     {
-        const double cur[3] = {+dz, -dz, +dz};      // cur[0]=Rx, cur[1]=Ry, cur[2]=Rz
+        const double cur[3] = {+dz, 0, 0};
         button2JointTarget(ref, refS, cur, out);
-        CHECK(fabs((out[3] - ref[3]) - Config::BTN2_J4_SIGN * (+dz)) < 1e-12);   // Rx -> J4
-        CHECK(fabs((out[4] - ref[4]) - Config::BTN2_J5_SIGN * (+dz)) < 1e-12);   // Rz -> J5
-        CHECK(fabs((out[5] - ref[5]) - Config::BTN2_J6_SIGN * (-dz)) < 1e-12);   // Ry -> J6
+        CHECK(fabs((out[3] - ref[3]) - Config::BTN2_J4_SIGN * (+dz)) < 1e-12);   // 器件 X -> J4
+    }
+    {
+        const double cur[3] = {0, -dz, 0};
+        button2JointTarget(ref, refS, cur, out);
+        CHECK(fabs((out[4] - ref[4]) - Config::BTN2_J5_SIGN * (-dz)) < 1e-12);   // 器件 Y -> J5
+    }
+    {
+        const double cur[3] = {0, 0, +dz};
+        button2JointTarget(ref, refS, cur, out);
+        CHECK(fabs((out[5] - ref[5]) - Config::BTN2_J6_SIGN * (+dz)) < 1e-12);   // 器件 Z -> J6
+    }
+
+    // (d) 三轴同时、取不同正负、都**远高于**门限 ⇒ 三路都放行，且各自落在**正确的一侧**。
+    //     ⚠ 这里【不能】断言精确值，也【不能】把三轴取在门限上：
+    //       三个欧拉角同时动时，真 ΔR 的旋转向量与 (ΔRx,ΔRy,ΔRz) 相差 O(θ²) ——
+    //       θ = 10° 时每个分量可差 ~1°。而 θ = dz = 0.05° 时那一项虽只有 1e-4 量级，
+    //       却足以把某个分量**推到门限之下** ⇒ 被门吞掉、期望值恒不成立（2026-09-24 实测）。
+    //       ⇒ "恰好等于门限"这个边界由 (c) 用**单轴**精确钉住（单轴时 rv 就是输入本身）。
+    //     ⚠ 本条仍有判别力：若 Y 与 Z 两路被接反，下面两个符号断言会同时红。
+    {
+        const double dbig = 10.0;
+        const double cur[3] = {+dbig, -dbig, +dbig};
+        button2JointTarget(ref, refS, cur, out);
+        const double d3 = out[3] - ref[3], d4 = out[4] - ref[4], d5 = out[5] - ref[5];
+        CHECK(d3 * Config::BTN2_J4_SIGN > 0.0);        // 器件 X 正向 ⇒ J4 落在 SIGN 那一侧
+        CHECK(d4 * Config::BTN2_J5_SIGN < 0.0);        // 器件 Y 负向
+        CHECK(d5 * Config::BTN2_J6_SIGN > 0.0);        // 器件 Z 正向
+        CHECK(fabs(fabs(d3) - dbig) < 3.0);            // 量级同阶（容差见上）
+        CHECK(fabs(fabs(d4) - dbig) < 3.0);
+        CHECK(fabs(fabs(d5) - dbig) < 3.0);
     }
     PASS();
 }
@@ -279,27 +367,54 @@ static void test_nonfinite_guard_covers_all_argument_positions() {
     PASS();
 }
 
-// ⑦ 【实现者追加】三轴同时动 + 大角度 ⇒ 各走各的，**没有交叉耦合、没有大角度误差**。
-//    【为什么非补不可】① 是一次只动一根轴，它对"某两轴交换了影响"之外的错误有分辨力，
-//      但**测不出**"三轴同时偏时互相串扰"这一类（例如把三个增量加在同一个关节上、
-//      或先合成再分解）。而旧路（末端 RPY）正是**大角度下才翻车**（90° 摆幅差 149°）。
-//      新路是逐轴 1:1 相加，**大角度不引入任何误差** —— 这条用例把这个性质写死，
-//      也顺带把"新路绕开了整层姿态算术"这件事变成可执行的证据。
+// ⑦ ★★ 2026-09-24 重写：**倾斜参照下的三根器件轴**（这是现场那个症状的回归用例）。
+//    【为什么换掉原来那条】旧版的期望值是"欧拉角差 ⇒ 关节"的逐分量等式 —— 那正是被推翻的语义
+//      （`cur = refS + (Δx,Δy,Δz)` 在欧拉图上加减，与"绕器件某轴转"不是一回事）。
+//    【现在断什么】把参照放在**多轴倾斜**的姿态（现场那个按下姿态），然后**一次只绕一根器件轴**转：
+//        ΔR = R_ref^T · (R_ref · R_axis(δ)) = R_axis(δ)  ⇒ 旋转向量**恰好**只有那一维
+//      ⇒ 期望值可以写成【解析解】：那一根轴转 δ ⇒ 那一个关节转 SIGN·δ，另两个**逐位不动**。
+//    ★ 判别力：旧实现在这个姿态下把"自转 10°"送成 J4 +1.52 / J5 +5.48 / J6 +8.50（离线复算），
+//      本用例对它**必红** —— 它不是"换个写法", 它是把现场症状钉住。
+//    ⚠ 输入用本地的 bodyAxisEuler() 构造（测试侧的输入构造器），并用 rpyToMatrix 复核构造成功。
 static void test_three_axes_at_once_are_independent_at_large_angles() {
     TEST(three_axes_at_once_are_independent_at_large_angles);
     const double ref[6] = {-173.0, -22.0, -118.0, 100.0, -100.0, 179.0};
-    const double refS[3] = {-20.0, 12.0, 30.0};
-    // 三轴同时偏，且都远大于死区、都小于限幅（此处 120° 上限内）
-    const double dRx = +120.0, dRy = -60.0, dRz = +45.0;
-    const double cur[3] = {refS[0] + dRx, refS[1] + dRy, refS[2] + dRz};
+    // 现场那个按下姿态（2026-09-24 实测日志里的 burst 起点）
+    const double refS[3] = {-58.93, 11.83, -6.41};
+    const double deltas[3] = {+40.0, -30.0, +50.0};   // 都远大于死区、都小于限幅
+    const int    jmap[3]   = {3, 4, 5};               // 器件 X/Y/Z -> J4/J5/J6
+    const double signs[3]  = {Config::BTN2_J4_SIGN, Config::BTN2_J5_SIGN, Config::BTN2_J6_SIGN};
     double out[6];
-    button2JointTarget(ref, refS, cur, out);
-    CHECK(fabs((out[3] - ref[3]) - Config::BTN2_J4_SIGN * dRx) < 1e-9);   // 前后摆 -> J4
-    CHECK(fabs((out[4] - ref[4]) - Config::BTN2_J5_SIGN * dRz) < 1e-9);   // 左右摆 -> J5
-    CHECK(fabs((out[5] - ref[5]) - Config::BTN2_J6_SIGN * dRy) < 1e-9);   // 自转   -> J6
-    CHECK(fabs(out[0] - ref[0]) < 1e-12);
-    CHECK(fabs(out[1] - ref[1]) < 1e-12);
-    CHECK(fabs(out[2] - ref[2]) < 1e-12);
+
+    for (int axis = 0; axis < 3; axis++) {
+        double cur[3];
+        bodyAxisEuler(refS, axis, deltas[axis], cur);
+
+        // 自检：构造出的欧拉三元组确实还原成 R_ref · R_axis(δ)（否则下面等于在空转）
+        {
+            double Ra[9], Rb[9], Rax[9], expect[9];
+            TcpCalibration::rpyToMatrix(refS[0], refS[1], refS[2], Ra);
+            TcpCalibration::rpyToMatrix(cur[0],  cur[1],  cur[2],  Rb);
+            bodyAxisMatrix(axis, deltas[axis], Rax);
+            matMul3(Ra, Rax, expect);
+            double err = 0.0;
+            for (int i = 0; i < 9; ++i) { const double d = Rb[i] - expect[i]; err += d * d; }
+            CHECK(err < 1e-18);          // ★ 构造器自检（构造错了会让下面三条变成空转）
+        }
+
+        button2JointTarget(ref, refS, cur, out);
+        for (int k = 0; k < 3; ++k) {
+            const int j = jmap[k];
+            if (k == axis) {
+                CHECK(fabs((out[j] - ref[j]) - signs[k] * deltas[axis]) < 1e-6);
+            } else {
+                CHECK(fabs(out[j] - ref[j]) < 1e-9);     // 另两个关节**没动**
+            }
+        }
+        CHECK(fabs(out[0] - ref[0]) < 1e-12);
+        CHECK(fabs(out[1] - ref[1]) < 1e-12);
+        CHECK(fabs(out[2] - ref[2]) < 1e-12);
+    }
     PASS();
 }
 
@@ -334,7 +449,10 @@ static void test_deadzone_is_per_axis_not_by_magnitude() {
     button2JointTarget(ref, refS, cur, out);
 
     // (a) 远越界那一根：逐轴门与聚合门**都**放行 ⇒ 单看它区分不了两种门（幅度也钉住：±1e-6）
-    CHECK(fabs((out[3] - ref[3]) - Config::BTN2_J4_SIGN * 5.0) < 1e-6);
+    // ⚠ 容差 1e-2 而【不是】1e-6：2026-09-24 换成真 ΔR 之后，输入里 X 与 Z 两轴混在一起，
+    //   rv.x 与欧拉差 ΔRx 相差 O(5°×0.04°) ≈ 3.5e-3° ⇒ 1e-6 会恒红。
+    //   判别力不在这句上：真正区分逐轴门与聚合门的是下面那句 `out[4] == ref[4]`。
+    CHECK(fabs((out[3] - ref[3]) - Config::BTN2_J4_SIGN * 5.0) < 1e-2);
     // (b) ★ 判别力所在：门限之下那一根必须**逐位**等于参照。
     //     用 `==` 而不是 `< 1e-9`：0.04 一旦被放行，差值就是 0.04（远大于 1e-9），
     //     但逐位相等是这里真正的契约（没放行就是原样搬参照，不该有任何浮点痕迹）。
@@ -576,8 +694,29 @@ static void test_accumulator_reaches_a_large_target_over_several_frames() {
     PASS();
 }
 
+// ⑱ ★ 跨 ±180 接缝（2026-09-24 新实现特有的性质，旧实现没有）。
+//    【场景】`Rz(+179°) → Rz(−179°)`：物理上只转了 **2°**，但逐欧拉角作差是
+//      `−179 − (+179) = −358°` ⇒ 被限幅夹到 −150 ⇒ **关节一路冲向限位**（本仓记过
+//      "180 → −179.9 的数值跳被照字面解释成 J6 转一整圈"那次关节超速）。
+//    【现在断什么】真 ΔR 走矩阵，绕接缝无关 ⇒ 期望值是 **+2°**，不是 ±150°。
+//    ⚠ 这条对新实现是**结构性的**（不是调参调出来的）；旧实现在这里必红。
+static void test_crossing_the_pm180_seam_is_only_two_degrees() {
+    TEST(crossing_the_pm180_seam_is_only_two_degrees);
+    const double ref[6] = {0, 0, 0, 10, 20, 30};
+    const double refS[3] = {0, 0, +179.0};
+    const double cur[3]  = {0, 0, -179.0};
+    double out[6];
+    button2JointTarget(ref, refS, cur, out);
+    CHECK(fabs((out[5] - ref[5]) - Config::BTN2_J6_SIGN * (+2.0)) < 1e-6);   // 器件 Z -> J6，+2°
+    CHECK(fabs(out[3] - ref[3]) < 1e-9);
+    CHECK(fabs(out[4] - ref[4]) < 1e-9);
+    CHECK(fabs(out[5] - ref[5]) < 150.0);            // ★ 绝不能被夹成 ±150
+    PASS();
+}
+
+
 int main() {
-    std::cout << "--- Button2Joint (按钮2 关节空间映射：笔杆 Euler 增量 -> 关节增量) ---" << std::endl;
+    std::cout << "--- Button2Joint (按钮2 关节空间映射：笔杆姿态增量 -> 关节增量) ---" << std::endl;
     test_each_stylus_axis_moves_exactly_one_joint();
     test_no_motion_returns_reference();
     test_signature_has_no_position_input();
@@ -595,6 +734,7 @@ int main() {
     test_clamp_step_zero_offset_changes_nothing();      // ⑮ M2 的判据（抽出后）
     test_clamp_step_limits_a_large_offset_per_axis();   // ⑯
     test_accumulator_reaches_a_large_target_over_several_frames();  // ⑰ ★ 不会永久截断
+    test_crossing_the_pm180_seam_is_only_two_degrees();   // ⑱ 2026-09-24 换实现后新增（跨 ±180）
     std::cout << "\nResults: " << g_passed << " passed, " << g_failed << " failed" << std::endl;
     return g_failed == 0 ? 0 : 1;
 }

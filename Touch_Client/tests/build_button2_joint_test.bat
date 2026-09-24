@@ -41,5 +41,11 @@ rem   Cf. build_button2_mapping_test.bat, which DOES link a calibration .cpp (Tc
 rem   for a symbol its test actually calls -- the same transitive rule, applied that way.
 rem NOTE: keep this file ASCII-only. Non-ASCII comments in a .bat get mis-decoded by cmd.exe
 rem under a non-UTF-8 codepage and can silently swallow the following line.
-cl /EHsc /std:c++17 /I"D:\Projects\Touch\OpenHaptics\Developer\3.5.0\include" /I"D:\Projects\Touch\OpenHaptics\Developer\3.5.0\utilities\include" /DWIN32 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS test_button2_joint.cpp ../relay/Button2Joint.cpp ../robot/Kinematics.cpp /Fe:test_button2_joint.exe
+rem
+rem 2026-09-24: button2JointTarget no longer differences Euler angles; it builds the real
+rem   delta-R and takes its rotation vector, so Button2Joint.cpp now CALLS
+rem   TcpCalibration::rpyToMatrix -- the single source of truth for the Rz*Ry*Rx convention.
+rem   Hence ../calibration/TcpCalibration.cpp is now REQUIRED here (LNK2019 without it).
+rem   TcpCalibration.cpp needs only cmath/cstdio/cstring/cstdlib, so nothing else comes along.
+cl /EHsc /std:c++17 /I"D:\Projects\Touch\OpenHaptics\Developer\3.5.0\include" /I"D:\Projects\Touch\OpenHaptics\Developer\3.5.0\utilities\include" /DWIN32 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS test_button2_joint.cpp ../relay/Button2Joint.cpp ../robot/Kinematics.cpp ../calibration/TcpCalibration.cpp /Fe:test_button2_joint.exe
 echo BUILD_EXIT=%ERRORLEVEL%
