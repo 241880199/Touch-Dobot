@@ -64,7 +64,12 @@
   ⚠ **裸 `grep -c 'echo   \[FAIL\]'` 会数出 26** —— 文件头 "HOW TEST RESULTS ARE JUDGED" 段里
   还有两行**教学示例**（`:51` / `:53`）。可靠计数用 `set /a PASSED+=1`（=24）。
 - 块形如：`if %ERRORLEVEL% EQU 0 ( 建 ⇒ 跑 ⇒ if !ERRORLEVEL! EQU 0 (PASSED+=1) else (FAILED+=1) ) else ( 构建失败 )`。
-- **内层 `else`（构建成功但测试 exe 返回非零）从未被看到变红** —— 上一轮（`0a72524`）的六个负对照打的都是**构建失败**那一路。
+- **内层 `else`（构建成功但测试 exe 返回非零）从未被【当成目标】刻意反证过**
+  —— 上一轮（`0a72524`）的六个负对照打的都是**构建失败**那一路。
+  ⚠ **本句原先写"从未被看到变红"，那是错的**（Task 5 复审实测纠正）：同批的 Task 2 与 Task 4
+  各**顺手**走过这一支（`_harness_task2_redwiring.log` / `_harness_task4_neg.log`，后者基数与本轮相同），
+  但那两次**套件自己也报了红**、且**都没量调用方的退出码** ⇒ 分不开"判定靠退出码"与"判定靠扫摘要"。
+  **Task 5 补的正是这一半。**
 - 缺射程的后果是具体的：`set "HARNESS_RC=%FAILED%"` + `exit /b %HARNESS_RC%` 是唯一把失败传给调用方的东西（`run_tests.bat:786-805`）；这条链没被反证过。
 
 ### 设计
