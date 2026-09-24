@@ -3,6 +3,7 @@
 #include "Button2Joint.h"     // ★ Task 2: 按钮2 关节空间纯函数 (笔杆偏移 ⇒ J4/J5/J6 增量)
 #include "Button2Mapping.h"
 #include "FeedbackParser.h"
+#include "GainReadbackPolicy.h"
 #include "RelayCommandParser.h"
 #include "SafetyBoundary.h"
 #include "../robot/RobotConnection.h"
@@ -2505,23 +2506,25 @@ static std::atomic<bool>   s_gainReportPending{false};
 void RelayCore::sendReflectionGain(bool force) {
     const DWORD now = GetTickCount();
     const double g = ForceTuning::gain();
-    if (!force) {
-        // ① 值没变 ⇒ 不发。⚠ 这里必须【顺手清掉待发标志】: 一条被限频挡下的 A→B 之后值又变回 A,
-        //    此时"待发"已无事可做; 留着标志会让 pollRelayCommands 每帧都调进来、每帧都从这里
-        //    返回 ⇒ 标志卡在 true 再也不动 (无害, 但那个标志从此失去意义)。
-        if (g == s_lastSentGain.load()) {
-            s_gainReportPending.store(false);
-            return;
-        }
-        // ② 距上次发送不足 100ms ⇒ 只记下待发。
-        //    ⚠ s_lastGainReportMs 【不】在这里更新: 它记的是"上次真的发出去"的时刻。若把被挡下的
-        //      时刻也写进去, 拖动期间每一条命令 (以及每帧的补发) 都会把期限往后推 ⇒ 只要命令
-        //      不停就永远发不出去, 限频变成饥饿。
-        const DWORD lastReportMs = s_lastGainReportMs.load();   // 先取, 再算差 (原子量不能直接参与算术)
-        if ((now - lastReportMs) < 100) {
-            s_gainReportPending.store(true);   // 记下待发, 由 pollRelayCommands 补 —— 最后一条不丢
-            return;
-        }
+    // 判决【不在本文件里】—— 抽成了纯函数 (relay/GainReadbackPolicy.h), 理由与
+    //   force 必须第一道的说明都写在那里, 并由 test_gain_readback_policy 钉住。
+    //   本文件只负责: 取值、传参、按判决改这三样状态 (sent 值 / 上次发送时刻 / 待发标志)。
+    switch (GainReadbackPolicy::gainReportDecision(
+                force, g, s_lastSentGain.load(), now,
+                s_lastGainReportMs.load(), GainReadbackPolicy::GAIN_REPORT_MIN_INTERVAL_MS)) {
+    case GainReadbackPolicy::GainReport::SkipUnchanged:
+        // ⚠ 必须【顺手清掉待发标志】: 一条被限频挡下的 A→B 之后值又变回 A, 此时"待发"已
+        //   无事可做; 留着标志会让 pollRelayCommands 每帧都调进来、每帧都从这里返回 ⇒
+        //   标志卡在 true 再也不动 (无害, 但那个标志从此失去意义)。
+        s_gainReportPending.store(false);
+        return;
+    case GainReadbackPolicy::GainReport::SkipTooSoon:
+        // 记下待发, 由 pollRelayCommands 补 —— 最后一条不丢。
+        // ⚠ 这里【不】更新 s_lastGainReportMs: 它记的是"上次真的发出去"的时刻 (见头文件)。
+        s_gainReportPending.store(true);
+        return;
+    case GainReadbackPolicy::GainReport::Send:
+        break;   // 落到下面发送
     }
     s_gainReportPending.store(false);
     s_lastGainReportMs.store(now);
@@ -2596,6 +2599,7 @@ void RelayCore::dispatchRelayCommand(const char* line) {
             //     唯一一条必须发出去的回读 ⇒ MATLAB 会永远显示一个假数 (规格 §4 末尾那段:
             //     滑条上限来自回读, GAIN_MAX 在 C++ 侧调低后 MATLAB 会一直发一个已被拒的值)。
             //     合上这条闸只省下一次 160 字节的发送, 代价是那个不变量失效。
+            //   （判决本身已抽到 relay/GainReadbackPolicy.h, 由 test_gain_readback_policy 钉住。）
             sendReflectionGain(true);
         }
         break;

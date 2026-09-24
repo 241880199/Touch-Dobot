@@ -632,6 +632,46 @@ if %ERRORLEVEL% EQU 0 (
 )
 echo.
 
+rem ============================================================
+rem Suite wired into "build then run" on 2026-09-24:
+rem   gain_readback_policy -- the pure decision function behind RG| readback rate
+rem   limiting (relay/GainReadbackPolicy.h). It was extracted out of RelayCore.cpp,
+rem   which no test compiles, after the limiter was once silently disabled by a
+rem   mis-passed force=true argument -- a defect the test bench did not notice.
+rem   Only the DECISION is covered here; the call site in RelayCore.cpp still has
+rem   no automated coverage.
+rem   The assertion count is deliberately NOT copied here: the suite prints it on
+rem   every run, and a hand-typed copy only goes stale in the silent direction
+rem   (see the note on hand-typed numbers in the NOT RUN block at the bottom).
+rem   Adding this .cpp is what makes the runtime suite count on disk move
+rem   from 24 to 25; if this section is ever deleted while the .cpp stays,
+rem   the harness asserts at the bottom and exits 1 -- by design.
+rem   The FORM of the result check is NOT special to this suite -- every
+rem   section in this file uses it. See "HOW TEST RESULTS ARE JUDGED" at
+rem   the top of this file for the rule and the two tempting-but-wrong forms.
+rem ============================================================
+
+echo --- Building test_gain_readback_policy ---
+call "%TESTDIR%\build_gain_readback_policy_test.bat"
+@echo off
+if %ERRORLEVEL% EQU 0 (
+    echo   Build OK
+    echo.
+    echo === test_gain_readback_policy.exe ===
+    "%TESTDIR%\test_gain_readback_policy.exe"
+    if !ERRORLEVEL! EQU 0 (
+        set /a PASSED+=1
+        echo   [OK]
+    ) else (
+        set /a FAILED+=1
+        echo   [FAIL]
+    )
+) else (
+    echo   [FAIL: build error]
+    set /a FAILED+=1
+)
+echo.
+
 echo ================================================
 echo   Tests complete
 echo ================================================
