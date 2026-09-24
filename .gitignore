@@ -56,3 +56,14 @@ Touch_Client/tests/_*.bat
 Touch_Client/tests/_*.cpp
 Touch_Client/tests/*.log
 Hardware/stl.zip
+
+# ===== 2026-09-24 深夜: 上机运行产生的【运行日志】—— 一律不入库（磁盘上保留）=====
+# 判据: 它们不是证据而是运行副产品（不编码任何结论、不被文档引用）。
+# ⚠ 逐条点名, 不用 *.log —— 仓库里已有被跟踪的 .log, 宽通配会把它们藏起来。
+Touch_Client/alarms.log
+Touch_Client/robot_diagnostics.log
+Touch_Client/send_transcript.txt
+Touch_Client/force_demo_log.csv
+Touch_Client/tests/_nc_gold_hash.txt
+# 未被任何文档引用的原始采集（留盘不入库; 若以后要引用它, 把这一行删掉即可）
+Docs/superpowers/evidence/2026-09-24-force-wave-press-cycles-raw-only.csv
