@@ -335,7 +335,13 @@ static DWORD WINAPI forceReaderThread(LPVOID) {
             const double* p624 = app.forceData.tcpPoseActual;
             const bool have624 = !(p624[3] == 0.0 && p624[4] == 0.0 && p624[5] == 0.0);
             double pose[6];
-            pose[0] = dashPose[0];  pose[1] = dashPose[1];  pose[2] = dashPose[2];
+            // ★★ 2026-09-24 深夜: 位置也优先取同帧 @624 —— 它是**运动估计器**的输入，
+            //   而估计器死着 ⇒ 惯量补偿形同虚设（见 Config::FORCE_POSE_POS_FROM_624 那一段）。
+            //   ⚠ 与 FORCE_INERTIA_SIGN = −1 成对；单独打开会把惯性加倍。
+            const bool use624Pos = Config::FORCE_POSE_POS_FROM_624 && have624;
+            pose[0] = use624Pos ? p624[0] : dashPose[0];
+            pose[1] = use624Pos ? p624[1] : dashPose[1];
+            pose[2] = use624Pos ? p624[2] : dashPose[2];
             const bool use624Orient = Config::FORCE_POSE_ORIENT_FROM_624 && have624;
             pose[3] = use624Orient ? p624[3] : dashPose[3];
             pose[4] = use624Orient ? p624[4] : dashPose[4];
