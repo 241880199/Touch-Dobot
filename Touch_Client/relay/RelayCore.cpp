@@ -3059,8 +3059,10 @@ void RelayCore::pollForce() {
     //   lastMotionStill, 那两个与它功能重复, 已撤回)。
     double motionVel[3] = {0, 0, 0}, motionAcc[3] = {0, 0, 0};
     const bool motionStill = ForceCompensation::motionState(motionVel, motionAcc);
+    // ★ 2026-09-24: 末尾带上**原始 @1304 三轴** —— 与上面的 filtered 同时落盘，
+    //   才能判"重压时横向抖动"是物理的还是补偿链注进去的（见 ForceLogger.h 那段）。
     ForceLogger::log(now, filtered, logPose, appState.forceFeedbackEnabled ? 1 : 0,
-                     motionAcc, motionStill ? 1 : 0);
+                     motionAcc, motionStill ? 1 : 0, appState.forceData.sixForceRaw);
 
     sendRelayUpdate(buf);
 

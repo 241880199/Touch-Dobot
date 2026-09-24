@@ -32,9 +32,9 @@ namespace ForceLogger {
                    const double pose[6],       // 机器人末端位姿 x,y,z,rx,ry,rz (mm, deg)
                    int ffEnabled,              // 1=力反馈开, 0=关
                    const double acc[3],        // 运动估计器滤波后加速度 (m/s²)
-                   int isStill);               // 1=估计器判"静止" (那时 Fi 不施加)
+                   int isStill, const double raw[3]);   // raw = 原始 @1304 三轴 (N) —— 见 RelayCore 调用点那段理由               // 1=估计器判"静止" (那时 Fi 不施加)
 
     // 写一条采样 (文件未打开时忽略)。
     void log(unsigned long tMs, const double force[6], const double pose[6], int ffEnabled,
-             const double acc[3], int isStill);
+             const double acc[3], int isStill, const double raw[3]);
 }
