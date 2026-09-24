@@ -2042,7 +2042,11 @@ static int mgParseRepeat(const char* line, PayloadCalibration::RepeatPair* out, 
         if (*p == ',') p++;
     }
     // 循环因上限而停 = 后面还有项 ⇒ (a)
-    if (nf == 16 && *p == ',') return -1;
+    //   ⚠ 判据【不能】写成 `*p == ','`: 循环体末尾那句 `if (*p == ',') p++;` 已经吃过逗号了,
+    //     停在上限时 p 指向的是【第 17 项的第一个字符】, 不是逗号 ⇒ 写成 `== ','` 这一支
+    //     【永不触发】(2026-09-24 实测: 17 项时返回 16, 全靠 (b) 兜住)。
+    //   正确的问法是"是不是【因为没有位置】才停的": 停了, 但后面还有东西。
+    if (nf == 16 && *p != '\0' && *p != ' ') return -1;
     p = strstr(line, "seconds=");
     if (!p) return 0;
     p += 8;
@@ -2054,7 +2058,7 @@ static int mgParseRepeat(const char* line, PayloadCalibration::RepeatPair* out, 
         p = e;
         if (*p == ',') p++;
     }
-    if (ns == 16 && *p == ',') return -1;
+    if (ns == 16 && *p != '\0' && *p != ' ') return -1;   // (a) —— 判据同 nf, 见上
     if (nf != ns) return -1;        // (c)
     if (nf > maxOut) return -1;     // (b)
     for (int i = 0; i < nf; i++) { out[i].first = firsts[i] - 1; out[i].second = seconds[i] - 1; }
@@ -3121,6 +3125,13 @@ static T6FreshStatus t6TakeFreshCapture(const char* name, T6Capture& cap, T6Last
                      " 读不出任何一块采集 (拿错文件了 / 格式不对)。" << std::endl;
         return T6FreshStatus::Broken;
     }
+    if (blk.nc < 0) {
+        // nc == -1 = 这一块里【一行数据都没有】(只有块头/注释行)。它既不是"缺 @720"、
+        //   也不是"列太宽" —— 报错必须分开, 否则会把操作者引去补列 (2026-09-24)。
+        std::cout << "    ★★ 新采集 " << blk.path << " 的最后一块 attempt " << blk.stamp
+                  << " 里【一行数据都没有】(只有块头 / 注释行) ⇒ 这一块没采到东西。" << std::endl;
+        return T6FreshStatus::Broken;
+    }
     if (blk.nc > MG_MAXCOLS) {
         // ★ 2026-09-24: 从前"太宽"与"太窄"共用同一句"没有参考量那一路"—— 对一份【多带了几列】
         //   的采集, 那句话会把操作者引到反方向 (去补 @720, 而它就在那儿)。两种情况分开报。
@@ -3445,7 +3456,17 @@ static void test_repeat_header_is_not_silently_truncated() {
     const char* mismatch = "# repeat: first=1,3,5 seconds=2,4,6,8\n";
     CHECK(mgParseRepeat(mismatch, reps, MG_MAXREP) == -1);
 
-    // 单侧超过 16 项 (解析缓冲本身的上限) ⇒ 拒 (旧行为: 静默停在 16)
+    // 单侧超过 16 项 (解析缓冲本身的上限) ⇒ 拒 (旧行为: 静默停在 16)。
+    // ⚠ 这里拒它的其实是 (b) (`nf > MG_MAXREP`, 而 MG_MAXREP=8): 17 项解析出来 nf=17 ⇒
+    //   17 > 8 当场拒。修 (a) 之前, 这一条【就】是靠 (b) 过的 —— (a) 的判据当时写成
+    //   `*p == ','`, 而循环体末尾已经吃过逗号, 停在上限时 p 指向第 17 项的首字符 ⇒
+    //   (a) 永不触发, 实测 17 项 / maxOut=16 时返回 16 (静默截断) 也印证了这一点。
+    //   修完之后 (a) 对这份输入【先】触发 (返回 -1 的结论不变)。
+    //   ⚠ 但注意 (a) 在【现有唯一的调用路径上仍不是唯一的判决者】: mgLoad 传的 maxOut 恒为
+    //     MG_MAXREP=8, 而 (a) 触发意味着 nf==16 ⇒ 16 > 8 ⇒ (b) 必然同真 ⇒ (a) 在那里被 (b)
+    //     完全覆盖。(a) 单独说了算的情形需要一个 maxOut >= 16 的调用方; 实现者量"这一支永不
+    //     触发"用的正是 maxOut=16 (而不是生产路径上的 8), 因为只有那样才能把 (a) 与 (b) 分开。
+    //   本条断言 (= -1) 不为此改动: 它验的是"不静默截断"这个结论。
     const char* over16 = "# repeat: first=1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17"
                          " seconds=1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17\n";
     CHECK(mgParseRepeat(over16, reps, MG_MAXREP) == -1);
