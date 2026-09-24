@@ -230,7 +230,7 @@ static bool test_shoulder_early_trigger() {
     double q[6] = {5, 85, -100, 10, 45, -20};
     Vec3 positions[7];
     Kinematics::computeJointPositions(q, positions);
-    double r_elbow = sqrt(positions[2].x*positions[2].x + positions[2].y*positions[2].y);
+    double r_elbow = sqrt(positions[3].x*positions[3].x + positions[3].y*positions[3].y);
     printf("  Test10: r_elbow=%.1f mm\n", r_elbow);
 
     Vec3 targetOrient(0, 0, 0);
@@ -257,7 +257,7 @@ static bool test_dual_singular_warning() {
     double q[6] = {3, 88, -100, 10, 1.0, 20};
     Vec3 positions[7];
     Kinematics::computeJointPositions(q, positions);
-    double r_elbow = sqrt(positions[2].x*positions[2].x + positions[2].y*positions[2].y);
+    double r_elbow = sqrt(positions[3].x*positions[3].x + positions[3].y*positions[3].y);
 
     Vec3 targetOrient(0, 0, 0);
     Vec3 delta(5.0, 5.0, 5.0);

@@ -27,15 +27,20 @@ static int g_passed = 0, g_failed = 0;
 #define PASS() do { std::cout << "PASS" << std::endl; g_passed++; } while(0)
 #define CHECK(cond) do { if (!(cond)) { std::cout << "FAIL: " << #cond << std::endl; g_failed++; return; } } while(0)
 
-// ★★ 2026-09-22: 本文件从前五处都写死 `Sleep(60)`，而判据是 `elapsed >= Config::MIN_WARN_MS`(=50)，
-//   其中 elapsed 由 `GetTickCount()` 得到 —— **它的粒度是 15.6ms** ⇒ 真实睡了 60~78ms，
-//   但【量出来的差值可能只有 ~46ms】⇒ `shouldEscalate()` 返回 false ⇒ 状态停在 RUNNING
-//   ⇒ 用例随机变红。**实测：60 次里红 5 次（≈8%）**，且随机命中 `can_move_guard` 或 `speed_factor`。
-//   ⇒ 余量必须【显著大于时钟粒度】：4 × MIN_WARN_MS = 200ms ⇒ 余量 150ms ≫ 15.6ms。
-//   ⚠ 同目录的 `test_escalation.cpp` 用了更彻底的办法（直接 `et.m_firstErrorMs -= MIN_WARN_MS + 1`，
-//     把时间做成【确定的输入】）。这里用不了那一招：需要拿到 `EscalationTracker`，而
-//     `RobotStateMachine` 的 `m_escalation` 是私有的 ⇒ 只能用拉开余量。
-static const DWORD kSettleMs = static_cast<DWORD>(Config::MIN_WARN_MS) * 4;
+// ★★ 2026-09-24: 时间【注入】, 不睡觉。
+//
+// 【为什么不再睡了】: 判据是 `elapsed >= Config::MIN_WARN_MS`(=50ms)，而 elapsed 由
+//   `GetTickCount()` 得到 —— 它的粒度是 15.6ms。从前本文件靠"睡 4 × MIN_WARN_MS = 200ms"
+//   把余量拉开，代价是 (a) 每次运行白花 ~1s，(b) 判据对 MIN_WARN_MS ∈ (0, 200] 全都不敏感
+//   —— 改到 150 也照样绿。下侧边界（差 1ms 不升级）更是无从谈起。
+// 【那件事的如实记录】: 2026-09-22 记的是"实测 60 次里红 5 次（≈8%）"。2026-09-24 复核：
+//   加了 200ms 余量之后**跑 180 次零红** ⇒ 那条 flake 已经不存在了。所以本轮不是"修 flake",
+//   而是把时间做成【确定的输入】、并把阈值两侧补上。
+// 【为什么现在能用注入】: 从前这里写着"`RobotStateMachine` 的 `m_escalation` 是私有的 ⇒
+//   用不了那一招" —— **那句是假的**。`RobotStateMachine::escalation()`
+//   (safety/RobotStateMachine.h:63) 在 public 段里 (private 从 66 行才开始)，返回可写引用。
+// 【代价】: 这要直接写 `m_firstErrorMs` —— public 字段, 但语义上是内部量, 属【测试专用写】。
+//   先例: 同目录 `test_escalation.cpp:92` 一直在这么做 (`et.m_firstErrorMs -= MIN_WARN_MS + 1`)。
 
 // ===== Test 1: State machine standard transition chain =====
 static void test_state_machine_transition_chain() {
@@ -61,7 +66,7 @@ static void test_state_machine_transition_chain() {
     warnErr.timestampMs = GetTickCount64();
 
     sm.onError(warnErr, delta);
-    Sleep(kSettleMs);  // 余量必须 ≫ GetTickCount 的 15.6ms 粒度 —— 见 kSettleMs 的说明
+    sm.escalation().m_firstErrorMs -= (Config::MIN_WARN_MS + 1);  // 时间注入, 见文件顶部
     sm.onError(warnErr, delta);
     sm.onError(warnErr, delta);
     CHECK(sm.currentState() == RobotState::DEGRADED);
@@ -121,7 +126,7 @@ static void test_can_move_guard() {
     warnErr.timestampMs = GetTickCount64();
 
     sm.onError(warnErr, delta);
-    Sleep(kSettleMs);  // 余量必须 ≫ GetTickCount 的 15.6ms 粒度 —— 见 kSettleMs 的说明
+    sm.escalation().m_firstErrorMs -= (Config::MIN_WARN_MS + 1);  // 时间注入, 见文件顶部
     sm.onError(warnErr, delta);
     sm.onError(warnErr, delta);
     CHECK(sm.currentState() == RobotState::DEGRADED);
@@ -151,7 +156,7 @@ static void test_speed_factor() {
     warnErr.timestampMs = GetTickCount64();
 
     sm.onError(warnErr, delta);
-    Sleep(kSettleMs);  // 余量必须 ≫ GetTickCount 的 15.6ms 粒度 —— 见 kSettleMs 的说明
+    sm.escalation().m_firstErrorMs -= (Config::MIN_WARN_MS + 1);  // 时间注入, 见文件顶部
     sm.onError(warnErr, delta);
     sm.onError(warnErr, delta);
     CHECK(fabs(sm.speedFactor() - 0.3) < 0.01);
@@ -179,8 +184,7 @@ static void test_escalation_warn_to_degrade() {
     et.recordError(RobotErrorCode::ERR_CYLINDRICAL_WARN, delta);
     CHECK(!et.shouldEscalate());  // 1 frame, not enough
 
-    // 拉开余量以满足 MIN_WARN_MS —— 见 kSettleMs 的说明 (也是同一个 flake 的修法)
-    Sleep(kSettleMs);
+    et.m_firstErrorMs -= (Config::MIN_WARN_MS + 1);   // 时间注入, 见文件顶部
 
     et.recordError(RobotErrorCode::ERR_CYLINDRICAL_WARN, delta);
     et.recordError(RobotErrorCode::ERR_CYLINDRICAL_WARN, delta);
@@ -218,7 +222,7 @@ static void test_deescalation_reverse_motion() {
 
     // Record an error to get escalated state
     et.recordError(RobotErrorCode::ERR_CYLINDRICAL_WARN, dangerDir);
-    Sleep(kSettleMs);   // 见 kSettleMs 的说明
+    et.m_firstErrorMs -= (Config::MIN_WARN_MS + 1);   // 时间注入, 见文件顶部
     et.recordError(RobotErrorCode::ERR_CYLINDRICAL_WARN, dangerDir);
     et.recordError(RobotErrorCode::ERR_CYLINDRICAL_WARN, dangerDir);
     et.escalated = true;
@@ -252,6 +256,60 @@ static void test_deescalation_clear_frames() {
     PASS();
 }
 
+// ===== Test 9: MIN_WARN_MS 的【两侧边界】=====
+//
+// 【为什么必须有它】: 本文件从前靠"睡 4 × MIN_WARN_MS = 200ms"去满足 50ms 的规则 ——
+//   余量 4 倍 ⇒ 判据对 MIN_WARN_MS ∈ (0, 200] 全都不敏感, 改到 150 也照样绿。
+//   下面两条把阈值本身钉到 1ms: 差 1ms 不升级, 正好到点升级 —— 而且经下面那道
+//   相位对齐之后, 【两侧都是确定的】, 不是"通常如此"。
+// 【怎么做到不用睡】: 直接注入"距第一次出错过去了多久"——
+//   注入的确实是【差】, 但那个差是减在 `recordError()` 内部那次 `GetTickCount()`
+//   读数上的 ⇒ 下侧断言看到的 elapsed 实际是 `49 + (T'-T)`, 其中 T'-T 是之后
+//   `shouldEscalate()` 里再读一次时钟的增量。
+// 【所以要先把相位对齐】: 不对齐的话, 那两次读时钟的相位是【随机的】⇒
+//   中间可能跨过一个 15.6ms 量子, 使 elapsed 从 49 变成 64/65 ⇒ 下侧留一道残留
+//   刀口: **实测 ≈5e-7/次 (2,000,000 次重放里 1 次), 不是 0**。
+//   ⇒ 在【第一次 `recordError()` 之前】自旋到"刚跨过一个 tick 边界", 之后两次读时钟
+//   都落在同一个新鲜量子内 (它们相隔不过微秒级, 而余量是整个 15.6ms) ⇒ elapsed 确定地是 49
+//   ⇒ 这才是"为什么要有那一段自旋"的理由, 不是把残留当成接受的代价。
+//   这一段自旋的位置是【要紧的】: 必须在【第一次 `recordError()` 之前】——
+//   那一次调用才是 `m_firstErrorMs` 的写入点 (见 EscalationTracker.h:31)。
+//   若是挪到注入前那一行, 第一次读时钟的相位仍随机, 自旋反而会保证跨过刻度
+//   ⇒ 下侧断言【必然】失败 (elapsed = 64/65)。
+// 【构造上抓不到"常数取值错"】: 本用例读的就是实现读的那个 `Config::MIN_WARN_MS`
+//   ⇒ 把 50 改成别的值, 它会跟着改、照样绿。它钉住的是【阈值处的那次比较】,
+//   不是 50 这个数本身 (那个数在别处钉)。
+static void test_escalation_boundary_at_min_warn_ms() {
+    TEST(escalation_boundary_at_min_warn_ms);
+
+    // 本用例的算术假设: MIN_WARN_MS >= 2 才谈得上"差 1ms"这一侧。
+    CHECK(Config::MIN_WARN_MS > 1);
+
+    Vec3 delta = {1, 0, 0};
+    EscalationTracker et;
+
+    // ★ 先把相位【对齐到刚跨过一个 tick 边界】: 这样下面两次读时钟都落在同一个 15.6ms 量子里,
+    //   下侧断言就是确定的。不对齐时它有一道 ≈5e-7/次 的残留刀口 (实测 2,000,000 次里 1 次) ——
+    //   原因是 recordError() 里那次 GetTickCount() 读与 shouldEscalate() 里那次读之间, 相位是
+    //   随机的 ⇒ 可能跨过一个量子, 使 elapsed 从 49 变成 65。
+    //   自旋最多 15.6ms, 是这一支能拿到"确定的 1ms 夹逼"的全部代价。
+    //   ⚠ 位置: 必须在【第一次 recordError() 之前】(它是 m_firstErrorMs 的写入点), 不能挪到注入前。
+    { DWORD a = GetTickCount(); while (GetTickCount() == a) { } }
+
+    et.recordError(RobotErrorCode::ERR_CYLINDRICAL_WARN, delta);
+    et.recordError(RobotErrorCode::ERR_CYLINDRICAL_WARN, delta);
+    et.recordError(RobotErrorCode::ERR_CYLINDRICAL_WARN, delta);
+    CHECK(et.count() == 3);                       // 帧数够了, 只差时间
+
+    et.m_firstErrorMs -= (Config::MIN_WARN_MS - 1);   // 差 1ms
+    CHECK(!et.shouldEscalate());                      // ★ 不升级 (下侧)
+
+    et.m_firstErrorMs -= 1;                           // 正好到点
+    CHECK(et.shouldEscalate());                       // ★ 升级 (阈值本身)
+
+    PASS();
+}
+
 int main() {
     std::cout << "=== Safety Core Unit Tests ===" << std::endl;
     test_state_machine_transition_chain();
@@ -262,6 +320,7 @@ int main() {
     test_escalation_different_error_resets();
     test_deescalation_reverse_motion();
     test_deescalation_clear_frames();
+    test_escalation_boundary_at_min_warn_ms();
 
     std::cout << "\nResults: " << g_passed << " passed, " << g_failed << " failed" << std::endl;
     return g_failed ? 1 : 0;

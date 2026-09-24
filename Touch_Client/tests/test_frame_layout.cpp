@@ -13,8 +13,10 @@
 
 #include <iostream>
 #include <cstring>
+#include <cmath>
 
 #include "../robot/FrameLayout.h"
+#include "../relay/CoordinateTransform.h"
 
 static int g_passed = 0, g_failed = 0;
 
@@ -154,6 +156,40 @@ static void test_all_zero_frame_rejected() {
     PASS();
 }
 
+// 2026-09-23: 平移路径与姿态路径必须用【同一张】坐标变换 ——
+//   09-21 起姿态那条是自己又写了一遍（且源码里明写"从未被验证过"），漂开的风险是结构性的。
+// ⚠ 断言写的是本文件既有的 CHECK（不是 TEST）：TEST 在本文件里是【标签打印器】(见它上面的
+//   #define)，它不求值也不计失败 —— 写成 TEST(<表达式>) 会让这两条用例【无论对错都绿】。
+//   (初稿里这两条就是这么写的; 实测: 那样写 g_passed 仍是 12, 而打印却看着"过了"。)
+static void test_touch_to_robot_matrix_is_the_position_mapping() {
+    TEST(touch_to_robot_matrix_is_the_position_mapping);
+    double M[9] = {0};
+    touchToRobotMatrix(M);
+    // 与 convertTouchToRobot 的兜底逐位比：对三个基向量各跑一次
+    const double basis[3][3] = {{1,0,0},{0,1,0},{0,0,1}};
+    for (int c = 0; c < 3; c++) {
+        Vec3 r = convertTouchToRobot(basis[c]);
+        CHECK(M[0*3+c] == r.x && M[1*3+c] == r.y && M[2*3+c] == r.z);
+    }
+    PASS();
+}
+static void test_touch_to_robot_matrix_is_orthonormal() {
+    TEST(touch_to_robot_matrix_is_orthonormal);
+    double M[9] = {0};
+    touchToRobotMatrix(M);
+    for (int i = 0; i < 3; i++) {
+        double n = M[i*3]*M[i*3] + M[i*3+1]*M[i*3+1] + M[i*3+2]*M[i*3+2];
+        CHECK(fabs(n - 1.0) < 1e-12);                       // 每行单位长
+        for (int j = i+1; j < 3; j++) {
+            double d = M[i*3]*M[j*3] + M[i*3+1]*M[j*3+1] + M[i*3+2]*M[j*3+2];
+            CHECK(fabs(d) < 1e-12);                          // 行间正交
+        }
+    }
+    double det = M[0]*(M[4]*M[8]-M[5]*M[7]) - M[1]*(M[3]*M[8]-M[5]*M[6]) + M[2]*(M[3]*M[7]-M[4]*M[6]);
+    CHECK(fabs(det - 1.0) < 1e-12);                          // 右手系（det=+1，不是镜像）
+    PASS();
+}
+
 int main() {
     std::cout << "--- FrameLayout (30004 帧自检) ---" << std::endl;
     test_readU64LE();
@@ -168,6 +204,8 @@ int main() {
     test_null_buffer();
     test_all_ff_frame_rejected();
     test_all_zero_frame_rejected();
+    test_touch_to_robot_matrix_is_the_position_mapping();
+    test_touch_to_robot_matrix_is_orthonormal();
     std::cout << "\nResults: " << g_passed << " passed, " << g_failed << " failed" << std::endl;
     return g_failed == 0 ? 0 : 1;
 }

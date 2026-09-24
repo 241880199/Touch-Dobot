@@ -243,10 +243,20 @@ static void computeSafetyGradient(const double q[6], double g[6]) {
     for (int i = 0; i < 6; i++) g[i] = 0.0;
 
     // --- Shoulder safety: maximize elbow r_xy ---
-    // Elbow = J2 position
+    // ★★ 2026-09-24 深夜【订正：这个点取错了】。原文 `Vec3 elbow = positions[2]; // J2 world position`
+    //   —— 变量名叫 elbow(肘)、注释写 J2、而判据常数的注释写的是"**肘部** r_xy"。
+    //   **`positions[2]` 按构造恒等于 `(0,0,J1_Z)`**：J2 段只有 `roty/rotx/rotz` 三个**纯旋转**、
+    //   没有平移，而 `mat4_roty` 是**后乘**（`T = T·R`，纯旋转不改平移列）；J1 段留下的就是
+    //   `(0,0,J1_Z)` ⇒ `r_elbow ≡ 0`（**与关节角无关**）⇒ `r_elbow < 120` **恒成立**
+    //   ⇒ 这一路（安全梯度 / 警告 / 推离方向）**一直是满档**，`optimizeOrientation` 一直用一个假项带路。
+    //   ⚠ 依据：以 `positions[3]` 算同一个量，实测 r = 139.07mm（正常姿态 ⇒ 不该触发）✓
+    //     肘在 `positions[3]`（J3 原点 —— `J3_X` 那段平移之后）。
+    //   ⚠ 命名不一致（**没改名，避免大范围 churn**）：常数叫 `SINGAVOID_SHOULDER_*`、
+    //     变量叫 `r_elbow`、注释说"肘部" —— 三处指的是同一个点，以这里为准。
+    // Elbow（肘）= J3 原点。⚠ 2026-09-24: 从前这里取的是 `positions[2]`（J2 轴上的点），它按构造恒在 Z 轴上、r≡0 ⇒ 判据恒真（详见下面那段订正）
     Vec3 positions[7];
     Kinematics::computeJointPositions(q, positions);
-    Vec3 elbow = positions[2];  // J2 world position
+    Vec3 elbow = positions[3];  // 肘（J3 原点；`J3_X` 那段平移之后）
     double r_elbow = sqrt(elbow.x*elbow.x + elbow.y*elbow.y);
     double eps = 1.0;
     if (r_elbow < Config::SINGAVOID_SHOULDER_SAFE_R) {
@@ -254,7 +264,7 @@ static void computeSafetyGradient(const double q[6], double g[6]) {
         // df/dr = 1/(r_elbow+eps)^2
         double dr = 1.0 / ((r_elbow + eps) * (r_elbow + eps));
         // dr/dq approx J_elbow_xy (Jacobian rows for elbow x,y)
-        // Use the position Jacobian at q for elbow (positions[2])
+        // Use the position Jacobian at q for elbow (positions[3])
         double J_full[6][6];
         Kinematics::jacobian(q, J_full);
         // Elbow Jacobian = first 2 rows of position Jacobian at joint 2
@@ -409,7 +419,7 @@ Vec3 optimizeOrientation(const Vec3& targetPos, const double currentJoints[6]) {
     // Step 4: Check if shoulder is dangerously close — send warning
     Vec3 positions[7];
     Kinematics::computeJointPositions(q, positions);
-    double r_elbow = sqrt(positions[2].x*positions[2].x + positions[2].y*positions[2].y);
+    double r_elbow = sqrt(positions[3].x*positions[3].x + positions[3].y*positions[3].y);
     if (r_elbow < Config::SINGAVOID_SHOULDER_CRITICAL_R) {
         sendWarning(1, "shoulder",
             "肘部距Z轴过近，零空间优化中",
@@ -508,12 +518,12 @@ Vec3 dampOrientationMotion(const Vec3& targetOrient, const Vec3& deltaOrient,
     // where ~80% of the gradient was filtered out by the orientation null-space projector.
     Vec3 positions[7];
     Kinematics::computeJointPositions(currentJoints, positions);
-    double r_elbow = sqrt(positions[2].x*positions[2].x + positions[2].y*positions[2].y);
+    double r_elbow = sqrt(positions[3].x*positions[3].x + positions[3].y*positions[3].y);
 
     if (r_elbow < Config::SINGAVOID_SHOULDER_SAFE_R) {  // 120mm
         // Radial outward direction (XY plane) — pushes elbow away from Z-axis
-        double pushDirX = (r_elbow > 0.01) ? positions[2].x / r_elbow : 1.0;
-        double pushDirY = (r_elbow > 0.01) ? positions[2].y / r_elbow : 0.0;
+        double pushDirX = (r_elbow > 0.01) ? positions[3].x / r_elbow : 1.0;
+        double pushDirY = (r_elbow > 0.01) ? positions[3].y / r_elbow : 0.0;
 
         double pushMag, forceMag;
 
@@ -663,11 +673,11 @@ void dampFullCommand(const Vec3& userDeltaPos, const Vec3& userDeltaOrient,
     {
         Vec3 positions[7];
         Kinematics::computeJointPositions(currentJoints, positions);
-        double r_elbow = sqrt(positions[2].x*positions[2].x + positions[2].y*positions[2].y);
+        double r_elbow = sqrt(positions[3].x*positions[3].x + positions[3].y*positions[3].y);
 
         if (r_elbow < Config::SINGAVOID_SHOULDER_SAFE_R) {
-            double pushDirX = (r_elbow > 0.01) ? positions[2].x / r_elbow : 1.0;
-            double pushDirY = (r_elbow > 0.01) ? positions[2].y / r_elbow : 0.0;
+            double pushDirX = (r_elbow > 0.01) ? positions[3].x / r_elbow : 1.0;
+            double pushDirY = (r_elbow > 0.01) ? positions[3].y / r_elbow : 0.0;
 
             double pushMag;
             if (r_elbow >= Config::SINGAVOID_DUAL_SING_ELBOW_THR) {

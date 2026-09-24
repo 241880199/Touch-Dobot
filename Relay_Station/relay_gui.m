@@ -47,7 +47,18 @@ function relay_gui()
     %   ⇒ 判不了就别猜, 给现场一个一行的判据: 改成 false 重跑一次 ——
     %     拖动能回来 ⇒ 就是它 (那时我换成别的方式做放缩);
     %     回不来     ⇒ 与它无关, 我从别处查 (那时请把"上一次能拖动是什么时候"告诉我)。
-    S.useWheelZoom = true;
+    S.useWheelZoom = false;   % ★ 2026-09-22 现场判定用: 见上面那三行 —— 这一趟跑完按结论定回来
+    % ===== 高频遥测【不抽样】落盘开关 (2026-09-24) =====
+    % true  = `P| / J| / RP|` 每一条都写进 `_matlab_session_<date>.log`
+    % false = 维持"每 10 条记 1 条"（默认；全量约 30+10+10 = 50 条/秒，久了会淹掉文件）
+    % 【为什么要这个开关】按钮2 的"笔杆三根轴 ↔ 三个关节"映射必须**按帧率**量:
+    %   抽样到 ~2 Hz 之后，段内增量的【轴】会估漂 —— 实测同一动作的两段主方向差 42°
+    %   （按 30 Hz 的逐步轴，三条轴两两夹角 74~83°，才是对的）。
+    %   这是一次性的标定测量，量完就关回去 ⇒ 做成开关，而不是改掉抽样率。
+    % ⚠ 只在【标定那几分钟】打开；打开期间日志不适合人工翻阅。
+    % ⚠ 旁路日志本身曾经把界面卡死过（每条一次 fopen/fclose、~39 条/秒）—— 那已修
+    %   （持句柄 + 每秒重开 + 同内容去重）。50 条/秒下若界面变卡，先把它关掉再看。
+    S.logAllFast = false;
     S.viewCenter  = [0 0 400];   % mm
     % 边长 1400 -> 1000 (2026-09-21 现场: "模型太小了")。等边长 + 中心 z=400 ⇒
     %   x/y ∈ [-500,500], z ∈ [-100,900] —— 纵向仍然盖得住 CR3 总高 795, 而模型在画面里大 1.4 倍。
@@ -58,6 +69,24 @@ function relay_gui()
     S.viewSpanMax = 4000;
     S.server = [];
     S.ff_enabled = true;      % 力反馈开关状态 (A组=true / B组=false)
+    % ===== 力反射增益调参 (2026-09-22) =====
+    % 真值【只在 C++ 那一侧】。下面这些字段只是【显示缓存】, 全部由 RG| 回读刷新 ——
+    % 绝不当作"我设过什么"的记忆使用 (那正是无声不一致的入口)。
+    S.tuning = struct('gain', NaN, 'min', NaN, 'max', NaN, 'ratio', NaN, ...
+                      'deadN', NaN, 'satN', NaN, 'defGain', NaN, 'known', false, ...
+                      'displayUnknown', false);
+    % displayUnknown: 控件上【没有可信的增益数】(回读自相矛盾那一档才为 true)。
+    %   只由 showGainUnknown() 置 true、由"赋真值"那两句置 false —— 它描述的是【显示状态】,
+    %   不是回读本身, 所以标题行也拿它当判据 (见 updateTextPanels)。
+    S.tuningDragging = false;   % 拖动中禁止回读移动滑块 (否则和手指打架)
+    S.tuningLastSent = NaN;     % 最近一次发出去的值, 用于判断回读是否与请求不符 (拒收)
+    % ===== 断线丢弃的【报数限幅】(2026-09-22) =====
+    % 送不出去必须出声 (见 sendToClient), 但 ValueChangingFcn 拖动时每秒几十条 ⇒ 逐条出声
+    %   等于刷屏, 而本项目有成文教训: **被刷屏的控制台就是看不见的控制台**
+    %   (C++ → MATLAB 那条回读方向当初正是为这个才做了限频)。
+    % 这一对字段就是那个限幅的状态: 报过【第一声】之后同类命令只计数, 等连接状态一变再补报条数。
+    S.dropNotifiedKey = '';     % 已经报过"丢弃"的那【一类】命令 ('|' 前面那一段: RG / Z / FF)
+    S.dropQuiet       = struct();  % 类别 -> 被【压下去、没有逐条报】的条数 (等连接状态一变补报)
     % 3D 场景对象 (Task 7)
     S.linkMesh     = {};    S.linkPatch = gobjects(1,0);  S.linkHg = gobjects(1,0);
     S.stlLoaded    = false;
@@ -173,8 +202,8 @@ function relay_gui()
     lblForceRaw.Layout.Row = 2;  lblForceRaw.Layout.Column = 1;
 
     % -- Row 3: 滤波力 --
-    pnlFF = uigridlayout(glMid, [3 1]);
-    pnlFF.RowHeight = {22, 26, '1x'};
+    pnlFF = uigridlayout(glMid, [4 1]);
+    pnlFF.RowHeight = {22, 44, 40, '1x'};   % ★ 2026-09-24: 第 2 行 26→44（现场反馈「力反馈开关太小」）
     pnlFF.Padding = [4 0 4 2];  pnlFF.RowSpacing = 0;
     pnlFF.BackgroundColor = clr.bg_panel;
     pnlFF.Layout.Row = 3;  pnlFF.Layout.Column = 1;
@@ -185,24 +214,86 @@ function relay_gui()
 
     % 力反馈开关 (A/B 对照实验)
     pnlFFToggle = uigridlayout(pnlFF, [1 2]);
-    pnlFFToggle.ColumnWidth = {'1x', 60};
+    pnlFFToggle.ColumnWidth = {'1x', 120};  % ★ 2026-09-24: 60→120（同上的现场反馈）
     pnlFFToggle.Padding = [0 0 0 0];  pnlFFToggle.RowSpacing = 0;  pnlFFToggle.ColumnSpacing = 4;
     pnlFFToggle.BackgroundColor = clr.bg_panel;
     pnlFFToggle.Layout.Row = 2;  pnlFFToggle.Layout.Column = 1;
 
     lblFFToggle = uilabel(pnlFFToggle, 'Text', 'Force Feedback (A/B switch)', ...
-        'FontColor', clr.text_dim, 'FontSize', 9);
+        'FontColor', clr.text_dim, 'FontSize', 11);   % ★ 2026-09-24: 9→11（与面板其它标签一致）
     lblFFToggle.Layout.Row = 1;  lblFFToggle.Layout.Column = 1;
 
+    % ★ 这里是 @(~,~) onForceFeedbackToggle(swFF.Value) —— 【既有缺陷】, 与本分支的增益调参无关,
+    %   是在这个文件里干活时【顺手发现】的 (在分支基线上就能重现)。匿名函数在【赋值完成之前】
+    %   就引用了 swFF, 而 MATLAB 的匿名函数按【创建时刻】捕获变量的值 ⇒ 这个句柄从未捕获到
+    %   那个开关, 一扳开关就报"函数或变量 'swFF' 无法识别"。
+    % 后果不只是"报了个错": uiswitch 的 Value 【自己会翻】(外观变化与回调成败无关), 而
+    %   FF|0 / FF|1 【一条都没发出去】⇒ 屏幕上的开关位置与 C++ 那侧的真实状态不一致 ——
+    %   正是本分支整趟在消灭的那类不一致。
+    % ⇒ 改成从【回调的源参数】取值 (s.Value), 与下面滑条/编辑框那几处同一种写法,
+    %   不再捕获外部变量。uiswitch 的 Value 是 char, 内容就是 Items 里的 'ON'/'OFF',
+    %   正是 onForceFeedbackToggle 期望的入参。
     swFF = uiswitch(pnlFFToggle, 'Items', {'OFF', 'ON'}, 'Value', 'ON', ...
-        'ValueChangedFcn', @(~,~) onForceFeedbackToggle(swFF.Value));
+        'ValueChangedFcn', @(s,~) onForceFeedbackToggle(s.Value));
     swFF.Layout.Row = 1;  swFF.Layout.Column = 2;
 
     lblForceFilt = uilabel(pnlFF, 'Text', {'Filtered force for haptic feedback...', '', ...
         'Fx:   0.00 N   Fy:   0.00 N   Fz:   0.00 N'}, ...
         'FontColor', clr.text_dim, 'FontSize', 10, ...
         'VerticalAlignment', 'top', 'FontName', 'Consolas');
-    lblForceFilt.Layout.Row = 3;  lblForceFilt.Layout.Column = 1;
+    lblForceFilt.Layout.Row = 4;  lblForceFilt.Layout.Column = 1;
+
+    % -- 力反射增益调参 (2026-09-22) --
+    % 标题行显示【响应窗口】而不是单个饱和点 —— 只给上沿会把死区那个前提藏起来:
+    %   gain 300 时窗口是 0.20–0.67N, 死区占了 30%, 可区分的只剩一条缝。
+    % 窗口的两个数与比例全部来自 C++ 的 RG| 回读, 本文件【一个魔数都不写】。
+    pnlGain = uigridlayout(pnlFF, [2 1]);
+    pnlGain.RowHeight = {15, 25};
+    pnlGain.Padding = [0 0 0 0];  pnlGain.RowSpacing = 0;
+    pnlGain.BackgroundColor = clr.bg_panel;
+    pnlGain.Layout.Row = 3;  pnlGain.Layout.Column = 1;
+
+    lblGainTitle = uilabel(pnlGain, 'Text', 'Reflection Gain — 等待 C++…', ...
+        'FontColor', clr.text_dim, 'FontSize', 9, 'FontName', 'Consolas');
+    lblGainTitle.Layout.Row = 1;  lblGainTitle.Layout.Column = 1;
+
+    pnlGainCtl = uigridlayout(pnlGain, [1 4]);
+    pnlGainCtl.ColumnWidth = {'1x', 58, 58, 44};
+    pnlGainCtl.Padding = [0 0 0 0];  pnlGainCtl.RowSpacing = 0;  pnlGainCtl.ColumnSpacing = 3;
+    pnlGainCtl.BackgroundColor = clr.bg_panel;
+    pnlGainCtl.Layout.Row = 2;  pnlGainCtl.Layout.Column = 1;
+
+    % ★ 回读之前【屏幕上不许出现任何看着像增益的数】(2026-09-22 复审 Fix 2)。
+    %   原来这里写的是 'Value',120 + Limits [100 300] ⇒ 数值框明明读着 120, 而对面 C++ 可能
+    %   正跑在 force_tuning.json 的 200 上 —— 那是唯一一处"屏幕上的数不是正在用的数"。
+    %   ★ 实测 (R2025b, 本机): 数值框与滑条【都拒 NaN】—— 构造与赋值都报
+    %     ''Value' 必须为位于 'Limits' 的范围之内的双精度标量' ⇒ 提示里那条 NaN 方案不成立。
+    %   ⇒ 改用 numeric 编辑框的公开属性 AllowEmpty: 空值 + Placeholder 显示的是一句话, 不是数。
+    %     实测空值时框里是 '— 等待 C++ —'; 第一次回读时 AllowEmpty 置 false 并给真值。
+    % ⚠ 这里【一个占位魔数都不写】: 编辑框空着 (Limits 取默认 [-Inf Inf]), 滑条用 MATLAB 自己的
+    %   默认 Limits [0 100] / Value 0, 且明确把 MajorTickLabels 置空 ⇒ 滑条上也没有数字
+    %   (实测 R2025b: 默认 MajorTicks 是 [0 20 40 60 80 100], 而【画出来】的自动标签是
+    %    0 4 8 12 … 96 100 一整排 —— 以出图为准, 那又是一排假数)。
+    %   占位范围只在"控件禁用、发不出去"这一档存在; 第一次 RG| 回读就用 C++ 的 min/max 顶掉它。
+    sldGain = uislider(pnlGainCtl, 'Enable', 'off', 'MajorTickLabels', {}, ...
+        'ValueChangingFcn', @(s,e) onGainChanging(e.Value), ...
+        'ValueChangedFcn',  @(s,e) onGainChanged(e.Value));
+    sldGain.Layout.Row = 1;  sldGain.Layout.Column = 1;
+
+    edGain = uieditfield(pnlGainCtl, 'numeric', 'Value', [], 'AllowEmpty', true, ...
+        'Placeholder', '— 等待 C++ —', 'Enable', 'off', ...
+        'FontName', 'Consolas', 'FontSize', 10, ...
+        'ValueChangedFcn', @(s,e) onGainChanged(e.Value));
+    edGain.Layout.Row = 1;  edGain.Layout.Column = 2;
+
+    btnGainDefault = uibutton(pnlGainCtl, 'Text', 'Default', 'FontSize', 9, ...
+        'Enable', 'off', 'ButtonPushedFcn', @(~,~) onGainDefault());
+    btnGainDefault.Layout.Row = 1;  btnGainDefault.Layout.Column = 3;
+
+    % Zero 与键盘 'z' 【同语义】: 再按一次 = 中止。不在 GUI 里发明第二种语义。
+    btnZero = uibutton(pnlGainCtl, 'Text', 'Zero', 'FontSize', 9, ...
+        'ButtonPushedFcn', @(~,~) onZeroPressed());
+    btnZero.Layout.Row = 1;  btnZero.Layout.Column = 4;
 
     % -- Row 4: 力历史迷你图 --
     pnlFH = uigridlayout(glMid, [2 1]);
@@ -408,6 +499,9 @@ function relay_gui()
     end
 
     function onServerConnection(src, ~)
+        % 连接状态一变就是"上一段断线到此为止": 把被压下的丢弃条数补报出来并复位
+        % (无事时空操作)。⇒ 重连之后的第一条命令【一定】会重新出声, 不会被上一段压掉。
+        flushDropNotice();
         if src.Connected
             fprintf('[Relay] Touch client connected\n');
             lblConn.Text = 'C++ Client: CONNECTED';
@@ -428,14 +522,223 @@ function relay_gui()
         end
     end
 
+    % ===== 力反射增益 (2026-09-22) =====
+    % 真值在 C++。这里只做两件事: 把用户意图发过去、把回读显示出来。
+
+    function onGainChanging(v)
+        % 拖动中: 实时下发 —— 拖的过程手上就能感觉到 (C++ 那道 0.25s 斜坡把它摊平)
+        S.tuningDragging = true;
+        S.tuningLastSent = v;
+        sendToClient(sprintf('RG|%.4f', v));
+    end
+
+    function onGainChanged(v)
+        % 松手 / 编辑框提交: 再发一次。幂等, 保证最后一条一定到
+        % (拖动中被 C++ 限频挡下的那条, 由它的补发机制兜住)。
+        S.tuningDragging = false;
+        S.tuningLastSent = v;
+        sendToClient(sprintf('RG|%.4f', v));
+    end
+
+    function onGainDefault()
+        % ★ 【不硬编码 120】—— 用 C++ 回读里的 defGain。
+        %   硬编码的话, Config.h 的默认值一改, 这个按钮就与"默认"无关了 ——
+        %   而它做的正是"送回默认值"这件事。
+        if ~S.tuning.known, return; end
+        S.tuningDragging = false;
+        S.tuningLastSent = S.tuning.defGain;
+        sendToClient(sprintf('RG|%.4f', S.tuning.defGain));
+    end
+
+    function onZeroPressed()
+        % 与键盘 'z' 同语义 (C++ 那边负责"再按一次 = 中止")
+        % 旁路日志: 与键盘 'z' 区分开 —— 两者发出去的都是 'Z|1', 但一条来自这个按钮、
+        %   一条来自键盘; 判"按钮到底有没有接上"时, 日志必须能分辨是哪一个动作。
+        tlog('UI', 'Zero button pressed');
+        sendToClient('Z|1');
+    end
+
+    function showGainUnknown()
+        % 回读自相矛盾时【唯一诚实的显示】: 喊一声 + 把两个控件摆成"没有数"这一档。
+        %   (2026-09-22 Fix round 2。判据与守门见 processNetworkData 里跳赋值的那一支。)
+        % 【为什么不能用 NaN】实测 (R2025b, 本机): 数值框与滑条【都拒】NaN —— 构造与赋值都报
+        %   ''Value' 必须为位于 'Limits' 的范围之内的双精度标量'。
+        % 数值框: AllowEmpty=true + Value=[] 就是"没有数"这一档, 占位串顶上去 ——
+        %   与"第一次回读之前"用的是同一个机制, 不是这里新发明的一种状态。
+        % 滑条: 【没有空值这一档】⇒ 用 Enable='off', 刻度标签本来就已置空 (MajorTickLabels={})。
+        %   出图核对过: 关掉之后【一个数字都没有】, 只剩变灰的轨道与手柄。
+        % ⚠ 先关 Enable 再清编辑框, 顺序不能反: 置 AllowEmpty=true 会把"交出空值"这条路重新
+        %   打开, 而 onGainChanged 收到 [] 会发出 sprintf('RG|%.4f', []) = 'RG|' —— 一条畸形
+        %   命令 (实测就是 'RG|')。关掉 Enable ⇒ 操作员根本交不出空值。
+        % ⚠ 那句 ⚠ 日志【写在本函数里】不是随手放的: 这样任何一处调用都会喊, 不会有"清了屏
+        %   幕却没人说话"的调用方式。
+        fprintf(['[Relay] ⚠ 回读自相矛盾: 回读的当前增益 %.1f 落在它自己声明的范围 ' ...
+                 '[%.0f, %.0f] 之外 —— 增益已显示为【未知】(控件清空+禁用), ' ...
+                 '不留上一条回读的旧数\n'], ...
+            S.tuning.gain, S.tuning.min, S.tuning.max);
+        edGain.Enable      = 'off';
+        sldGain.Enable     = 'off';
+        edGain.AllowEmpty  = true;
+        edGain.Value       = [];
+        % 占位串【短】是量出来的, 不是随手写的: 这一格是 58px 宽 (pnlGainCtl 的 ColumnWidth),
+        %   实测 '— 回读矛盾 · 增益未知 —' 会被截断成 '— 回读矛盾', 而 '— 未知 —' 完整显示。
+        %   细节留给上面那行标题去说 (宽度够, 整句都在), 这一格只回答"有没有数"。
+        edGain.Placeholder = '— 未知 —';
+        S.tuning.displayUnknown = true;
+    end
+
+    % ===== 旁路日志 (2026-09-23): 只写文件, 不参与任何界面逻辑 =====
+    % 【为什么加】判读"阻力映射系数可调"那几项时, MATLAB 侧(界面 / 命令窗)与 C++ 侧(控制台)
+    %   是【两条互不可见的通道】—— 只能靠人在两边来回看、再口头对齐, 而口头对齐正是本项目
+    %   反复出错的环节。这一路把两侧的协议流量落到【同一个文件】, 事后可以逐条对齐。
+    % 【只记低频】P| / F| / J| / RP| 是 123 Hz 级遥测 —— 记了会把文件淹掉, 而且它们每一拍
+    %   都在变、与本功能无关; 真正要判读的是 RG| / C| / Z| / FF| 这一类: 由操作员动作触发、
+    %   频率低。高频那四路在【调用处】就滤掉了(名单只有一份, 就在那一个 if 里)。
+    % ⚠ 整个函数套 try/catch: 日志【永远不许】打断收包循环或发送路径。本项目对"静默"极敏感,
+    %   但这里是反过来的 —— 日志可以静默失败, 界面不许挂。
+    % ⚠ 每次调用各自 fopen/fclose(追加): 不需要持句柄、也就不用判句柄失效; 而且 MATLAB 被
+    %   直接关掉时不会丢掉缓冲区里的最后几行。调用频率(几十条/秒上限)下这点开销无感。
+    function tlog(tag, text)
+        persistent log_path fid pendTag pendText pendN t0
+        try
+            if isempty(log_path)
+                log_path = fullfile(fileparts(mfilename('fullpath')), ...
+                    ['_matlab_session_' char(datetime('now', 'Format', 'yyyyMMdd')) '.log']);
+                fid = -1; pendTag = ''; pendText = ''; pendN = 0;
+                t0 = tic;   % 刷新节拍的计时器：用【带句柄的 tic/toc】而不是 now ——
+                            %   后者会被 lint 判为"建议改用 datetime"，而 datetime('now')
+                            %   每条消息构造一次太贵，正好与本次"降开销"的目的相反。
+                            %   toc(t0) 是显式句柄形式，不受别处的 tic 影响。
+            end
+            % ===== ★★ 2026-09-23 重写：从"每条消息 fopen/fclose 一次"改成"持句柄 + 每秒重开一次"
+            %   【为什么必须改】现场报告"按住按钮时 MATLAB 界面卡死、松手才恢复"。机制：
+            %   本函数跑在【收包回调】里，而那条线程正是服务界面的那条 ⇒ 每条一次 open/close
+            %   实测达 【~39 条/秒 × 3 次文件操作 ≈ 上百次 I/O/秒】，足以把界面饿死；而按钮一松、
+            %   C|ServoP 那一路停了、消息率骤降 ⇒ 界面就"活了"。
+            %   ⚠ 这是【测量工具扰动了被测对象】—— 本项目的老教训（09-21 那次"仪器本身出错"）；
+            %     所以改法是降低开销，而不是"少测点"。
+            %   【为什么不能只持句柄】实测（2026-09-23）：fseek(fid,0,'cof') 【不刷新】——
+            %   MATLAB 还在跑时另一个进程读到的是空文件 ⇒ 我的实时读取会失效。
+            %   ⇒ 折中：持句柄写（便宜），但【每秒 close+reopen 一次】把数据推出去，
+            %     我的读取最多滞后 1 秒。
+            % ===== 另一处等量开销：同内容去重 =====
+            %   客户端有一路 W| 是【设计上 30 Hz 重发】的（RelayCore.cpp "持续重发 MATLAB 警告"），
+            %   实测 21 条/秒，而每一拍的文本【完全相同】—— 信息量 0，却要付全部 I/O 代价。
+            %   G|/S| 这类状态量在不变时同理。⇒ 连续同内容【只写第一行】，之后只计数，
+            %   等它变了（或该标签换了）再补一行 "(xN 次相同)"。信息不丢，量掉一个数量级。
+            if fid < 0
+                fid = fopen(log_path, 'a');
+                if fid < 0
+                    return;
+                end
+            end
+            same = strcmp(tag, pendTag) && strcmp(text, pendText);
+            if same
+                pendN = pendN + 1;
+            else
+                if pendN > 1
+                    fprintf(fid, '%s %-5s ···· 上一行内容连续相同, 另有 %d 次 (已省略)\n', ...
+                        char(datetime('now', 'Format', 'HH:mm:ss.SSS')), 'REP', pendN - 1);
+                end
+                fprintf(fid, '%s %-5s %s\n', ...
+                    char(datetime('now', 'Format', 'HH:mm:ss.SSS')), tag, text);
+                pendTag = tag; pendText = text; pendN = 1;
+            end
+            % 每秒把数据推出去（close 才会真落盘 —— fseek 不刷，已实测）
+            if toc(t0) >= 1.0
+                if pendN > 1
+                    fprintf(fid, '%s %-5s ···· 上一行内容连续相同, 另有 %d 次 (已省略)\n', ...
+                        char(datetime('now', 'Format', 'HH:mm:ss.SSS')), 'REP', pendN - 1);
+                    pendN = 1;
+                end
+                fclose(fid); fid = -1;
+                t0 = tic;
+            end
+        catch
+            % 刻意静默 —— 理由见本函数开头的注释
+        end
+    end
+
     function sendToClient(cmd)
+        % ⚠ 送不出去【必须出声】(2026-09-22 终审 Fix 1)。
+        %   从前的形状是一句无声的 return。于是 C++ 断线时操作员拖滑条 / 按 [Zero] /
+        %   扳 swFF, 屏幕上的意图照旧动, 而【一条都没发出去】—— 这是本功能的中心承诺
+        %   ("屏幕上的增益 = 机械臂在用的增益")唯一会失效的状态, 也是计划里那条
+        %   "不许静默"的 Global Constraint 唯一被破的地方。
+        % 【为什么不改成"断线就把控件禁用掉"】想过, 而且【刻意不做】:
+        %   打开这三个控件的只有【两处】—— processNetworkData 里
+        %   `~wasKnown || rangeChanged` 那一支, 以及"从【回读自相矛盾】状态恢复"那一支
+        %   (它自己带着 `if S.tuning.displayUnknown` 这道门)。
+        %   断线时禁用【不会】惊动其中任何一个: C++ 的范围若没在这期间变过, 重连后
+        %   到达的那条回读与上次同范围 (第一道不成立); 而 displayUnknown 仍是 false
+        %   —— "断线"这件事本身不会把它置 true (第二道也不成立) ⇒ 滑条 / 数值框 /
+        %   Default 永远灰着, 操作员再也动不了, 而屏幕上【没有一句话】说的是这件事
+        %   (控件为什么是灰的)。那正是本函数要消灭的那种静默。
+        %   ⇒ 出声 + 让人能原样重试, 比一个漂亮但会卡死的灰控件诚实。
         if ~isempty(S.server) && isvalid(S.server) && S.server.Connected
             try
                 write(S.server, uint8([cmd newline]), 'uint8');
+                tlog('OUT', cmd);
+                flushDropNotice();   % 真的送出去了 ⇒ 断线那一段到此为止 (无事时是空操作)
             catch e
                 fprintf('[Relay] ERROR sending to client: %s\n', e.message);
+                tlog('OUTFAIL', sprintf('%s  (%s)', cmd, e.message));
+            end
+        else
+            tlog('DROP', cmd);
+            notifyDropped(cmd);
+        end
+    end
+
+    % ===== 断线丢弃: 出声一次 + 按类别限幅 (2026-09-22) =====
+    % 机制: 每一类命令在【一段断线】里报【第一声】之后就不再逐条出声, 只累加条数;
+    %   连接状态一变 (真的发出去一条, 或连接断开/重连) 就把每类的条数补报出来并复位。
+    %   ⇒ 一次拖动 (不论多长、多少个回调) = 恒定 1 行; 补报最多每类 1 行 (本协议只有 RG/Z/FF)。
+    % 为什么不选"每隔 N 秒重复报一次": 那仍随拖动【时长】线性增长 —— 拖 10 秒就是十几行,
+    %   而本机制与拖动时长、回调频率【都无关】。
+    % 为什么按【类别】分: 拖动 (RG|) / [Zero] (Z|) / swFF (FF|) 是操作员三个独立的意图,
+    %   压掉其中任何一类都是新的静默 ⇒ 换类别必须重新出声。
+    % ⚠ 计数【不按类别分别清零】: 换类别只是让新类别出声, 旧类别的条数留着等补报 ——
+    %   否则"恢复时补报条数"这句承诺在"拖完再按 Zero"这种次序下就成了一句空话。
+
+    function key = cmdKey(cmd)
+        % 类别 = '|' 前面那一段 (FF / RG / Z)。本协议的命令都带 '|';
+        %   万一没有, 整条当类别 —— 只是分得粗一点, 不影响"每类只出声一次"。
+        % makeValidName: 这个 key 要当 S.dropQuiet 的字段名, 非法字符会让【报数】这一步抛错,
+        %   而报数正是"不许静默"的落点 ⇒ 宁可把类别名规整一下, 也不让那条路有抛错的形状。
+        key = cmd;
+        p = find(cmd == '|', 1);
+        if ~isempty(p), key = cmd(1:p-1); end
+        key = matlab.lang.makeValidName(key);
+    end
+
+    function notifyDropped(cmd)
+        key = cmdKey(cmd);
+        if ~strcmp(key, S.dropNotifiedKey)
+            fprintf(['[Relay] ⚠ 未发送 (C++ 客户端未连接), 该命令已【丢弃】: %s ' ...
+                     '—— 连接恢复后请重做一次\n' ...
+                     '[Relay]    (断线期间同类命令不再逐条刷屏, 恢复时补报条数)\n'], cmd);
+            S.dropNotifiedKey = key;
+        else
+            if ~isfield(S.dropQuiet, key), S.dropQuiet.(key) = 0; end
+            S.dropQuiet.(key) = S.dropQuiet.(key) + 1;
+        end
+    end
+
+    function flushDropNotice()
+        % 连接状态变了 (或真发出去了一条): 该把【被压下去的条数】补报出来, 然后复位。
+        % ⚠ 【不补发】—— 一条都没缓存: 这句日志说的是"要重做一次", 不是"稍后会自动补上"。
+        if isempty(S.dropNotifiedKey), return; end
+        keys = fieldnames(S.dropQuiet);
+        for k = 1:numel(keys)
+            n = S.dropQuiet.(keys{k});
+            if n > 0
+                fprintf(['[Relay] 断线期间另有 %d 条 %s 类命令被【丢弃】(未逐条刷屏), ' ...
+                         '没有缓存、不会补发 —— 需要重做一次\n'], n, keys{k});
             end
         end
+        S.dropNotifiedKey = '';
+        S.dropQuiet       = struct();
     end
 
     % ===== 主更新循环 =====
@@ -453,6 +756,11 @@ function relay_gui()
     end
 
     function processNetworkData()
+        % 抽样计数（见下面旁路日志那一处）：persistent 必须声明在【函数顶层】——
+        %   放进循环体里会被 lint 报 "PERSISTENT 可能会非常低效"（实测 2026-09-23）。
+        persistent fastN
+        if isempty(fastN), fastN = 0; end
+
         if isempty(S.server) || ~isvalid(S.server) || S.server.NumBytesAvailable == 0
             return;
         end
@@ -468,6 +776,24 @@ function relay_gui()
                 if isempty(msg), continue; end
 
                 S.packet_count = S.packet_count + 1;
+
+                % 旁路日志: 低频协议全记；高频遥测【抽样】记。
+                %   ★ 2026-09-23 改：从前是"P|/F|/J|/RP| 一律不记"，结果是**日志回答不了
+                %   "这几路到底有没有到"** —— 而当天要判的恰恰是这个（RP| 的解析 bug 就是这样
+                %   找到的：C++ 侧确证发了，只能从 MATLAB 侧查接收）。
+                %   ⇒ 现在除 F|（纯力遥测，与本功能无关）外，其余三路每 10 条记 1 条。
+                %     抽样率足够看出"有没有到、值在不在动"，又不会淹掉文件。
+                %   （P| 30 Hz、J|/RP| 各 10 Hz ⇒ 抽样后约 3 + 1 + 1 条/秒。）
+                %   ★ 2026-09-24: `S.logAllFast = true` 时【不抽样】，三路每条都记 ——
+                %     按帧率量按钮2 的笔杆轴映射要用它（见文件顶部那个开关的说明）。
+                if ~any(startsWith(msg, {'P|', 'F|', 'J|', 'RP|'}))
+                    tlog('IN', msg);
+                elseif ~startsWith(msg, 'F|')
+                    fastN = fastN + 1;
+                    if S.logAllFast || mod(fastN, 10) == 1
+                        tlog('IN-S', msg);
+                    end
+                end
 
                 % -- 现有协议 --
                 if startsWith(msg, 'P|')
@@ -491,7 +817,20 @@ function relay_gui()
                     vals = sscanf(msg(3:end), '%f,%f,%f,%f,%f,%f');
                     if length(vals) == 6, S.joint_angles = vals'; end
                 elseif startsWith(msg, 'RP|')
-                    vals = sscanf(msg(3:end), '%f,%f,%f,%f,%f,%f');
+                    % ★★★ 2026-09-23 修 —— 这里从前是 msg(3:end)，**一个字符的错，静默了整条链**。
+                    %   'RP|' 与 'RG|' 一样是【三个】字符 ⇒ 载荷从第 4 个字符起。
+                    %   msg(3:end) 的开头是 '|'，sscanf('%f,...') 撞上非数字【立刻返回空】
+                    %   ⇒ length(vals)==6 永远为假 ⇒ S.robot_pos 一次都没被赋过值。
+                    %   【现场症状(2026-09-23)】操作员报告"面板上 orientation 恒为 0" ——
+                    %   而 C++ 侧是好的（同一份 robotActualPose 既驱动姿态控制、又发给 RP|，
+                    %   且 `pos=`(GetPose) 与 `tcp=`(30004 帧) 实测逐位相同）。
+                    %   【代价】两处，都静默：
+                    %     · 面板 Position / Orientation 两行恒 0（来自同一个 S.robot_pos）；
+                    %     · 3D 里那个 eeMarkerActual（实际位置球标）被 `if any(rp(1:3)~=0)` 挡住
+                    %       ⇒ 【从来没显示过】。
+                    %   证据：headless 实测 `sscanf('RP|12.34,...'(3:end))` 长度 0、
+                    %   `(4:end)` 长度 6。同文件 RG| 那一段早就踩过并写下了警告，本支漏修。
+                    vals = sscanf(msg(4:end), '%f,%f,%f,%f,%f,%f');
                     if length(vals) == 6, S.robot_pos = vals'; end
                 % -- 新协议 --
                 elseif startsWith(msg, 'S|')
@@ -510,6 +849,162 @@ function relay_gui()
                     vals = sscanf(msg(3:end), '%d,%f');
                     if length(vals) == 2
                         S.calib_enabled = (vals(1) == 1); S.calib_rms = vals(2);
+                    end
+                elseif startsWith(msg, 'RG|')
+                    % ★ 七个字段【按位置】解析 —— 线上没有字段名, 错一位就整排错。
+                    %   前缀 'RG|' 是【三个】字符 ⇒ 值从第 4 个字符起 (msg(4:end))。
+                    %   写成 msg(3:end) 会让第一个字段变成 '|120' ⇒ NaN, 整排跟着错位。
+                    vals = str2double(split(msg(4:end), ','));
+                    % 可用 = 字段数够 且 全是数 且 上下限真的构成一个区间。
+                    %   最后一条不能省: Limits 反了 uislider 会直接抛错, 而那会把整个
+                    %   收包循环打断 (外层 try 兜住 ⇒ 那一拍的所有消息都丢)。
+                    if numel(vals) >= 7 && all(~isnan(vals)) && vals(2) < vals(3)
+                        wasKnown = S.tuning.known;
+                        % ★ 覆盖之前先留一份旧范围 —— 下面要靠它判断"声明变了没有"。
+                        prevMin  = S.tuning.min;
+                        prevMax  = S.tuning.max;
+                        S.tuning.gain    = vals(1);
+                        S.tuning.min     = vals(2);
+                        S.tuning.max     = vals(3);
+                        S.tuning.ratio   = vals(4);
+                        S.tuning.deadN   = vals(5);
+                        S.tuning.satN    = vals(6);
+                        S.tuning.defGain = vals(7);
+                        S.tuning.known   = true;
+
+                        % 旁路日志: 记下这条回读【解析出来的七个数】—— 判"滑条显示的范围到底
+                        %   是不是 C++ 声明的那个"时, 这是唯一可比的证据 (线上没有字段名, 靠位置)。
+                        tlog('TUNE', sprintf(['gain=%.4f min=%.4f max=%.4f ratio=%.6f ' ...
+                              'deadN=%.4f satN=%.4f defGain=%.4f'], ...
+                              S.tuning.gain, S.tuning.min, S.tuning.max, S.tuning.ratio, ...
+                              S.tuning.deadN, S.tuning.satN, S.tuning.defGain));
+
+                        % ★ 范围【跟着回读走】, 不是只在第一次认 (2026-09-22 复审 Fix 1)。
+                        %   原先只有 ~wasKnown 一条门 ⇒ C++ 重编/重启把 GAIN_MIN/GAIN_MAX 改了,
+                        %   而本窗口一直开着: 新的 min/max 存进了 S.tuning 却【永远贴不到控件上】,
+                        %   滑条此后一直给出 C++ 会拒的位置 —— "改 C++ 范围零 MATLAB 工作"这句
+                        %   就得靠【重启 MATLAB 窗口】兑现。现在声明一变就重贴。
+                        rangeChanged = wasKnown && ...
+                            (prevMin ~= S.tuning.min || prevMax ~= S.tuning.max);
+                        if ~wasKnown || rangeChanged
+                            % ★ 【忘掉"我们上次发的是什么"】(2026-09-22 终审 Fix 4)。
+                            %   下面那道拒收判据的前提是"我们发的值落在【当前这条回读给出的】范围之外
+                            %   ⇒ C++ 拒了它"。而 S.tuningLastSent 可能来自【另一套范围】:
+                            %   C++ 被重编成更窄的 GAIN_MAX (比如 300 → 200) 而本窗口一直开着,
+                            %   当年被【接受】的 250 相对新范围就成了越界 ⇒ 判据成立, 打出一句
+                            %   「增益 250.0 被拒」—— 那是【假话】, 它当时是被接受的。
+                            %   ⇒ 范围一被重新声明, 那条"上次发了什么"就不再可比, 置回 NaN
+                            %     (= "没发过"), 判据自然不成立。只在【这一支】置: 范围没变时
+                            %     的越界回读仍然是真的拒收, 那条日志要留着。
+                            S.tuningLastSent = NaN;
+                            % 第一次回读: 用 C++ 给的上下限把控件打开 —— 不猜。
+                            % 顺序【不能反】: 先 Limits 再(下面那段)Value。实测把 Limits 缩到
+                            %   不含当前 Value 时 MATLAB 只夹紧不抛错 (120 → 150);
+                            %   而上下限反了会让 uislider 直接抛错, 那条已在上面并进"可用"判据。
+                            sldGain.Limits = [S.tuning.min S.tuning.max];
+                            % 空值是"没有数"那一档, 只在【回读之前】与【回读自相矛盾】两处合法
+                            %   ⇒ 有真值就关掉 AllowEmpty (实测: 置 false 之后赋 [] 会被拒)。
+                            % ⚠ 补一条实测 (2026-09-22): 值的的确确还空着时置 false 【不报错】,
+                            %   而是把值【悄悄变成 0】; 紧接的下面那句 Limits 写入又把它夹回 min。
+                            %   ⇒ 屏幕上看不到这个 0, 而且这几句在同一个同步回调里、中间插不进
+                            %   一次重绘 ⇒ 无用户可见效果。记下来是因为它【看起来像没发生】。
+                            %   (Fix round 2 起"此后不可能为空"这句不再成立: 回读自相矛盾时
+                            %    showGainUnknown() 会把编辑框重新清空。)
+                            edGain.AllowEmpty = false;
+                            edGain.Limits  = [S.tuning.min S.tuning.max];
+                            sldGain.MajorTicks = ...
+                                linspace(S.tuning.min, S.tuning.max, 5);
+                            sldGain.MajorTickLabels = {};
+                            sldGain.Enable = 'on';
+                            edGain.Enable  = 'on';
+                            btnGainDefault.Enable = 'on';
+                            % 旁路日志: 控件【解锁那一刻】的实际 Limits 与是否首次。
+                            % ⚠ 这里【刻意不记 Value】: 下面那句 Limits 赋值会把空值悄悄夹成
+                            %   min (实测, 见本函数上面那段), 而真值是在更后面 (sldGain.Value =
+                            %   S.tuning.gain) 才写进去的 —— 在这一行记 Value 会记到一个中间态
+                            %   (实测 2026-09-23: 记成 100, 而实际显示 120), 那正是"拿快照下
+                            %   断言"的坑。值改记在它真正落定的地方, 标签是 SET。
+                            tlog('CTL', sprintf('enabled limits=[%.1f,%.1f] wasKnown=%d', ...
+                                  sldGain.Limits(1), sldGain.Limits(2), wasKnown));
+                            if ~wasKnown
+                                fprintf(['[Relay] 增益控件已启用: 范围 [%.0f, %.0f], ' ...
+                                         '当前 %.1f\n'], ...
+                                    S.tuning.min, S.tuning.max, S.tuning.gain);
+                            else
+                                % 不静默: 范围变了必须看得见, 否则操作员不知道滑条被重贴过
+                                fprintf(['[Relay] 增益范围已跟随 C++: [%.0f, %.0f] → ' ...
+                                         '[%.0f, %.0f], 当前 %.1f\n'], ...
+                                    prevMin, prevMax, S.tuning.min, S.tuning.max, ...
+                                    S.tuning.gain);
+                            end
+                        end
+
+                        % 拒收: 回读与我们刚发的不符 ⇒ 说清原因。
+                        % 数字全部来自这条回读, 本文件不写 100/300。
+                        % ⚠ 只有"不符"【还不够】—— 回读是 C++ 限频发出来的 (≥100ms 一条),
+                        %   所以拖动中/刚松手时队列里躺着的那条报的是【几步之前】的值,
+                        %   它与"被拒"长得一模一样。再加两个前置条件:
+                        %     · 正在拖动 ⇒ 一律不判 (手指还在动, 回读必然滞后);
+                        %     · 我们发的那个值得【落在回读给出的范围之外】才可能被拒
+                        %       —— C++ 只按范围拒 (ForceTuning::setGain 校验 [min,max])。
+                        if ~S.tuningDragging && ~isnan(S.tuningLastSent) && ...
+                           (S.tuningLastSent < S.tuning.min || ...
+                            S.tuningLastSent > S.tuning.max) && ...
+                           abs(S.tuning.gain - S.tuningLastSent) > 1e-6
+                            fprintf(['[Relay] 增益 %.1f 被拒 —— 可取范围 ' ...
+                                     '[%.0f, %.0f], 仍是 %.1f\n'], ...
+                                S.tuningLastSent, S.tuning.min, ...
+                                S.tuning.max, S.tuning.gain);
+                            % 旁路日志: 这一句【必须】进文件 —— 它是"拖动没生效"的唯一
+                            %   信号, 而它本来只写命令窗(不在这份日志的覆盖范围里)。
+                            tlog('REFUSED', sprintf(['sent=%.1f refused, range=[%.0f,%.0f] ' ...
+                                  'still=%.1f'], S.tuningLastSent, S.tuning.min, ...
+                                  S.tuning.max, S.tuning.gain));
+                        end
+
+                        if ~S.tuningDragging
+                            % 拖动中不动滑块 —— 否则回读会和手指打架
+                            % ⚠ 范围守卫 (Fix 1 之后才需要): 回读自相矛盾时 (gain 在它自己声明的
+                            %   范围之外) 这一句会【抛错】而不是把值夹紧 (实测: 只有 Limits 赋值
+                            %   才夹紧) ⇒ 那是收包循环里的一声炸, 会把那一拍的所有消息一起带走。
+                            if S.tuning.gain >= S.tuning.min && S.tuning.gain <= S.tuning.max
+                                sldGain.Value = S.tuning.gain;
+                                edGain.Value  = S.tuning.gain;
+                                % 旁路日志: 值【落定】的地方 —— 这才是"屏幕上到底是几"。
+                                %   非拖动时每条回读都会走到这里 (回读本身被 C++ 限到 ≥100ms,
+                                %   且只在值变/重连时才发) ⇒ 量很小, 不会淹掉文件。
+                                tlog('SET', sprintf('value=%.3f (from RG readback)', ...
+                                      sldGain.Value));
+                                % ★ 从"未知"那一档恢复 —— 必须也把控件【恢复成可用】。
+                                %   ⚠ 这一步不能指望上面那道范围门: 它只在"第一次回读 / 范围变了"
+                                %   时才跑, 而矛盾状态【随时】可能被下一条正常回读解掉 (同一范围内
+                                %   报一个合法 gain 就够了) ⇒ 只赋 Value 的话, 屏幕上是有了数,
+                                %   两个控件却永远灰着、操作员再也动不了它们。
+                                %   顺序: 先赋 Value (上面两句) 再关 AllowEmpty —— 值非空时置 false
+                                %   才不会触发"悄悄变 0"那一条 (见上面第一道门的注释)。
+                                %   占位串【不必在这里恢复】: 它只在框空着时可见, 而进入"空"只有
+                                %   两处 (构造 / showGainUnknown), 两处都各自写了当时该显示的句子。
+                                if S.tuning.displayUnknown
+                                    sldGain.Enable    = 'on';
+                                    edGain.Enable     = 'on';
+                                    edGain.AllowEmpty = false;
+                                    S.tuning.displayUnknown = false;
+                                end
+                            else
+                                % ★ 跳过赋值的那一支 —— 那句 ⚠ 就挂在这里 (2026-09-22 Fix round 2)。
+                                %   从前它写在上面的范围门里 ⇒ 只有"第一次回读 / 范围变了"才打。
+                                %   于是【范围没变的矛盾回读】(gain 越界, 而 min/max 与上一条相同)
+                                %   一次都不打地走完全程, 控件停在上一条回读的夹紧值上 ——
+                                %   一个看着像、却不是机械臂在用的增益, 而且无人吭声。本文件的
+                                %   整个立意就是"屏幕上的数 = 机械臂在用的数" ⇒ 不能留这个洞。
+                                showGainUnknown();
+                            end
+                        end
+                    else
+                        % 不静默: 回读坏了必须看得见 —— 否则界面会一直停在"等待 C++…",
+                        %   而没人知道为什么。这正是本项目最忌的"无声失败"。
+                        fprintf(['[Relay] RG| 回读不可用 (字段数/数值/上下限 ' ...
+                                 '其一不对), 已忽略: %s\n'], msg);
                     end
                 elseif startsWith(msg, 'FB|')
                     S.fb_idx = mod(S.fb_idx, 50) + 1;
@@ -726,11 +1221,31 @@ function relay_gui()
         % -- Robot State --
         rp = S.robot_pos; rt = S.robot_target; ja = S.joint_angles;
         txActive = any(rt(1:3) ~= 0);
+
+        % -- 笔杆 (Touch) 姿态 --
+        % P| 那条消息【本来就】带这三个角: C++ 侧发的是 P|x,y,z,sx,sy,sz
+        % (RelayCore.cpp 的 sendRelayUpdate), 而这里从前只用 tp(1:3) 去画那支笔, 后三个一直没用。
+        % 2026-09-22 加: 现场判"按钮2 大幅晃动"的【Euler 退化】假设要用它 ——
+        %   C++ 侧姿态跟随用 Euler 角作差, 提取式 ry = asin(-R[2][0]), 在 ry ≈ ±90° 附近 rx/rz 退化
+        %   (奇点分支直接把 rz 定成 0) ⇒ 微小的物理转动会产出巨大的角度差 ⇒ 缓慢转动也大幅晃。
+        %   ⇒ 【Ry 接近 ±90° 就是那个假设成立的线索】。同一读数在 C++ 侧也能看: 'm' 模式按 SPACE
+        %     会打一行 "笔杆姿态 Rx=.. Ry=.. Rz=.." —— 但那是【快照】, 这里是【连续】的。
+        % ⚠ 注意这两组角是【两个不同的设备】: 上面 Orientation 是机械臂的 (来自 RP|),
+        %   这一行是手写笔的 (来自 P|) —— 别混着比。
+        tp = S.touch_pos;
+        stylusLine = sprintf('Stylus (deg):     Rx: %7.2f  Ry: %7.2f  Rz: %7.2f', ...
+            tp(4), tp(5), tp(6));
+        if abs(abs(tp(5)) - 90) <= 20            % |Ry| ∈ [70,110]: 判据取 ±20° 的环带
+            stylusLine = [stylusLine '  <== |Ry| near 90: Euler 退化'];
+        end
+
         lblCoord.Text = {
             sprintf('Position (mm):    X: %8.2f  (target: %8.2f)', rp(1), rt(1));
             sprintf('                   Y: %8.2f  (target: %8.2f)', rp(2), rt(2));
             sprintf('                   Z: %8.2f  (target: %8.2f)', rp(3), rt(3));
             sprintf('Orientation (deg): Rx: %7.2f  Ry: %7.2f  Rz: %7.2f', rp(4), rp(5), rp(6));
+            '';
+            stylusLine;
             '';
             sprintf('Joints (deg):  J1:%7.1f  J2:%7.1f  J3:%7.1f', ja(1:3));
             sprintf('               J4:%7.1f  J5:%7.1f  J6:%7.1f', ja(4:6));
@@ -827,6 +1342,26 @@ function relay_gui()
         S.warn_max_level = 0;
 
         lblSafety.Text = safetyLines;
+
+        % -- 力反射增益 (2026-09-22) --
+        % 把 C++ 回读的三个展示量写成一行 (净比例 + 响应窗口)。
+        % 显示【窗口】而不是单个饱和点 —— satN 单给一个数会把死区那个前提藏起来
+        % (gain 300 时窗口只有 0.20–0.67N, 死区占了 30%)。
+        % ⚠ "该轴分量"这句不能省: HapticCallback 是【三个轴各自夹】, 不是夹合力。
+        if S.tuning.known
+            if S.tuning.displayUnknown
+                % ⚠ 回读自相矛盾时【这行也不能照常写】: ratio/satN 同样是【那一条】回读算出来的
+                %   (C++ 侧 netRatioPerGainUnit()*g), 与控件一样不可信。若还照常显示, 面板就
+                %   自相矛盾 —— 标题按某条回读报一个窗口, 而控件说"未知"。这里改成说清矛盾。
+                lblGainTitle.Text = sprintf( ...
+                    'Reflection Gain  ⚠ 回读自相矛盾: 报的 %.1f 不在 [%.0f, %.0f] —— 增益未知', ...
+                    S.tuning.gain, S.tuning.min, S.tuning.max);
+            else
+                lblGainTitle.Text = sprintf( ...
+                    'Reflection Gain  ≈%.2f:1   响应窗口 %.2f – %.2f N (该轴分量)', ...
+                    S.tuning.ratio, S.tuning.deadN, S.tuning.satN);
+            end
+        end
     end
 
     function updateForceHistory()

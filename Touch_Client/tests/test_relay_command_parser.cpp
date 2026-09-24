@@ -3,6 +3,7 @@
 // Run: test_relay_command_parser.exe
 
 #include <iostream>
+#include <cmath>        // fabs —— 别靠 <iostream> 的传递包含 (本项目同目录其余用例都显式写这一行)
 #include "../relay/RelayCommandParser.h"
 
 static int g_passed = 0, g_failed = 0;
@@ -79,6 +80,64 @@ static void test_unknown_command() {
     PASS();
 }
 
+// ===== 2026-09-22 新增: 增益与调零 =====
+
+static void test_rg_valid() {
+    TEST(rg_valid);
+    double v = 0.0;
+    CHECK(RelayCommandParser::parse("RG|200.5", &v) == R::SetReflectionGain);
+    CHECK(fabs(v - 200.5) < 1e-9);
+    PASS();
+}
+
+static void test_rg_range_not_checked_here() {
+    TEST(rg_range_not_checked_here);
+    // 【解析器不管范围】—— 范围是 ForceTuning 的事 (单一定义)。解析器只负责"这是个合法的数"。
+    // 这里钉住这条分工, 免得将来有人把增益范围 (ForceTuning::GAIN_MIN/GAIN_MAX) 塞进解析器、
+    // 于是范围有了第二份实现 (数值也不抄进来, 抄了会过期 —— 只用符号名)。
+    // 注意这条用例【不引用 ForceTuning.h】: 解析器与它无依赖, 引用反而把两者绑在一起。
+    double v = 0.0;
+    CHECK(RelayCommandParser::parse("RG|5000", &v) == R::SetReflectionGain);
+    CHECK(fabs(v - 5000.0) < 1e-9);
+    PASS();
+}
+
+static void test_rg_missing_value_out_param() {
+    TEST(rg_missing_value_out_param);
+    // 没给 out 参数也不能崩
+    CHECK(RelayCommandParser::parse("RG|200") == R::SetReflectionGain);
+    PASS();
+}
+
+static void test_rg_invalid() {
+    TEST(rg_invalid);
+    double v = 0.0;
+    CHECK(RelayCommandParser::parse("RG|", &v) == R::None);
+    CHECK(RelayCommandParser::parse("RG|abc", &v) == R::None);
+    CHECK(RelayCommandParser::parse("RG|200x", &v) == R::None);
+    CHECK(RelayCommandParser::parse("RG|2 00", &v) == R::None);
+    CHECK(RelayCommandParser::parse("RG|-", &v) == R::None);
+    PASS();
+}
+
+static void test_zero_command() {
+    TEST(zero_command);
+    CHECK(RelayCommandParser::parse("Z|1") == R::ForceZero);
+    CHECK(RelayCommandParser::parse("Z|1\n") == R::ForceZero);
+    CHECK(RelayCommandParser::parse("Z|0") == R::None);   // 只有 1, 没有 0
+    PASS();
+}
+
+static void test_rg_not_confused_with_ff() {
+    TEST(rg_not_confused_with_ff);
+    // FF| 与 RG| 是两条不同命令, 前缀不能互相吞
+    CHECK(RelayCommandParser::parse("FF|1") == R::ForceFeedbackOn);
+    double v = 0.0;
+    CHECK(RelayCommandParser::parse("RG|1", &v) == R::SetReflectionGain);
+    CHECK(fabs(v - 1.0) < 1e-9);   // 是 1.0, 【不是】被当成 FF|1
+    PASS();
+}
+
 int main() {
     std::cout << "=== RelayCommandParser Tests ===" << std::endl;
     test_ff_on();
@@ -92,6 +151,12 @@ int main() {
     test_empty();
     test_null();
     test_unknown_command();
+    test_rg_valid();
+    test_rg_range_not_checked_here();
+    test_rg_missing_value_out_param();
+    test_rg_invalid();
+    test_zero_command();
+    test_rg_not_confused_with_ff();
     std::cout << std::endl;
     std::cout << g_passed << " passed, " << g_failed << " failed" << std::endl;
     return g_failed > 0 ? 1 : 0;

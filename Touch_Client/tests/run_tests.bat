@@ -33,6 +33,18 @@ rem   EQU, so it is correct for passing, failing AND crashing suites.
 rem   The OUTER (build-exit) checks are top-level statements, are NOT
 rem   affected by delayed expansion, and are correct as they are.
 rem
+rem BUT THE OUTER CHECK IS ONLY AS GOOD AS THE BUILD SCRIPTS' LAST LINE
+rem   (measured 2026-09-23). The ERRORLEVEL that "call build_x.bat" leaves
+rem   behind is whatever the SCRIPT's last command left. echo, set, if, for
+rem   and set /a all PRESERVE it -- which is why every build script ending in
+rem   its "echo BUILD_EXIT=..." line works: the compiler's exit code survives
+rem   the echo. cd and ver, by contrast, RESET it to 0 (both measured).
+rem   So if anyone ever appends a cd -- or anything else that resets it --
+rem   AFTER the compiler call inside a build script, a FAILED BUILD goes
+rem   silent: this file prints "Build OK" and then runs the stale exe, which
+rem   is the precise failure mode this harness was rebuilt to remove.
+rem   Keep the compiler call last in those scripts, or re-check the code.
+rem
 rem WHY "@echo off" FOLLOWS EVERY "call" BELOW (do not delete those lines):
 rem   Each build script starts with "@echo on", and that switch is GLOBAL to
 rem   the cmd session, so it survives the call. Without restoring it, this
@@ -330,12 +342,461 @@ if %ERRORLEVEL% EQU 0 (
 echo.
 
 echo ================================================
+echo   Force Tuning Tests
+echo ================================================
+echo.
+echo --- Building test_force_tuning ---
+call "%TESTDIR%\build_force_tuning_test.bat"
+@echo off
+if %ERRORLEVEL% EQU 0 (
+    echo   Build OK
+    echo.
+    echo === test_force_tuning.exe ===
+    "%TESTDIR%\test_force_tuning.exe"
+    if !ERRORLEVEL! EQU 0 (
+        set /a PASSED+=1
+        echo   [OK]
+    ) else (
+        set /a FAILED+=1
+        echo   [FAIL]
+    )
+) else (
+    echo   [FAIL: build error]
+    set /a FAILED+=1
+)
+echo.
+
+rem ============================================================
+rem Suites wired into "build then run" on 2026-09-23:
+rem   calib_store / calibration / frame_layout / inertia_identification /
+rem   self_collision / singularity_avoidance
+rem   These six had WORKING build scripts that nothing ever called -- the
+rem   same orphan defect class fixed above on 2026-09-22 for five others.
+rem   Measured green on 2026-09-23, right after a fresh build. Name and
+rem   numbers are written as PAIRS on purpose: a bare row of counts would be
+rem   read against whatever order the reader assumes, and this block is a
+rem   measurement, not a number to be re-derived.
+rem     calibration 8/0      calib_store 3/0        frame_layout 12/0
+rem     inertia_identification 12/0   self_collision 6/0   singularity_avoidance 12/0
+rem   (assertions passed / failed; all six exes exit 0.)
+rem   The FORM of the result check is NOT special to these six -- every
+rem   section in this file uses it. See "HOW TEST RESULTS ARE JUDGED" at the
+rem   top of this file for the rule and the two tempting-but-wrong forms.
+rem ============================================================
+
+echo ================================================
+echo   Calibration / Kinematics / Safety Standalone Tests
+echo ================================================
+echo.
+echo --- Building test_calibration ---
+call "%TESTDIR%\build_calibration_test.bat"
+@echo off
+if %ERRORLEVEL% EQU 0 (
+    echo   Build OK
+    echo.
+    echo === test_calibration.exe ===
+    "%TESTDIR%\test_calibration.exe"
+    if !ERRORLEVEL! EQU 0 (
+        set /a PASSED+=1
+        echo   [OK]
+    ) else (
+        set /a FAILED+=1
+        echo   [FAIL]
+    )
+) else (
+    echo   [FAIL: build error]
+    set /a FAILED+=1
+)
+echo.
+
+echo --- Building test_calib_store ---
+call "%TESTDIR%\build_calib_store_test.bat"
+@echo off
+if %ERRORLEVEL% EQU 0 (
+    echo   Build OK
+    echo.
+    echo === test_calib_store.exe ===
+    "%TESTDIR%\test_calib_store.exe"
+    if !ERRORLEVEL! EQU 0 (
+        set /a PASSED+=1
+        echo   [OK]
+    ) else (
+        set /a FAILED+=1
+        echo   [FAIL]
+    )
+) else (
+    echo   [FAIL: build error]
+    set /a FAILED+=1
+)
+echo.
+
+echo --- Building test_frame_layout ---
+call "%TESTDIR%\build_frame_layout_test.bat"
+@echo off
+if %ERRORLEVEL% EQU 0 (
+    echo   Build OK
+    echo.
+    echo === test_frame_layout.exe ===
+    "%TESTDIR%\test_frame_layout.exe"
+    if !ERRORLEVEL! EQU 0 (
+        set /a PASSED+=1
+        echo   [OK]
+    ) else (
+        set /a FAILED+=1
+        echo   [FAIL]
+    )
+) else (
+    echo   [FAIL: build error]
+    set /a FAILED+=1
+)
+echo.
+
+echo --- Building test_inertia_identification ---
+call "%TESTDIR%\build_inertia_identification_test.bat"
+@echo off
+if %ERRORLEVEL% EQU 0 (
+    echo   Build OK
+    echo.
+    echo === test_inertia_identification.exe ===
+    "%TESTDIR%\test_inertia_identification.exe"
+    if !ERRORLEVEL! EQU 0 (
+        set /a PASSED+=1
+        echo   [OK]
+    ) else (
+        set /a FAILED+=1
+        echo   [FAIL]
+    )
+) else (
+    echo   [FAIL: build error]
+    set /a FAILED+=1
+)
+echo.
+
+echo --- Building test_self_collision ---
+call "%TESTDIR%\build_self_collision_test.bat"
+@echo off
+if %ERRORLEVEL% EQU 0 (
+    echo   Build OK
+    echo.
+    echo === test_self_collision.exe ===
+    "%TESTDIR%\test_self_collision.exe"
+    if !ERRORLEVEL! EQU 0 (
+        set /a PASSED+=1
+        echo   [OK]
+    ) else (
+        set /a FAILED+=1
+        echo   [FAIL]
+    )
+) else (
+    echo   [FAIL: build error]
+    set /a FAILED+=1
+)
+echo.
+
+echo --- Building test_singularity_avoidance ---
+call "%TESTDIR%\build_singavoid_test.bat"
+@echo off
+if %ERRORLEVEL% EQU 0 (
+    echo   Build OK
+    echo.
+    echo === test_singularity_avoidance.exe ===
+    "%TESTDIR%\test_singularity_avoidance.exe"
+    if !ERRORLEVEL! EQU 0 (
+        set /a PASSED+=1
+        echo   [OK]
+    ) else (
+        set /a FAILED+=1
+        echo   [FAIL]
+    )
+) else (
+    echo   [FAIL: build error]
+    set /a FAILED+=1
+)
+echo.
+
+rem ============================================================
+rem Suite wired into "build then run" on 2026-09-23 (7th of the orphan set):
+rem   button2_mapping -- the pure function behind button 2's stylus->robot
+rem   orientation mapping. Measured green 2026-09-23, right after a fresh
+rem   build: exe exit code 0. The assertion count is deliberately NOT copied
+rem   here: it is printed by the suite itself on every run, and a hand-typed
+rem   copy of it only goes stale in the silent direction (see the note on
+rem   hand-typed numbers in the NOT RUN block at the bottom of this file).
+rem   Adding this .cpp is what makes the runtime suite count on disk move
+rem   from 21 to 22; if this section is ever deleted while the .cpp stays,
+rem   the harness asserts at the bottom and exits 1 -- by design.
+rem   The FORM of the result check is NOT special to this suite -- every
+rem   section in this file uses it. See "HOW TEST RESULTS ARE JUDGED" at
+rem   the top of this file for the rule and the two tempting-but-wrong forms.
+rem ============================================================
+
+echo --- Building test_button2_mapping ---
+call "%TESTDIR%\build_button2_mapping_test.bat"
+@echo off
+if %ERRORLEVEL% EQU 0 (
+    echo   Build OK
+    echo.
+    echo === test_button2_mapping.exe ===
+    "%TESTDIR%\test_button2_mapping.exe"
+    if !ERRORLEVEL! EQU 0 (
+        set /a PASSED+=1
+        echo   [OK]
+    ) else (
+        set /a FAILED+=1
+        echo   [FAIL]
+    )
+) else (
+    echo   [FAIL: build error]
+    set /a FAILED+=1
+)
+echo.
+
+rem ============================================================
+rem Suite wired into "build then run" on 2026-09-23 (Task 1 of the
+rem   haptic-output jitter instrument plan):
+rem   jitter_stats -- the pure statistics accumulator (JitterStats.h) that the
+rem   jitter diagnosis feeds once per FRAME to get (a) the per-axis sd of
+rem   hapticOut and (b) the fraction of frames whose residual crosses the 0.20 N
+rem   dead zone. Both numbers decide whether the "1.27 sigma against a 0.20 N
+rem   dead zone" mechanism stands, so an error here flips the conclusion.
+rem   The assertion count is deliberately NOT copied here: the suite prints it on
+rem   every run, and a hand-typed copy only goes stale in the silent direction
+rem   (see the note on hand-typed numbers in the NOT RUN block at the bottom).
+rem   Adding this .cpp is what makes the runtime suite count on disk move
+rem   from 22 to 23; if this section is ever deleted while the .cpp stays,
+rem   the harness asserts at the bottom and exits 1 -- by design.
+rem   The FORM of the result check is NOT special to this suite -- every
+rem   section in this file uses it. See "HOW TEST RESULTS ARE JUDGED" at
+rem   the top of this file for the rule and the two tempting-but-wrong forms.
+rem ============================================================
+
+echo --- Building test_jitter_stats ---
+call "%TESTDIR%\build_jitter_stats_test.bat"
+@echo off
+if %ERRORLEVEL% EQU 0 (
+    echo   Build OK
+    echo.
+    echo === test_jitter_stats.exe ===
+    "%TESTDIR%\test_jitter_stats.exe"
+    if !ERRORLEVEL! EQU 0 (
+        set /a PASSED+=1
+        echo   [OK]
+    ) else (
+        set /a FAILED+=1
+        echo   [FAIL]
+    )
+) else (
+    echo   [FAIL: build error]
+    set /a FAILED+=1
+)
+echo.
+
+rem ============================================================
+rem Suite wired into "build then run" on 2026-09-23 (Task 1 of the
+rem   button-2 joint-space plan):
+rem   button2_joint -- the pure function (relay/Button2Joint.{h,cpp}) that maps the
+rem   stylus Euler deltas onto J4/J5/J6 (Rx->J4, Rz->J5, Ry->J6; J1/J2/J3 held;
+rem   translation cannot participate because the signature has no position input).
+rem   As of 2026-09-23 fix2 it also covers the two hookup-layer predicates that were
+rem   extracted out of RelayCore.cpp (isTrustworthyJointRef / clampJointStep) -- the
+rem   arithmetic only; the call sites in RelayCore.cpp still have no automated coverage.
+rem   The assertion count is deliberately NOT copied here: the suite prints it on
+rem   every run, and a hand-typed copy only goes stale in the silent direction
+rem   (see the note on hand-typed numbers in the NOT RUN block at the bottom).
+rem   Adding this .cpp is what makes the runtime suite count on disk move
+rem   from 23 to 24; if this section is ever deleted while the .cpp stays,
+rem   the harness asserts at the bottom and exits 1 -- by design.
+rem   The FORM of the result check is NOT special to this suite -- every
+rem   section in this file uses it. See "HOW TEST RESULTS ARE JUDGED" at the
+rem   top of this file for the rule and the two tempting-but-wrong forms.
+rem ============================================================
+
+echo --- Building test_button2_joint ---
+call "%TESTDIR%\build_button2_joint_test.bat"
+@echo off
+if %ERRORLEVEL% EQU 0 (
+    echo   Build OK
+    echo.
+    echo === test_button2_joint.exe ===
+    "%TESTDIR%\test_button2_joint.exe"
+    if !ERRORLEVEL! EQU 0 (
+        set /a PASSED+=1
+        echo   [OK]
+    ) else (
+        set /a FAILED+=1
+        echo   [FAIL]
+    )
+) else (
+    echo   [FAIL: build error]
+    set /a FAILED+=1
+)
+echo.
+
+rem ============================================================
+rem Suite wired into "build then run" on 2026-09-24:
+rem   gain_readback_policy -- the pure decision function behind RG| readback rate
+rem   limiting (relay/GainReadbackPolicy.h). It was extracted out of RelayCore.cpp,
+rem   which no test compiles, after the limiter was once silently disabled by a
+rem   mis-passed force=true argument -- a defect the test bench did not notice.
+rem   Only the DECISION is covered here; the call site in RelayCore.cpp still has
+rem   no automated coverage.
+rem   The assertion count is deliberately NOT copied here: the suite prints it on
+rem   every run, and a hand-typed copy only goes stale in the silent direction
+rem   (see the note on hand-typed numbers in the NOT RUN block at the bottom).
+rem   Adding this .cpp is what makes the runtime suite count on disk move
+rem   from 24 to 25; if this section is ever deleted while the .cpp stays,
+rem   the harness asserts at the bottom and exits 1 -- by design.
+rem   The FORM of the result check is NOT special to this suite -- every
+rem   section in this file uses it. See "HOW TEST RESULTS ARE JUDGED" at
+rem   the top of this file for the rule and the two tempting-but-wrong forms.
+rem ============================================================
+
+echo --- Building test_gain_readback_policy ---
+call "%TESTDIR%\build_gain_readback_policy_test.bat"
+@echo off
+if %ERRORLEVEL% EQU 0 (
+    echo   Build OK
+    echo.
+    echo === test_gain_readback_policy.exe ===
+    "%TESTDIR%\test_gain_readback_policy.exe"
+    if !ERRORLEVEL! EQU 0 (
+        set /a PASSED+=1
+        echo   [OK]
+    ) else (
+        set /a FAILED+=1
+        echo   [FAIL]
+    )
+) else (
+    echo   [FAIL: build error]
+    set /a FAILED+=1
+)
+echo.
+
+rem ============================================================
+rem Suite wired into "build then run" on 2026-09-24:
+rem   payload_calibration -- the offline payload/COM solver (PayloadCalibration.cpp)
+rem   plus the local-compensation acceptance case. It carries ONE case that is
+rem   deliberately NOT run by this exe: test_runtime_consistency_guard_replay
+rem   replays the four 2026-09-19 captures, which carry no reference-column
+rem   (@720) data, so the gate can only answer REFERENCE_UNAVAILABLE and that
+rem   assertion is red BY DESIGN. Deleting the case would make an unverified
+rem   assertion disappear silently, so it was split out instead of removed:
+rem   this exe runs the other cases and PRINTS A [PARKED] DISCLOSURE ON EVERY
+rem   RUN naming the excluded one. The case itself lives in
+rem   test_payload_calibration_parked.cpp, which is named in NOTRUN_LIST below.
+rem   WHY THE DISCLOSURE IS PRINTED, NOT JUST COMMENTED: the accounting below is
+rem   a CARDINALITY check, not an IDENTITY check -- it cannot tell "this exe ran"
+rem   from "this exe ran but one of its cases never executed". The banner is the
+rem   only thing that makes the missing case visible on every run.
+rem   The parked case is still COMPILED by this exe every time (the #ifdef only
+rem   switches main()), so a production API change still breaks the build here.
+rem   The assertion count is deliberately NOT copied here: the suite prints it on
+rem   every run, and a hand-typed copy only goes stale in the silent direction
+rem   (see the note on hand-typed numbers in the NOT RUN block at the bottom).
+rem   Adding this .cpp is what makes the runtime suite count on disk move
+rem   from 25 to 26; if this section is ever deleted while the .cpp stays,
+rem   the harness asserts at the bottom and exits 1 -- by design.
+rem   The FORM of the result check is NOT special to this suite -- every
+rem   section in this file uses it. See "HOW TEST RESULTS ARE JUDGED" at
+rem   the top of this file for the rule and the two tempting-but-wrong forms.
+rem ============================================================
+
+echo --- Building test_payload_calibration ---
+call "%TESTDIR%\build_payload_calibration_test.bat"
+@echo off
+if %ERRORLEVEL% EQU 0 (
+    echo   Build OK
+    echo.
+    echo === test_payload_calibration.exe ===
+    "%TESTDIR%\test_payload_calibration.exe"
+    if !ERRORLEVEL! EQU 0 (
+        set /a PASSED+=1
+        echo   [OK]
+    ) else (
+        set /a FAILED+=1
+        echo   [FAIL]
+    )
+) else (
+    echo   [FAIL: build error]
+    set /a FAILED+=1
+)
+echo.
+
+echo ================================================
 echo   Tests complete
 echo ================================================
-echo ================================================
 set /a TOTAL=PASSED+FAILED
+
+rem ------------------------------------------------------------
+rem How many suites EXIST in this repository: counted at RUN time from the
+rem   sources on disk, never typed by hand. "%TESTDIR%\test_*.cpp" is the
+rem   definition of "a suite lives here", so dropping in a new test_*.cpp
+rem   moves this number by itself -- that is the whole point. A number that
+rem   is typed by hand instead goes stale in the SILENT direction: it keeps
+rem   printing a total that looks complete while the new suite is missing
+rem   from the disclosure below.
+rem ------------------------------------------------------------
+set /a NTESTS=0
+for %%F in ("%TESTDIR%\test_*.cpp") do set /a NTESTS+=1
+
+rem ------------------------------------------------------------
+rem The suites this harness deliberately does NOT build or run. One entry
+rem   per suite, space separated, name WITHOUT the .cpp suffix, NO wildcards.
+rem   A suite belongs here ONLY if it is named in this list; every other
+rem   suite must be wired into "build then run" above and therefore must be
+rem   counted by PASSED+FAILED. That invariant is asserted at the bottom of
+rem   this file.
+rem
+rem THIS LIST IS VALIDATED, NOT TRUSTED (added 2026-09-23). Counting the
+rem   entries in the string instead would put back the exact defect this file
+rem   was fixed for: a name that does not exist on disk -- a typo, say --
+rem   still counts as one excluded suite, the arithmetic still balances, the
+rem   harness still exits 0, and the suite it was supposed to stand for is
+rem   neither run nor disclosed. The three checks below close that.
+rem ------------------------------------------------------------
+set "NOTRUN_LIST=test_constraint_force test_payload_calibration_parked"
+
+rem A dictionary of the suites that EXIST, keyed by exact file stem. Entries
+rem   are looked up in it rather than trusted, so a misspelled name matches
+rem   nothing. (Keys are exact stems, so a wildcard never matches one either,
+rem   but see the explicit wildcard check below -- that one exists because the
+rem   for below would EXPAND a pattern before we ever get to look it up.)
+for %%F in ("%TESTDIR%\test_*.cpp") do set "NR_SUITE_%%~nF=1"
+
+set /a NNOTRUN=0
+set /a NN_BAD=0
+rem "if defined" is NOT decoration on the two loops below. Measured
+rem   2026-09-23: an EMPTY set does not skip -- it runs the body ONCE with an
+rem   empty for-variable. Without the guard an emptied list would therefore
+rem   report a phantom entry (a [LIST ERROR] naming "") and count it. (The
+rem   test_*.cpp count above needs no guard because a wildcard with no match
+rem   really does loop zero times -- measured 0, same day.)
+if defined NOTRUN_LIST for %%G in (%NOTRUN_LIST%) do if not defined NR_SUITE_%%G (
+    echo   [LIST ERROR] NOTRUN_LIST entry "%%G" does not name exactly one
+    echo               test_*.cpp in this repo. See the notes on NOTRUN_LIST.
+    set /a NN_BAD+=1
+)
+
+rem Count DISTINCT names, so repeating an entry cannot inflate the count.
+if defined NOTRUN_LIST for %%G in (%NOTRUN_LIST%) do if not defined NR_SEEN_%%G (
+    set "NR_SEEN_%%G=1"
+    set /a NNOTRUN+=1
+)
+
+rem A pattern in the list is worse than a typo: the for above would expand it
+rem   into REAL suites, and the disclosure would name suites that actually ran
+rem   while hiding the ones actually meant to be excluded.
+rem   findstr is used deliberately instead of cmd's %VAR:*/?=% substitution,
+rem   which was measured 2026-09-23 to leave a literal, unexpandable line
+rem   behind (a syntax error) when the character is absent -- so the
+rem   substitution idiom cannot be used to ask "does this contain an asterisk".
+echo %NOTRUN_LIST%| findstr /c:"*" >nul && set /a NN_BAD+=1
+echo %NOTRUN_LIST%| findstr /c:"?" >nul && set /a NN_BAD+=1
+
+set /a ACCOUNTED=TOTAL+NNOTRUN
+
 echo ================================================
-echo   Summary: %TOTAL% of 20 suites run - %PASSED% OK, %FAILED% FAILED
+echo   Summary: %TOTAL% of %NTESTS% suites accounted for - %PASSED% OK, %FAILED% FAILED
 echo ================================================
 echo.
 rem ------------------------------------------------------------
@@ -343,52 +804,95 @@ rem [NOT RUN] -- the suites this harness does NOT build or run. Kept in the RUN
 rem   LOG (not only in the source) so that a green run cannot be misread as
 rem   "every suite in this repository is green".
 rem
-rem   The "20" and the "8" below are HAND-MAINTAINED -- nothing computes them.
-rem   To recompute: test_*.cpp in the repo = 20; sections wired in below = 12;
-rem   20 - 12 = 8 not run. If you wire one in, update BOTH numbers here AND the
-rem   "12" that the MISMATCH check further down asserts.
+rem   NOTHING in this block is typed by hand any more (changed 2026-09-23):
+rem   the total comes from counting test_*.cpp on disk, the not-run count and
+rem   the NAME LIST below come from NOTRUN_LIST above, and the "suites that
+rem   ran" figure comes from PASSED+FAILED. This block used to spell the
+rem   numbers out, which meant every change needed a matching edit here --
+rem   and a missed edit printed a state of the world that looked complete.
+rem   Do not reintroduce a literal count in this block.
+rem
+rem   The REASON paragraph further down is the one surviving hand-maintained
+rem   list: it repeats the two names. NOTHING enforces that the two stay in
+rem   step, so if you add a name to NOTRUN_LIST, add its reason here too --
+rem   otherwise the run discloses a suite it never explains.
 rem ------------------------------------------------------------
-echo   [NOT RUN] 8 of the 20 test_*.cpp in this repo are not built or run here:
+echo   [NOT RUN] %NNOTRUN% of the %NTESTS% test_*.cpp in this repo are not built or run here:
+echo.
+if defined NOTRUN_LIST for %%F in (%NOTRUN_LIST%) do echo     %%F
+echo.
+echo   Why each of those is excluded (every name printed above needs a line
+echo   here -- NOTRUN_LIST is the source of truth for WHICH suites are
+echo   excluded, this paragraph is only the REASON):
 echo.
 echo     test_constraint_force
 echo       Its build script is ignored by Touch_Client/tests/.gitignore line 1, so
 echo       it is NOT in HEAD -- nothing COMMITTED can build this suite's exe.
 echo       (Undecided; see the gap note further up this file.)
 echo.
-echo     test_payload_calibration
-echo       Has a DELIBERATELY RED assertion: its fixture carries no reference-
-echo       channel columns, so the case cannot be decided either way. Wiring it
-echo       in would make this harness exit non-zero forever. Known, not a bug.
+echo     test_payload_calibration_parked
+echo       Is the PARKED variant of test_payload_calibration.cpp -- it runs ONLY the one
+echo       case that is red by design (the gate replay over the four 2026-09-19 captures,
+echo       which carry no reference-column data). The main suite excludes that case and is
+echo       wired in above; this variant is what keeps the case NAMED instead of deleted.
+echo       Build it by hand with build_payload_calibration_parked_test.bat when you want
+echo       to see it. Re-capturing a fixture with the @720 columns is what un-parks it.
 echo.
-echo     test_calib_store / test_calibration / test_frame_layout /
-echo     test_inertia_identification / test_self_collision /
-echo     test_singularity_avoidance
-echo       These six have WORKING build scripts and currently pass; nothing ever
-echo       wired them in. Same orphan defect class this harness just fixed for
-echo       five other suites -- they belong in the next plan, not silently absent.
-echo.
-echo   A green line above therefore means "the 12 suites that ran all passed".
+echo   The line above therefore means: %PASSED% passed, %FAILED% failed, out of the
+echo   %NTESTS% test_*.cpp in this repo (%NNOTRUN% of which this harness does not run).
 echo   It does NOT mean every suite in this repository is green.
+echo   (The six suites with working-but-never-called build scripts -- calib_store,
+echo    calibration, frame_layout, inertia_identification, self_collision,
+echo    singularity_avoidance -- were wired into "build then run" on 2026-09-23
+echo    and are counted in the %TOTAL% above, not in this block.)
 echo ================================================
 echo.
 
 rem ------------------------------------------------------------
 rem Report the result to the CALLER, not only to stdout.
-rem  * Every suite must be counted exactly once, so PASSED+FAILED must equal
-rem    the number of build sections (12). If it does not, a section was
-rem    silently skipped and the Summary above cannot be trusted.
+rem  * Every test_*.cpp in this repo must be accounted for exactly once: it
+rem    either RAN (and was counted by PASSED+FAILED) or it is named in
+rem    NOTRUN_LIST above. So TOTAL + NNOTRUN must equal the number of
+rem    test_*.cpp counted off the disk. When it does not, a section was
+rem    silently skipped, a section was wired to something that is not a
+rem    test_*.cpp, or a NEW suite was added to the repo without being wired
+rem    in -- and the Summary above cannot be trusted.
+rem    (Until 2026-09-23 this compared the count against a HARDCODED number
+rem    of build sections, 13. That form could only catch a SKIPPED section:
+rem    it did not know how many suites exist, so a newly added test_*.cpp
+rem    sailed past it and simply dropped out of the [NOT RUN] disclosure.
+rem    Do not go back to a hardcoded section count here.)
+rem    WHAT THIS DOES NOT CATCH, stated plainly so the next editor does not
+rem    trust it further than it goes: it is a check on the NUMBERS, not on the
+rem    NAMES. A compensating pair -- one section deleted AND a section wired
+rem    to a non-suite (e.g. the orphan build_fk_validate.bat) -- keeps the
+rem    total right and passes. Each of those two edits ALONE is caught, so
+rem    this needs two deliberate mistakes, but nobody should read a green run
+rem    as "every section is wired to a real suite".
+rem  * NN_BAD is set by the NOTRUN_LIST validation above (a name with no
+rem    matching test_*.cpp, or a wildcard in the list). Those mistakes would
+rem    otherwise leave the arithmetic perfectly balanced and exit 0.
 rem  * The script must exit NON-ZERO when anything failed. Without this, cmd
 rem    returns 0 after a failing command and the harness always looks green
 rem    to whatever ran it (CI, another script, a human checking the code).
 rem ------------------------------------------------------------
 set "HARNESS_RC=%FAILED%"
-if %TOTAL% NEQ 12 (
+if %ACCOUNTED% NEQ %NTESTS% (
     echo ================================================
-    echo   MISMATCH: expected 12 counted suites, but counted %TOTAL%
-    echo   A section was skipped -- the Summary above is NOT trustworthy.
+    echo   MISMATCH: %NTESTS% test_*.cpp on disk, but %TOTAL% suites counted
+    echo             + %NNOTRUN% declared not-run = %ACCOUNTED%.
+    echo   A suite is unaccounted for -- the Summary above is NOT trustworthy.
+    echo ================================================
+    set "HARNESS_RC=1"
+)
+if %NN_BAD% GTR 0 (
+    echo ================================================
+    echo   MISMATCH: NOTRUN_LIST is invalid. Problems found: %NN_BAD%
+    echo   See the LIST ERROR lines above. The list is:
+    echo     %NOTRUN_LIST%
     echo ================================================
     set "HARNESS_RC=1"
 )
 echo.
-echo   Suites counted: %TOTAL%    Exit code: %HARNESS_RC%
+echo   Suites accounted: %ACCOUNTED% of %NTESTS% (ran %TOTAL% + not-run %NNOTRUN%)    Exit code: %HARNESS_RC%
 endlocal & exit /b %HARNESS_RC%

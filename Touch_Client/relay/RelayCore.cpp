@@ -1,6 +1,9 @@
 #define _USE_MATH_DEFINES
 #include "RelayCore.h"
+#include "Button2Joint.h"     // ★ Task 2: 按钮2 关节空间纯函数 (笔杆偏移 ⇒ J4/J5/J6 增量)
+#include "Button2Mapping.h"
 #include "FeedbackParser.h"
+#include "GainReadbackPolicy.h"
 #include "RelayCommandParser.h"
 #include "SafetyBoundary.h"
 #include "../robot/RobotConnection.h"
@@ -16,6 +19,7 @@
 #include "../safety/RobotDiagnostics.h"
 #include "../safety/SelfCollision.h"
 #include "../force/ForcePipeline.h"
+#include "../force/ForceTuning.h"
 #include "../force/ForceCompensation.h"
 #include "../force/ForceCalibration.h"
 #include "../force/ForceLogger.h"
@@ -63,6 +67,59 @@ static Vec3 clampOrientToBounds(const Vec3& target) {
     }
     return clamped;
 }
+
+// ★★ 2026-09-22 实验（见 Config::ORIENT_SEAM_FIX_ENABLED 那一大段）：把角度规范化到 [-180,180)。
+// 为什么用 fmod 而不是 while 循环：while 在病态输入 (inf/nan) 下会挂住整个下发线程。
+// 注意 180 会映射成 -180 —— 同一个朝向，且规范区间是半开，这是刻意的。
+static double normalizeDeg180(double deg) {
+    if (!(deg > -1e18 && deg < 1e18)) return 0.0;   // NaN/inf 兜底: 别把毒值发给机械臂
+    double r = fmod(deg + 180.0, 360.0);
+    if (r < 0.0) r += 360.0;
+    return r - 180.0;
+}
+
+// ★★ 2026-09-22 实验：钳【相对参照的偏移】，而不是绝对值。
+// 【为什么绝对值那条会抖】参照 `m_orientRefRobot` 抄自按下按钮2 那一刻的【实际姿态】
+//   (:1303)，它可能就坐在 ±180 上（现场 `R=(+176.1,…)` 距 +180 只有 3.9°）⇒ 往外多转一点点
+//   就撞墙 ⇒ 目标被钉死在该边界 ⇒ 手一抖就在墙上【逐帧来回】⇒ 指令以帧率往复 ⇒ 臂抖。
+// 【为什么相对钳位才对】这个钳位想防的是"**相对起始姿态**转太多"，不是"别过 180 这个数"。
+//   而且 ±180 只是 RPY 表示的接缝，J6 量程本来就是 ±360。
+static Vec3 clampOrientOffset(const Vec3& target, const Vec3& ref) {
+    const Vec3 raw(target.x - ref.x, target.y - ref.y, target.z - ref.z);
+    Vec3 off = raw;
+    bool warned = false;
+
+    if (off.x >  Config::ORIENT_MAX_OFFSET_DEG) { off.x =  Config::ORIENT_MAX_OFFSET_DEG; warned = true; }
+    if (off.x < -Config::ORIENT_MAX_OFFSET_DEG) { off.x = -Config::ORIENT_MAX_OFFSET_DEG; warned = true; }
+    if (off.y >  Config::ORIENT_MAX_OFFSET_DEG) { off.y =  Config::ORIENT_MAX_OFFSET_DEG; warned = true; }
+    if (off.y < -Config::ORIENT_MAX_OFFSET_DEG) { off.y = -Config::ORIENT_MAX_OFFSET_DEG; warned = true; }
+    if (off.z >  Config::ORIENT_MAX_OFFSET_DEG) { off.z =  Config::ORIENT_MAX_OFFSET_DEG; warned = true; }
+    if (off.z < -Config::ORIENT_MAX_OFFSET_DEG) { off.z = -Config::ORIENT_MAX_OFFSET_DEG; warned = true; }
+
+    if (warned) {
+        std::cerr << "[Safety] Orientation offset from press-time reference clamped to ±"
+                  << Config::ORIENT_MAX_OFFSET_DEG << " deg. Original offset: ("
+                  << raw.x << "," << raw.y << "," << raw.z << ")" << std::endl;
+    }
+    return Vec3(ref.x + off.x, ref.y + off.y, ref.z + off.z);
+}
+
+// ★★ 2026-09-22 实验之二（见 Config::ORIENT_STYLUS_LPF_ENABLED 那一大段）：
+// 笔杆姿态【偏移】的一阶低通状态。放文件作用域而不是成员，是为了不动 RelayCore.h ——
+// 生命周期与进程相同，而参照那一组是每次按下按钮2 重设的 ⇒ 必须配一个 reset（见 onButton2Press）。
+static double s_stylusOffFilt[3] = { 0.0, 0.0, 0.0 };
+static DWORD  s_stylusOffFiltLastMs = 0;
+static bool   s_stylusOffFiltReady = false;
+
+static void resetStylusOffsetFilter() {
+    s_stylusOffFilt[0] = s_stylusOffFilt[1] = s_stylusOffFilt[2] = 0.0;
+    s_stylusOffFiltLastMs = 0;
+    s_stylusOffFiltReady = false;
+}
+
+// ★ 2026-09-23 (Task 3): "标定路径没接上"这件事只披露【一次】，别每帧刷屏。
+// 见 Config::BTN2_ROTATION_COMPOSE_ENABLED 与 Button2Mapping.h 的调用约定那一节。
+static bool s_warnedBtn2CalibIgnored = false;
 
 // ===== 帧率噪声探针的【环形缓冲】=====
 // 见 RelayCore.h 里那一段 (要回答什么问题) 与 force/NoiseProbe.h (统计量的判据)。
@@ -193,8 +250,10 @@ static DWORD WINAPI forceReaderThread(LPVOID) {
             // 同一帧里的 TCPForce @720 —— 与 @576 是两个不同的量 (见 AppState.h 的说明)。
             // 实测改 EnableRobot 的负载时 @576 不变, 所以两路都留着, 供以后对比/诊断。
             double* tcpForcePtr = reinterpret_cast<double*>(buf + 720);
-            // 同一帧里的 ToolVectorActual @624 / TCPSpeedActual @672 —— 坐标系未确认
-            // (见 AppState.h 的说明)。现在只镜像进 ForceData, 供运动探针并排打印对照。
+            // 同一帧里的 ToolVectorActual @624 / TCPSpeedActual @672。
+            // ★ 2026-09-24: @624 的坐标系已确认 (= 基座系，与 GetPose 同约定) **且已被消费**
+            //   —— 本函数下面取重力项姿态时优先用它 (恰好全 0 才退回仪表盘)。
+            //   判定办法与证据写在 AppState.h 那个字段上。@672 **仍未确认**，仍然只镜像。
             const double* tcpPosePtr = reinterpret_cast<const double*>(buf + 624);
             const double* tcpSpeedPtr = reinterpret_cast<const double*>(buf + 672);
             // 同一帧里的 SixForceValue @1304 = "当前六维力数据原始值" —— 与 @576 的派生量
@@ -214,17 +273,31 @@ static DWORD WINAPI forceReaderThread(LPVOID) {
             // 【姿态为什么在这里读】与 pollForce 【同一来源、同一把锁、同一顺序】:
             //   robotPoseMutex 先取先放, 然后才取 forceDataMutex。反过来会与 pollForce 构成死锁。
             //   (HapticCallback 从不嵌套这两把锁 —— 144~172 行是串行取的。)
-            //   ⚠ 姿态仍只由 GetPose() 每 100 ms 刷新 (robotActualPose) ⇒ A·g 是阶梯。
-            //     但重力项变化慢 (0.1° ≈ 0.007 N), 代价可接受。真要同帧对齐: 30004 帧里本来就带
-            //     ToolVectorActual @624 (已镜像进 forceData.tcpPoseActual) —— 那是第二步, 未做。
+            //   ★★ 2026-09-24: **姿态改用【同一帧】的 ToolVectorActual @624**。上面那句
+            //     "姿态仍只由 GetPose() 每 100 ms 刷新 ⇒ A·g 是阶梯，但重力项变化慢
+            //      (0.1° ≈ 0.007 N)，代价可接受" —— **算术对，前提错**：
+            //      0.1° 是"慢速工况"下的陈旧量；关节模式手腕能到 90°/s，而姿态实测每 ~200 ms
+            //      才更新一次 ⇒ 每步陈旧 **9~21°** ⇒ `A·g` 残差可达 **1.55 N**。
+            //      离线复算与 force_demo_log 同一时刻的实测 |F| 逐个对上：
+            //        0.591/0.591 · 1.041/1.046 · 0.670/0.691 · 1.555/1.656（178 个姿态台阶，
+            //        corr(|ΔFg|,|F|) = +0.727）；乘力反射增益 ≈1.98 ⇒ 手上 1~3 N 的"较大且抖的力"。
+            //   【@624 的约定已实测确认，不再是"未确认"】位置那六位早就是同一个量
+            //     （180 条采样逐位相同到 ±0.001 mm）；姿态那三位 2026-09-24 实测：静止 32 个样本的
+            //     旋转矩阵差中位 0.000° / 最大 0.068°，运动样本的差正好= GetPose 自己的陈旧量
+            //     ⇒ 与 GetPose **同一约定**（ZYX/度/基座系）。
+            //   【为什么仍读一份仪表盘姿态】@624 在启动早期可能还没被填（全 0）⇒ 那一步退回
+            //     GetPose（难看，但比把 0 当姿态喂进重力项好得多）。判据沿用本仓既有的
+            //     "恰好全 0 = 从没写过"那条指纹（同 `isTrustworthyJointRef` 的子句一）。
+            //   ⚠ 兜底那一读守的是【与从前完全相同】的锁行为：同一把锁、同一顺序、同一频率
+            //     ⇒ 不引入任何新的锁序/争用（下面 forceDataMutex 那段注释仍然成立）。
             // 【★ 给下一个人的警告】这两个调用【全程序只能有这一处】。若在 pollForce 里再调一次,
             //   滤波器每帧被推两次 (11 Hz 那一路会把 123 Hz 的结果又滤一遍) ⇒ 相位与幅值全乱,
             //   而且没有任何报错。
-            double pose[6] = {0};
+            double dashPose[6] = {0};
             EnterCriticalSection(&app.robotPoseMutex);
-            pose[0] = app.robotActualPose.x;  pose[1] = app.robotActualPose.y;
-            pose[2] = app.robotActualPose.z;  pose[3] = app.robotActualPose.rx;
-            pose[4] = app.robotActualPose.ry; pose[5] = app.robotActualPose.rz;
+            dashPose[0] = app.robotActualPose.x;  dashPose[1] = app.robotActualPose.y;
+            dashPose[2] = app.robotActualPose.z;  dashPose[3] = app.robotActualPose.rx;
+            dashPose[4] = app.robotActualPose.ry; dashPose[5] = app.robotActualPose.rz;
             LeaveCriticalSection(&app.robotPoseMutex);
 
             EnterCriticalSection(&app.forceDataMutex);
@@ -238,6 +311,40 @@ static DWORD WINAPI forceReaderThread(LPVOID) {
             app.forceData.sixForceOnline = sixForceOnline;
             app.forceData.lastUpdateMs = GetTickCount();
             app.forceData.isStale = false;
+
+            // ★★ 姿态与位置【分别取源】—— 这是 2026-09-24 一次现场实测换来的教训。
+            //   · 姿态 (pose[3..5]) 优先取【同一帧】的 @624：它唯一的消费者是重力项
+            //     `A·g`（+ 惯量项的坐标系变换），而那一项正是要修的东西。
+            //   · 位置 (pose[0..2]) **刻意留在仪表盘那条**：它喂 `feedMotionEstimator`
+            //     → 惯量项 `Fi = mass·a`。**那是另一件事** —— 一起换会把 `Fi` 从"阶梯下二阶
+            //     差分恒 0、几乎为 0"变成一个每帧都在跳的真实量。当天的实测：**连位置一起换
+            //     ⇒ 抖动变大**（现场报的），所以那次耦合已经拆掉。
+            //   ⚠ 判据是"恰好全 0"而不是"接近 0"：机械臂真的停在法兰 (0,0,0) 且姿态全 0 是
+            //     不可能同时成立的位姿，而"从没被写过"恰好就是这个指纹 —— 同 isTrustworthyJointRef。
+            const double* p624 = app.forceData.tcpPoseActual;
+            const bool have624 = !(p624[3] == 0.0 && p624[4] == 0.0 && p624[5] == 0.0);
+            double pose[6];
+            pose[0] = dashPose[0];  pose[1] = dashPose[1];  pose[2] = dashPose[2];
+            const bool use624Orient = Config::FORCE_POSE_ORIENT_FROM_624 && have624;
+            pose[3] = use624Orient ? p624[3] : dashPose[3];
+            pose[4] = use624Orient ? p624[4] : dashPose[4];
+            pose[5] = use624Orient ? p624[5] : dashPose[5];
+
+            // 一次性出声：把"这一刻用的是哪个源"变成可观测的。两种源的差别正是本节要消灭的东西
+            // —— 而"读代码才知道用的哪一个"正是本项目最忌的那种状态。
+            // ⚠ 只打一行、且只在这个线程里（forceDataMutex 持锁中 ⇒ 同一时刻只有一个写者）。
+            static bool s_poseSrcReported = false;
+            if (!s_poseSrcReported) {
+                s_poseSrcReported = true;
+                std::cout << "[Force] 重力项姿态源 = "
+                          << (use624Orient
+                                  ? "同帧 ToolVectorActual @624 (123 Hz)"
+                                  : (Config::FORCE_POSE_ORIENT_FROM_624
+                                         ? "⚠ GetPose 仪表盘 (~10 Hz 阶梯) —— @624 还没被填"
+                                         : "GetPose 仪表盘（FORCE_POSE_ORIENT_FROM_624 = false，一行回滚态）"))
+                          << "；位置源 = GetPose 仪表盘（刻意不换，见 RelayCore.cpp 那段）"
+                          << std::endl;
+            }
 
             // 顺序不能反: 先补偿 (ForceCompensation), 再滤波 + 映射 (ForcePipeline)。
             ForceCompensation::step(app.forceData, pose);
@@ -796,8 +903,15 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
     // ===== 安全守卫 =====
     if (!appState.isRobotBaseSet) return;
 
-    // 更新触觉线程心跳时间戳
-    m_lastHapticFrameMs = GetTickCount();
+    // ⛔ 2026-09-22 移走了: 这里从前写着 `m_lastHapticFrameMs = GetTickCount();`。
+    //   【为什么它在这里是错的】本行在守卫 `:843` 之后，而本函数【只在 isTransmitting() 为真时
+    //   才被调用】(HapticCallback.cpp:134) ⇒ 那个"心跳"实际是【正在下发】的心跳，
+    //   **不是触觉线程的心跳** —— 名字与事实不符。
+    //   【后果】一松手就停刷新 ⇒ 看门狗 (本文件 :309, 阈值 `WATCHDOG_TIMEOUT_MS*2`=400ms)
+    //   只要求 isTransmitting() 为真 ⇒ 第二次按下时读到的是【上一次下发时】那个陈旧时间戳
+    //   ⇒ 把"没有在下发"误判成"GLUT 死了" ⇒ EmergencyStop。
+    //   ★ 它同时是"分不清真假"的原因: 真实停摆与"没在下发"在同一个时间戳上长得一模一样。
+    //   ⇒ 心跳现在由 `markHapticFrame()` 在【触觉回调入口】无条件刷新 (见该函数)。
 
     // ===== ServoP 频率限制: 30Hz =====
     DWORD now = GetTickCount();
@@ -922,7 +1036,8 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
     }
 
     // Mode 1: Position-only (button1, no button2) — optimize orientation
-    if (appState.lastButtonState && !m_transmittingOrient) {
+    if (Config::SINGAVOID_ORIENT_OPTIMIZE_ENABLED &&
+        appState.lastButtonState && !m_transmittingOrient) {
         double curJoints[6];
         {
             EnterCriticalSection(&app.robotPoseMutex);
@@ -963,7 +1078,11 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
         //   而"去标定每个人的抖动"既不可靠也不该做。
         //   现场实测印证了量级问题: 移动手写笔时笔杆朝向只差 0.9°, 机器人姿态却转了 10.4° ——
         //   方向对得上轴重映射 (笔杆 Rz → 机器人 Ry, 见下面那段), 所以【映射没错】;
-        //   错的是【量级】: 手一动笔杆就抖, 而抖动被"三轴一起放行 + 无界累加"放大了。
+        //   错的是【量级】: 手一动笔杆就抖, 而抖动被"三轴一起放行 + 累加进目标"放大了。
+        //   ⚠ 【2026-09-22 订正】此处原写"无界累加"—— "无界"是【错的】: 目标由下面的
+        //     clampOrientToBounds 逐帧钳位, 积分到 ±180 就被钉住, 不是"越走越大"
+        //     (钳位自 2026-07-26 e63c0b3 起就在, 早于本次改动)。"累加会把任何非零抖动
+        //     积进去"这段仍是本改动的理由, 不受影响。详见 main.cpp "笔杆姿态"那段。
         //
         // 【现在】 目标 = 【按下按钮2时的机器人姿态】 + R×(K × (笔杆现在 − 笔杆按下时))
         //   · 抖动 ⇒ 目标只【颤动】(有界、自回), **与抖动大小无关 ⇒ 不漂** ✓
@@ -978,6 +1097,37 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
         double offy = current.y - m_orientRefStylus.y;
         double offz = current.z - m_orientRefStylus.z;
 
+        // ★★ 2026-09-22 实验之二：偏移的一阶低通（理由见 Config::ORIENT_STYLUS_LPF_ENABLED）。
+        // 【为什么滤的是"偏移"而不是"机器人目标"】抖动来自【输入】，在输入端压掉才不会
+        //   在机器人侧留下任何痕迹；滤目标等于在输出端追着改，永远慢一拍。
+        // ⚠ α 用【实测 dt】：本函数被 ServoP 的 30 Hz 节流着，但节流值会随改动漂，别写死 0.033。
+        if (Config::ORIENT_STYLUS_LPF_ENABLED) {
+            const DWORD nowMs = GetTickCount();
+            if (!s_stylusOffFiltReady) {
+                // 按下按钮2 后的第一帧：直接把滤值对齐到当前偏移（不从 0 慢慢爬）
+                s_stylusOffFilt[0] = offx; s_stylusOffFilt[1] = offy; s_stylusOffFilt[2] = offz;
+                s_stylusOffFiltLastMs = nowMs;
+                s_stylusOffFiltReady = true;
+            } else {
+                const double dt = (double)(nowMs - s_stylusOffFiltLastMs) / 1000.0;
+                s_stylusOffFiltLastMs = nowMs;
+                if (dt <= 0.0) {
+                    // 同一 tick 内重复调用（节流本该挡住）—— 不推进相位，避免 α=0 的除零/停滞
+                } else if (dt > Config::ORIENT_STYLUS_LPF_MAX_GAP_S) {
+                    // 隔了很久（卡顿/断连恢复）：重新对齐，别把陈旧姿态当增量补进来
+                    s_stylusOffFilt[0] = offx; s_stylusOffFilt[1] = offy; s_stylusOffFilt[2] = offz;
+                } else {
+                    const double a = dt / (Config::ORIENT_STYLUS_LPF_TAU_S + dt);
+                    s_stylusOffFilt[0] += a * (offx - s_stylusOffFilt[0]);
+                    s_stylusOffFilt[1] += a * (offy - s_stylusOffFilt[1]);
+                    s_stylusOffFilt[2] += a * (offz - s_stylusOffFilt[2]);
+                }
+            }
+            offx = s_stylusOffFilt[0];
+            offy = s_stylusOffFilt[1];
+            offz = s_stylusOffFilt[2];
+        }
+
         // 逐轴响应门限 (低于它本帧这一轴不动; 只影响颤动幅度, 不影响漂移)
         const double dz = Config::ORIENT_DEADZONE_DEG;
         auto axisGate = [dz](double d) -> double {
@@ -986,6 +1136,21 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
         double drx = axisGate(offx);
         double dry = axisGate(offy);
         double drz = axisGate(offz);
+
+        // ★★ 2026-09-23 (Task 2)：关节空间路径要的"**当前**笔杆姿态"就是这里 ——
+        //   参照 + 【已过死区(drx/dry/drz)、已低通(上面的 s_stylusOffFilt)】的偏移。
+        //   ⚠ 这正是下面 RPY 路径用的 `curFiltered`（同样的三个分量相加），**不是**另一个量。
+        //     之所以不写在那一处：那一处在 `BTN2_ROTATION_COMPOSE_ENABLED` 分支【里面】
+        //     ⇒ 哪天 RPY 开关翻回 false，**关节路径的入参也会跟着冻住** —— 那是静默耦合
+        //     （关掉 A 却改了 B 的行为）。放这里 ⇒ 两条路径共用同一份"过门+低通"的中间量。
+        //   ⚠ NaN：`dr*` 是 NaN 时这里会把 NaN 抄进去 —— **无害**，且不靠巧合：
+        //     `button2JointTarget` 自己的守卫（Button2Joint.cpp 的 allFinite3）会让返回值
+        //     **退回参照** ⇒ 关节不动、正解出的位置也有限。⇒ NaN 到不了 ServoJ，也到不了安全门。
+        //   ⚠ 死区把三轴全归 0 时，这里写入的就是 `m_orientRefStylus` 本身 ⇒ 纯函数返回
+        //     逐位等于 `m_jointRef` 的目标 ⇒ 机械臂**原地保持**（不是"这一帧不下发"）。
+        m_btn2StylusFilt[0] = m_orientRefStylus.x + drx;
+        m_btn2StylusFilt[1] = m_orientRefStylus.y + dry;
+        m_btn2StylusFilt[2] = m_orientRefStylus.z + drz;
 
         // ⚠ m_lastStylusOrient 从本改动起【只用于诊断】(记录最近一次原始读到的笔杆姿态),
         //   控制回路不再读它 —— 别再把它当成"增量式参照"。
@@ -1001,56 +1166,105 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
         //   ⇒ 现在只问一句: 这一帧有没有任何一轴真的用掉了增量?
         if (drx != 0.0 || dry != 0.0 || drz != 0.0) {
 
-            // Apply gain
-            drx *= Config::ORIENT_GAIN;
-            dry *= Config::ORIENT_GAIN;
-            drz *= Config::ORIENT_GAIN;
+            // ★★★ 2026-09-23 (Task 3)：期望目标由【两条路径】之一给出 —— 开关见
+            //   Config::BTN2_ROTATION_COMPOSE_ENABLED（默认 true ⇒ 新路径；翻 false = 回滚）。
+            //   ⚠ 这一段【不被任何测试编译】：守住它的只有"编译 + 语法错误注入的负对照 + 上机"。
+            // ⚠ 初值取【当前目标】而不是 `(0,0,0)`：`(0,0,0)` 是一个**合法但错**的目标姿态
+            //   （机械臂真的会朝它转过去）。今天两条路径【都】无条件给 desired 赋值，所以这只
+            //   是记账；但只要将来有人在上面加一条早退分支（比如某个开关下"这帧跳过"），
+            //   初值就会**静默地**变成那个错目标 —— 而这一段**不被任何测试编译**
+            //   （见 Config::BTN2_ROTATION_COMPOSE_ENABLED 那段：守它的只有编译 + 上机）。
+            //   取 `m_targetOrient` ⇒ 早退 = "目标不动"，即 `wx=wy=wz=0`，是本帧的安全语义。
+            Vec3 desired = m_targetOrient;
+            if (Config::BTN2_ROTATION_COMPOSE_ENABLED) {
+                // ---- 新路径：真旋转合成（纯函数，见 relay/Button2Mapping.{h,cpp}）----
+                //   · 喂进去的是"当前笔杆姿态" = 参照 + 【已过门、已低通】的偏移（drx/dry/drz）。
+                //     死区与低通仍作用在【笔杆偏移】上，语义不变 —— 它们【不】进纯函数
+                //     （搬进去会改掉它们已被现场验证过的语义，还会把它们拖出可测范围）。
+                //   · 偏移的限幅在【函数内部】按【旋转角】做完（≤ ORIENT_MAX_OFFSET_DEG）
+                //     ⇒ 这条路径【不】再调 clampOrientOffset（逐分量那个，见下面的钳位段）。
+                //   · 三个 Vec3 各自【显式拷贝】成局部 double[3]，不写 `&m_orientRefRobot.x`：
+                //     那前提是"Vec3 的三个成员在内存里连续且按 x,y,z 排列"，而这个前提
+                //     **没有任何东西保证**（编译器可以对成员各自安排）—— Task 1 已因同类
+                //     前提被要求改写法。显式拷贝没有前提。
+                Vec3 curFiltered(m_orientRefStylus.x + drx,
+                                 m_orientRefStylus.y + dry,
+                                 m_orientRefStylus.z + drz);
+                double aRef[3] = { m_orientRefRobot.x,  m_orientRefRobot.y,  m_orientRefRobot.z  };
+                double sRef[3] = { m_orientRefStylus.x, m_orientRefStylus.y, m_orientRefStylus.z };
+                double sCur[3] = { curFiltered.x,       curFiltered.y,       curFiltered.z       };
+                desired = button2OrientationTarget(aRef, sRef, sCur);
 
-            // ★ 单帧限幅【不在这里】(2026-09-21 参照式改造)。
-            //   参照式下 drx/dry/drz 是"相对按下按钮2那一点的偏移"——**可以很大, 而且那是对的**:
-            //   操作员转了 30°, 就该给 30°。从前这里限的是【偏移】, 那是累加式时代的写法,
-            //   会把大转动【永久截断】掉。
-            //   ⇒ 限幅改到【目标姿态每帧的变化】上 (见下面 wx/wy/wz 那一段) —— 那才是"手一甩
-            //     不让机器人跟着猛转"要限的量。
-
-            // ★★ 逐轴符号 (2026-09-21 改)。从前这里是【无条件三轴取负】, 注释的理由是
-            //   "Touch Euler (ZYX intrinsic) 沿正轴看逆时针增大, 而 Dobot RPY 相反"。
-            //   那个理由与仓库里的两份实现都不符 —— Touch 侧的 Euler 提取与 Dobot 侧的
-            //   TcpCalibration::rpyToMatrix **都是 Rz·Ry·Rx**; 而现场实测也是"转向反了"。
-            //   ⇒ 默认改为【不翻转】。完整依据、以及"若只有某些轴反而是置换问题"的处置,
-            //     见 Config::ORIENT_FLIP_RX 那一大段。
-            drx *= Config::ORIENT_FLIP_RX;
-            dry *= Config::ORIENT_FLIP_RY;
-            drz *= Config::ORIENT_FLIP_RZ;
-
-            // ---- Axis remap: stylus frame → robot frame ----
-            // Build 3×3 rotation that maps Touch rotation axes to robot rotation axes.
-            // When calibration is enabled, use the calibrated rigid transform R.
-            // Fallback: hardcoded axis mapping matching convertTouchToRobot():
-            //   robot_X = touch_X   → [1, 0,  0]
-            //   robot_Y = -touch_Z  → [0, 0, -1]
-            //   robot_Z = touch_Y   → [0, 1,  0]
-            double R00, R01, R02, R10, R11, R12, R20, R21, R22;
-            if (Calibration::enabled) {
-                R00 = Calibration::R[0]; R01 = Calibration::R[1]; R02 = Calibration::R[2];
-                R10 = Calibration::R[3]; R11 = Calibration::R[4]; R12 = Calibration::R[5];
-                R20 = Calibration::R[6]; R21 = Calibration::R[7]; R22 = Calibration::R[8];
+                // ⚠ 记账（Task 3 附加要求②，完整说明在 Button2Mapping.h 的调用约定里）：
+                //   纯函数只用【兜底】那张表 M，**标定路径没接**。⇒ 一旦 calibration.json 存在
+                //   （Calibration::enabled = true），平移路径走标定出来的 R/t，而姿态路径仍走
+                //   兜底 M ⇒ 两条路【静默】不一致。本仓库最怕静默，所以这里至少让它响一次。
+                if (Calibration::enabled && !s_warnedBtn2CalibIgnored) {
+                    s_warnedBtn2CalibIgnored = true;
+                    std::cerr << "[Orient] Calibration is enabled, but the button-2 pose mapping still "
+                                 "uses the fallback axis table M (calibrated path NOT wired) -- "
+                                 "translation and orientation will disagree. See relay/Button2Mapping.h."
+                              << std::endl;
+                }
             } else {
-                R00 = 1.0; R01 = 0.0; R02 =  0.0;
-                R10 = 0.0; R11 = 0.0; R12 = -1.0;
-                R20 = 0.0; R21 = 1.0; R22 =  0.0;
-            }
-            double robot_dRx = R00*drx + R01*dry + R02*drz;
-            double robot_dRy = R10*drx + R11*dry + R12*drz;
-            double robot_dRz = R20*drx + R21*dry + R22*drz;
+                // ---- 旧路径：Euler 角之差当旋转向量 + 逐分量加到参照上（**逐字保留**，只缩进）----
+                // Apply gain
+                drx *= Config::ORIENT_GAIN;
+                dry *= Config::ORIENT_GAIN;
+                drz *= Config::ORIENT_GAIN;
 
-            // ★★★ 期望目标 = 【按下按钮2时的机器人姿态】+ 映射后的偏移 —— 【不是累加】。
-            //   `m_orientRefRobot` 是 onButton2Press 时抓的那一份机器人姿态, 在整个按住期间不变。
-            //   ⇒ 抖动只让 desired 在参照附近【颤动】, 手一回它自己就回去 ⇒【不漂】,
-            //     而且与抖动多大无关 (这就是这套改法的全部意义)。
-            const Vec3 desired(m_orientRefRobot.x + robot_dRx,
+                // ★ 单帧限幅【不在这里】(2026-09-21 参照式改造)。
+                //   参照式下 drx/dry/drz 是"相对按下按钮2那一点的偏移"——**可以很大, 而且那是对的**:
+                //   操作员转了 30°, 就该给 30°。从前这里限的是【偏移】, 那是累加式时代的写法,
+                //   会把大转动【永久截断】掉。
+                //   ⇒ 限幅改到【目标姿态每帧的变化】上 (见下面 wx/wy/wz 那一段) —— 那才是"手一甩
+                //     不让机器人跟着猛转"要限的量。
+
+                // ★★ 逐轴符号 (2026-09-21 改)。从前这里是【无条件三轴取负】, 注释的理由是
+                //   "Touch Euler (ZYX intrinsic) 沿正轴看逆时针增大, 而 Dobot RPY 相反"。
+                //   那个理由与仓库里的两份实现都不符 —— Touch 侧的 Euler 提取与 Dobot 侧的
+                //   TcpCalibration::rpyToMatrix **都是 Rz·Ry·Rx**; 而现场实测也是"转向反了"。
+                //   ⇒ 默认改为【不翻转】。完整依据、以及"若只有某些轴反而是置换问题"的处置,
+                //     见 Config::ORIENT_FLIP_RX 那一大段。
+                drx *= Config::ORIENT_FLIP_RX;
+                dry *= Config::ORIENT_FLIP_RY;
+                drz *= Config::ORIENT_FLIP_RZ;
+
+                // ---- Axis remap: stylus frame → robot frame ----
+                // Build 3×3 rotation that maps Touch rotation axes to robot rotation axes.
+                // When calibration is enabled, use the calibrated rigid transform R.
+                // Fallback: hardcoded axis mapping matching convertTouchToRobot():
+                //   robot_X = touch_X   → [1, 0,  0]
+                //   robot_Y = -touch_Z  → [0, 0, -1]
+                //   robot_Z = touch_Y   → [0, 1,  0]
+                double R00, R01, R02, R10, R11, R12, R20, R21, R22;
+                if (Calibration::enabled) {
+                    R00 = Calibration::R[0]; R01 = Calibration::R[1]; R02 = Calibration::R[2];
+                    R10 = Calibration::R[3]; R11 = Calibration::R[4]; R12 = Calibration::R[5];
+                    R20 = Calibration::R[6]; R21 = Calibration::R[7]; R22 = Calibration::R[8];
+                } else {
+                    // 与平移路径同一张表（唯一一份定义）—— 见 CoordinateTransform::touchToRobotMatrix
+                    // ⚠ 这里【故意】用显式局部数组 + 逐个赋值，而不是 touchToRobotMatrix(&R00):
+                    //   "R00..R22 这 9 个 double 在内存里连续" 是一个【未验证的前提】(编译器可以对
+                    //   局部标量各自安排位置), 而显式赋值不需要任何前提。
+                    double M[9];
+                    touchToRobotMatrix(M);
+                    R00 = M[0]; R01 = M[1]; R02 = M[2];
+                    R10 = M[3]; R11 = M[4]; R12 = M[5];
+                    R20 = M[6]; R21 = M[7]; R22 = M[8];
+                }
+                double robot_dRx = R00*drx + R01*dry + R02*drz;
+                double robot_dRy = R10*drx + R11*dry + R12*drz;
+                double robot_dRz = R20*drx + R21*dry + R22*drz;
+
+                // ★★★ 期望目标 = 【按下按钮2时的机器人姿态】+ 映射后的偏移 —— 【不是累加】。
+                //   `m_orientRefRobot` 是 onButton2Press 时抓的那一份机器人姿态, 在整个按住期间不变。
+                //   ⇒ 抖动只让 desired 在参照附近【颤动】, 手一回它自己就回去 ⇒【不漂】,
+                //     而且与抖动多大无关 (这就是这套改法的全部意义)。
+                desired = Vec3(m_orientRefRobot.x + robot_dRx,
                                m_orientRefRobot.y + robot_dRy,
                                m_orientRefRobot.z + robot_dRz);
+            }
 
             // 本帧要走的量 = 期望 − 当前目标, 再【逐轴限幅】。
             // 保护的是"手一甩不会让机器人跟着猛转"; 因为目标是朝 desired 收敛的,
@@ -1090,7 +1304,21 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
             m_targetOrient.x += damped.x;
             m_targetOrient.y += damped.y;
             m_targetOrient.z += damped.z;
-            m_targetOrient = clampOrientToBounds(m_targetOrient);
+            // ★★ 2026-09-22 实验：钳位改成比【相对参照的偏移】(理由见 clampOrientOffset)。
+            //   翻回 false ⇒ 走原来的绝对值钳位 (那条会在参照贴着 ±180 时逐帧夹 ⇒ 手一抖就抖)。
+            // ★ 2026-09-23 (Task 3)：逐分量那条钳位**只给旧路径** —— 新路径的偏移限幅已经在
+            //   `button2OrientationTarget` 内部按【旋转角】做完（≤ ORIENT_MAX_OFFSET_DEG），
+            //   再逐分量夹一次会与那个语义打架（把"合成的旋转"按表示量切掉一块）。
+            //   `clampOrientToBounds`（绝对值 ±180 的安全钳位）两条路径都保留、语义不动。
+            //   ⚠ 这条 `!BTN2_ROTATION_COMPOSE_ENABLED` 今天【不改变任何行为】：
+            //     ORIENT_SEAM_FIX_ENABLED 是 false（那条修法 2026-09-22 现场证否，见 Config.h）。
+            //     加它是因为 SEAM_FIX 的文档写着"翻回 true 即可重试" —— 不写这一句，那个回滚
+            //     会在新路径上偷偷把逐分量限幅又接回来（本仓库最怕这种静默的组合）。
+            if (Config::ORIENT_SEAM_FIX_ENABLED && !Config::BTN2_ROTATION_COMPOSE_ENABLED) {
+                m_targetOrient = clampOrientOffset(m_targetOrient, m_orientRefRobot);
+            } else {
+                m_targetOrient = clampOrientToBounds(m_targetOrient);
+            }
 
             // Apply TCP micro-adjust (position mode: locked; orient mode: micro-adjust)
             if (appState.lastButtonState && m_transmittingOrient) {
@@ -1207,20 +1435,342 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
     }
 
     // ===== 构造并发送 ServoP =====
+    // ★★ 2026-09-22 实验：下发前把三个角规范化到 [-180,180)（见 Config::ORIENT_SEAM_FIX_ENABLED）。
+    // 【为什么必须要这一步】上一步把钳位改成了"相对参照"，于是 `m_targetOrient` 现在是
+    //   **连续累加、会越过 ±180** 的量（那是刻意的：工具确实在连续滚）—— 而它直接发给 ServoP
+    //   就会送出 `183` 这种数。规范化是**等价的朝向**（183 ≡ −177），按矩阵做 IK 的控制器得到同解。
+    // ⚠ 对 Mode 1/3 那几条路是**无操作**：它们的值来自 `robotActualPose` 或 IK 解，本就在范围内。
+    // ⚠ 就地改 `targetRx` 而不是只用副本：下面 :1223 的日志行与 :1247 的 `robotTargetPose`
+    //   都要跟着走 —— 否则界面会显示"目标 183 / 实际 −177"，看的人以为出错了。
+    if (Config::ORIENT_SEAM_FIX_ENABLED) {
+        targetRx = normalizeDeg180(targetRx);
+        targetRy = normalizeDeg180(targetRy);
+        targetRz = normalizeDeg180(targetRz);
+    }
+
     char cmd[256];
-    snprintf(cmd, sizeof(cmd), "ServoP(%.2f,%.2f,%.2f,%.2f,%.2f,%.2f)",
-        servoCmdX, servoCmdY, servoCmdZ,
-        targetRx, targetRy, targetRz);
+
+    // ★★★ 2026-09-23 (Task 2)：按钮2 的两条下发路径在**这里**分叉 —— 唯一的开关是
+    //   `Config::BTN2_JOINT_SPACE_ENABLED`（**回滚 = 翻 false**，下面 else 那一支就是【逐字】
+    //   的旧路径，一字未改）。
+    //
+    // 【为什么分叉点选在下发前、而不是把上面那整块姿态计算换掉】
+    //   开关只决定"**发出去的是什么**"。上面那一段（期望姿态 → 逐帧限幅 → 奇异阻尼 →
+    //   `clampOrientToBounds` → `orientRepulsionForce`）**一行不动**，因为其中还挂着
+    //   **触觉反馈**（`dampOrientationMotion` 写 `app.orientRepulsionForce`）与 TCP 微调；
+    //   删掉它就等于**顺手关掉了奇异避让**，而那是明确要求"一条都不许删"的那一类。
+    //   ⚠ 代价（**如实记账，不藏**）：关节空间路径下那一段仍然在跑，它的输出
+    //     `targetRx/Ry/Rz` 只流向 `app.robotTargetPose`（`render/SceneRenderer.cpp:201` 只用来
+    //     画目标位姿）—— 也就是说**那一处显示的仍是那条不再下发的 RPY 目标**。真正发出去的是
+    //     什么，看 `cmd`（下面的 `reportCommand(cmd)` 与 `app.lastCommandSent` 存的都是 `cmd`
+    //     本身 ⇒ 那两处是准的）。
+    //   ★ 2026-09-23 复审 Important#1 补记：**同一句话对平移也成立，而且更隐蔽** ——
+    //     按钮1 那条平移块写的是 `servoCmdX/Y/Z`（本函数上面 `if (appState.lastButtonState)`
+    //     那一段，:891），它同样**照旧更新**、同样**一条都不发**（这一支发出的 `cmd` 是 `ServoJ`）。
+    //     ⇒ 关节模式下有**两个**"只显示、不下发"的目标：`servoCmdX/Y/Z`（它又流向下面
+    //       `[Relay] Motion sends` 的 `target=` 与 `app.robotTargetPose.x/y/z`）与
+    //       `app.robotTargetPose`（画在 GUI 上）。对账的唯一权威仍然是 `cmd`。
+    //     ⇒ 行为**一行未改**（锁存是刻意的，见下面关节分支的按钮1 提示）；改的是"让它出声"。
+    //   ★ 2026-09-23 复审 I3：`[Relay] Motion sends` 那行**原来只打 target/orient**，在关节模式
+    //     下等于**显示与实发不一致**（本项目最恨的那一类）⇒ 已在那行**补上真正发出去的 `cmd`**。
+    //     二选一里选的是这一条（**不是**"关节模式下跳过 `robotTargetPose` 写入"）：
+    //     后者会让目标位姿**冻结在上一次按下之前的值**（静止的假象仍会误导），而且会改动
+    //     `SceneRenderer` 看到的状态 ⇒ 影响面更大。⇒ **残留（已知、可接受）**：GUI 里画的
+    //     目标位姿在关节模式下仍是那条 RPY 目标；对账的唯一权威是 `cmd`。
+    //   ⇒ 措辞订正（2026-09-23 复审 M1 —— 原文写的是"新路径**不调** `clampOrientToBounds`"，
+    //     那是**假的**）：它**每帧仍在执行**（`:1268`，那个共享的 RPY 块在下面这个分叉【之前】）。
+    //     关节空间里确实没有 RPY 表示、没有 ±180 接缝，所以"夹表示量"这件事对**下发值**
+    //     没有意义；消失的只是它**对下发值的影响** —— 那一整段本身**一条没删**（旧路径要它，
+    //     触觉反馈也挂在里面）。
+    //
+    // ⚠⚠ 守不住什么：`RelayCore.cpp` **不被任何测试编译** ⇒ 这个分叉**没有自动化用例**。
+    //   能守它的只有三样：① MSBuild 零 error；② 负对照（往本文件注入语法错误 ⇒ 必须报
+    //   `error C…`，证明这次构建确实在编它）；③ 上机（Task 3 的执行单）。纯函数那一半有单测
+    //   （`tests/test_button2_joint.cpp`），但"**接线接对了没有**"只能靠上机。
+    //   ⚠ 本条在 2026-09-23 修复轮又长了一块（I1 参照可信度 · I2 关节限位 · M2 逐帧步长限幅），
+    //     同样**一条都没有自动化用例** ⇒ 只能靠人读 + 上机（见修复报告）。
+    // ⚠ **只按按钮2**（不含按钮1+2 组合）：组合模式要**同时**做平移，而**平移在关节空间里不是
+    //   一个关节量** ⇒ 要支持它就得回到 IK ⇒ 正是本方案要绕开的东西 ✗。
+    //   ⇒ 组合模式**继续走旧的 RPY 路径**（= 保持现状，**不引入功能回退** ✓）；这是有理由的取舍，
+    //     不是遗漏（2026-09-23 控制方裁定）。
+    //
+    // ★★★ 复审 C1 (Critical)：下面判的是**按下那一刻锁存的** `m_btn2JointMode`，
+    //   **不是**每帧重算 `Config::BTN2_JOINT_SPACE_ENABLED && !appState.lastButtonState`。
+    //   那个写法会在**按住中途换控制律**（真值随按钮1 变化而翻面）：
+    //     · 松开按钮1 ⇒ 条件变真 ⇒ `ServoJ(m_jointRef + δ)` 把臂**拽回按下按钮2 时的位姿**
+    //       （组合模式平移出去多远都白搭；那条 FK 位置门抓不到 —— 它校验的目标就是那个位姿）；
+    //     · 先按2 再按1 ⇒ 反过来翻成 `ServoP` ⇒ 姿态突变。
+    //   锁存点：`onButton2Press`（与 `m_jointRef` 同一个临界区）。
+    if (m_btn2JointMode && m_transmittingOrient && m_orientValid) {
+        // ================= 复审 Important#1：按钮1 在这个模式里被【静默忽略】=================
+        // 【场景】先单按按钮2（锁存关节模式）⇒ **按住不放**再按按钮1。按钮1 那条平移块
+        //   （本函数上面 `if (appState.lastButtonState)` 那一段，:891）**照旧在跑**：它更新
+        //   `servoCmdX/Y/Z`、过安全门、推进速度衰减 —— 而本分支**看都不看它们**（下面发的是
+        //   `ServoJ`）⇒ 平移**什么都没发生**，而且**一声不响**。
+        //   ⚠ 这正是本项目最恨的"显示值 ≠ 实发值"：GUI 的目标位姿在动、`[Relay] Motion sends`
+        //     那行的 `target=` 在动，只有臂不动。
+        // 【为什么不改行为】锁存是**刻意的**（C1：模式必须是"这一次按下"的属性 —— 中途换控制律
+        //   会把臂拽回按下时的位姿 / 姿态突变），而组合模式要**同时**做平移、平移在关节空间里
+        //   又不是关节量 ⇒ 要支持它就得回到 IK ⇒ 正是本方案要绕开的东西（计划已裁定）。
+        //   ⇒ 能改的只有**可观察性**与**书面记录**：让操作员当场知道"为什么不动"，
+        //     并在下面分叉注释的"代价"那一段把平移也点名（原文只点了 RPY 目标）。
+        // 【为什么必须一次性】按钮1 一直按着 ⇒ 这个条件**每帧都成立**；不设标记就是
+        //   "按住多久刷多久"，而 `cout` 写在触觉回调线程上（见 `m_btn2JointBtn1Noticed` 的注释）。
+        //   ⚠ 标记复位在 `onButton2Press` ⇒ 下一次按住会再报一次。
+        if (appState.lastButtonState && !m_btn2JointBtn1Noticed) {
+            m_btn2JointBtn1Noticed = true;
+            std::cout << "[Relay] Btn2 JOINT hold: button1 pressed — TRANSLATION IGNORED until re-press. "
+                      << "servoCmdX/Y/Z and robotTargetPose keep updating but this hold is latched to "
+                      << "ServoJ (a joint target has no translation, so none of it is sent). "
+                      << "Release and re-press button 2 to go back to combined (RPY) mode."
+                      << std::endl;
+        }
+
+        // ================= 新路径：关节空间（厂商 ServoJ）=================
+        // ① 关节目标：Task 1 的纯函数（**有单测**）——
+        //      笔杆 Rx(前后摆)⇒J4 · Rz(左右摆)⇒J5 · Ry(自转)⇒J6；J1/J2/J3 无条件保持参照；
+        //      死区/符号/限幅的语义都在函数内部（见 relay/Button2Joint.h 的「管线」与「单位变了」）。
+        //    入参按位置读：`m_jointRef` 是 j1..j6，`m_btn2StylusFilt` 是笔杆的 **Rx,Ry,Rz**
+        //    （即 `stylusOrient` 的次序）。⚠ 两个次序**不同**，且函数内部的映射是**错开**的
+        //    （out[4]←Rz、out[5]←Ry）⇒ 这里写错次序不会报错，只会让"前后摆变成左右摆"。
+        //    ⚠ 直传 `m_jointRef` / `m_btn2StylusFilt`：它们是**真的 double 数组**，退化成
+        //      指针是标准行为。（对照：下面 RPY 路径要从 `Vec3` 取 double[3] 就必须**显式拷贝**
+        //      —— "Vec3 的三个成员在内存里连续"是个没有依据的前提，本仓已因同类前提翻过车。）
+        double j[6];
+        double sRef[3];
+        sRef[0] = m_orientRefStylus.x;
+        sRef[1] = m_orientRefStylus.y;
+        sRef[2] = m_orientRefStylus.z;
+        button2JointTarget(m_jointRef, sRef, m_btn2StylusFilt, j);
+
+        // ================= 复审 I1（Important）：参照不可信 ⇒ **拒发** =================
+        // 【场景】`app.robotActualPose.j1..j6` 的初值**全 0**，唯一写入点是 `queryJointAngles`
+        //   里 `FeedbackParser::parseAngle` 的**成功路径** ⇒ 若 `GetAngle()` **从未解析成功**，
+        //   `m_jointRef` 就一直是全 0 ⇒ FK(0,…,0) = (0, −233.3, 756) **过得了下面所有位置门**
+        //   ⇒ `ServoJ(0,0,0,0,0,0)` 会把臂**开向模型零位**（一个大而无门可挡的运动）。
+        // 【判据】两个都查，任一成立即拒：
+        //   · **六位恰好全 0** —— 真机上不可能（关节零点不会同时精确落在 0.0000）；
+        //   · `!Kinematics::isWithinJointLimits(ref)` —— 现成函数、**有用例**（`Kinematics.cpp:457`，
+        //     `tests/test_kinematics.cpp:322-337`），越限的参照一定不可信。
+        // 【动作】`cerr` 出声 + `return`（**本帧不下发**）—— 与下面 `REJECT` 同款。
+        // 【守什么】这是"**值**"上的判据，不是"解析成功过没有"那个标志：`m_jointRef` 是按下
+        //   那一刻的快照，本分支每帧都在跑 ⇒ 判当前值才是"这一帧要用的那个参照"。
+        //   ⚠ 不覆盖 NaN：NaN 在 `isWithinJointLimits` 里逐条比较全为 false ⇒ 它**返回 true**
+        //     （放行）。那个情形由下面 ② 的 FK 门接住（FK(NaN) ⇒ NaN ⇒ 第一道守卫 REJECT）。
+        // ⚠ 接线这一段（什么时候调、返回值怎么用）**仍然没有自动化用例**（本文件不被任何
+        //   测试编译）⇒ 由人读 + 上机。判据**本身**已抽到 `relay/Button2Joint.cpp` 的
+        //   `isTrustworthyJointRef`（那里有单测）—— 抽出的只有算术，`return` 留在这里。
+        {
+            if (!isTrustworthyJointRef(m_jointRef)) {
+                // ★ Minor 2：这条**构造上非瞬时** —— 反馈在按下那一刻就坏了 ⇒ `m_jointRef` 是
+                //   个坏快照 ⇒ 下面这个条件**整个按住期间恒成立** ⇒ 不压就是一整行、
+                //   以 ~30 Hz 的发送速率刷到操作员松手为止。而 `cerr` 写在**触觉回调线程**上，
+                //   控制台阻塞（QuickEdit）是本仓已记录的危害 ⇒ **每次按下只报一次**。
+                //   ★ 2026-09-23 整支终审 (A) 订正：本段原文接着写的是"与上面/下面那些 `REJECT`
+                //     路径不同：它们是**瞬时**的（下一帧状态一变就不报了）⇒ 它们不需要这一手"
+                //     —— **那句前提是【假的】**，现已按它自己的理由把 I2 与 FK 那两道也压成一次：
+                //       · I2（目标越关节限位）：偏移一直保持很大 ⇒ 目标**一直**越限；
+                //       · FK 位置门：笔杆被顶在工作空间边缘 ⇒ FK 目标**一直**被拒。
+                //     两条都**整个按住期间恒成立**，都以 ~30 Hz 刷在触觉回调线程上 ⇒
+                //     正是让本条压成一次的那条链（控制台写 → QuickEdit 阻塞 → 看门狗 → EmergencyStop）。
+                //   ★ (G) "当初为什么只给 I1 压、I2 没压"**不是**因"I2 瞬时"（已证否）——
+                //     真正的差别在**可达性**：I1 的坏参照来自一次**冷** `GetAngle()`，
+                //     操作员**什么都没做**它就可能成立（`app.robotActualPose.j1..j6` 初值全 0）；
+                //     而 I2 的越限目标要求参照**已经坐在一个大关节角上**（`ref ± 150°` 才越界）
+                //     ⇒ 那条路上有操作员的动作。次序上 I1 在前，是因为它**最便宜**
+                //     （六次比较 + 一次限位查表，不算 FK）。这解释了**为什么 I1 排第一**，
+                //     但**不构成**"I2 不必压"—— 两条理由各管各的。
+                //   ⚠ 只压消息，**不压 `return`**：被拒的帧每一帧照样不下发（那是安全性质）。
+                //   ⚠ 标记复位在 `onButton2Press`（与 `m_btn2JointMode` 同一个临界区）⇒ 下一次按下会再报。
+                if (!m_btn2JointRefRejectLogged) {
+                    m_btn2JointRefRejectLogged = true;
+                    // ⚠ 这里的"理由"是**自己再问一次** `isWithinJointLimits`（判据只回 bool）。
+                    //   两个分支**互斥且穷尽**：被拒 且 在限位内 ⇒ 只能是"六位恰好全 0"
+                    //   ⇒ 打出来的字符串与抽出前那句 `allZero ? … : …` **逐字相同**。
+                    //   ⚠ 2026-09-23 复审订正：上面这句成立**【只因为 0 落在每个关节的量程内】**
+                    //     （`robot/Kinematics.h:15-20`：J3 是 ±155，其余五个是 ±360）—— 这是个
+                    //     **未写明的前提**，把它写出来：若哪个 `J*_MIN` 被抬到 0 之上，全 0 的参照
+                    //     就会落到**另一个**分支、打出 "outside joint limits"（旧代码那里打的是
+                    //     "all six joints are exactly 0"）⇒ **只有这句标签不同**，
+                    //     而**拒发行为完全一样**（判据只回 bool、`return` 不依赖这句话）。
+                    //     ⇒ 即"互斥且穷尽"依赖限位常数，不是依赖 `isWithinJointLimits` 的实现。
+                    //   代价：只在**被拒**的那一帧算一次（本来也要 return，可忽略）。
+                    std::cerr << "[Safety] Btn2 joint REF UNTRUSTWORTHY ("
+                              << (Kinematics::isWithinJointLimits(m_jointRef)
+                                      ? "all six joints are exactly 0" : "outside joint limits")
+                              << ") — NOT sending. Reported ONCE per press (every frame is still "
+                              << "rejected). ref=("
+                              << m_jointRef[0] << "," << m_jointRef[1] << "," << m_jointRef[2] << ","
+                              << m_jointRef[3] << "," << m_jointRef[4] << "," << m_jointRef[5] << ")"
+                              // ★ Minor 3：`m_jointRef` 是**按下那一刻的快照**，按住期间不会自己
+                              //   恢复 ⇒ 哪怕 `GetAngle()` 中途开始成功，这个参照照旧是坏的、
+                              //   整个按住都是死的。原文只说了"不发"，**没说怎么办** ⇒ 补上
+                              //   唯一的那条恢复路径（否则操作员只能等，或者以为坏了）。
+                              << ". RELEASE AND RE-PRESS BUTTON 2 — the reference is a press-time "
+                              << "snapshot and cannot recover while this hold lasts. "
+                              // ★ 2026-09-23 整支终审 (D)：**假拒的角落** —— 若机械臂的**物理零位**
+                              //   真的让六个关节读数**恰好全是 0**（那是**合法位姿**，臂就该停在
+                              //   那儿按着不动），本判据照样拒发，而上面那句"松开再按按钮2"
+                              //   **帮不了**：重按读到的还是同一个全 0 快照 ⇒ 这是**无法自愈**的
+                              //   假拒。判据**刻意不改**（放宽成容差会把"停在零位附近"也放行，
+                              //   而"恰好全 0"正是 `isTrustworthyJointRef` 要抓的坏参照指纹，
+                              //   见 `relay/Button2Joint.cpp:96-102`）⇒ 如实写进消息，
+                              //   给出唯一有效的那条出路（把臂挪离零位再按）。
+                              << "(If the arm is genuinely parked at its all-zero pose this is a "
+                              << "false positive and re-pressing will read all-zero again — nudge "
+                              << "one joint off zero first.)"
+                              << std::endl;
+                }
+                return;   // 本帧不下发（下一帧从同一状态重算）
+            }
+        }
+
+        // ================= 复审 I2（Important）：目标的**关节限位** =================
+        // `ref ± 150°`（`Button2Joint.cpp` 的偏移限幅）可能超出 J4/J5/J6 的 ±360 ⇒ 从前只有
+        // **控制器事后抱怨**。这里在下发前一行判**期望目标**，越限即 `cerr` + `return`。
+        // ⚠ 判的是**期望目标**（纯函数给的那个），不是下面限幅后的值 —— 限幅只是把"走过去"
+        //   这件事摊到多帧，它**不改变"目标本身合不合法"**。
+        // ⚠ 与 I1 同一句：无自动化用例，由人读 + 上机。
+        // ★ 2026-09-23 整支终审 (A)：这条 `cerr` 改成**每次按下只报一次**（标志复位在
+        //   `onButton2Press`）—— 它**不是瞬时的**：只要笔杆偏移一直保持很大，目标就
+        //   **每帧都越限**，不压就是 ~30 Hz 刷满整个按住期（触觉回调线程上的 `cerr`）。
+        //   ⚠ 压的**只有消息**：`return` 仍在外面、**每帧照走**（本帧不下发是安全性质）。
+        //   ⚠ 重复没有诊断价值：第一行已经带了**理由**与**位置**。
+        //     ★ 2026-09-23 焦点复审 (Minor 1)：**重复的是理由与门，不是数值** —— `j` 是
+        //       `ref + clamp(偏移, ±150°)` **每帧重算**的，只有那根轴顶在 ±150° 限幅上时数值才不动，
+        //       未饱和的轴会逐帧变（FK 那条打印的 `fk` 同理）。所以"每行都一样"**不是**这条的理由，
+        //       理由只有两条：**重复的是同一个门与同一个理由** + **体积**（~30 Hz × 整段按住）。
+        if (!Kinematics::isWithinJointLimits(j)) {
+            if (!m_btn2JointTargetRejectLogged) {
+                m_btn2JointTargetRejectLogged = true;
+                std::cerr << "[Safety] Btn2 joint TARGET outside joint limits — NOT sending. "
+                          << "Reported ONCE per press (every frame is still rejected). j=("
+                          << j[0] << "," << j[1] << "," << j[2] << ","
+                          << j[3] << "," << j[4] << "," << j[5] << ")"
+                          << std::endl;
+            }
+            return;   // 本帧不下发（每帧都走这里，与上面那行"只报一次"无关）
+        }
+
+        // ================= 复审 M2（Minor，但属**安全回退**）：每帧步长限幅 =================
+        // 【为什么必须有】纯函数给的是 `参照 + 增量`，与**上一帧发了什么**无关 ⇒ 手一甩，
+        //   哪怕笔杆偏移已经过死区与低通，本帧目标仍可能一步跨出 ~17.5°（≈30 Hz ⇒ 525°/s），
+        //   远超厂商"寸动"用法。RPY 路径有 `ORIENT_MAX_STEP_DEG = 3°/帧` 挡着（它的注释就是
+        //   "手一甩不甩飞机器人"），关节路径**原来没有** ⇒ 这里照它**同一形状**补上。
+        // 【形状照抄】`期望 − 上一帧已下发` **逐轴**夹到 `Config::ORIENT_MAX_STEP_DEG`，再累加。
+        //   ⚠ 累加（**不是**对 `m_jointRef` 直接夹）：直接夹 `j − ref` 会让大偏移被**永久截断**，
+        //     而累加式下它只会**慢慢跟上** —— RPY 路径 2026-09-21 那条改造就是为这个
+        //     （见 `Config.h` 的 `ORIENT_DEADZONE_DEG` 历史段与上面 `wx/wy/wz` 那一段的注释）。
+        //   ⚠ 量级**不自己发明**：起点照用 `ORIENT_MAX_STEP_DEG`。两条路量的都是"度"，而 RPY
+        //     那一段本身就同时在限制关节走速 ⇒ 同值起步有依据。Task 3 上机若觉得慢/快，
+        //     改的是**这一个常数**（以及可能要给关节路径单开一个，届时再说）。
+        // 【原地改写 `j`】⇒ 下面 ② 的 FK 门与 ③ 的下发用的都是**限幅后**的值（发出去的就是
+        //   被这道闸放行的那一个，不存在"判一个、发另一个"）。
+        // 【积分器的推进点】只在**真的走到下发**那一步（见 ③ 之后的一行）—— 被上面任一
+        //   道门拒掉的帧**不参与积分** ⇒ 它记的是"发过什么"，不是"算过什么"。
+        // ★ Task 2-fix2：这段算术已抽到 `relay/Button2Joint.cpp` 的 `clampJointStep`
+        //   （**那里有单测**）—— 逐轴夹取、次序、原地改写 `j` 全部逐字照抄。
+        //   ⚠ **积分器 `m_btn2JointCmd` 仍然由本函数持有**（它是"上一次发了什么"这个跨帧状态，
+        //     不是算术）⇒ 抽出来的函数是无状态的、`prev` 靠入参传进去。
+        //   ⚠ 接线这一段（传谁当 `prev`、什么时候推进）**仍然没有自动化用例**。
+        clampJointStep(m_btn2JointCmd, j, Config::ORIENT_MAX_STEP_DEG, j);
+
+        // ② 安全门：关节目标先**正解**出末端位置，再走**现有**的位置入口
+        //    （`evaluatePositionOnly` —— **一条都没删、也没绕**）。
+        //    ⚠ 判的对象是**法兰**，**不是笔尖**：`Kinematics::forwardPosition` 返回的是
+        //      `positions[6]`（`robot/Kinematics.cpp:200-204` = 链末那个齐次矩阵的平移列），
+        //      而 `Kinematics` 整条链里**没有工具偏移**（TCP 偏移的 apply 接线另有一笔待办）
+        //      ⇒ 真实笔尖比这个对象多出**整个笔杆的长度**。
+        //      ★ 2026-09-23 整支终审 (C)：关节模式下这个对象**是被【扫过】的**（swept），
+        //        不再像"命令是一段**固定 TCP**"时那样是个**静止的点** —— J4/J5/J6 一动，
+        //        法兰沿一段圆弧走过去，**工具偏移那部分误差是【被遍历的】**：工作空间半径
+        //        620mm 与 Z 行程都按**法兰**算，而笔尖真实位置可能已经出界。
+        //        ⚠ RPY 路径**没有**这条性质：它按住期间的 TCP 目标是冻结的（本门判的正是那个）。
+        //    ★ 2026-09-23 整支终审 (B) 订正 —— 本入口**能产生 `REJECT` 的只有四种**
+        //      （逐行核过 `safety/SafetyPredictor.cpp:240-339`）：
+        //        · NaN/Inf（`:243`）· 工作空间半径 620mm（`:255`）· Z 行程 0~795（`:265`）
+        //        · 安全边界"超出"（`:288`）—— ⚠ 这一条**今天恒为假**：它比的是
+        //          `clampToBoundaryActive(target)` 有没有改动 `target`，而该函数在
+        //          `Config::SAFETY_BOUNDARY_CLAMP_ENABLED == false`（**现值**，`Config.h:75`）时
+        //          **退化成 identity**（`relay/SafetyBoundary.h:47-50`）⇒ 永远不会改动
+        //          ⇒ 它是**死的**（不是"暂时还没撞上"；开关翻回来它就活）。
+        //      ⇒ 原文把 **圆柱奇异 30/80mm** 与 **报警点黑名单** 也列在这里，**那是错的**：
+        //        这两条**都返回 `WARN_SLOW`**（`:300` / `:307` / `:319` / `:326`），
+        //        **从不 `REJECT`**。而调用方（下面那一行）**只对 `REJECT` 动作** ——
+        //        `if (jv.action == SafetyVerdict::REJECT)` ⇒ 这两条在本门里**什么都不做**，
+        //        与 RPY 路径那条 TCP 门**同款**（`:1320` 同样只判 `REJECT`；两条路一致，
+        //        不是"降速在关节路径上漏接了"）。
+        //        ⚠ 别再把它们写成"会拒"—— 那句话会让人以为奇异区/报警点在这里有一道闸，
+        //          于是在上机时把"没被拒"读成"门坏了"。
+        //    ⚠ `Kinematics::forwardPosition` 与 `SafetyPredictor` 吃的是**同一个基座系**
+        //      （`app.robotActualPose` 那一套），所以这条比较才有意义。
+        //    ⚠ `refJoints` 本身是 NaN（机器人状态已经坏了）时：FK 结果是 NaN ⇒ 撞上本入口的
+        //      **第一道**守卫（NaN/Inf ⇒ REJECT）⇒ 本帧不下发。这是纯函数**刻意**不兜底的那个
+        //      情形（见 Button2Joint.h 的契约段）在**接线层**被接住的证据。
+        //    ⚠ 这条门判的是**关节目标**；上面姿态模式那条 TCP 门（`evaluatePositionOnly(tcpCheck)`，
+        //      `tcpCheck` 来自 `servoCmdX/Y/Z`）判的是另一个对象。两条都在，**不是**重复。
+        Vec3 fkPos = Kinematics::forwardPosition(j);
+        SafetyVerdict jv = SafetyPredictor::instance().evaluatePositionOnly(fkPos);
+        if (jv.action == SafetyVerdict::REJECT) {
+            // ★ 2026-09-23 整支终审 (A)：本 `cerr` 改成**每次按下只报一次**（复位在
+            //   `onButton2Press`）—— 它**不是瞬时的**：笔杆被顶在工作空间边缘/越界时，
+            //   FK 目标**每帧都落在同一处**、每帧都被拒 ⇒ 不压就是 ~30 Hz 刷满整个按住期。
+            //   ⚠ 压的**只有消息**：`return` 仍在外面、**每帧照走**（本帧不下发是安全性质）。
+            if (!m_btn2JointFkRejectLogged) {
+                m_btn2JointFkRejectLogged = true;
+                std::cerr << "[Safety] Btn2 joint target REJECT: " << (jv.reason ? jv.reason : "?")
+                          << " — Reported ONCE per press (every frame is still rejected). j=("
+                          << j[0] << "," << j[1] << "," << j[2] << ","
+                          << j[3] << "," << j[4] << "," << j[5] << ")"
+                          << " fk=(" << fkPos.x << "," << fkPos.y << "," << fkPos.z << ")"
+                          << std::endl;
+            }
+            return;   // 与上面那条 TCP REJECT 同款: 本帧不下发, 下一帧从同一状态重算
+        }
+
+        // ③ 下发：厂商 `ServoJ(J1..J6,t,lookahead_time,gain)`，参数照文档示例
+        //    （t=0.1 / lookahead_time=50 / gain=500 —— 见 Docs/机械臂资料/TCP_IP远程控制接口文档.md 的 ServoJ 节）。
+        //    ⚠ 30 Hz 节流在本函数**开头**（`if (now - m_lastServoTime < 33) return;`）——
+        //      与厂商建议的 33 Hz 同量级，**那个节流没动**（两条路径共用）。
+        snprintf(cmd, sizeof(cmd), "ServoJ(%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,0.1,50,500)",
+                 j[0], j[1], j[2], j[3], j[4], j[5]);
+
+        // M2：**走到这里才推进步长积分器**（上面任何一道门 `return` 掉的帧都不参与）。
+        //   ⚠ 位置在 `robotSendMotion` **之前**：若那一次发送失败（链路问题，已有 `failCount`
+        //     记账），积分器比"实际发出去的东西"**多走了一帧的量**。
+        //   ★ 2026-09-23 整支终审 (F) **订正**：原文写的是"一帧的差，且下一帧照旧逐轴夹住
+        //     ⇒ **不放大**" —— **对连续失败是错的**：逐轴夹逼只界住**每帧**的增量（≤3°），
+        //     它**不**收回"积分器已经领先实际发送多少"。丢了 k 次则积分器领先 k×3°，
+        //     恢复发送的第一帧下发的是 `领先量 + 3°` ⇒ **那一步是 k×3°，不是 1×3°**
+        //     ⇒ 机械臂要一口气走完那 k 帧没走的路。等价说法：**每帧有界，连续丢包数无界**。
+        //     ⚠ `failCount` 只**记账**、不参与任何控制律 ⇒ 今天**没有任何东西**按它回退积分器。
+        //     ⚠ 量级参考：`ORIENT_MAX_STEP_DEG = 3°/帧` × 30 Hz ⇒ 那句"≈90°/s"**只对
+        //       "逐帧"成立**，对"恢复的那一步"**不成立**（同一条订正；"≤90°/s"不是整条链的界）。
+        //     之所以不放它后面：那要跨过下面那段两条路径共用的代码，反而更绕、更易错。
+        for (int i = 0; i < 6; ++i) m_btn2JointCmd[i] = j[i];
+    } else {
+        // ================= 旧路径（**逐字**）=================
+        snprintf(cmd, sizeof(cmd), "ServoP(%.2f,%.2f,%.2f,%.2f,%.2f,%.2f)",
+            servoCmdX, servoCmdY, servoCmdZ,
+            targetRx, targetRy, targetRz);
+    }
 
     bool sent = robotSendMotion(cmd);
     static int sendCount = 0, failCount = 0;
     sendCount++;
     if (!sent) failCount++;
+    // ★ 2026-09-23 复审 I3：**补上真正发出去的 `cmd`**（本项目最恨"显示与实发不一致"）。
+    //   原来这行只打 `target=`/`orient=`（那条 **冻结的 TCP** 与**不再下发的 RPY 目标**），
+    //   关节模式下等于在撒谎。二选一里选的是"补 cmd"而不是"关节模式下跳过 `robotTargetPose`
+    //   写入"，理由与残留见上面的分叉注释（I3 那一段）。
+    //   ⚠ 无条件加给两条路径：RPY 模式下 `cmd` 与 target/orient 重复，只是那一行变长；
+    //     它**不改变任何下发内容**，也不改 `else` 那一支的语义。
     if (sendCount % 50 == 0) {
         std::cout << "[Relay] Motion sends: " << sendCount
                   << " ok, " << failCount << " fail"
                   << "  target=(" << servoCmdX << "," << servoCmdY << "," << servoCmdZ << ")"
                   << " orient=(" << targetRx << "," << targetRy << "," << targetRz << ")"
+                  << "  cmd=" << cmd
                   << std::endl;
     }
 
@@ -1294,6 +1844,18 @@ void RelayCore::onButton2Press(const Vec3& stylusOrient) {
     // NOT used in the per-frame delta computation. The per-frame tracking uses
     // m_lastStylusOrient (incremental delta) in sendPosition().
     m_orientRefStylus = stylusOrient;
+    // ★★ 2026-09-22: 参照重设 ⇒ 那个低通【必须同时重置】（见 Config::ORIENT_STYLUS_LPF_ENABLED）。
+    //   否则上一次按住期间的滤值会留到这一次，表现为"刚按下就有一小段残余姿态"。
+    resetStylusOffsetFilter();
+
+    // ★★ 2026-09-23 (Task 2)：关节空间路径的"当前笔杆姿态"也从按下这一刻起算。
+    //   初值 = **参照本身** ⇒ 三个偏移全为 0 ⇒ `button2JointTarget` 返回的关节**逐位等于参照**
+    //   （= 臂原地不动）。之后 `sendPosition` 的偏移段每帧覆盖它（见那里的 `m_btn2StylusFilt` 赋值）。
+    //   ⚠ 写在这里（而不是靠 `sendPosition` 第一帧去填）：那会让第一帧读到**上一次按住**留下的
+    //     陈旧笔杆姿态 ⇒ 按下瞬间跳一下。与姿态路径 `m_targetOrient = 当前实际姿态` 是同一个理由。
+    m_btn2StylusFilt[0] = stylusOrient.x;
+    m_btn2StylusFilt[1] = stylusOrient.y;
+    m_btn2StylusFilt[2] = stylusOrient.z;
 
     // Capture robot current orientation
     double curRx, curRy, curRz;
@@ -1304,6 +1866,57 @@ void RelayCore::onButton2Press(const Vec3& stylusOrient) {
         curRx = app.robotActualPose.rx;
         curRy = app.robotActualPose.ry;
         curRz = app.robotActualPose.rz;
+        // ★★ 2026-09-23 (Task 2)：关节参照 —— **六个关节角**，抄自按下那一刻的实际位姿。
+        //   字段是现成的（`AppState::RobotPose::j1..j6`），本文件 `sendPosition` 里已有两处
+        //   同款逐字段拷贝（:991 与 :1220）。
+        //   ⚠ 放在**同一个临界区**里：姿态参照与关节参照必须是同一次采样的结果，否则两者
+        //     描述的不是同一个位姿（而纯函数拿 `m_jointRef` 当整个按住期间的定点）。
+        //   ⚠ 次序是 `j1..j6`（**不是**笔杆的 Rx/Ry/Rz）—— `button2JointTarget` 按位置读，
+        //     灌错次序不会报错、只会让"前后摆变成左右摆"，所以这里逐字段写、不写循环。
+        m_jointRef[0] = app.robotActualPose.j1;
+        m_jointRef[1] = app.robotActualPose.j2;
+        m_jointRef[2] = app.robotActualPose.j3;
+        m_jointRef[3] = app.robotActualPose.j4;
+        m_jointRef[4] = app.robotActualPose.j5;
+        m_jointRef[5] = app.robotActualPose.j6;
+
+        // ★★ 2026-09-23 (Task 2 修复 / 复审 C1, Critical)：**锁存**这一次按住的模式。
+        //   读的是"按下按钮2 的**这一刻**按钮1 是否已按下" ⇒ 组合模式（1+2）进来就锁成 false
+        //   （整段按住走旧 RPY 路），**整个按住期间不再变化**。
+        //   ⚠ 与 `m_jointRef` 在**同一个临界区**：模式与参照必须是同一次采样的产物
+        //     （否则会出现"用 A 时刻的参照、按 B 时刻的模式下发"）。
+        //   ⚠ 这一行**替代**了 `sendPosition` 里原来每帧重算的那个条件 —— 那个写法会在按住
+        //     中途换控制律（松开按钮1 ⇒ 翻到 ServoJ 并回到按下时的位姿；先按2再按1 ⇒ 翻到 ServoP）。
+        m_btn2JointMode = Config::BTN2_JOINT_SPACE_ENABLED && !appState.lastButtonState;
+
+        // ⚠⚠ 2026-09-23 复审 Minor 5：上面这一行读到的 `appState.lastButtonState` **是本帧的值**，
+        //   而这一点**靠的是调用方的小节次序** —— `HapticCallback.cpp` 必须让
+        //   小节 5（按钮1 状态机，:114-123，它写 `app.lastButtonState = button1`）
+        //   **跑在小节 5b 之前**（小节 5b 才是调 `onButton2Press` 的那一处，:125-142）。
+        //   ⇒ 同帧内 1+2 一起按下时，这里读到的**已经是"按下"** ⇒ 锁成**组合模式**（走 RPY 旧路），
+        //     正是我们要的语义（"组合模式继续走旧路，不引入功能回退"）。
+        //   ⚠ 这条次序**没有任何自动化用例**：它跨文件、跨回调，两节调换顺序**不会报错、不会红**，
+        //     只会**静默**改掉组合语义（同帧 1+2 会被锁成关节模式 ⇒ 按钮1 的平移被忽略，
+        //     而那一路上还有一次性的 `cout` 提示）。**改 `HapticCallback.cpp` 的小节次序前先读这句。**
+        //   ⚠ "按钮1 早已按着、之后再按按钮2"那种情形**与次序无关**（`lastButtonState` 早在上一帧
+        //     就已经是 true）⇒ 受影响的只有**同帧**那一种，也就是最不容易被注意的那种。
+
+        // ★ 2026-09-23 复审 Minor 2：一次性标记与"模式"同生共死 ⇒ **在这里复位**
+        //   （同一个临界区、同一份"这一次按下"的快照），见 `RelayCore.h` 里那四个成员的注释。
+        //   ★ 2026-09-23 整支终审 (A)：原先是**两条**（Minor 2 那轮），本轮把 I2 与 FK 那两道
+        //   `cerr` 也压成"每次按下只报一次" ⇒ 变成**四条**，一起在这里复位。
+        m_btn2JointBtn1Noticed = false;
+        m_btn2JointRefRejectLogged = false;
+        m_btn2JointTargetRejectLogged = false;
+        m_btn2JointFkRejectLogged = false;
+
+        // M2：步长限幅积分器的种子 = 参照本身 ⇒ 第一帧"本帧要走的量"为 0（与纯函数返回参照一致）。
+        m_btn2JointCmd[0] = m_jointRef[0];
+        m_btn2JointCmd[1] = m_jointRef[1];
+        m_btn2JointCmd[2] = m_jointRef[2];
+        m_btn2JointCmd[3] = m_jointRef[3];
+        m_btn2JointCmd[4] = m_jointRef[4];
+        m_btn2JointCmd[5] = m_jointRef[5];
         LeaveCriticalSection(&app.robotPoseMutex);
     }
 
@@ -1336,11 +1949,28 @@ void RelayCore::onButton2Press(const Vec3& stylusOrient) {
               << m_orientRefStylus.x << "," << m_orientRefStylus.y << "," << m_orientRefStylus.z << ")"
               << " robot ref=(" << m_orientRefRobot.x << "," << m_orientRefRobot.y << "," << m_orientRefRobot.z << ")"
               << std::endl;
+    // ★ 2026-09-23 (Task 2)：关节参照也打出来。**这不是装饰** —— Task 3 上机判据里有一条
+    //   "J1/J2/J3 在按住期间逐位不变 ⇒ 若有漂说明参照没抓对"，而"抓到了什么"这件事
+    //   没有任何自动化用例覆盖（本文件不被测试编译）⇒ 至少让它可观察、可对账。
+    std::cout << "[Relay] Button2 PRESS — joint ref=("
+              << m_jointRef[0] << "," << m_jointRef[1] << "," << m_jointRef[2] << ","
+              << m_jointRef[3] << "," << m_jointRef[4] << "," << m_jointRef[5] << ")"
+              << (Config::BTN2_JOINT_SPACE_ENABLED ? "  [joint-space: ServoJ]" : "  [RPY: ServoP]")
+              << std::endl;
+    // ★ 2026-09-23 (Task 2 修复 / 复审 C1)：**锁存后的**模式也打出来 —— 它与上面那行的
+    //   "开关状态"**不是一回事**：组合模式下开关是 true 而锁存后是 false（这一整段按住走 RPY）。
+    //   ⚠ 上机对账时看的是**这一行**：`[joint-space: ServoJ]` 只说明开关开着，模式要看这里。
+    std::cout << "[Relay] Button2 PRESS — latched mode: "
+              << (m_btn2JointMode ? "JOINT-SPACE (ServoJ for the whole hold)"
+                                  : "RPY (ServoP for the whole hold)")
+              << std::endl;
 }
 
 void RelayCore::onButton2Release() {
     m_transmittingOrient = false;
     m_orientValid = false;
+    // C1：模式跟着这一次按住一起结束（下一次按下的锁存在 `onButton2Press`）。
+    m_btn2JointMode = false;
 
     // If button1 is NOT pressed (only button2 was active), stop all transmission.
     // When button1 IS still held, keep m_transmitting active for position control.
@@ -1550,6 +2180,20 @@ void RelayCore::queryJointAngles() {
     m_lastHeartbeatMs = GetTickCount();
 }
 
+// ★★ 2026-09-22 新增: 【触觉帧】心跳 —— 由触觉回调入口无条件调用 (HapticCallback.cpp)。
+// 【为什么必须有这个函数，而不是让 sendPosition 去刷】
+//   看门狗 (本文件 :309) 想查的是"**触觉回调**还活着吗"，可它读的那个时间戳从前是
+//   `sendPosition` 刷的 —— 而 `sendPosition` 只在 `isTransmitting()` 为真时才被调用
+//   (HapticCallback.cpp:134) ⇒ 那个数实际表达的是"**上一次下发**"，不是"上一帧回调"。
+//   ⇒ 两种完全不同的状态 (回调真的停了 / 只是没在下发) 共用一个数 ⇒ **分不开**。
+//   现场 2026-09-22 撞上的就是它: `ForceReader WATCHDOG ... 1078ms since last haptic frame`
+//   —— 而操作员说空闲很短，两边对不上，正是因为那个数根本不是触觉帧的年龄。
+//   ⇒ 放到这里以后: 再报 1078ms **一定**是回调真的停了 (那时查 GLUT / 控制台阻塞)。
+// ⚠ 无条件刷新是对的: 本函数就是"回调跑过一帧"这一件事的记录，与按钮状态无关。
+void RelayCore::markHapticFrame() {
+    m_lastHapticFrameMs.store(GetTickCount());
+}
+
 void RelayCore::checkHapticWatchdog() {
     if (!m_transmitting.load()) return;  // 未运动时不检查
     DWORD now = GetTickCount();
@@ -1671,6 +2315,22 @@ bool RelayCore::connectRelaySocket() {
     int timeout = 100;
     setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (char*)&timeout, sizeof(timeout));
 
+    // ★★ 2026-09-24: 这条 socket 改成【非阻塞】。
+    //   【为什么】它唯一的发送入口 `sendRelayUpdate` 跑在【触觉线程】里
+    //     （`HapticCallback.cpp:146/150` → `sendPosition` / `reportPosition`），而现场实测：
+    //     **MATLAB 开着、只是一时收得慢（背压）** ⇒ `send` 卡满 `SO_SNDTIMEO`(100ms) 超时，
+    //     而一个触觉帧里有**两处**调用 ⇒ 触觉线程静默 **204ms** ⇒ 安全看门狗判 FATAL ⇒
+    //     `ERR_EMERGENCY_STOP`、机械臂被禁用。
+    //     ⇒ 一条【只给 MATLAB 画孪生】的遥测链路，把机械臂急停了 —— 那是设计上的越权，
+    //       不是参数问题。MATLAB 在架构上是 display only（见 `start_system.bat` 的注释）。
+    //   【为什么必须放在 connect 之后】`FIONBIO` 对 `connect` 也生效 ⇒ 放前面会把连接变成
+    //     异步的，本函数下面"连不上就 closesocket 返回 false"那套语义就变了。
+    //   【收包路径不受影响，且已被核过】它本来就**先 select 零超时再 recv**，且把 `n <= 0`
+    //     一律当"没有数据"（本文件 `recv(sock, …)` 那一处，全文件只有那一处 recv）
+    //     ⇒ 非阻塞下 `recv` 返回 `WSAEWOULDBLOCK` 走的正是同一条路。
+    u_long nb = 1;
+    ioctlsocket(sock, FIONBIO, &nb);
+
     EnterCriticalSection(&m_relaySocketMutex);
     m_relaySocket = sock;
     LeaveCriticalSection(&m_relaySocketMutex);
@@ -1681,6 +2341,10 @@ void RelayCore::initRelayReporting() {
     if (connectRelaySocket()) {
         std::cout << "[Relay] GUI reporting connected to " << Config::RELAY_IP
                   << ":" << Config::RELAY_PORT << std::endl;
+        // ★ 2026-09-22: 连上就回读一次增益。必须有 —— 否则 MATLAB 在 C++ 启动时看到的
+        //   是滑条的初值 (它自己猜的), 而实际生效值可能来自 force_tuning.json。
+        //   那正是本设计要消灭的"GUI 显示的值 ≠ 实际生效的值"。
+        sendReflectionGain(true);
         return;
     }
     // ★ 失败必须出声 (2026-09-21)。从前这里是【静默 return】, 而整个程序里唯一会提到
@@ -1705,6 +2369,24 @@ void RelayCore::initRelayReporting() {
 // ⚠ 这条路径从前【完全无声】: sendRelayUpdate 把两次 send 的返回值直接相加就 return,
 //   SOCKET_ERROR (-1) 与换行那次 (+1) 会抵消成正数 ⇒ 连接死掉看起来和正常一样。
 static bool s_relayDownReported = false;
+
+// ★ 2026-09-24: 遥测【丢帧】的计数与限频上报 —— 与"断线"是两件事（见 sendRelayUpdate 里
+//   那条语义分界）。丢帧是背压下的正常取舍：宁可丢孪生的一帧，也不让触觉线程等 100ms。
+//   ⚠ 计数用 Interlocked：本路径可能被两个线程调用，普通 `++` 会丢计数。
+//   ⚠ 上报那两句**仍然是竞态的，且刻意不修**：最坏是多打一行或少打一行；
+//     为此再加一把锁，就是把触觉线程又往锁上挂一次 —— 那正是本次要消灭的东西。
+//   ⚠ 计数【不】在重连时清零：它是整场会话的累计，"今天一共丢了多少帧"才是有用的数。
+static volatile LONG s_relayDropFrames = 0;
+static DWORD s_relayDropLastReportMs = 0;
+
+static void noteRelayDrop() {
+    const LONG total = InterlockedIncrement(&s_relayDropFrames);
+    const DWORD now = GetTickCount();
+    if (s_relayDropLastReportMs != 0 && (now - s_relayDropLastReportMs) < 5000) return;
+    s_relayDropLastReportMs = now;
+    std::cout << "[Relay] GUI 遥测丢帧 " << total
+              << " 帧（对端一时收不过来 = 背压，【不是断线】；孪生会跳一段）" << std::endl;
+}
 
 void RelayCore::markRelayDisconnected(const char* why) {
     EnterCriticalSection(&m_relaySocketMutex);
@@ -1743,6 +2425,9 @@ bool RelayCore::ensureRelayConnected() {
     s_relayDownReported = false;
     std::cout << "[Relay] GUI reporting 【已重连】到 " << Config::RELAY_IP << ":"
               << Config::RELAY_PORT << std::endl;
+    // ★ 重连后同样要回读增益: MATLAB 可能是在 C++ 之后才起来的, 那条 RG| 从没送到过。
+    //   sendRelayUpdate 不调本函数 (它在 socket 无效时只返回 -1), 所以这里【不会递归】。
+    sendReflectionGain(true);
     return true;
 }
 
@@ -1761,21 +2446,48 @@ int RelayCore::sendRelayUpdate(const char* msg) {
     LeaveCriticalSection(&m_relaySocketMutex);
     if (sock == INVALID_SOCKET) return -1;
 
-    // ★★ 2026-09-21: 从这里起【检查 send 的返回值】。
-    //   从前是 `return n1 + n2;` —— SOCKET_ERROR 是 -1, 而换行那次通常是 +1 ⇒ **两者相加
-    //   正好把错误抵消掉**, 调用方永远看不到失败, 连接死掉这件事在代码里【完全不留痕】。
-    //   现场代价: MATLAB 的孪生停在默认姿势, 而没有任何一处能说明"是一条消息都没送到"。
-    int n1 = send(sock, msg, (int)strlen(msg), 0);
-    if (n1 == SOCKET_ERROR) {
+    // ★★ 2026-09-24: 【先探可写性，不可写就丢这一帧】—— 与收包路径同一套办法（select 零超时）。
+    //   起因见 `connectRelaySocket` 里 FIONBIO 那一段：现场一次 204ms 的触觉静默触发了急停。
+    //   ============ 本函数最要紧的一处语义分界 ============
+    //     · 不可写 / WSAEWOULDBLOCK / WSAETIMEDOUT ⇒ **背压** ⇒ 丢帧、【不断线】。
+    //       从前把超时当断线 ⇒ 对端一次正常的慢就被 closesocket + 每秒重连 ——
+    //       而"对端慢"与"对端死"要做的处置完全相反（一个该丢帧，一个该重连）。
+    //     · 其它 send 错误（ECONNRESET / EPIPE …）⇒ 真的死了 ⇒ 才 `markRelayDisconnected`。
+    //   返回值：>0 已发字节 · −1 socket 无效或真断线 · −2 丢帧（背压）。
+    //   ⚠ 调用方【不消费】返回值（那是既有事实，见 `reportCommand` 那处的注释）——
+    //     加一个 −2 不会改变任何调用点的行为，只是把"丢了"这件事变成可数的。
+    fd_set wfds;
+    FD_ZERO(&wfds);
+    FD_SET(sock, &wfds);
+    timeval tv = { 0, 0 };
+    if (select(0, nullptr, &wfds, nullptr, &tv) <= 0) {
+        noteRelayDrop();
+        return -2;
+    }
+
+    // ★ 两次 send 合成一次（msg + '\n'）：
+    //   ① 暴露时间减半（原来正文与换行各是一次独立 send，各能卡一个 SO_SNDTIMEO）；
+    //   ② 顺手修掉那条老账 —— 两个线程同时发时正文与换行会交错、**粘行**，
+    //      而粘行对 MATLAB 而言等于"第二条消息不存在"（静默丢）。
+    //   ⚠ 截断就【整帧丢掉】，不发半条：半条会被对端当成一条畸形消息解析。
+    char line[512];
+    const int n = snprintf(line, sizeof(line), "%s\n", msg);
+    if (n <= 0 || n >= (int)sizeof(line)) {
+        noteRelayDrop();
+        return -2;
+    }
+
+    const int sent = send(sock, line, n, 0);
+    if (sent == SOCKET_ERROR) {
+        const int e = WSAGetLastError();
+        if (e == WSAEWOULDBLOCK || e == WSAETIMEDOUT) {   // 背压，不是死
+            noteRelayDrop();
+            return -2;
+        }
         markRelayDisconnected("send() 失败");
         return -1;
     }
-    int n2 = send(sock, "\n", 1, 0);
-    if (n2 == SOCKET_ERROR) {
-        markRelayDisconnected("send(换行) 失败");
-        return -1;
-    }
-    return n1 + n2;
+    return sent;
 }
 
 void RelayCore::reportPosition() {
@@ -1855,9 +2567,113 @@ void RelayCore::reportFeedback(const char* fbText) {
     sendRelayUpdate(buf);
 }
 
+// 回读限频 (见 RelayCore.h 里的说明; 规格 §4 "回读限频")。
+//
+// ⚠ 【线程】(2026-09-22 修正): 从前这里写的是"只由 GLUT idle 线程调 ⇒ 不需要原子"。那句是
+//   错的, 而且与本文件上方 reportPosition 那一段 (那里明写"本函数跑在触觉实时线程上") 直接
+//   矛盾 —— 同一份文件里相隔三十来行, 两说的不是一回事。实际有【两个】线程调进来:
+//     · GLUT idle 线程 —— 派发与补发: idle() → pollRelayCommands() → dispatchRelayCommand()
+//       的【接受】/【拒绝】两个分支, 以及每帧那次 `if (s_gainReportPending)` 补发;
+//     · 【触觉实时线程】—— 重连那一条: HapticCallback 的 reportPosition() →
+//       ensureRelayConnected() → 重连成功时 sendReflectionGain(true)。
+//   ★ 启动那一次【也不例外】(2026-09-22 再修正): 这里从前写的是"initRelayReporting() 由
+//     main() 在 GLUT 主循环【之前】调, 那时还没有并发"—— 那句是【错的】, 而且错法与上面那句
+//     "只由 GLUT 线程调"同源: 把"启动时"当成了"单线程"。实际次序是 initHapticDevice() →
+//     hdStartScheduler() 【先把触觉线程起了起来】, initRelayReporting() 是之后才调的 ⇒
+//     这中间 reportPosition() 已按 Config::RELAY_UPDATE_INTERVAL 在跑, 而那一刻 socket 还是
+//     INVALID_SOCKET ⇒ ensureRelayConnected() 里 lastTryMs 初值为 0, 守卫
+//     (lastTryMs != 0 && …) 对【首次】调用必然放行 ⇒ 连上就在【触觉线程上】调
+//     sendReflectionGain(true), 与 main() 自己在 initRelayReporting() 里的那一次重叠。
+//     ⇒ 这个调用点新加的状态同样要并发保护, 不能按"启动时是单线程"推断。
+//     （前提: 触觉设备已启用。`--no-touch` 下 initHapticDevice() 不跑 ⇒ 那条启动路径确实是
+//       单线程的; 上面的保守结论不受影响 —— 多一层原子没有代价。）
+//   ⇒ 下面三个状态必须是 atomic: 两个线程不同步地读写同一个非原子对象就是数据竞争 (UB)。
+//   残留的只是【次序】上的竞争, 而且无害 —— 这三个状态【不参与强制发送的决策】:
+//     · force=true 一个判断都不从它们取 (只写) ⇒ 交错最坏 = 多回一条、或晚回一条;
+//     · s_gainReportPending 丢一次更新是【自愈】的 —— 那条强制发送本身已经带上了当前值。
+//
+// force=false 时【两条都成立才发】(规格原文: "只在目标值真的变了、且距上次回读 ≥100ms"):
+//   ① 目标值相对【上次真的发出去的那一条】变了 —— 没变就没有可报的东西
+//   ② 距上次【发送】≥100ms —— 拖动滑条几十条/秒, 逐条回读会堆在 MATLAB 侧
+// 被挡下的那一条在这里只置标志, 由 pollRelayCommands 每帧补发 ⇒ 最后一条一定到。
+//
+// ⚠ 【调用点不是随便挑的】(2026-09-22 修正): 上面条件①是一道【过滤被拒回读】的闸 ——
+//   force=false 只能用于【接受】(拖动洪水) 与 pollRelayCommands 的补发;
+//   dispatchRelayCommand 的【拒绝】分支必须走 force=true。理由:
+//   被拒 = setGain 在 store 之前就返回 = 值按构造没变 ⇒ 条件①必然命中 ⇒ 一个字节都发不出去。
+//   按调用点逐个说明见 RelayCore.h 的 sendReflectionGain 文档块。
+//
+// ⚠ ①②里的"上次真的发出去" = 【发送这一步】, 不是"确认送达": s_lastGainReportMs 与
+//   s_lastSentGain 都落笔在 sendRelayUpdate 调用【之前】(见下面的赋值), 所以 socket 恰在那一
+//   瞬间失效时, 这次算"发过了" —— 同一个值的重试会被条件①挡下。这是【已知且能收敛】的:
+//   重连成功时的强制回读 (force=true) 不看这两条闸, 会把当前值原样再送一条 ⇒ 值最终一定到
+//   MATLAB。⇒ 按这个定义读这两个名字, 别按"确认送达"读。
+//
+// s_lastSentGain 初值刻意选 0 —— 那是 setGain 不会接受的值 ⇒ 在第一次 force=true 之前
+//   若有人用 force=false 进来, 它一定发得出去 (保守方向)。
+static std::atomic<DWORD>  s_lastGainReportMs{0};
+static std::atomic<double> s_lastSentGain{0.0};
+static std::atomic<bool>   s_gainReportPending{false};
+
+void RelayCore::sendReflectionGain(bool force) {
+    const DWORD now = GetTickCount();
+    const double g = ForceTuning::gain();
+    // 判决【不在本文件里】—— 抽成了纯函数 (relay/GainReadbackPolicy.h), 理由与
+    //   force 必须第一道的说明都写在那里, 并由 test_gain_readback_policy 钉住。
+    //   本文件只负责: 取值、传参、按判决改这三样状态 (sent 值 / 上次发送时刻 / 待发标志)。
+    switch (GainReadbackPolicy::gainReportDecision(
+                force, g, s_lastSentGain.load(), now,
+                s_lastGainReportMs.load(), GainReadbackPolicy::GAIN_REPORT_MIN_INTERVAL_MS)) {
+    case GainReadbackPolicy::GainReport::SkipUnchanged:
+        // ⚠ 必须【顺手清掉待发标志】: 一条被限频挡下的 A→B 之后值又变回 A, 此时"待发"已
+        //   无事可做; 留着标志会让 pollRelayCommands 每帧都调进来、每帧都从这里返回 ⇒
+        //   标志卡在 true 再也不动 (无害, 但那个标志从此失去意义)。
+        s_gainReportPending.store(false);
+        return;
+    case GainReadbackPolicy::GainReport::SkipTooSoon:
+        // 记下待发, 由 pollRelayCommands 补 —— 最后一条不丢。
+        // ⚠ 这里【不】更新 s_lastGainReportMs: 它记的是"上次真的发出去"的时刻 (见头文件)。
+        s_gainReportPending.store(true);
+        return;
+    case GainReadbackPolicy::GainReport::Send:
+        break;   // 落到下面发送
+    }
+    s_gainReportPending.store(false);
+    s_lastGainReportMs.store(now);
+    s_lastSentGain.store(g);
+
+    // ⚠ 载荷的 7 个字段【按位置】解析: RG| 是逗号分隔的定长字段 (C++→MATLAB 的其它线路
+    //   都是这个形状), 规格 §4 只定义了【顺序】, 字段没有名字。顺序必须与 §4 的字段表
+    //   逐字一致, 否则 MATLAB 侧会把每个数都读错位 —— 而本侧没有任何单测能发现这件事
+    //   (回读的消费方在 MATLAB, Task 6)。
+    //   依次是: 1 gain = 当前生效目标值       (ForceTuning::gain())
+    //           2 min  = 可取范围下限         (ForceTuning::GAIN_MIN, 唯一一份定义)
+    //           3 max  = 可取范围上限         (ForceTuning::GAIN_MAX, 唯一一份定义)
+    //           4 ratio = 净比例 = 逐单位比例×gain (ForcePipeline::netRatioPerGainUnit)
+    //           5 deadN = 死区                (Config::FORCE_RESIDUAL_DEADZONE_N, 唯一一份定义)
+    //           6 satN  = 该轴打顶阈值        (ForcePipeline::saturationSensorN, 唯一一份定义)
+    //           7 defGain = 出厂默认          (ForceTuning::defaultGain())
+    //   上述四个 ratio/deadN/satN 全部取自各自【唯一一份定义】, 本处一个数字都不写。
+    char buf[160];
+    snprintf(buf, sizeof(buf), "RG|%.6g,%.6g,%.6g,%.4f,%.6g,%.6g,%.6g",
+             g,
+             ForceTuning::GAIN_MIN,
+             ForceTuning::GAIN_MAX,
+             ForcePipeline::netRatioPerGainUnit() * g,   // ratio
+             Config::FORCE_RESIDUAL_DEADZONE_N,          // deadN
+             ForcePipeline::saturationSensorN(g),        // satN
+             ForceTuning::defaultGain());                // defGain
+    sendRelayUpdate(buf);
+}
+
+bool RelayCore::consumeForceZeroRequest() {
+    return m_forceZeroRequested.exchange(false);
+}
+
 void RelayCore::dispatchRelayCommand(const char* line) {
     using R = RelayCommandParser::Command;
-    switch (RelayCommandParser::parse(line)) {
+    double value = 0.0;
+    switch (RelayCommandParser::parse(line, &value)) {
     case R::ForceFeedbackOn:
         appState.forceFeedbackEnabled = true;
         std::cout << "[Relay] Force feedback ENABLED (MATLAB command)" << std::endl;
@@ -1866,13 +2682,71 @@ void RelayCore::dispatchRelayCommand(const char* line) {
         appState.forceFeedbackEnabled = false;
         std::cout << "[Relay] Force feedback DISABLED (MATLAB command)" << std::endl;
         break;
+    case R::SetReflectionGain:
+        // 【不论接受还是拒绝都回读】—— 回的都是当前实际生效值 (规格 §4)。
+        // 但两条路的形态【不同】, 而且必须不同 (2026-09-22 修正):
+        if (ForceTuning::setGain(value)) {
+            std::cout << "[Tuning] 力反射增益 → " << value << " (MATLAB command)" << std::endl;
+            // 【接受】⇒ 目标值真的变了 ⇒ 限频形态 (force=false)。
+            // 规格 §4 那两条条件 ("只在目标值真的变了、且距上次回读 ≥100ms") 写的正是
+            // 这条拖动路径: 拖动滑条每秒几十条 RG|, 逐条回读会堆在 MATLAB 侧。
+            // 被时间挡下的那条由 pollRelayCommands 补发, 最后一条一定到。
+            sendReflectionGain(false);
+        } else {
+            // 拒收必须出声, 而且要说清范围 —— 范围取自 ForceTuning 那一份定义, 不另写数字。
+            std::cout << "[Tuning] 增益 " << value << " 【被拒】: 可取范围 ["
+                      << ForceTuning::GAIN_MIN << ", " << ForceTuning::GAIN_MAX
+                      << "], 仍是 " << ForceTuning::gain() << std::endl;
+            // 【拒绝】【必须无条件发】—— force=true。这就是 true 在本设计里的第三个用途
+            // (连接、重连之外的第三个):
+            //   · 被拒 ⇒ ForceTuning::setGain 在【任何 store 之前】就 return false
+            //     ⇒ 生效值【按构造】没有变。
+            //   · 而 force=false 的第一道闸就是 "g == s_lastSentGain ⇒ 不发"
+            //     ⇒ 那道闸在拒绝路径上【必然】命中 ⇒ 一个字节都发不出去。
+            //   · 偏偏这条恰恰是 MATLAB 最需要的一条: 它自己的滑条【已经动了】(到那个被拒的值),
+            //     正等着被纠正回真值 —— 规格 §4 的中心例子就是它:
+            //     "若它发了 500 被拒, 回读仍是 120, 滑条自己弹回 120"。
+            //   ⚠ 【不要把它"优化"成 false】。值没变对"拖动洪水"是对的判据 (那是为了限频),
+            //     但对"拒绝"是【反的】: 拒绝的定义就是值没变 ⇒ 拿值变没变当闸门, 恰好滤掉了
+            //     唯一一条必须发出去的回读 ⇒ MATLAB 会永远显示一个假数 (规格 §4 末尾那段:
+            //     滑条上限来自回读, GAIN_MAX 在 C++ 侧调低后 MATLAB 会一直发一个已被拒的值)。
+            //     合上这条闸只省下一次 160 字节的发送, 代价是那个不变量失效。
+            //   （判决本身已抽到 relay/GainReadbackPolicy.h, 由 test_gain_readback_policy 钉住。）
+            sendReflectionGain(true);
+        }
+        break;
+    case R::ForceZero:
+        // 只置标志: 真正的处置在 main.cpp 的 requestForceZero() (与键盘 'z' 同一个函数)。
+        // 为什么不在这个线程直接做 —— 见 RelayCore.h 里 consumeForceZeroRequest 的说明。
+        m_forceZeroRequested.store(true);
+        std::cout << "[Tuning] 收到 MATLAB 的调零请求" << std::endl;
+        break;
     case R::None:
     default:
+        // 【这是决定, 不是遗漏】(2026-09-22 拍板): 形状坏掉的 RG| 行 (如 "RG|abc") 在
+        //   RelayCommandParser 里塌成 Command::None, 与未知命令无法区分 ⇒ 不回读。
+        //   · 规格 §4 的"不论接受还是拒绝"指的是【被 setGain 按范围拒收】, 那条路走上面的
+        //     SetReflectionGain 分支, 已覆盖; 解析器【故意】放行超范围的数值。
+        //   · 规格真正的不变量是"MATLAB 显示的值不可能与实际生效值分叉"。畸形命令下
+        //     MATLAB 自己也没改显示值 ⇒ 没有分叉 ⇒ 不变量成立。
+        //   · sprintf('RG|%.4f', v) 配上 Limits 约束的数值框, 产不出畸形行。
+        // ⇒ 【不要】在这里回头去判 "RG|" 前缀: 那是把协议知识搬回错误的层 (解析器已经在
+        //   那一层认识它了), 会变成第二份实现。
         break;
     }
 }
 
 void RelayCore::pollRelayCommands() {
+    // 力反射增益的两件家常事 (2026-09-22):
+    //   tick()      —— 防抖落盘 (值变过且静默 ≥1s 才写盘)。借本循环当心跳, 不新起线程/定时器。
+    //   补发待发的回读 —— 拖动滑条时被限频挡下的那一条, 在这里补上, 保证"最后一条一定到"。
+    //   ⚠ 补发本身【仍然】受那两条条件管: 本循环每帧都跑, 若这一帧距上次发送仍不足 100ms,
+    //     补发会被再次挡下 (标志保持 true), 再过几帧才真的发出去 —— 这是有意的, 不是漏发。
+    // ⚠ 放在 socket 有效性检查【之前】: 这两件事与 relay socket 在不在无关 (tick 只管落盘),
+    //   放在后面会在 GUI 没连上时整个停掉。
+    ForceTuning::tick();
+    if (s_gainReportPending.load()) sendReflectionGain(false);
+
     EnterCriticalSection(&m_relaySocketMutex);
     SOCKET sock = m_relaySocket;
     LeaveCriticalSection(&m_relaySocketMutex);

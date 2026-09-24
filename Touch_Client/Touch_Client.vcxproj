@@ -105,6 +105,12 @@
     <!-- relay -->
     <ClInclude Include="relay\IExtension.h" />
     <ClInclude Include="relay\CoordinateTransform.h" />
+    <ClInclude Include="relay\Button2Mapping.h" />
+    <ClCompile Include="relay\Button2Mapping.cpp" />
+    <!-- ★ 2026-09-23 (Task 2): Task 1 建了这个文件与它的测试套件, 但**没把它加进本工程**
+         ⇒ 纯函数有单测、exe 里却【编不进去】(接线时撞出 LNK2019)。现在补上。 -->
+    <ClInclude Include="relay\Button2Joint.h" />
+    <ClCompile Include="relay\Button2Joint.cpp" />
     <ClInclude Include="relay\SafetyBoundary.h" />
     <!-- ProtocolAdapter inlined into RelayCore -->
     <ClInclude Include="relay\FeedbackParser.h" />
@@ -129,7 +135,10 @@
     <ClCompile Include="haptic\HapticCallback.cpp" />
     <!-- force -->
     <ClInclude Include="force\ForcePipeline.h" />
+    <ClInclude Include="core\JsonLite.h" />
+    <ClInclude Include="force\ForceTuning.h" />
     <ClCompile Include="force\ForcePipeline.cpp" />
+    <ClCompile Include="force\ForceTuning.cpp" />
     <ClInclude Include="force\ForceCompensation.h" />
     <ClCompile Include="force\ForceCompensation.cpp" />
     <ClInclude Include="force\ZeroDriftCheck.h" />

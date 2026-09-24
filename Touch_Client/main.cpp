@@ -19,7 +19,9 @@
 #include "calibration/TcpCalibration.h"
 #include "force/ForceCalibration.h"
 #include "force/ForceCompensation.h"
+#include "force/ForceTuning.h"       // 力反射增益的运行时值 (MATLAB 可调, 落盘在 calib/force_tuning.json)
 #include "force/NoiseProbe.h"        // 帧率噪声探针 ('n') 的统计量 (唯一一份定义, 有单测)
+#include "force/ForcePipeline.h"     // 抖动诊断的两个只读累加器 ('n' 的第二段, 2026-09-23) + softDeadzone
 #include "force/ZeroDriftCheck.h"
 #include "force/PayloadCalibration.h"
 #include "force/RepeatPairRegistry.h"
@@ -550,8 +552,13 @@ namespace BiasCheck {
             // ★ 笔杆姿态的【第二个角】—— 2026-09-21 加, 用来验"按钮2 大幅晃动"的退化假设。
             // 【为什么必须有这一行】姿态跟随用的是【Euler 角作差】, 而 ry 接近 ±90° 时 rx/rz
             //   退化 (提取式 ry = asin(-R[2][0]); 奇点分支直接把 rz 定成 0) ⇒ 微小的物理转动
-            //   会产出巨大的角度差, 再被【无界累加】进 m_targetOrient ⇒ 缓慢转动也会大幅晃动、
-            //   且范围越走越大。**判它的唯一线索就是这里这个 ry。**
+            //   会产出巨大的角度差 ⇒ 缓慢转动也会大幅晃动。
+            //   ⚠ 【2026-09-22 订正】此处原写着"再被【无界累加】进 m_targetOrient、范围越走越大"
+            //     —— 那一条【已被推翻】: m_targetOrient 由 clampOrientToBounds (RelayCore.cpp)
+            //     逐帧钳位, 它是【有界】的; 而且那个钳位【不受】SAFETY_BOUNDARY_CLAMP_ENABLED 管
+            //     (那个开关的 4 个调用点全是位置, 姿态走的是另一个入口)。
+            //   ⇒ 假设只剩两条腿: ① Euler 作差退化 (本行要验的); ② 死区是【门】——
+            //     任一轴超限就三轴原样放行, 噪声一并过。**判它的唯一线索就是这里这个 ry。**
             // ⚠ MATLAB 不显示这三个角 (P| 那条消息里有, 但界面没画) ⇒ 只能在这里看。
             // 读法: 若【Ry 接近 ±90°】(比如 70°~110°) ⇒ 假设成立 ⇒ 该把"Euler 作差"换成
             //   【四元数/旋转矢量求相对旋转】; 若离 ±90° 很远 ⇒ 假设不成立, 另找。
@@ -2739,6 +2746,20 @@ static bool g_motionProbeDone = false;
 static DWORD g_motionProbeStartMs = 0;
 static DWORD g_motionProbeLastUpdateMs = 0;   // 去重用, 与 BiasCheck::sample 同一套办法
 static int g_motionProbeCount = 0;
+// ★ 2026-09-24 追加：本探针的【第二个用途】—— 判 @624 的**姿态**三位是什么约定。
+//   位置那三位早已实测一致（盘上 180 行 `pos=` 与 `tcp=` 逐位相同到 ±0.001 mm），
+//   而**姿态那三位从来没被读过或打印过**（`tcpPoseActual[3..5]` 全仓零读者），
+//   厂商文档也只写"TCP笛卡尔实际坐标值"、**没写欧拉约定** ⇒ 只能测。
+// 【判据】同一物理姿态下 `posR`(GetPose 的 rx,ry,rz) 与 `tcpR`(@624 的 rx,ry,rz)
+//   **逐位相等（±0.05°）** ⇒ 约定相同，可把重力项 `A·g` 的输入换成**同帧**的 @624
+//   （那是 ③"关节模式运动时手上有大力"的修法，根因是现在用的姿态只有 ~5~10 Hz）；
+//   **不等** ⇒ 记下差值，据此写显式转换（别猜）。
+// ⚠ 陷阱：只在"三个角里**只有一个非零**"的姿态下比会**巧合相等**（不同约定在该点重合）
+//   ⇒ 必须扫过几个"三个角都非零"的姿态。所以触发条件不只是启动那 30 帧：
+//     之后每**转过 ≥5°**再打一行，上限 200 行（免得刷屏）。
+static double g_motionProbeLastR[3] = {0.0, 0.0, 0.0};   // 上一次【打印】时的姿态
+static DWORD  g_motionProbeLastPrintMs = 0;               // 上一次打印的时刻（时间门）
+static int    g_motionProbePoseCount = 0;                 // 姿态触发那一段已打的行数
 
 static void runMotionProbe() {
     if (g_motionProbeDone) return;
@@ -2763,19 +2784,50 @@ static void runMotionProbe() {
     if (fd.lastUpdateMs == g_motionProbeLastUpdateMs) return;
     g_motionProbeLastUpdateMs = fd.lastUpdateMs;
 
-    // 原始位姿 (mm), 与 pollForce 同法在锁内读取 (RelayCore.cpp:1605-1612)。
-    double px, py, pz;
+    // 原始位姿 (mm + 姿态), 与 pollForce 同法在锁内读取 (RelayCore.cpp:1605-1612)。
+    double px, py, pz, prx, pry, prz;
     EnterCriticalSection(&appState.robotPoseMutex);
     px = appState.robotActualPose.x;
     py = appState.robotActualPose.y;
     pz = appState.robotActualPose.z;
+    prx = appState.robotActualPose.rx;
+    pry = appState.robotActualPose.ry;
+    prz = appState.robotActualPose.rz;
     LeaveCriticalSection(&appState.robotPoseMutex);
+
+    // 本行要不要打？启动 30 帧一律打（看 10Hz 阶梯）；之后只在【姿态转过 ≥5°】时打，
+    // 上限 200 行 —— 目的是扫过多个"三个角都非零"的姿态去比 @624 的约定（见文件头那段）。
+    const double posR[3] = { prx, pry, prz };
+    bool probePrint = false;
+    if (g_motionProbeCount < 30) {
+        probePrint = true;
+    } else if (g_motionProbePoseCount < 200) {
+        double dmax = 0.0;
+        for (int i = 0; i < 3; i++) {
+            const double d = fabs(posR[i] - g_motionProbeLastR[i]);
+            if (d > dmax) dmax = d;
+        }
+        // ⚠ 还要一道【时间门】: 手腕 90°/s 时 ≥5° 每 ~55ms 就满足 ⇒ 没有时间门的话
+        //   200 行预算十几秒就烧完, 后面几个姿态一个都打不出来。500ms 一行 ⇒ 上限
+        //   200 行 ≈ 100 秒的扫描时间, 而判 @624 只需要十几个"三角都非零"的姿态。
+        if (dmax >= 5.0 && (now - g_motionProbeLastPrintMs) >= 500) probePrint = true;
+    }
+    if (!probePrint) {
+        // 两段都打满了 ⇒ 永久收工。
+        if (g_motionProbeCount >= 30 && g_motionProbePoseCount >= 200) g_motionProbeDone = true;
+        return;
+    }
+    if (g_motionProbeCount >= 30) g_motionProbePoseCount++;
+    for (int i = 0; i < 3; i++) g_motionProbeLastR[i] = posR[i];
+    g_motionProbeLastPrintMs = now;
 
     double vel[3], acc[3];
     int still = ForceCompensation::motionState(vel, acc) ? 1 : 0;
-    // tcp= / tcpV= 取自上面那份 ForceData 快照 (同一个 forceDataMutex 临界区), 不再二次加锁。
-    printf("[Force] 运动检测 #%02d: pos=(%.3f,%.3f,%.3f)mm  tcp=(%.3f,%.3f,%.3f)mm  vel=%.6f m/s (阈值 %.4f)  acc=%.6f m/s² (阈值 %.4f)  tcpV=(%.4f,%.4f,%.4f)  isStill=%d\n",
-           g_motionProbeCount + 1,
+    // tcp= / tcpR= / tcpV= 取自上面那份 ForceData 快照 (同一个 forceDataMutex 临界区), 不再二次加锁。
+    // ⚠ `posR` 与 `tcpR` 是【两个不同来源的同一个量】: posR 来自 GetPose()(~10Hz 的仪表盘查询),
+    //   tcpR 来自 30004 帧里的 ToolVectorActual @624(同帧, ~123Hz)。这一行就是拿来比它们的。
+    printf("[Force] 运动检测 #%02d: pos=(%.3f,%.3f,%.3f)mm  tcp=(%.3f,%.3f,%.3f)mm  vel=%.6f m/s (阈值 %.4f)  acc=%.6f m/s² (阈值 %.4f)  tcpV=(%.4f,%.4f,%.4f)  isStill=%d  posR=(%.3f,%.3f,%.3f)  tcpR=(%.3f,%.3f,%.3f)\n",
+           g_motionProbeCount + g_motionProbePoseCount,   // 两段共用一个单调行号（见上）
            px, py, pz,
            fd.tcpPoseActual[0], fd.tcpPoseActual[1], fd.tcpPoseActual[2],
            sqrt(vel[0]*vel[0] + vel[1]*vel[1] + vel[2]*vel[2]),
@@ -2783,10 +2835,12 @@ static void runMotionProbe() {
            sqrt(acc[0]*acc[0] + acc[1]*acc[1] + acc[2]*acc[2]),
            Config::FORCE_MOTION_ACC_THRESH_MSS,
            fd.tcpSpeedActual[0], fd.tcpSpeedActual[1], fd.tcpSpeedActual[2],
-           still);
+           still,
+           posR[0], posR[1], posR[2],
+           fd.tcpPoseActual[3], fd.tcpPoseActual[4], fd.tcpPoseActual[5]);
 
-    // 30 行后永久停: 够看出阶梯节奏, 又不至于一直刷屏。
-    if (++g_motionProbeCount >= 30) g_motionProbeDone = true;
+    // 启动那 30 行打满后不再靠它计数（见上面 probePrint 的两段逻辑）。
+    if (g_motionProbeCount < 30) g_motionProbeCount++;
 }
 
 // ===== 采集类模式互斥 =====
@@ -2800,6 +2854,61 @@ static void cancelOtherCaptureModes(char keep) {
     if (keep != 'v' && FkValidate::mode) {
         FkValidate::mode = false;
         std::cout << "[FK-VAL] Mode OFF" << std::endl;
+    }
+}
+
+// 力传感器调零 —— 【全程序唯一一份守卫链】。键盘 'z' 与 MATLAB 的 Zero 按钮【都走这里】。
+//
+// 【为什么不把守卫链放到 RelayCore】g_noRobot 与 cancelOtherCaptureModes 都是本文件的
+//   file-static, RelayCore 拿不到; 而在那里复制一份"标定中/调零中"的判断, 就是本项目最
+//   忌讳的"同一个规则两份实现, 改一份忘一份"(成文教训见 force/ForcePipeline.h)。
+//   ⇒ 让 RelayCore 只置一个标志, 由本函数在 GLUT 线程上统一处置。
+//
+// src: 标明是谁触发的, 写进日志 (两条入口的日志必须能分辨)。
+static void requestForceZero(const char* src) {
+    auto& relay = RelayCore::instance();
+    char msg[192];
+
+    if (relay.isForceZeroing()) {
+        relay.abortForceCalibration();
+        snprintf(msg, sizeof(msg), "[Force] 调零【已中止】 (来自 %s)", src);
+        std::cout << msg << std::endl;
+        relay.reportCommand(msg);
+        return;
+    }
+    if (relay.isForceCalibrating()) {
+        snprintf(msg, sizeof(msg),
+                 "[Force] 力标定进行中 — 等它结束, 或按 'k' 中止 (来自 %s)", src);
+        std::cout << msg << std::endl;
+        relay.reportCommand(msg);
+        return;
+    }
+    if (g_noRobot) {
+        snprintf(msg, sizeof(msg), "[Force] --no-robot 模式下无法调零 (来自 %s)", src);
+        std::cout << msg << std::endl;
+        relay.reportCommand(msg);
+        return;
+    }
+
+    cancelOtherCaptureModes('z');
+    if (relay.startForceZeroing()) {
+        snprintf(msg, sizeof(msg),
+                 "[Force] 调零中: 保持机械臂静止, 采集完成后自动应用并存盘 (来自 %s)", src);
+        std::cout << msg << std::endl;
+        relay.reportCommand(msg);
+    } else {
+        // ★ 2026-09-22: 这个 else 是【必须的】, 不是装饰。startForceZeroing() 返回 false 时, 原因由
+        //   forceCalibPreconditions 打到 stdout —— 而操作员坐在 MATLAB 前面【看不到 stdout】
+        //   ⇒ 只打 stdout 就等于"点了按钮什么都没发生"。
+        // ⚠ 【这里故意不重复判那三个条件】(仍在传输 / 机械臂未连 / 报警中): 那会把守卫链复制成
+        //   第二份, 而本功能的设计就是"守卫链只有一份"(见本函数顶上那段)。所以只报"未启动",
+        //   并让操作员知道去查哪三处。
+        // 文本【不含逗号】: 与 reportWarning 的自律一致 (C| 虽只拼一个 %s, 但保持同一套习惯)。
+        snprintf(msg, sizeof(msg),
+                 "[Force] 调零【未启动】—— 机械臂状态不允许 (仍在传输 / 未连接 / 报警中 三者之一)"
+                 " 请先排除后重试 (来自 %s)", src);
+        std::cout << msg << std::endl;
+        relay.reportCommand(msg);
     }
 }
 
@@ -2819,8 +2928,15 @@ void idle() {
     if (!appState.isClosing) {
         glutPostRedisplay();
 
-        // MATLAB → C++ 反向命令轮询 (力反馈开关等)
+        // MATLAB → C++ 反向命令轮询 (力反馈开关 / 反射增益 / 调零请求)
         RelayCore::instance().pollRelayCommands();
+
+        // MATLAB 的 Zero 按钮: 在这里 (GLUT 线程) 消费, 走与键盘 'z' 完全同一个函数。
+        // 为什么不在 pollRelayCommands 里直接做: g_noRobot / cancelOtherCaptureModes 是
+        // 本文件的 file-static (见 requestForceZero 顶上的说明)。
+        if (RelayCore::instance().consumeForceZeroRequest()) {
+            requestForceZero("MATLAB");
+        }
 
         // 控制台键盘轮询 (标定模式等操作不依赖 GLUT 窗口焦点)
         if (_kbhit()) {
@@ -3051,6 +3167,107 @@ namespace ForceNoiseProbe {
     }
 }
 
+// ===== 抖动诊断报告 —— 'n' 的【第二段】(2026-09-23, 抖动计划 Task 2) =====
+// 【与上面那个探针不是同一个窗口, 也不量同一个量】—— 两段都要看, 但别混:
+//   · 探针  : 最近 1024 帧的【原始 @1304】(未补偿), 由环缓冲逐帧存下来 —— 问的是"噪声的结构";
+//   · 本段  : 自上次 'n' 起(按下后清零)的【已经进映射的那两个量】, 由 ForcePipeline::step
+//             每帧累加一次 —— 问的是"手感到底抖多少、死区被越过多频繁"。
+//   判据也不同 (A 看输出 sd, B 看残差越死区占比), 所以【分成 A/B 两段并各自标明量的是什么】。
+// ⚠ 两个累加器【不可互换】(中间隔着轴映射与增益): 把死区阈值用在 A 上, B 就会量在错的量上,
+//   而打印出来的样子完全一样 —— 这是本项目最怕的"安静地错"。见 ForcePipeline.cpp 的注释。
+// ⚠ 本段【只读】: 除了把窗口清零 (为了"自上次 'n' 起"这个语义) 之外不写任何状态,
+//   也不碰死区 / 增益 / 滤波 / 限幅。回滚 = 删掉这个函数与 keyboard 里的那一行调用。
+namespace JitterReport {
+    static void run() {
+        ForcePipeline::JitterSnapshot s;
+        // ⚠ 线程契约: 累加器由 ForceReader 线程在 step() 里写 (持 forceDataMutex), 而这里在
+        //   GLUT 线程读 ⇒ 拷快照【必须在锁内】, 打印在锁外 (不占着这把锁做 I/O —— 与 pollForce
+        //   对落盘的纪律一致)。清零也在锁内: 它是一次写。
+        EnterCriticalSection(&appState.forceDataMutex);
+        ForcePipeline::copyJitterSnapshot(s);
+        ForcePipeline::resetJitterStats();   // 窗口从此刻重新开始 = 标题里的"自上次 'n' 起"
+        LeaveCriticalSection(&appState.forceDataMutex);
+
+        const double dz = Config::FORCE_RESIDUAL_DEADZONE_N;
+
+        std::cout << "\n===== 抖动诊断 (只读累加器; 与上面那个探针【窗口不同】: 本段自上次 'n' 起) ====="
+                  << std::endl;
+
+        // 两个累加器是【同一个喂入点】喂的 ⇒ 帧数必须相等。不等说明接线坏了 (例如有人改成
+        // 有条件地喂其中一路), 那时两张表不可比 —— 响亮地说出来, 别让读者自己去发现。
+        if (s.nOut != s.nResidual) {
+            std::cout << "  ⚠ 接线异常: 两个累加器的帧数不等 (" << s.nOut << " vs " << s.nResidual
+                      << ") —— 它们由 step() 里的同两行喂入, 本该恒等。下面的两张表不可比。"
+                      << std::endl;
+        }
+
+        // ===== A) 输出 (= 手感) =====
+        std::cout << "  A) 输出(手感) hapticOut —— 【已过】轴映射+死区+增益; 单位 Touch N; N = "
+                  << s.nOut << " 帧" << std::endl;
+        if (s.nOut <= 0) {
+            std::cout << "     窗口里 0 帧 —— 没收到 30004 帧 (机械臂没连?), 本段无数据。"
+                      << std::endl;
+        } else {
+            printf("     轴%12s%12s\n", "mean", "sd");
+            for (int a = 0; a < 3; a++) {
+                printf("     %c %+11.5f %11.5f\n", "xyz"[a], s.meanOut[a], s.sdOut[a]);
+            }
+            if (s.nOut < 2) {
+                std::cout << "     ⚠ 只有 " << s.nOut << " 帧: sd 在 n<2 时无定义 (按 0 打)。"
+                          << std::endl;
+            }
+            // 某轴恒 0 可能是【当前配置】的直接后果, 不写出来会被读成"这一轴没噪声"。
+            // 只按数据说事 + 指到那个开关上, 不替它下"该不该关"的结论。
+            if (s.sdOut[0] == 0.0 && s.sdOut[1] == 0.0 && s.sdOut[2] == 0.0) {
+                std::cout << "     (三个 sd 全为 0 —— 若此时手上有力, 先查 hapticOut 是否根本没在变)"
+                          << std::endl;
+            } else if (s.sdOut[1] == 0.0 && s.meanOut[1] == 0.0) {
+                std::cout << "     (y 轴恒 0 ⇒ 这一轴当前【被关掉】, 不是【没噪声】: "
+                          << "见 Config::FORCE_FEEDBACK_Z_SIGN)" << std::endl;
+            }
+        }
+
+        // ===== B) 残差 =====
+        // 标题必须写清量的是哪个数组: 判据 B 说的"残差"= 【进死区的那个量】(filtered,
+        // 补偿+滤波之后、还没过死区), 不是未滤波的 compensated[]。两者会给出相反的结论。
+        std::cout << "  B) 补偿后残差 = 【进死区的 filtered】(补偿+滤波后, 【未过】死区); "
+                  << "单位 传感器 N; 同一窗口 N = " << s.nResidual << " 帧"
+                  << std::endl;
+        if (s.nResidual <= 0) {
+            std::cout << "     窗口里 0 帧 —— 同上, 本段无数据。" << std::endl;
+        } else {
+            printf("     轴%12s%12s     |残差|>=%.3f N 的帧占比\n", "mean", "sd", dz);
+            for (int a = 0; a < 3; a++) {
+                printf("     %c %+11.5f %11.5f     ", "xyz"[a], s.meanResidual[a], s.sdResidual[a]);
+                // ⚠ <0 是"算不出来"(没在喂帧前武装阈值 / 有帧没被数过), 【不是】0% ——
+                //   这两种情况必须长得不一样, 否则"没量到"会被读成"机制不成立"。
+                if (s.fracResidual[a] < 0.0) {
+                    printf("  n/a (计数没武装, 见 JitterStats.h)\n");
+                } else {
+                    printf("  %6.2f%%\n", 100.0 * s.fracResidual[a]);
+                }
+            }
+            if (s.nResidual < 2) {
+                std::cout << "     ⚠ 只有 " << s.nResidual << " 帧: sd 在 n<2 时无定义 (按 0 打); "
+                          << "占比也只由这一两帧决定, 别当结论。" << std::endl;
+            }
+        }
+
+        // ===== 怎么读 (计划里写下的判据; 本工具【不替它下结论】) =====
+        // ⚠ 这里【故意不】写"算出来是多少 ⇒ 结论是 X"那种自动判决: 判据里的参考值
+        //   (0.028 N、15~25%) 来自计划/历史测量, 不是本工具能验的东西。仪器替人下结论,
+        //   本项目吃过亏 (见 ForceNoiseProbe 里那段"写在字符串里的结论")。
+        std::cout << "  ☞ 计划里写下的判据 (Docs/superpowers/plans/2026-09-23-haptic-output-jitter-instrument.md):"
+                  << std::endl;
+        std::cout << "     A: 输出的 sd 【明显大于】11 Hz 落盘口量到的 0.028 N (推算真实速率下 ≈0.15 N)"
+                  << " ⇒ \"D2 用错了仪器\"成立。" << std::endl;
+        std::cout << "     B: 占比 ≈ 15~25% (1.27σ 的高斯尾) ⇒ \"噪声对死区\"这个机制成立;"
+                  << std::endl;
+        std::cout << "        【远低于 15% ⇒ 机制不成立】, 那时别按这个机制去改死区 (回到【另有其因】)。"
+                  << std::endl;
+    }
+}
+
 void keyboard(unsigned char key, int, int) {
     if (key == 'q' || key == 'Q' || key == 27) { // q 或 ESC
         std::cout << "\nShutting down..." << std::endl;
@@ -3080,8 +3297,14 @@ void keyboard(unsigned char key, int, int) {
 
     // 帧率噪声探针 (见 ForceNoiseProbe 那一大段)。放在发送确认拦截【之后】是必须的:
     // 那个拦截要求"除确认键以外的任何键都取消下发", 排在它前面会让 'n' 变成例外。
+    // ★ 2026-09-23: 同一个 'n' 现在打【两段】—— 上面那段是"最近 1024 帧的原始 @1304",
+    //   下面那段 (JitterReport) 是"自上次 'n' 起的输出 sd + 残差越死区占比"。
+    //   ⚠ 分成两个函数调用 (而不是塞进 ForceNoiseProbe::run 里) 是【故意的】: 那个函数
+    //     在帧数 <64 时会提前 return (机械臂没连时), 塞进去会让第二段永远打不出来 ——
+    //     而第二段恰恰要在"没连机械臂"时也能说清"窗口里 0 帧"。按键仍只有 'n', 不新增。
     if (key == 'n' || key == 'N') {
         ForceNoiseProbe::run();
+        JitterReport::run();
         return;
     }
 
@@ -3100,25 +3323,9 @@ void keyboard(unsigned char key, int, int) {
     // ===== 力传感器调零 ('z' key) =====
     // 'z': 静置采集零偏 → 直接应用+存盘。不进 MOTION 相、不开拖拽模式。再按一次中止。
     //      换装工具 (笔夹/笔) 后重新调零用这个。
+    // ★ 2026-09-22: 守卫链抽进 requestForceZero() —— MATLAB 的 Zero 按钮走【同一个函数】。
     if (key == 'z' || key == 'Z') {
-        auto& relay = RelayCore::instance();
-        if (relay.isForceZeroing()) {
-            relay.abortForceCalibration();
-            return;
-        }
-        if (relay.isForceCalibrating()) {
-            std::cout << "[Force] 力标定进行中 — 等它结束, 或按 'k' 中止" << std::endl;
-            return;
-        }
-        if (g_noRobot) {
-            std::cout << "[Force] --no-robot 模式下无法调零" << std::endl;
-            return;
-        }
-        cancelOtherCaptureModes('z');
-        if (relay.startForceZeroing()) {
-            std::cout << "[Force] 调零中: 保持机械臂静止, 采集完成后自动应用并存盘"
-                      << std::endl;
-        }
+        requestForceZero("键盘");
         return;
     }
 
@@ -3698,6 +3905,20 @@ int main(int argc, char* argv[]) {
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    // 1.5 加载力反射增益 (calib/force_tuning.json; 没有就用 Config.h 的默认值)
+    // ★★ 【必须排在 initRelayReporting 与 initHapticDevice 之前】—— 这两步之后都【可能】
+    //   立刻回读一次增益, 而且哪一次最先发生是【竞争】: 触觉线程可能先连上, 不能指望它输,
+    //   ⇒ 只排到 initRelayReporting 前面是不够的。约束的本质是"必须排在前面", 不是
+    //   "因为某一次总是先发生"。
+    //   ⚠ 后来者别把本调用"整理"到后面去 —— 机制 (触觉线程上那一次回读) 见 RelayCore.cpp
+    //   的 sendReflectionGain 文档块, 此处不重复。
+    // ★ 晚了会怎样: 回读报的是旧值而实际生效的是文件里的值 ⇒ 界面一个数、手上另一个数,
+    //   无声地不一致; 这个不一致要等到下一次回读 —— 重连, 或一次被接受的增益改动 —— 才会
+    //   被纠正, 没有别的事件会自己纠正它。这正是本设计要消灭的状态。
+    // ★ 也必须在 initForceReader 之前 —— 那里的 ForcePipeline::init() 会把增益斜坡就位;
+    //   晚了那 0.25 秒里增益是错的 (不会失控, 总夹还在, 但没必要)。
+    ForceTuning::loadOnStartup();
 
     // 2. 初始化 Touch 设备 (--no-touch 时跳过)
     if (g_noTouch) {

@@ -16,6 +16,19 @@
 >   这是**端到端**结果，不再是推理。
 > - **有意例外**：`test_constraint_force` **不构建也不跑**（它的构建脚本被 `tests/.gitignore:1` 忽略、
 >   不在 HEAD 里）⇒ 源码里留了一段明标缺口的注释。⚠ 那条忽略**尚未被决定**。
+> - ### ★★ 2026-09-23 再进一步：**六个孤儿套件已接进来，三个手维护的数字改成运行时推导**
+>   * **六个**"有构建脚本、从来没人接"的套件（`calib_store` / `calibration` / `frame_layout` /
+>     `inertia_identification` / `self_collision` / `singularity_avoidance`）接进了"先建再跑"，
+>     各自实测绿（`8/0` · `3/0` · `12/0` · `12/0` · `6/0` · `12/0`，均 exit 0）。
+>   * `Summary` 的 `20`、`[NOT RUN]` 的 `8`、末尾 `if %TOTAL% NEQ 13` **全部删掉**，改成
+>     **运行时数出 `test_*.cpp` 个数并断言**：磁盘上每个 `test_*.cpp` 必须**恰好被交代一次**
+>     ——要么跑了，要么在 `NOTRUN_LIST` 里具名。⇒ 旧断言只能抓"段被跳过"，
+>     抓不到"**新套件来了没人接线**"（那正是上面那句"会静默过期"的情形）。
+>   * 现在：**`19 of 21 suites accounted for`，`Suites accounted: 21 of 21 (ran 19 + not-run 2)`**。
+>   * `NOTRUN_LIST` 本身**也被校验**（名单必须对应磁盘上真实存在的 `test_*.cpp`、不许重复、
+>     不许写通配符）——否则一个拼错的名字仍然会计入、算术照样平、照样 exit 0。
+>   * ⚠ **本文件正文里那些 `run_tests.bat:<行号>` 引用在 09-23 之后全部平移**（文件长了约 160 行）
+>     ⇒ 按**符号/描述**找，别按行号。
 > - 侦察还查出**三个新缺陷类别**（见本文件【三个新缺陷类别 (A)(B)(C)】）——
 >   其中一条是**一个陈旧二进制里编着已被取代的物理常数**（`J1_Z = 128.3` vs 源里的 `136.0`）。
 >   ⚠ 另一条（判定标记解析期冻结）在修的过程里**衍生出两个新形态**，见下节末。
@@ -318,3 +331,119 @@ kinematics / coord_safety）。
 **不要写非 ASCII 注释。** 非 UTF-8 代码页下 cmd.exe 会误解码，**可能静默吞掉后面那一行**
 —— 即"注释写错一个字符 ⇒ 编译命令消失 ⇒ 构建失败得莫名其妙"。
 `build_force_pipeline_test.bat` 头部写着这条。
+
+## 2026-09-24 —— 【运行失败】分支的实测负对照（此前从未被当成目标反证过）
+
+`run_tests.bat` 里同一块判定手抄了 **24** 遍 —— 这是**此刻**的数：每接进一个套件就多一处，
+所以它只会朝"少"的方向**静默**过期（本节初稿写的 19 是 2026-09-23 `0a72524` 处的数；
+那天收工已是 22，09-24 又涨到 24 —— 而文档只在初稿里记过那一次）。
+量法（四种独立计数一致）：`set /a PASSED+=1` / `echo   [FAIL: build error]` /
+`call "%TESTDIR%\build_*.bat"` 各 24 处，运行日志里 `=== test_*.exe ===` 也 24 次，
+harness 收尾自报 `ran 24`。⚠ 裸 `grep 'echo   [FAIL]'` 会数出 **26** —— 多出的两行是
+`run_tests.bat:51`/`:53` 那段 "HOW TEST RESULTS ARE JUDGED" 教学示例里的字面文本，
+**它们不是判定块**（同一个"裸 grep 把散文一起数进去"的坑，这个文档反复记）。
+
+其内层 `else`（**构建成功、测试 exe 返回非零**）**此前从未被【当成目标】刻意反证过** ——
+上一轮（2026-09-23）打的六个负对照全是**构建失败**那一路。同批的 Task 2 与 Task 4 各**顺手**
+走过一次这一支（见 `_harness_task2_redwiring.log` / `_harness_task4_neg.log`，后者与本轮基数相同），
+但那两次**套件自己也报了红**，且**都没有量调用方的退出码** ⇒ 分不开"判定靠退出码"
+与"判定靠扫摘要"。本轮补上的正是这一半。
+而"把失败传给调用方"只有一条链：`set "HARNESS_RC=%FAILED%"` → `endlocal & exit /b %HARNESS_RC%`
+（本轮树上是 `:879` 与 `:898`；行号会随注释漂移，按 2026-09-24 的树看）。
+
+做法：把 `test_calib_store.cpp` 的 `main()` 末尾 `return g_failed ? 1 : 0;` 临时改成 `return 1;`
+（**构建照旧成功**）。该行在**第 47 行**（本轮执行单写的 `:163` 落在文件之外 —— 那文件总共只有 48 行；
+引用 `文件:行号` 前先核文件长度 —— 本文件**前面**那节（`:277`）也说了这件事）。
+
+**这一趟的判别力在这里**：该套件自己打的是 `3 passed, 0 failed` —— 即"文本说绿、退出码说红"。
+所以它验的是判定**用了退出码**，而不是**扫套件打印的摘要**；后者是很容易被写成的假绿。
+
+实测三条同时成立（抄自 `_harness_runfail.log` 那一趟：245499 B / 2951 行，整趟跑完）：
+
+1. 该段打出 `[FAIL]`，不是 `[FAIL: build error]`：
+
+```
+=== test_calib_store.exe ===
+=== CalibStore Tests ===
+  derive_dir_normal... PASS
+  derive_dir_shallow... PASS
+  derive_dir_bad_input... PASS
+
+3 passed, 0 failed
+  [FAIL]
+```
+
+该段上方是 `BUILD_EXIT=0` 与 `  Build OK` ⇒ 走的是**内层** `else`。
+全日志里 `[FAIL` 出现 **1** 次、`FAIL: build error` 出现 **0** 次。
+
+2. `FAILED` = **1**。⚠ 本轮执行单把这条写成"`Suites accounted` 那行里的 `FAILED` 计数" ——
+   实测 **`FAILED` 在 `Summary` 行、不在 `Suites accounted` 行**，两行都抄：
+
+```
+  Summary: 24 of 26 suites accounted for - 23 OK, 1 FAILED
+```
+
+```
+  Suites accounted: 26 of 26 (ran 24 + not-run 2)    Exit code: 1
+```
+
+（这行尾巴上的 `Exit code:` 是 harness **自述**，见本节最后那条 ⚠ —— 它不是调用方量到的退出码。）
+
+⇒ `Suites accounted` 那行**基数完全没变**（26 / ran 24 / not-run 2，与 baseline 逐字相同），
+只有 `Exit code:` 从 0 变成 1；失败的套件**仍被算进 `ran`**，所以那条
+`ACCOUNTED == NTESTS` 的恒等式在失败态下依然成立。
+
+3. **进程退出码 = 1**。这一条是**从调用方量的** —— bash 里
+   `MSYS_NO_PATHCONV=1 cmd.exe /c ".\run_tests.bat"` 之后的 `$?`，不是 harness 自己 echo 的那行：
+
+```
+exit=1
+```
+
+⚠ 这一条**只存在于本轮的终端记录里，没有被落进任何日志文件** —— `_harness_runfail.log` 里有的是
+harness 自述的 `Exit code: 1`（`:2951`），**没有**调用方量的那个数。将来别去那个文件里找它。
+
+与 baseline 的 `diff` 只差 5 行：`[OK]`→`[FAIL]`、`24 OK, 0 FAILED`→`23 OK, 1 FAILED`、
+`24 passed, 0 failed`→`23 passed, 1 failed`、`Exit code: 0`→`Exit code: 1`，
+外加一行蒙特卡洛用时（1.8 s→1.9 s，噪声）。其余 2946 行逐字节相同。
+
+⚠ **2026-09-24 复审订正**：这里原文写的是 `1.7 s→1.9 s`。按日志实测是 **`1.8 s→1.9 s`**
+（`_harness_task4.log:2603` = `用时 1.8 s`，`_harness_runfail.log:2603` = `用时 1.9 s`；
+`diff` 逐行核过，两文件之间恰好只有上面列的这 5 行不同）。基线那份是 **`_harness_task4.log`**
+（245497 B），不是 `_harness_baseline.log`（162283 B，更早的一趟，连蒙特卡洛那行都没有）。
+
+还原后 sha256 与动手前**逐字相同**
+（`68d32651b33a89a4dc1073f8c8c46c0875362cd30feb54aedaba7830600943f4`，1766 B），
+`git status` 无该文件；随后整床 `exit=0`：
+
+```
+  Suites accounted: 26 of 26 (ran 24 + not-run 2)    Exit code: 0
+```
+
+（⚠ **2026-09-24 复审订正**：原文说 `_harness_after_neg.log` "与 baseline 只差那一行计时" ——
+**不成立**。它与 baseline（`_harness_task4.log`，245497 B）**逐字节相同**：`diff` 空，
+两者 sha256 同为 `3e3b8417e9a0752b9c0cecffa664e0d673524f9a42a1fd4db0e9f53831c4cea5`。还原不但把
+`[FAIL]` 收回去了，连那行计时也回到了 1.8 s。）
+
+⚠ **还原这一步有个坑：`git show HEAD:<path> > <path>` 还原不出动手前的字节。**
+本文件的**工作区副本是 CRLF**（1766 B），而 **HEAD blob 是 LF**（1718 B，`afc55722…`）。
+所以 brief Step 4 那条处方写出的是 LF 那一份（`9e257b04…`），而且 `git status` 会把这文件
+报成 ` M`（`git diff` 却是空的 —— `core.autocrlf=true` 下按内容比是相同的）。
+实测**能**还原的是 CRLF 那一份：`git show HEAD:<path> | perl -pe 's/\n/\r\n/'` ⇒
+1766 B / `68d32651…`，与动手前逐字相同、`git status` 干净。
+
+⇒ 教训：**"哪一份才是规范字节"是【每个文件各自】的** —— 取决于它的工作区副本上一次是被 git
+（⇒ CRLF）还是被某个文本工具（⇒ LF）写的。Task 3 那个文件是 LF（2 734 是它动手前的样子，
+`git checkout --` 出来的 2 811 才对不上）；本文件偏偏是 CRLF。两边都别想当然，
+**唯一可靠的做法是拿动手前记下的 `sha256sum` 去对**；本次先按处方走、对不上，再实测 CRLF 那份才对上。
+
+⚠ **`Exit code:` 那个数是 harness 自己 echo 的自述**（`:897`，紧接着 `:898` 才是真的 `exit /b`）。
+**自述 ≠ 调用方量到的退出码。** 2026-09-24 那份 `_harness_task2_redwiring.log` 正落在这个缺口里：
+它有 `[FAIL]`、有 `Summary: 23 of 25 suites accounted for - 22 OK, 1 FAILED`、也有
+`Exit code: 1`，但**没有任何外部量的退出码** —— 那毕竟是一次别的改动
+（`GainReadbackPolicy` 的头文件）顺手跑出来的，而且那条用例自己就打了 `4 passed, 1 failed`，
+所以它分不开"判定靠退出码"与"判定靠扫摘要"。本轮的 `3 passed, 0 failed` + `[FAIL]` 才是那个判别。
+
+⚠ **这是一次性实测，不是常驻保护**：没有任何东西会在将来再验一遍。要常驻，唯一的路是把那 24 处
+调用点重构成 `call :judge` 子程序 —— 那会动一个 `cmd` 语义陷阱密集的文件
+（见 `cmd-batch-semantics` 记的十一类实测），本轮**刻意不做**。
