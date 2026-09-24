@@ -203,7 +203,8 @@ function relay_gui()
 
     % -- Row 3: 滤波力 --
     pnlFF = uigridlayout(glMid, [4 1]);
-    pnlFF.RowHeight = {22, 26, 40, '1x'};
+    pnlFF.RowHeight = {22, 44, 40, '1x'};   % ★ 2026-09-24: 第 2 行 26→44 —— 现场反馈「力反馈开关太小」
+                                               %   （开关是本轮 A/B 判别的主控件：关掉它可判「力反馈闭环」）
     pnlFF.Padding = [4 0 4 2];  pnlFF.RowSpacing = 0;
     pnlFF.BackgroundColor = clr.bg_panel;
     pnlFF.Layout.Row = 3;  pnlFF.Layout.Column = 1;
@@ -214,13 +215,13 @@ function relay_gui()
 
     % 力反馈开关 (A/B 对照实验)
     pnlFFToggle = uigridlayout(pnlFF, [1 2]);
-    pnlFFToggle.ColumnWidth = {'1x', 60};
+    pnlFFToggle.ColumnWidth = {'1x', 120};  % ★ 2026-09-24: 60→120（同上的现场反馈）
     pnlFFToggle.Padding = [0 0 0 0];  pnlFFToggle.RowSpacing = 0;  pnlFFToggle.ColumnSpacing = 4;
     pnlFFToggle.BackgroundColor = clr.bg_panel;
     pnlFFToggle.Layout.Row = 2;  pnlFFToggle.Layout.Column = 1;
 
     lblFFToggle = uilabel(pnlFFToggle, 'Text', 'Force Feedback (A/B switch)', ...
-        'FontColor', clr.text_dim, 'FontSize', 9);
+        'FontColor', clr.text_dim, 'FontSize', 11);   % ★ 2026-09-24: 9→11（与面板其它标签一致）
     lblFFToggle.Layout.Row = 1;  lblFFToggle.Layout.Column = 1;
 
     % ★ 这里是 @(~,~) onForceFeedbackToggle(swFF.Value) —— 【既有缺陷】, 与本分支的增益调参无关,
