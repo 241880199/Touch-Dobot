@@ -29,7 +29,7 @@ static int g_passed = 0, g_failed = 0;
 
 // ★★ 2026-09-24: 时间【注入】, 不睡觉。
 //
-// 【为什么不再 Sleep】: 判据是 `elapsed >= Config::MIN_WARN_MS`(=50ms)，而 elapsed 由
+// 【为什么不再睡了】: 判据是 `elapsed >= Config::MIN_WARN_MS`(=50ms)，而 elapsed 由
 //   `GetTickCount()` 得到 —— 它的粒度是 15.6ms。从前本文件靠"睡 4 × MIN_WARN_MS = 200ms"
 //   把余量拉开，代价是 (a) 每次运行白花 ~1s，(b) 判据对 MIN_WARN_MS ∈ (0, 200] 全都不敏感
 //   —— 改到 150 也照样绿。下侧边界（差 1ms 不升级）更是无从谈起。
@@ -260,15 +260,22 @@ static void test_deescalation_clear_frames() {
 //
 // 【为什么必须有它】: 本文件从前靠"睡 4 × MIN_WARN_MS = 200ms"去满足 50ms 的规则 ——
 //   余量 4 倍 ⇒ 判据对 MIN_WARN_MS ∈ (0, 200] 全都不敏感, 改到 150 也照样绿。
-//   下面两条把阈值本身钉到 1ms: 差 1ms 不升级, 正好到点升级。
+//   下面两条把阈值本身钉到 1ms: 差 1ms 不升级, 正好到点升级 —— 而且经下面那道
+//   相位对齐之后, 【两侧都是确定的】, 不是"通常如此"。
 // 【怎么做到不用睡】: 直接注入"距第一次出错过去了多久"——
 //   注入的确实是【差】, 但那个差是减在 `recordError()` 内部那次 `GetTickCount()`
 //   读数上的 ⇒ 下侧断言看到的 elapsed 实际是 `49 + (T'-T)`, 其中 T'-T 是之后
-//   `shouldEscalate()` 里再读一次时钟的增量, 只可能取 0 或一个 15.6ms 量子
-//   ⇒ 落到 49 还是 65 取决于这中间有没有跨过刻度 ⇒ 下侧仍留一道残留刀口:
-//   **实测 ≈5e-7/次 (2,000,000 次重放里 1 次), 不是 0**。
-//   也正是这个量子决定了本时钟下做不出"正好差 1ms"的夹逼 ⇒ 下面这两条已经是
-//   在这里能写下的最紧的确定说法。
+//   `shouldEscalate()` 里再读一次时钟的增量。
+// 【所以要先把相位对齐】: 不对齐的话, 那两次读时钟的相位是【随机的】⇒
+//   中间可能跨过一个 15.6ms 量子, 使 elapsed 从 49 变成 64/65 ⇒ 下侧留一道残留
+//   刀口: **实测 ≈5e-7/次 (2,000,000 次重放里 1 次), 不是 0**。
+//   ⇒ 在【第一次 `recordError()` 之前】自旋到"刚跨过一个 tick 边界", 之后两次读时钟
+//   都落在同一个新鲜量子内 (它们相隔不过微秒级, 而余量是整个 15.6ms) ⇒ elapsed 确定地是 49
+//   ⇒ 这才是"为什么要有那一段自旋"的理由, 不是把残留当成接受的代价。
+//   这一段自旋的位置是【要紧的】: 必须在【第一次 `recordError()` 之前】——
+//   那一次调用才是 `m_firstErrorMs` 的写入点 (见 EscalationTracker.h:31)。
+//   若是挪到注入前那一行, 第一次读时钟的相位仍随机, 自旋反而会保证跨过刻度
+//   ⇒ 下侧断言【必然】失败 (elapsed = 64/65)。
 // 【构造上抓不到"常数取值错"】: 本用例读的就是实现读的那个 `Config::MIN_WARN_MS`
 //   ⇒ 把 50 改成别的值, 它会跟着改、照样绿。它钉住的是【阈值处的那次比较】,
 //   不是 50 这个数本身 (那个数在别处钉)。
@@ -280,6 +287,15 @@ static void test_escalation_boundary_at_min_warn_ms() {
 
     Vec3 delta = {1, 0, 0};
     EscalationTracker et;
+
+    // ★ 先把相位【对齐到刚跨过一个 tick 边界】: 这样下面两次读时钟都落在同一个 15.6ms 量子里,
+    //   下侧断言就是确定的。不对齐时它有一道 ≈5e-7/次 的残留刀口 (实测 2,000,000 次里 1 次) ——
+    //   原因是 recordError() 里那次 GetTickCount() 读与 shouldEscalate() 里那次读之间, 相位是
+    //   随机的 ⇒ 可能跨过一个量子, 使 elapsed 从 49 变成 65。
+    //   自旋最多 15.6ms, 是这一支能拿到"确定的 1ms 夹逼"的全部代价。
+    //   ⚠ 位置: 必须在【第一次 recordError() 之前】(它是 m_firstErrorMs 的写入点), 不能挪到注入前。
+    { DWORD a = GetTickCount(); while (GetTickCount() == a) { } }
+
     et.recordError(RobotErrorCode::ERR_CYLINDRICAL_WARN, delta);
     et.recordError(RobotErrorCode::ERR_CYLINDRICAL_WARN, delta);
     et.recordError(RobotErrorCode::ERR_CYLINDRICAL_WARN, delta);
