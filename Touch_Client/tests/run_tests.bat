@@ -672,6 +672,56 @@ if %ERRORLEVEL% EQU 0 (
 )
 echo.
 
+rem ============================================================
+rem Suite wired into "build then run" on 2026-09-24:
+rem   payload_calibration -- the offline payload/COM solver (PayloadCalibration.cpp)
+rem   plus the local-compensation acceptance case. It carries ONE case that is
+rem   deliberately NOT run by this exe: test_runtime_consistency_guard_replay
+rem   replays the four 2026-09-19 captures, which carry no reference-column
+rem   (@720) data, so the gate can only answer REFERENCE_UNAVAILABLE and that
+rem   assertion is red BY DESIGN. Deleting the case would make an unverified
+rem   assertion disappear silently, so it was split out instead of removed:
+rem   this exe runs the other cases and PRINTS A [PARKED] DISCLOSURE ON EVERY
+rem   RUN naming the excluded one. The case itself lives in
+rem   test_payload_calibration_parked.cpp, which is named in NOTRUN_LIST below.
+rem   WHY THE DISCLOSURE IS PRINTED, NOT JUST COMMENTED: the accounting below is
+rem   a CARDINALITY check, not an IDENTITY check -- it cannot tell "this exe ran"
+rem   from "this exe ran but one of its cases never executed". The banner is the
+rem   only thing that makes the missing case visible on every run.
+rem   The parked case is still COMPILED by this exe every time (the #ifdef only
+rem   switches main()), so a production API change still breaks the build here.
+rem   The assertion count is deliberately NOT copied here: the suite prints it on
+rem   every run, and a hand-typed copy only goes stale in the silent direction
+rem   (see the note on hand-typed numbers in the NOT RUN block at the bottom).
+rem   Adding this .cpp is what makes the runtime suite count on disk move
+rem   from 25 to 26; if this section is ever deleted while the .cpp stays,
+rem   the harness asserts at the bottom and exits 1 -- by design.
+rem   The FORM of the result check is NOT special to this suite -- every
+rem   section in this file uses it. See "HOW TEST RESULTS ARE JUDGED" at
+rem   the top of this file for the rule and the two tempting-but-wrong forms.
+rem ============================================================
+
+echo --- Building test_payload_calibration ---
+call "%TESTDIR%\build_payload_calibration_test.bat"
+@echo off
+if %ERRORLEVEL% EQU 0 (
+    echo   Build OK
+    echo.
+    echo === test_payload_calibration.exe ===
+    "%TESTDIR%\test_payload_calibration.exe"
+    if !ERRORLEVEL! EQU 0 (
+        set /a PASSED+=1
+        echo   [OK]
+    ) else (
+        set /a FAILED+=1
+        echo   [FAIL]
+    )
+) else (
+    echo   [FAIL: build error]
+    set /a FAILED+=1
+)
+echo.
+
 echo ================================================
 echo   Tests complete
 echo ================================================
@@ -704,7 +754,7 @@ rem   still counts as one excluded suite, the arithmetic still balances, the
 rem   harness still exits 0, and the suite it was supposed to stand for is
 rem   neither run nor disclosed. The three checks below close that.
 rem ------------------------------------------------------------
-set "NOTRUN_LIST=test_constraint_force test_payload_calibration"
+set "NOTRUN_LIST=test_constraint_force test_payload_calibration_parked"
 
 rem A dictionary of the suites that EXIST, keyed by exact file stem. Entries
 rem   are looked up in it rather than trusted, so a misspelled name matches
@@ -780,10 +830,13 @@ echo       Its build script is ignored by Touch_Client/tests/.gitignore line 1, 
 echo       it is NOT in HEAD -- nothing COMMITTED can build this suite's exe.
 echo       (Undecided; see the gap note further up this file.)
 echo.
-echo     test_payload_calibration
-echo       Has a DELIBERATELY RED assertion: its fixture carries no reference-
-echo       channel columns, so the case cannot be decided either way. Wiring it
-echo       in would make this harness exit non-zero forever. Known, not a bug.
+echo     test_payload_calibration_parked
+echo       Is the PARKED variant of test_payload_calibration.cpp -- it runs ONLY the one
+echo       case that is red by design (the gate replay over the four 2026-09-19 captures,
+echo       which carry no reference-column data). The main suite excludes that case and is
+echo       wired in above; this variant is what keeps the case NAMED instead of deleted.
+echo       Build it by hand with build_payload_calibration_parked_test.bat when you want
+echo       to see it. Re-capturing a fixture with the @720 columns is what un-parks it.
 echo.
 echo   The line above therefore means: %PASSED% passed, %FAILED% failed, out of the
 echo   %NTESTS% test_*.cpp in this repo (%NNOTRUN% of which this harness does not run).

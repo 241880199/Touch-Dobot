@@ -1579,6 +1579,65 @@ static void test_decompose_rejects_singular_A() {
     PASS();
 }
 
+// ===== 列布局: 认识的清单 + "看真列数"的扫描上限 (2026-09-21) =====
+//
+// ⚠ 2026-09-24: 本节【从下方上移】—— replay_real_capture 也要按【真列数】判,
+//   所以它必须在这一节之后。
+//
+// 【为什么必须有这两个数】: mgSplitRow 的第三参是【上限】—— 一行比它宽时返回的仍是那个上限,
+//   第 maxOut 列之后的内容被静默丢弃。所以"返回值 == 某个数"这个判据挡得住【列变少】,
+//   挡不住【列变多】: 一行 31 列会被截成 25 列、判据满足、行被收下, 而多出来的那 6 列
+//   (正是参考量 @720 那一路) 一个数都没进内存。于是"读了夹具"与"读了夹具的前 25 列"
+//   在结论上【不可区分】。
+//
+// 两处调用点因此都改成【先看真列数, 再判】:
+//   · 解析那一趟传 MG_COLSCAN —— 它【高到能看见真实列数】, 不是"打算写入多少列";
+//   · 真列数 > MG_MAXCOLS (= 本读取器支持的最宽布局) ⇒ 【响亮拒绝】, 绝不截断后收下。
+static const int MG_COLSCAN = 64;   // 扫描上限: 任何已知布局都远窄于它 (最宽 = 31)
+static const int MG_MAXCOLS = 31;   // 支持的最宽布局 = 25 列 + 末尾 6 列参考量 (F720*/M720*)
+
+// 【响亮拒绝】的唯一一份打印。报出文件名、看错的列数与支持范围 —— 三个数齐了才谈得上
+// "布局变了"这四个字是可查的, 而不是要靠猜。
+// ⚠ 措辞【不用 "FAIL" 开头】: 它是读取器的一条【正常】拒收记录 (用例可以在等它出现),
+//   冠上 FAIL 会让"故意喂了一行坏数据"的用例看起来像坏了。
+static void mgRejectColumns(const char* file, int seen, const char* wanted) {
+    printf("    ★★ 读取器【拒收这一行】: 夹具 %s 有 %d 列, 不在支持的范围内 (支持 %s;"
+           " 最宽 %d 列)。⇒ 不截断到 %d 列再收下: 那样读到的数不是这一行的数。\n",
+           file, seen, wanted, MG_MAXCOLS, MG_MAXCOLS);
+}
+
+// 逗号分隔的一行 -> 逐列。返回值是【读到的列数, 但被 maxOut 截断】——
+// ⚠ 它【不是】"这一行有多少列": 第三参是**上限**, 行里第 maxOut 列之后的内容会被**静默丢弃**,
+//   返回的仍是 maxOut。所以上面那两处调用点都传 MG_COLSCAN (高到看得见真列数), 并且
+//   【按真列数判】—— 谁要拿一个"够用就好"的小上限来调它, 就先把上面那段说明读完。
+// 它能做的是: 少于 maxOut 列时如实返回更小的数 —— 所以"列数变少"看得见, "列数变多"看不见。
+static int mgSplitRow(const char* q, double* out, int maxOut) {
+    int k = 0;
+    while (*q && k < maxOut) {
+        char* e = nullptr;
+        const double v = strtod(q, &e);
+        if (e == q) break;
+        out[k++] = v;
+        q = e;
+        if (*q == ',') q++; else break;
+    }
+    return k;
+}
+
+// 金标夹具 (`calib_poses_2026-09-19.txt`) 的数据行必须【正好 18 列】。
+//   返回 false = 已响亮拒绝 (原因已打印), 调用方不许再拿 c 里的数往下算。
+// 【为什么是函数而不是在调用处内联】: 用例必须走【真的读取器】—— 本项目在这条上栽过
+//   (把判据在测试里抄一遍, 于是测试绿着而真路径坏着)。有了它, 用例与 replay_real_capture
+//   走的是同一段算术。
+static bool goldRowColumns(const char* row, double* c, const char* file) {
+    // 【先数真实列数, 再判】: sscanf 数够 18 个转换就返回 18, 第 19 列起【从不被解析】
+    //   ⇒ "列数变多了"它看不见 (完整说明见 mgSplitRow 那段)。
+    //   金标只对【18 列】的布局成立 ⇒ 多于 18 列 = 另一次采集 / 布局变了 ⇒ 【响亮失败】,
+    //   不截断后拿它去对金标 (那会把"读到了别人的数据"变成一条绿)。
+    const int nc = mgSplitRow(row, c, MG_COLSCAN);
+    if (nc != 18) { mgRejectColumns(file, nc, "18 列 (这份金标夹具的布局)"); return false; }
+    return true;
+}
 // =====================================================================================
 // ★ 实机回归 (Task 2): 用 7 个【真实姿态】的采集文件重放, 钉住整条求解链
 //   (fitRaw 的线性解 + decompose 的物理量)。
@@ -1703,17 +1762,13 @@ static void test_replay_real_capture() {
         while (*q == ' ' || *q == '\t') q++;
         if (*q == '\0' || *q == '\r' || *q == '\n' || *q == '#') continue;   // 空行与注释头
         if (n >= MAXN) { n = -1; break; }                                    // 行数超上限
-        double c[18];
-        // 【不静默跳行】—— 但只在"列少了"这一侧: 这条检查问的是"从头能不能读出 18 个浮点",
-        // 多个字段它会【静默忽略】(sscanf 数够就返回 18), 所以"这行有 18 列"这个结论它给不出。
-        // 拿它去对金标仍然安全 (金标只用到前 18 列, 且这份夹具的列布局由表头写着),
-        // 但"列数变了就会被拦住"这句话不成立 —— 要判它得数【真实列数】(见 mgSplitRow 那段 ⚠)。
-        if (sscanf(q, "%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf",
-                   &c[0], &c[1], &c[2], &c[3], &c[4], &c[5], &c[6], &c[7], &c[8],
-                   &c[9], &c[10], &c[11], &c[12], &c[13], &c[14], &c[15], &c[16], &c[17]) != 18) {
-            n = -2;
-            break;
-        }
+        // 【按真列数判, 且走与用例同一份守卫】(2026-09-24): 从前这里拿
+        //   `sscanf(18 个 %lf) != 18` 当判据 —— 它只看得见"列变少", 看不见"列变多"
+        //   (数够 18 个转换就返回 18, 第 19 列起从不被解析)。金标只对【18 列】的布局成立
+        //   ⇒ 更宽的行必须【响亮拒绝】, 否则"读到了别人的数据"会被静默收下、再拿去对一份
+        //   不属于它的金标。判据收进 goldRowColumns(), 所以用例与这条真路径是同一段算术。
+        double c[MG_COLSCAN];
+        if (!goldRowColumns(q, c, used)) { n = -3; break; }
         for (int a = 0; a < 6; a++) rawRows[n][a] = c[a];
         // @1304 = 第 13..18 列 (下标 12..17): 拟合吃的那一份原始通道
         for (int a = 0; a < 3; a++) { F[n][a] = c[12 + a]; M[n][a] = c[15 + a]; }
@@ -1722,8 +1777,8 @@ static void test_replay_real_capture() {
     fclose(fp);
 
     if (n < 0) {
-        std::cout << "FAIL: 采集文件读不动 (行数超上限, 或有一行的【前 18 个字段】读不出 18 个"
-                     " 浮点) —— 布局变了就别拿它去对金标。" << std::endl;
+        std::cout << "FAIL: 采集文件读不动 (行数超上限, 或有一行的【真实列数不是 18】, 或有一行的"
+                     " 前 18 个字段读不出 18 个浮点) —— 布局变了就别拿它去对金标。" << std::endl;
         g_failed++;
         return;
     }
@@ -1964,6 +2019,15 @@ static bool mgOpenFixture(const char* name, FILE** out) {
 
 // "# repeat: first=1,3,5 seconds=2,4,6  (共 3 对...)" -> 0 基下标对。返回解析出的对数。
 // "# repeat: none" -> 0。列号是 1 基的行号, 与 main.cpp 落盘时逐字一致。
+//
+// ★ 2026-09-24 【返回值 -1 = 响亮拒绝】: 从前这一支有【三处静默丢弃】——
+//   (a) 单侧列表超过 16 项时循环到上限就停, 多出来的项【无声消失】;
+//   (b) 解析出的对数超过调用方的缓冲 (MG_MAXREP) 时, `cnt = maxOut` 把多出来的对【无声砍掉】;
+//   (c) 两侧项数不等时 `cnt = min(nf, ns)` 把多出来的【无声丢掉】。
+//   三者都是"夹具说的话比我们装下的更多" ⇒ 收下就是拿【不完整】的复采对去算自由度,
+//   而结果看起来完全正常。改成一律拒: 调用方 (mgLoad) 大声失败。
+//   ⚠ 三处一起关的理由: 它们是【同一类缺陷】(静默丢弃数据), 分开关只会让下一个读的人
+//     以为剩下那些是故意的。实测: 仓库里现存的夹具头 (3/5/8 对) 两侧项数全部相等, 无回归。
 static int mgParseRepeat(const char* line, PayloadCalibration::RepeatPair* out, int maxOut) {
     int firsts[16], seconds[16], nf = 0, ns = 0;
     const char* p = strstr(line, "first=");
@@ -1977,6 +2041,8 @@ static int mgParseRepeat(const char* line, PayloadCalibration::RepeatPair* out, 
         p = e;
         if (*p == ',') p++;
     }
+    // 循环因上限而停 = 后面还有项 ⇒ (a)
+    if (nf == 16 && *p == ',') return -1;
     p = strstr(line, "seconds=");
     if (!p) return 0;
     p += 8;
@@ -1988,53 +2054,19 @@ static int mgParseRepeat(const char* line, PayloadCalibration::RepeatPair* out, 
         p = e;
         if (*p == ',') p++;
     }
-    int cnt = (nf < ns) ? nf : ns;
-    if (cnt > maxOut) cnt = maxOut;
-    for (int i = 0; i < cnt; i++) { out[i].first = firsts[i] - 1; out[i].second = seconds[i] - 1; }
-    return cnt;
+    if (ns == 16 && *p == ',') return -1;
+    if (nf != ns) return -1;        // (c)
+    if (nf > maxOut) return -1;     // (b)
+    for (int i = 0; i < nf; i++) { out[i].first = firsts[i] - 1; out[i].second = seconds[i] - 1; }
+    return nf;
 }
 
-// ===== 列布局: 认识的清单 + "看真列数"的扫描上限 (2026-09-21) =====
-//
-// 【为什么必须有这两个数】: mgSplitRow 的第三参是【上限】—— 一行比它宽时返回的仍是那个上限,
-//   第 maxOut 列之后的内容被静默丢弃。所以"返回值 == 某个数"这个判据挡得住【列变少】,
-//   挡不住【列变多】: 一行 31 列会被截成 25 列、判据满足、行被收下, 而多出来的那 6 列
-//   (正是参考量 @720 那一路) 一个数都没进内存。于是"读了夹具"与"读了夹具的前 25 列"
-//   在结论上【不可区分】。
-//
-// 两处调用点因此都改成【先看真列数, 再判】:
-//   · 解析那一趟传 MG_COLSCAN —— 它【高到能看见真实列数】, 不是"打算写入多少列";
-//   · 真列数 > MG_MAXCOLS (= 本读取器支持的最宽布局) ⇒ 【响亮拒绝】, 绝不截断后收下。
-static const int MG_COLSCAN = 64;   // 扫描上限: 任何已知布局都远窄于它 (最宽 = 31)
-static const int MG_MAXCOLS = 31;   // 支持的最宽布局 = 25 列 + 末尾 6 列参考量 (F720*/M720*)
-
-// 【响亮拒绝】的唯一一份打印。报出文件名、看错的列数与支持范围 —— 三个数齐了才谈得上
-// "布局变了"这四个字是可查的, 而不是要靠猜。
-// ⚠ 措辞【不用 "FAIL" 开头】: 它是读取器的一条【正常】拒收记录 (用例可以在等它出现),
-//   冠上 FAIL 会让"故意喂了一行坏数据"的用例看起来像坏了。
-static void mgRejectColumns(const char* file, int seen, const char* wanted) {
-    printf("    ★★ 读取器【拒收这一行】: 夹具 %s 有 %d 列, 不在支持的范围内 (支持 %s;"
-           " 最宽 %d 列)。⇒ 不截断到 %d 列再收下: 那样读到的数不是这一行的数。\n",
-           file, seen, wanted, MG_MAXCOLS, MG_MAXCOLS);
+// 【响亮拒绝】的唯一一份打印 —— 与 mgRejectColumns 同一形状 (那边是列, 这边是复采对)。
+static void mgRejectRepeat(const char* file, const char* why) {
+    printf("    ★★ 读取器【拒收这一行】: 夹具 %s 的 `# repeat:` %s ⇒ 不截断后收下:"
+           " 那样算出的自由度不是这份数据的自由度。\n", file, why);
 }
 
-// 逗号分隔的一行 -> 逐列。返回值是【读到的列数, 但被 maxOut 截断】——
-// ⚠ 它【不是】"这一行有多少列": 第三参是**上限**, 行里第 maxOut 列之后的内容会被**静默丢弃**,
-//   返回的仍是 maxOut。所以上面那两处调用点都传 MG_COLSCAN (高到看得见真列数), 并且
-//   【按真列数判】—— 谁要拿一个"够用就好"的小上限来调它, 就先把上面那段说明读完。
-// 它能做的是: 少于 maxOut 列时如实返回更小的数 —— 所以"列数变少"看得见, "列数变多"看不见。
-static int mgSplitRow(const char* q, double* out, int maxOut) {
-    int k = 0;
-    while (*q && k < maxOut) {
-        char* e = nullptr;
-        const double v = strtod(q, &e);
-        if (e == q) break;
-        out[k++] = v;
-        q = e;
-        if (*q == ',') q++; else break;
-    }
-    return k;
-}
 
 // 夹具 -> MomentCaptureData。25 列 = 18 均值 + N1304 + 6 个 sd (见夹具的 # 头)。
 static bool mgLoad(const char* fixture, MomentCaptureData& d, const char*& pathUsed) {
@@ -2045,7 +2077,13 @@ static bool mgLoad(const char* fixture, MomentCaptureData& d, const char*& pathU
     char line[1024];
     while (fgets(line, sizeof(line), fp)) {
         if (strstr(line, "# repeat:") != nullptr) {
-            d.repCount = mgParseRepeat(line, d.reps, MG_MAXREP);
+            const int rep = mgParseRepeat(line, d.reps, MG_MAXREP);
+            if (rep < 0) {
+                mgRejectRepeat(pathUsed, "比本读取器能装下/能使用的更长 (或两侧项数不等)");
+                fclose(fp);
+                return false;
+            }
+            d.repCount = rep;
             continue;
         }
         const char* q = line;
@@ -3083,15 +3121,25 @@ static T6FreshStatus t6TakeFreshCapture(const char* name, T6Capture& cap, T6Last
                      " 读不出任何一块采集 (拿错文件了 / 格式不对)。" << std::endl;
         return T6FreshStatus::Broken;
     }
-    if (blk.nc != MG_MAXCOLS) {
+    if (blk.nc > MG_MAXCOLS) {
+        // ★ 2026-09-24: 从前"太宽"与"太窄"共用同一句"没有参考量那一路"—— 对一份【多带了几列】
+        //   的采集, 那句话会把操作者引到反方向 (去补 @720, 而它就在那儿)。两种情况分开报。
+        std::cout << "    ★★ 新采集 " << blk.path << " 的最后一块 attempt " << blk.stamp
+                  << " 的数据行是 " << blk.nc << " 列, 比本读取器支持的最宽布局 ("
+                  << MG_MAXCOLS << " 列) 还宽 ⇒ 【不是\"少了参考量那六列\", 而是多了不认识的列】。"
+                  << std::endl;
+        std::cout << "       ⇒ 判据那一侧会按【这一行不是 31 列】拒掉它。先去核: 记录程序是不是"
+                     "又往末尾追加了新列 (那要同步改本读取器), 而不是去补 @720。" << std::endl;
+        return T6FreshStatus::Broken;
+    }
+    if (blk.nc < MG_MAXCOLS) {
         // ⚠ 这一支【不是为了改变结论】(没有它, 下面 t6LoadAttempt 也会拒掉这一块), 而是为了
         //   把【最可能的那一种错】说准: 少了参考量那六列时, t6LoadAttempt 只能报"读不出来"
         //   并猜"截断 / 姿态太多"—— 那两句会把操作者引到错的方向 (实测过: 25 列的那一份走
-        //   那一条路时打印的是"头部自报 poses=4 读不出来")。这里先按【列数】判, 点名那一列
-        //   缺了什么。
+        //   那一条路时打印的是"头部自报 poses=4 读不出来")。这里先按【列数】判, 点名缺了什么。
         std::cout << "    ★★ 新采集 " << blk.path << " 的最后一块 attempt " << blk.stamp
                   << " 的数据行是 " << blk.nc << " 列, 不是 " << MG_MAXCOLS << " 列 ⇒ 这一块"
-                     "【没有参考量那一路 (@720 的 F720*/M720* 六列)】。" << std::endl;
+                     "【少了参考量那一路 (@720 的 F720*/M720* 六列)】。" << std::endl;
         std::cout << "       ⇒ 判据那一侧没有实测值可喂, 这份数据回答不了本用例的问题, 而采集的"
                      "目的正是它。回实机上让记录程序写满末尾那六列 (上机清单 §1 的陷阱 1)。"
                   << std::endl;
@@ -3345,6 +3393,66 @@ static void test_reader_rejects_fixture_wider_than_supported() {
     CHECK(fabs(trunc[24] - 34.0) < 1e-9);   // 第 25 列 = 这一行的第 25 个数 (不是最后一个)
     // 而参考量那 6 列在这条路上【根本没有被解析过】—— 这就是"夹具重采了, 参考量却还在被
     // 现算"的那个洞 (见 t6AnnounceRefSource 的合成值标记)。
+    PASS();
+}
+
+// ===== 金标夹具的读取器也必须按【真列数】判 (2026-09-24) =====
+//
+// 【为什么】: `replay_real_capture` 从前用 `sscanf(18 个 %lf) != 18` 当判据 —— 它只看得见
+//   "列变少", 看不见"列变多"(数够 18 个就返回 18)。金标只对 18 列的布局成立, 而
+//   「重采夹具」正是接下来要做的事 ⇒ 一份更宽的夹具会被静默收下, 然后拿去对一份【不属于它】的金标。
+// 【本用例走【真的守卫】goldRowColumns()】, 不是把判据在本文件里抄一遍 —— 抄一遍的话
+//   测试绿着而真路径坏着也能过 (本项目记过账的那类)。所以它的红/绿与那条判决是同一件事。
+// 【非空证明(实测)】: 把 goldRowColumns 退回 `sscanf(...) != 18` 那版, 21 列的行会被收下
+//   ⇒ 下面第一条断言当场变红。
+static void test_gold_fixture_reader_rejects_wider_rows() {
+    TEST(gold_fixture_reader_rejects_wider_rows);
+
+    char row21[2048];   // 18 列布局 + 3 个多余列 (模拟"重采时多带了几列")
+    mgSynthRow(row21, sizeof(row21), 21);
+
+    double c[MG_COLSCAN];
+    // ★ 走真守卫: 旧行为(sscanf 版)对它返回 true
+    CHECK(!goldRowColumns(row21, c, "(synth 21 列)"));
+
+    // 反面: 正好 18 列必须【照收】—— 否则重采的真夹具会被挡在门外
+    char row18[2048];
+    mgSynthRow(row18, sizeof(row18), 18);
+    CHECK(goldRowColumns(row18, c, "(synth 18 列)"));
+    CHECK(fabs(c[0] - 10.0) < 1e-9);    // 列值 = 10.0 + 下标 (见 mgSynthRow)
+    CHECK(fabs(c[17] - 27.0) < 1e-9);
+
+    PASS();
+}
+
+// ===== `# repeat:` 行也不许静默截断 =====
+// 【非空证明】: 把 mgParseRepeat 的返回值判断退回 `cnt = maxOut` 那版, 第二条断言当场变红
+//   (9 对会被砍成 8 对并返回 8, 而它必须返回 -1)。
+static void test_repeat_header_is_not_silently_truncated() {
+    TEST(repeat_header_is_not_silently_truncated);
+
+    PayloadCalibration::RepeatPair reps[MG_MAXREP];
+
+    // 8 对 = 缓冲正好装得下 ⇒ 照收 (这是现存夹具的最大规模)
+    const char* ok8 = "# repeat: first=1,2,3,4,6,7,8,9 seconds=2,3,4,5,7,8,9,10\n";
+    CHECK(mgParseRepeat(ok8, reps, MG_MAXREP) == 8);
+
+    // 9 对 > 缓冲 ⇒ 拒 (旧行为: 返回 8, 第 9 对无声消失)
+    const char* tooMany = "# repeat: first=1,2,3,4,6,7,8,9,10 seconds=2,3,4,5,7,8,9,10,11\n";
+    CHECK(mgParseRepeat(tooMany, reps, MG_MAXREP) == -1);
+
+    // 两侧项数不等 ⇒ 拒 (旧行为: 取较小者, 多出来的丢掉)
+    const char* mismatch = "# repeat: first=1,3,5 seconds=2,4,6,8\n";
+    CHECK(mgParseRepeat(mismatch, reps, MG_MAXREP) == -1);
+
+    // 单侧超过 16 项 (解析缓冲本身的上限) ⇒ 拒 (旧行为: 静默停在 16)
+    const char* over16 = "# repeat: first=1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17"
+                         " seconds=1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17\n";
+    CHECK(mgParseRepeat(over16, reps, MG_MAXREP) == -1);
+
+    // 没有 `# repeat:` 语义的头部照旧返回 0 (不是拒)
+    CHECK(mgParseRepeat("# columns extended\n", reps, MG_MAXREP) == 0);
+
     PASS();
 }
 
@@ -5310,6 +5418,25 @@ static void test_send_candidate_diff_conclusion_never_says_only_m_when_unsendabl
     PASS();
 }
 
+#ifdef PC_PARKED_REPLAY_ONLY
+// ===== parked 变体 (见同目录 test_payload_calibration_parked.cpp) =====
+//
+// 【为什么有这个变体】: 本文件里有一条【按设计红着】的用例 —— test_runtime_consistency_guard_replay
+//   回放四份 2026-09-19 的采集, 那四份【没有参考量 (@720) 那一列】⇒ 闸门只能判
+//   REFERENCE_UNAVAILABLE ⇒ 那条断言永远红。它红着就接不进测试床 (测试床的退出码 = FAILED 数),
+//   而删掉它 = 让一条未验证的断言静默消失 (本项目一贯拒绝)。
+//   ⇒ 拆成两个 exe: 默认变体跑其余全部 (接进测试床), 本变体只跑那一条。
+// 【为什么它不是死代码】: `#ifdef` 只切 main(), 不切函数定义 ⇒ 默认 exe 每次运行都仍然
+//   【编译】那条用例的全部代码。生产 API 改了, 默认 exe 当场编译失败 (只是不调用它)。
+int main() {
+    std::cout << "=== PayloadCalibration Tests (PARKED replay only) ===" << std::endl;
+    std::cout << "  ⚠ 本变体【只】跑那条按设计红着的闸门回放; 它【不在】测试床上运行"
+                 " (见 run_tests.bat 的 [NOT RUN] 段)。" << std::endl;
+    test_runtime_consistency_guard_replay();
+    std::cout << "\n" << g_passed << " passed, " << g_failed << " failed" << std::endl;
+    return g_failed ? 1 : 0;
+}
+#else
 int main() {
     std::cout << "=== PayloadCalibration Tests ===" << std::endl;
     test_recovers_true_payload();
@@ -5383,6 +5510,8 @@ int main() {
     //   放在重放类用例【之前】—— 它要是红了, 下面那些"读到了夹具"的结论就都不作数。
     std::cout << "--- fixture reader: layout acceptance ---" << std::endl;
     test_reader_rejects_fixture_wider_than_supported();
+    test_gold_fixture_reader_rejects_wider_rows();
+    test_repeat_header_is_not_silently_truncated();
 
     // ★★ 2026-09-21 预接线 (上机清单 §1): 【可选新采集】的取用规则 —— 它用临时夹具自测,
     //   验的是"文件放对名字就会被读到"这件事本身 (采回来却发现没被读, 是今晚最贵的失败模式)。
@@ -5405,20 +5534,33 @@ int main() {
     //            (并附【部分循环论证】的折扣说明: eps_乙 就是由那三块推出来的);
     //       (1b) 【可选】新采的那一份 (上机清单 §1 的 calib_poses_2026-09-21.txt, 文件不在就
     //            明说一声、不算失败) —— 它是【独立数据】, 【没有】(1a) 那个折扣, 两条不许混读。
-    //   (2) 再跑四份 09-19 老夹具那一条 —— 它【按设计红着】并在第一个姿态就 return
+    //   (2) 四份 09-19 老夹具那一条 —— 它【按设计红着】并在第一个姿态就 return
     //       (那四份没有参考量那一列, 闸门只能判"参考量不可用")。
-    //   ⚠ 顺序【必须】(1) 在前: 反过来的话 (2) 的 return 会让 (1) 变成死代码 —— 一条
-    //     刻意红着的断言不该顺带把新做的检验一起掐掉 (2026-09-21 复审点出过这一点)。
-    //   ⚠ 同理 (1b) 也在 (2) 【之前】: 那条刻意红着的断言必须【仍然是最后一条】被判的
-    //     闸门回放 —— 它"唯一那条失败"的位置不变。
+    //   ★ 2026-09-24: (2) 【已移出本变体】—— 见下面那段 [PARKED] 披露与 PC_PARKED_REPLAY_ONLY。
+    //     它红着就接不进测试床 (测试床退出码 = FAILED 数), 而删掉它 = 让一条未验证的断言
+    //     静默消失, 所以它被拆到 test_payload_calibration_parked 里单独具名。
+    //     ⇒ 从前那两条"顺序必须"的约束 (理由都是"(2) 的 return 会把 (1) 掐成死代码")
+    //       随 (2) 一起消失: 本变体里 (2) 已不存在, 掐不到了。(1a)/(1b) 【仍然】排在这里,
+    //       相对位置不变 —— 它们本来就排在 (2) 之前。
     std::cout << "--- runtime consistency guard (replay, real @720 reference) ---" << std::endl;
     test_runtime_consistency_guard_replay_ref_snapshot();
     std::cout << "--- runtime consistency guard (replay, fresh capture if present) ---"
               << std::endl;
     test_runtime_consistency_guard_replay_fresh_capture();
-    std::cout << "--- runtime consistency guard (replay on the four 09-19 captures) ---"
-              << std::endl;
-    test_runtime_consistency_guard_replay();
+
+    // ★★ 2026-09-24 【一条被刻意隔离, 每次运行都点名】
+    //   ⚠ 不许只写在源码注释里: 计数是【基数】检查不是【身份】检查, 它抓不到
+    //     "这个 exe 跑了、但里面有 1 条从不执行" —— 所以必须每次打在运行输出里。
+    std::cout << std::endl;
+    std::cout << "  [PARKED] 1 case in this suite is deliberately NOT run here:" << std::endl;
+    std::cout << "    test_runtime_consistency_guard_replay" << std::endl;
+    std::cout << "      It replays the four 2026-09-19 captures, which carry no reference-column" << std::endl;
+    std::cout << "      (@720) data, so the gate can only answer REFERENCE_UNAVAILABLE and its" << std::endl;
+    std::cout << "      assertion is red BY DESIGN. A re-capture that carries the reference" << std::endl;
+    std::cout << "      columns is what un-parks it; it cannot be fixed by editing that case." << std::endl;
+    std::cout << "      It is named in run_tests.bat's NOTRUN_LIST as" << std::endl;
+    std::cout << "      test_payload_calibration_parked, which builds and runs it on demand." << std::endl;
+    std::cout << std::endl;
 
     // ⚠ TODO (Task 8a-3) —— 覆盖缺口, 只记录, 本次不动 runner:
     //   tests\run_tests.bat 【不跑本文件】。它跑的是另外 12 个用例程序 (7 个预构建 exe +
@@ -5459,3 +5601,4 @@ int main() {
     std::cout << "\n" << g_passed << " passed, " << g_failed << " failed" << std::endl;
     return g_failed ? 1 : 0;
 }
+#endif   // PC_PARKED_REPLAY_ONLY
