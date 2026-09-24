@@ -2627,6 +2627,50 @@ static void runConstraintDisableNotice() {
               << std::endl;
 }
 
+// ===== 在线零偏的时间轨迹 (2026-09-24, **只读**诊断) =====
+// 要回答的问题: 【写字时, 第 8 步的在线零偏 EMA 会不会把操作员的载荷学进 bF?】
+//   机制怀疑: `ForceCompensation.cpp` 第 8 步的守卫【只有 isStill()】(该文件里 `button`
+//   出现 0 次) ⇒ 笔画之间"手停住、笔还压着纸"的静止瞬间会把载荷吸收进 bF
+//   ⇒ 抬手后残余反向出现 ⇒ 现场报的"阻滞感"。
+//   该文件自己早就记过这一类 ("在线零偏会以 τ 把【持续施加】的外力吸收掉",
+//   见 main.cpp 的 BiasCheck 那一段), 而 τ 从 3.3 s 提到 600 s 的依据是"0.02 N/小时"
+//   —— 那是【热漂】的量级, 不是"一次载荷持续几分钟"的量级。
+// 【判据, 先写死, 免得事后圆说】(bF 是【持久值】, 与闸门状态无关, 所以拒绝时也读得到):
+//   · 【按钮=1 的时段里 bF 明显移动(任一轴 ≥0.1 N)】 ⇒ 坐实: 载荷被学成零偏。
+//   · bF 全程几乎不动(<0.03 N) 而 comp 在写完之后变大 ⇒ 不是估计器
+//     ⇒ 走【模型 / 热漂 / 姿态相关】那一条 (即计划 Task 2 要分开的两支)。
+// ⚠ 只读: 不碰任何力、不碰标定、不落盘。放在主线程, 与 runZeroDriftCheck 同一个调用点。
+static DWORD g_biasTraceLastMs = 0;
+static void runBiasTrace() {
+    const DWORD now = GetTickCount();
+    if (g_biasTraceLastMs != 0 && (now - g_biasTraceLastMs) < 60000) return;
+    g_biasTraceLastMs = now;
+
+    AppState::ForceData fd;
+    EnterCriticalSection(&appState.forceDataMutex);
+    fd = appState.forceData;
+    LeaveCriticalSection(&appState.forceDataMutex);
+
+    double bF[3] = {0, 0, 0}, bM[3] = {0, 0, 0};
+    ForceCompensation::currentBias(bF, bM);
+
+    double px, py, pz;
+    EnterCriticalSection(&appState.robotPoseMutex);
+    px = appState.robotActualPose.rx;
+    py = appState.robotActualPose.ry;
+    pz = appState.robotActualPose.rz;
+    LeaveCriticalSection(&appState.robotPoseMutex);
+
+    std::cout << "[BiasTrace] bF=(" << bF[0] << "," << bF[1] << "," << bF[2] << ")"
+              << "  comp=(" << fd.compensated[0] << "," << fd.compensated[1] << "," << fd.compensated[2] << ")"
+              << "  filtered=(" << fd.filtered[0] << "," << fd.filtered[1] << "," << fd.filtered[2] << ")"
+              << "  [闸门 " << ForceCompensation::guardStateName(ForceCompensation::guardState()) << "]"
+              << "  按钮=" << (appState.lastButtonState ? 1 : 0)
+              << "  stale=" << (fd.isStale ? 1 : 0)
+              << "  姿态=(" << px << "," << py << "," << pz << ")"
+              << "  t=" << (now / 1000) << "s" << std::endl;
+}
+
 static void runZeroDriftCheck(bool hasStoredZero) {
     if (g_zeroCheckDone) return;
 
@@ -2954,6 +2998,9 @@ void idle() {
             // ★ 触觉安全提示已关闭的横幅 (主线程; 理由与分工见该函数说明)。
             //   MATLAB 端那一条由 RelayCore::reportPosition 以 30Hz 重发, 不在这里。
             runConstraintDisableNotice();
+
+            // ★ 在线零偏的时间轨迹 (2026-09-24, 只读): 判"操作员的载荷有没有被学成零偏"。
+            runBiasTrace();
 
             // 启动运动检测器诊断 (一次性 30 行, 一个力帧一行 — 见定义处注释)
             runMotionProbe();
