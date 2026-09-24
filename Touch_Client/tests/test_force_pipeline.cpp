@@ -82,22 +82,25 @@ static void test_gain_actually_changes_output() {
     fd.lastUpdateMs = GetTickCount();
 
     // gain = 300: 输出 = 1.0 × (3.3/200) × 300 = 4.95, 横向符号 +1 ⇒ +4.95
-    // ⚠ 符号 2026-09-23 由 −1 翻成 +1：现场实测「往右推 touch 会有往右的力」（= 顺着推，不是阻力），
-    //   命中了旧常数注释里【它自己写下的那条可证伪检验】；该常数 09-23 已拆成逐路两个
-    //   （FORCE_FEEDBACK_TOUCH_X_SIGN / _TOUCH_Z_SIGN），依据与两个报告的处置都记在那边。
+    // ⚠ 符号 2026-09-24 晚【现场定案】：横向 X=+1 · Z=−1（两路仍必然相反）。
+    //   决定性证词是**操作员的手，两次一致**：σ_x=−1 下两次报"被推向【顺着推】的方向"
+    //   （09-23 与 09-24）⇒ X 取 +1；Z 由"两路必反"取 −1，且 09-24 现场【往前推】实测方向正确。
+    //   ⚠ 那个曾把 X 判成 −1 的"成对窗口"探针，错在把一个【未验证的约定】当测量：
+    //     它把"手感 `A.x` 增大"读成"手被推向右"，而 `A.x` 是**器件系**的轴、指向哪边是约定。
+    //     完整四次拐弯的历史见 Config::FORCE_FEEDBACK_TOUCH_X_SIGN 那一大段。
     // ⚠ 300 是 ForceTuning::GAIN_MAX 的当前值 —— 范围若收窄, setGain 会【返回 false 且什么都不改】,
     //   而下面那条断言只会在值对不上时红 ⇒ 病因看起来是"映射错了"。所以前置条件必须在这里
     //   被【命名】: 这条 CHECK 红了就是"量程对不上", 不是"增益没生效"。
     CHECK(ForceTuning::setGain(300.0));
     ForcePipeline::init();                // 让斜坡直接就位 (不然要等 0.25s)
     for (int i = 0; i < 300; i++) ForcePipeline::step(fd);   // 让滤波器收敛
-    CHECK(fabs(fd.hapticOut[0] - (-4.95)) < 0.05);
+    CHECK(fabs(fd.hapticOut[0] - (+4.95)) < 0.05);
 
     // gain = 120: 同一个输入 ⇒ +1.98
     CHECK(ForceTuning::setGain(120.0));
     ForcePipeline::init();
     for (int i = 0; i < 300; i++) ForcePipeline::step(fd);
-    CHECK(fabs(fd.hapticOut[0] - (-1.98)) < 0.03);
+    CHECK(fabs(fd.hapticOut[0] - (+1.98)) < 0.03);
 
     PASS();
 }
@@ -166,12 +169,12 @@ static void test_gain_ramp_is_gradual() {
     ForcePipeline::init();                       // 斜坡就位在 100
     for (int i = 0; i < 300; i++) ForcePipeline::step(fd);   // 先让滤波器收敛
     const double at100 = fd.hapticOut[0];
-    CHECK(fabs(at100 - (-1.65)) < 0.03);         // 1.0 × 0.0165 × 100 = 1.65, σ_x=−1 ⇒ 负
+    CHECK(fabs(at100 - (+1.65)) < 0.03);         // 1.0 × 0.0165 × 100 = 1.65, σ_x=+1 ⇒ 正
 
     // 跳到 300, 数多少帧才到位
     CHECK(ForceTuning::setGain(300.0));
     int frames = 0;
-    while (fabs(fd.hapticOut[0] - (-4.95)) > 0.05 && frames < 200) {
+    while (fabs(fd.hapticOut[0] - (+4.95)) > 0.05 && frames < 200) {
         ForcePipeline::step(fd);
         frames++;
     }
@@ -256,8 +259,8 @@ static void test_saturation() {
     CHECK(fabs(fabs(fd.hapticOut[0]) - clampedMax) < 0.01);   // 正好在夹子上
     // ⚠ 符号故意写死 (拿 Config 常数去算断言会对那些常数【恒真】),
     //   完整论述见 test_coord_transform 的同段说明。
-    CHECK(fd.hapticOut[0] < 0.0);   // 正输入 ⇒ 负输出 (器件 X ← −基座 Fx, FORCE_FEEDBACK_TOUCH_X_SIGN = −1;
-                                    //   2026-09-23 现场实测推翻旧符号，依据见该常数处注释)
+    CHECK(fd.hapticOut[0] > 0.0);   // 正输入 ⇒ 正输出 (器件 X ← +基座 Fx, FORCE_FEEDBACK_TOUCH_X_SIGN = +1;
+                                    //   2026-09-24 现场实测定案，依据见该常数处注释)
     PASS();
 }
 
@@ -289,10 +292,9 @@ static void test_coord_transform() {
     //     （X 与 Z **同号** —— 与 +Mᵀ 和 −Mᵀ **都不符**）⇒ **漂移的日期就是 07-26**。
     //     两份计划互相矛盾 ⇒ **依据是 `Mᵀ`，不是"历史如此"**：历史只说明漂移何时发生。）
     //
-    // 【整体符号 +1 的依据】2026-09-23 现场实测"往右推 touch 会有往右的力"（顺着推、非阻力），
-    //   命中旧常数注释里自己写下的【可证伪检验】⇒ 判否 ⇒ 整体取 +1。
-    //   ⚠ **精确边界**：X 的符号有现场锚点；**Z 的符号由 Mᵀ 推出、【从未被任何现场报告约束过】** ——
-    //     本次是断言 ⇒ 上机要按执行单那节"看力出现在哪根轴上"去验【尚未做】。
+    // 【整体符号 +1 的依据】★ 2026-09-24 晚实测：**两个横向轴都已由操作员的手确认** ——
+    //   往右推 ⇒ 阻挡（验 X=+1）· 往前推 ⇒ 阻挡（验 Z=−1）。这是本仓**第一次**两路都有现场锚点。
+    //   之前的账（现在已结）：X 的符号有现场锚点；**Z 由 Mᵀ 推出、从未被任何现场报告约束过**。
     //   ⚠ 相对最后两版基线，本修**各只动一路**（对 σ=−1 版只动 X；对 σ=+1 版只动 Z）⇒ 保守、可否证。
     //   ⚠ 垂直那路的旧锚点（−1）与 Mᵀ（+1）**矛盾** ⇒ 重开前必须逐轴实测（今天 Z_SIGN=0，关着）。
     //   ⇒ 完整依据见 Config::FORCE_FEEDBACK_TOUCH_X_SIGN 那一大段 —— **动符号之前先读它**。
@@ -314,11 +316,12 @@ static void test_coord_transform() {
     //     真正用的那个数。上面 ratio 那两个常数【保留】是对的 —— 流水线确实读它们。
     double ratio = Config::FORCE_MAX_TOUCH_N / Config::FORCE_MAX_SENSOR_N;
     double gain = ForceTuning::gain();
-    CHECK(fabs(fd.hapticOut[0] - (-ratio * 10.0 * gain)) < 0.01);     // 来自 +Fx = +10 ⇒ 【负】
-                                                                      //   (2026-09-23 深夜改回 −Mᵀ: σ_x=−1)
-                                                                      //   (2026-09-23 符号 −1→+1，同 f196cb0)
+    // ⚠ 下面两条的符号【写死】是故意的（拿 Config 常数算会对那些常数恒真）——
+    //   它们就是"横向两路符号"的**独立证人**。当前取值 X=+1 · Z=−1 是 2026-09-24 晚
+    //   由操作员的手实测定的（往右推 ⇒ 阻挡；往前推 ⇒ 阻挡），四次拐弯的历史见 Config.h。
+    CHECK(fabs(fd.hapticOut[0] - (+ratio * 10.0 * gain)) < 0.01);     // 来自 +Fx = +10 ⇒ 【正】(σ_x=+1)
     CHECK(fabs(fd.hapticOut[1]) < 0.01);                              // Fz→Y 已关 ⇒ 与 fz=+30 无关
-    CHECK(fabs(fd.hapticOut[2] - (+ratio * 20.0 * gain)) < 0.01);     // 来自 +Fy = +20 ⇒ 【正】
+    CHECK(fabs(fd.hapticOut[2] - (-ratio * 20.0 * gain)) < 0.01);     // 来自 +Fy = +20 ⇒ 【负】(σ_z=−1)
                                                                       //   (σ_z=+1)
                                                                       //   ★ 2026-09-23: 器件 Z ← −基座 Fy（Mᵀ 决定，与 X 相反；
                                                                       //     两路【相对】符号必然相反 ⇒ 由"一个共用常数"拆成逐路两个）
@@ -467,7 +470,7 @@ static void test_jitter_accumulators_are_fed_and_distinct() {
     CHECK(s.fracResidual[0] == 0.0);          // 0.05 量级的残差不越 0.20 的门 —— 而且【不是 −1】
     // 它就是那个输入本身 (窗口里没有建立过程了 ⇒ 容差可以收紧到 5%)。
     CHECK(fabs(s.meanResidual[0] - dz * 0.25) < dz * 0.25 * 0.05);
-    CHECK(s.meanOut[0] < 0.0);                // 输出还活着 (没被清零); σ_x=−1 ⇒ 残差为正时输出为负
+    CHECK(s.meanOut[0] > 0.0);                // 输出还活着 (没被清零); σ_x=+1 ⇒ 残差为正时输出为正
     // ⚠ 必须用 fabs 比【幅值】: 原来是有符号比较 ⇒ σ 翻成 −1 之后它【恒真】
     //   (本想钉"输出比残差小得多", 却变成什么都不测) —— 2026-09-23 当场抓到并修。
     CHECK(fabs(s.meanOut[0]) < fabs(s.meanResidual[0]) * 0.5);

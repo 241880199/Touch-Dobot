@@ -312,14 +312,23 @@ static DWORD WINAPI forceReaderThread(LPVOID) {
             app.forceData.lastUpdateMs = GetTickCount();
             app.forceData.isStale = false;
 
-            // ★ 姿态：优先【同一帧】的 @624；全 0（启动早期没填过）则退回上面那份仪表盘姿态。
-            //   ⚠ 判据是"恰好全 0"而不是"接近 0"：机械臂真的停在法兰 (0,0,0)/姿态全 0 是不可能同时
-            //     成立的位姿，而"从没被写过"恰好就是这个指纹 —— 与 isTrustworthyJointRef 同一套。
+            // ★★ 姿态与位置【分别取源】—— 这是 2026-09-24 一次现场实测换来的教训。
+            //   · 姿态 (pose[3..5]) 优先取【同一帧】的 @624：它唯一的消费者是重力项
+            //     `A·g`（+ 惯量项的坐标系变换），而那一项正是要修的东西。
+            //   · 位置 (pose[0..2]) **刻意留在仪表盘那条**：它喂 `feedMotionEstimator`
+            //     → 惯量项 `Fi = mass·a`。**那是另一件事** —— 一起换会把 `Fi` 从"阶梯下二阶
+            //     差分恒 0、几乎为 0"变成一个每帧都在跳的真实量。当天的实测：**连位置一起换
+            //     ⇒ 抖动变大**（现场报的），所以那次耦合已经拆掉。
+            //   ⚠ 判据是"恰好全 0"而不是"接近 0"：机械臂真的停在法兰 (0,0,0) 且姿态全 0 是
+            //     不可能同时成立的位姿，而"从没被写过"恰好就是这个指纹 —— 同 isTrustworthyJointRef。
             const double* p624 = app.forceData.tcpPoseActual;
-            const bool have624 = !(p624[0] == 0.0 && p624[1] == 0.0 && p624[2] == 0.0 &&
-                                   p624[3] == 0.0 && p624[4] == 0.0 && p624[5] == 0.0);
+            const bool have624 = !(p624[3] == 0.0 && p624[4] == 0.0 && p624[5] == 0.0);
             double pose[6];
-            for (int i = 0; i < 6; i++) pose[i] = have624 ? p624[i] : dashPose[i];
+            pose[0] = dashPose[0];  pose[1] = dashPose[1];  pose[2] = dashPose[2];
+            const bool use624Orient = Config::FORCE_POSE_ORIENT_FROM_624 && have624;
+            pose[3] = use624Orient ? p624[3] : dashPose[3];
+            pose[4] = use624Orient ? p624[4] : dashPose[4];
+            pose[5] = use624Orient ? p624[5] : dashPose[5];
 
             // 一次性出声：把"这一刻用的是哪个源"变成可观测的。两种源的差别正是本节要消灭的东西
             // —— 而"读代码才知道用的哪一个"正是本项目最忌的那种状态。
@@ -328,8 +337,12 @@ static DWORD WINAPI forceReaderThread(LPVOID) {
             if (!s_poseSrcReported) {
                 s_poseSrcReported = true;
                 std::cout << "[Force] 重力项姿态源 = "
-                          << (have624 ? "同帧 ToolVectorActual @624 (123 Hz)"
-                                      : "⚠ GetPose 仪表盘 (~10 Hz 阶梯) —— @624 还没被填")
+                          << (use624Orient
+                                  ? "同帧 ToolVectorActual @624 (123 Hz)"
+                                  : (Config::FORCE_POSE_ORIENT_FROM_624
+                                         ? "⚠ GetPose 仪表盘 (~10 Hz 阶梯) —— @624 还没被填"
+                                         : "GetPose 仪表盘（FORCE_POSE_ORIENT_FROM_624 = false，一行回滚态）"))
+                          << "；位置源 = GetPose 仪表盘（刻意不换，见 RelayCore.cpp 那段）"
                           << std::endl;
             }
 
