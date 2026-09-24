@@ -2020,13 +2020,15 @@ static bool mgOpenFixture(const char* name, FILE** out) {
 // "# repeat: first=1,3,5 seconds=2,4,6  (共 3 对...)" -> 0 基下标对。返回解析出的对数。
 // "# repeat: none" -> 0。列号是 1 基的行号, 与 main.cpp 落盘时逐字一致。
 //
-// ★ 2026-09-24 【返回值 -1 = 响亮拒绝】: 从前这一支有【三处静默丢弃】——
+// ★ 2026-09-24 【返回值 -1 = 响亮拒绝】: 从前这一支有【四处静默丢弃】——
 //   (a) 单侧列表超过 16 项时循环到上限就停, 多出来的项【无声消失】;
 //   (b) 解析出的对数超过调用方的缓冲 (MG_MAXREP) 时, `cnt = maxOut` 把多出来的对【无声砍掉】;
-//   (c) 两侧项数不等时 `cnt = min(nf, ns)` 把多出来的【无声丢掉】。
-//   三者都是"夹具说的话比我们装下的更多" ⇒ 收下就是拿【不完整】的复采对去算自由度,
-//   而结果看起来完全正常。改成一律拒: 调用方 (mgLoad) 大声失败。
-//   ⚠ 三处一起关的理由: 它们是【同一类缺陷】(静默丢弃数据), 分开关只会让下一个读的人
+//   (c) 两侧项数不等时 `cnt = min(nf, ns)` 把多出来的【无声丢掉】;
+//   (d) 只有 `first=` 而没有 `seconds=` 时直接 `return 0` ⇒ "声明了 N 对"变成"0 对"
+//       (2026-09-24 复审补上的第四处; 前三处收口时这一支被漏掉了)。
+//   四者都是"夹具说的话比我们收下的更多" (或: 说过的对一对都没被收下) ⇒ 收下就是拿
+//   【不完整/空】的复采对去算自由度, 而结果看起来完全正常。改成一律拒: 调用方 (mgLoad) 大声失败。
+//   ⚠ 四处一起关的理由: 它们是【同一类缺陷】(静默丢弃数据), 分开关只会让下一个读的人
 //     以为剩下那些是故意的。实测: 仓库里现存的夹具头 (3/5/8 对) 两侧项数全部相等, 无回归。
 static int mgParseRepeat(const char* line, PayloadCalibration::RepeatPair* out, int maxOut) {
     int firsts[16], seconds[16], nf = 0, ns = 0;
@@ -2048,7 +2050,10 @@ static int mgParseRepeat(const char* line, PayloadCalibration::RepeatPair* out, 
     //   正确的问法是"是不是【因为没有位置】才停的": 停了, 但后面还有东西。
     if (nf == 16 && *p != '\0' && *p != ' ') return -1;
     p = strstr(line, "seconds=");
-    if (!p) return 0;
+    // ⚠ 第四处静默丢弃 (2026-09-24 复审): first= 在、seconds= 不在时, 从前返回 0
+    //   ⇒ "声明了 3 对"变成"0 对" ⇒ 自由度是按没有复采对算出来的, 而结果看起来完全正常。
+    //   只有 nf == 0 (即 first= 后面本来就没数) 才是真正的"没有复采对", 那才返回 0。
+    if (!p) return nf == 0 ? 0 : -1;
     p += 8;
     while (*p && *p != ' ' && ns < 16) {
         char* e = nullptr;
@@ -3470,6 +3475,16 @@ static void test_repeat_header_is_not_silently_truncated() {
     const char* over16 = "# repeat: first=1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17"
                          " seconds=1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17\n";
     CHECK(mgParseRepeat(over16, reps, MG_MAXREP) == -1);
+
+    // ★ (a) 的【常驻证人】: 只有 maxOut >= 16 时 (b) 才不可能替它决定 —— mgLoad 永远传 8,
+    //   所以没有这一格的话, 把 (a) 退回死写法整床仍然全绿 (2026-09-24 复审指出的覆盖缺口)。
+    PayloadCalibration::RepeatPair big[16];
+    CHECK(mgParseRepeat(over16, big, 16) == -1);
+
+    // 有 first= 没有 seconds= ⇒ 拒 (从前返回 0: "声明了 3 对"变成"0 对")
+    CHECK(mgParseRepeat("# repeat: first=1,3,5\n", reps, MG_MAXREP) == -1);
+    // first= 后面本来就没数 ⇒ 这才是真的"没有复采对", 照 0 返回 (不是拒)
+    CHECK(mgParseRepeat("# repeat: first= seconds=\n", reps, MG_MAXREP) == 0);
 
     // 没有 `# repeat:` 语义的头部照旧返回 0 (不是拒)
     CHECK(mgParseRepeat("# columns extended\n", reps, MG_MAXREP) == 0);

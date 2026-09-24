@@ -154,8 +154,16 @@ static void test_corrupt_file_rejected() {
 //   计划/规格里写的 "12 条" 是笔误): 规格的验收行「落盘 → 读回」只经由
 //   `saveToFile` / `loadFromFile` 那对显式函数验证过 ⇒ 生产走的那条路一条断言都没有。
 // 【时间怎么进来】: `tickAt(nowMs)` 是接缝, `tick()` 在它外面包一层 GetTickCount()。
-//   基准 `t0` 取 `GetTickCount()`: `setGain` 刚刚返回, 它的 `s_dirtyMs` 与 t0 只差几微秒
-//   ⇒ t0 之后的偏移就是 s_dirtyMs 之后的偏移 (窗口 1000ms 对几微秒的误差免疫)。
+//   ⚠ 基准 `t0` 是在 `setGain` 【之前】读的, 而 `s_dirtyMs` 是在 `setGain` 【里面】写的
+//   (`ForceTuning.cpp:42`) ⇒ `s_dirtyMs ∈ {t0, t0 + 一个时钟量子}` (GetTickCount 粒度 ~15.6ms,
+//   两次读之间最多跨一格)。"t0 之后的偏移就等于 s_dirtyMs 之后的偏移"只在两次读落在同一格时
+//   成立 —— 从前这里写的是"只差几微秒", 那是错的 (2026-09-24 复审: 边界落在那一格里就会放假红,
+//   而且长得跟"防抖坏了"一模一样)。
+//   ⇒ 断言点按【两种落法都成立】挑, 不是按"大概"挑:
+//     不许写 → `t0+983` (983-16=967<1000, 且 983-0=983<1000);
+//     必须写 → `t0+1016` (1016-0≥1000, 且 1016-16=1000≥1000)。
+//   代价: 判据比 1000ms 那把尺子粗一个量子 —— 验的仍是"防抖边界两侧", 但边界外只剩 ≥0ms 的余量,
+//   不再有原来那个"差 1ms"的漂亮数字 (`t0+999` 在 s_dirtyMs=t0+16 时其实是差 17ms 不写, 判不到边界)。
 // ⚠ 两条用例都【自己建立前置状态】(先 setGain 把静默期起点钉在 t0) —— 不依赖 main() 里的
 //   调用顺序, 也不依赖 s_dirty 在进入本用例时是什么值 (它是 file-static, 会跨用例残留)。
 static bool fileExistsAt(const char* path) {
@@ -178,9 +186,9 @@ static void test_tick_at_debounces_persistence() {
 
     ForceTuning::tickAt(t0);                  // 立刻: 还在静默期
     CHECK(!fileExistsAt(kTmp));
-    ForceTuning::tickAt(t0 + 999);            // 差 1ms: 仍然不写
+    ForceTuning::tickAt(t0 + 983);            // 对两种 s_dirtyMs 落法都 < 1000ms ⇒ 不写
     CHECK(!fileExistsAt(kTmp));
-    ForceTuning::tickAt(t0 + 1000);           // 到点: 写
+    ForceTuning::tickAt(t0 + 1016);           // 对两种落法都 ≥ 1000ms ⇒ 写
     CHECK(fileExistsAt(kTmp));
 
     double v = 0.0;                           // 写的必须是【目标值】
@@ -188,6 +196,10 @@ static void test_tick_at_debounces_persistence() {
     CHECK(fabs(v - 150.0) < 1e-9);
 
     remove(kTmp);
+    // ⚠ 把落盘目标还回生产路径 (nullptr = 不干预, 见 ForceTuning.h:64) —— 今天这两条用例排在
+    //   main() 末尾所以没事, 但将来谁在后面追一条会走到 tick() 的用例, 钉着 kTmp 会让它写一个
+    //   CWD 相对的临时文件、还【因为错的原因变绿】(本文件自己的头就禁止"只测临时文件")。
+    ForceTuning::setStorePathForTest(nullptr);
     PASS();
 }
 
@@ -198,13 +210,15 @@ static void test_tick_at_does_not_rewrite_when_clean() {
     ForceTuning::setStorePathForTest(kTmp);   // 同上: 把落盘目标钉到本用例的临时文件
     const unsigned long t0 = GetTickCount();
     CHECK(ForceTuning::setGain(160.0));
-    ForceTuning::tickAt(t0 + 1000);           // 写第一次
+    ForceTuning::tickAt(t0 + 1016);           // 写第一次 (对两种 s_dirtyMs 落法都 ≥ 1000ms)
     CHECK(fileExistsAt(kTmp));
 
     remove(kTmp);                             // 删掉: 若下面又写, 文件会重新出现
     ForceTuning::tickAt(t0 + 5000);           // 已经不脏了 ⇒ 什么都不做
     CHECK(!fileExistsAt(kTmp));               // ★ "不是每次都重写"的判据
 
+    // ⚠ 还回生产路径, 理由同 test_tick_at_debounces_persistence 末尾 (见 ForceTuning.h:64)。
+    ForceTuning::setStorePathForTest(nullptr);
     PASS();
 }
 
