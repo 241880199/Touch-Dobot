@@ -80,6 +80,22 @@ inline Vec3 convertTouchToRobot(const hduVector3Dd& devicePos) {
 }
 
 // 计算相对位移
+// ★ 2026-09-24: 逐轴的【带记忆的死区】（静摩擦模型）—— 用在位置通道的每帧增量上。
+//   用途/形状/代价全写在 Config::TOUCH_POS_DEADZONE_MM 那一段。
+//   入参：`residual` = 本轴上一帧留下的余量（mm，**引用、就地更新**）· `d` = 本帧增量 · `dz` = 门限。
+//   输出：本帧应当传给目标的位移。未达门限 ⇒ 0（目标吸附）；达到 ⇒ 把累积量**整块**传出并清零
+//   （⇒ 平均速度守恒，无系统性滞后）。
+//   ⚠ 余量被门限封顶 ⇒ **有界**（≤ dz）；新参照点到来时不必重置也不会跳。
+inline double stictionGate(double& residual, double d, double dz) {
+    residual += d;
+    if (residual >= dz || residual <= -dz) {
+        const double out = residual;
+        residual = 0.0;
+        return out;
+    }
+    return 0.0;
+}
+
 inline Vec3 computeDelta(const Vec3& current, const Vec3& base) {
     return current - base;
 }

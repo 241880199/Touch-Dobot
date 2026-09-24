@@ -48,6 +48,17 @@ public:
         unsigned long long tickUs;   // steady_clock 微秒 (不能用 GetTickCount: 15.6 ms 粒度
                                      // 分辨不出 8 ms 的帧间隔 —— 那正是要量的东西)
         double f[3];                 // @1304 的 Fx,Fy,Fz (原始值, 未补偿)
+        // ★★ 2026-09-24 深夜: 现场说的"抖动"是**机械臂在动**（不是手上的力）⇒ 必须同时看这两组：
+        //   · tgt[6] = 本帧**下发目标的位姿**（app.robotTargetPose 的 x,y,z,rx,ry,rz）
+        //   · act[6] = 本帧**机械臂实际位姿**（@624，与本帧的力/滤波同源）
+        //   判据：目标平滑而实际在跳 ⇒ 机械臂自身伺服/机械（不归软件）；
+        //         目标本身在跳 ⇒ 我们的映射/控制（能修）。
+        double tgt[6];
+        double act[6];
+        // ⚠ 位姿列是 mm/deg —— 与 f/g 的 N 不同单位，落盘表头里写清楚。
+        double g[3];                 // ★ 2026-09-24: 同一帧的 **filtered**(补偿+5Hz 低通后的) Fx,Fy,Fz
+                                     //   目的：与 f[] 同频段对比 ⇒ 判"低通到底有没有在工作"
+                                     //   （raw 的 20~60Hz 占 40~67%，若 filtered 里也还在 ⇒ 是 bug）
     };
     // 取最近收到的 ≤maxN 帧, 按【从旧到新】写进 out。返回实际帧数。
     int copyRecentForceFrames(ForceFrameSample* out, int maxN);

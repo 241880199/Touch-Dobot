@@ -353,6 +353,44 @@ static void test_vec3_operators() {
 }
 
 // ============================================================
+// ★ 2026-09-24: stictionGate —— 位置增量上的"带记忆死区"（静摩擦模型）。
+//   用在 RelayCore::sendPosition 的 dx/dy/dz 上；用途/形状/代价见 Config::TOUCH_POS_DEADZONE_MM。
+//   判据：① 小于门限的抖动永远传不出去（目标吸附）② 越过门限时把累积量**整块**传出并清零
+//   ③ 大位移直通、不被夹 ④ 余量有界 ⑤ 【恒等式】传出 + 余量 = 总输入（不吞、不造）
+//   ⚠ ⑤ 是它区别于"直接砍每帧增量"的关键：后者会让慢速有意的移动整体丢失。
+static void test_stiction_gate() {
+    TEST(stiction_gate);
+    const double dz = 0.4;
+    {
+        double r = 0.0;                                  // ① 单帧小增量 ⇒ 输出 0、余量留住
+        CHECK(stictionGate(r, 0.1, dz) == 0.0);
+        CHECK_CLOSE(r, 0.1, 1e-12);
+    }
+    {
+        double r = 0.0;                                  // ② 累计到门限 ⇒ 整块传出（含门限本身）并清零
+        CHECK(stictionGate(r, 0.3, dz) == 0.0);
+        CHECK_CLOSE(stictionGate(r, 0.2, dz), 0.5, 1e-12);
+        CHECK_CLOSE(r, 0.0, 1e-12);
+    }
+    {
+        double r = 0.0;                                  // ③ 负方向对称
+        CHECK_CLOSE(stictionGate(r, -0.5, dz), -0.5, 1e-12);
+        CHECK_CLOSE(r, 0.0, 1e-12);
+    }
+    {
+        double r = 0.0;                                  // ④ 大位移直通、不被夹
+        CHECK_CLOSE(stictionGate(r, 12.0, dz), 12.0, 1e-12);
+    }
+    {
+        double r = 0.0, sum = 0.0;                       // ⑤ 恒等式 + 余量有界
+        for (int i = 0; i < 100; i++) sum += stictionGate(r, 0.03, dz);
+        CHECK_CLOSE(sum, 3.0 - r, 1e-9);
+        CHECK(sum > 2.5);                                // 确实传出去了（不是全被吞）
+        CHECK(fabs(r) <= dz + 1e-12);
+    }
+    PASS();
+}
+
 int main() {
     std::cout << "=== CoordinateTransform + SafetyBoundary Tests ===" << std::endl;
 
@@ -383,6 +421,7 @@ int main() {
     test_sf_beyond_boundary_min_speed();
     test_sf_half_buffer();
 
+    test_stiction_gate();   // ★ 2026-09-24
     test_vec3_length();
     test_vec3_operators();
 

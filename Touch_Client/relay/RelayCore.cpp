@@ -138,7 +138,9 @@ static bool                     s_noiseLockInit = false;
 
 // 只在 ForceReader 线程调用。加锁的理由: 读它的是主线程 (按键), 【不是】因为写入慢 ——
 // 125 Hz 下一次临界区可以忽略。与 forceDataMutex 分开, 免得探针的读把力数据的路径也拖住。
-static void pushForceFrame(double fx, double fy, double fz) {
+static void pushForceFrame(double fx, double fy, double fz,
+                          double gx, double gy, double gz,
+                          const double tgt[6], const double act[6]) {
     if (!s_noiseLockInit) return;   // 初始化竞态里的最早期帧, 丢掉即可 (不改变任何判决)
     const unsigned long long us =
         (unsigned long long)std::chrono::duration_cast<std::chrono::microseconds>(
@@ -148,6 +150,13 @@ static void pushForceFrame(double fx, double fy, double fz) {
     s_noiseBuf[s_noiseWrite].f[0] = fx;
     s_noiseBuf[s_noiseWrite].f[1] = fy;
     s_noiseBuf[s_noiseWrite].f[2] = fz;
+    s_noiseBuf[s_noiseWrite].g[0] = gx;
+    s_noiseBuf[s_noiseWrite].g[1] = gy;
+    s_noiseBuf[s_noiseWrite].g[2] = gz;
+    for (int i = 0; i < 6; i++) {
+        s_noiseBuf[s_noiseWrite].tgt[i] = tgt[i];
+        s_noiseBuf[s_noiseWrite].act[i] = act[i];
+    }
     s_noiseWrite = (s_noiseWrite + 1) % kNoiseCap;
     if (s_noiseCount < kNoiseCap) s_noiseCount++;
     LeaveCriticalSection(&s_noiseLock);
@@ -355,7 +364,18 @@ static DWORD WINAPI forceReaderThread(LPVOID) {
             // 帧率噪声探针: 存下这一帧的原始 @1304 三轴。
             // ⚠ 位置在【本帧解析完之后、且与本帧的赋值同源】—— 存的是刚读进来的 sixForcePtr,
             //   不是别的快照。存的这一列要拿来量"帧率下噪声的结构", 错一帧就白量。
-            pushForceFrame(sixForcePtr[0], sixForcePtr[1], sixForcePtr[2]);
+            // ★ 目标位姿：按本文件既有的锁序（robotPoseMutex 先取先放）在 forceDataMutex 之外取。
+            double tgtPoseBuf[6];
+            {
+                EnterCriticalSection(&app.robotPoseMutex);
+                tgtPoseBuf[0] = app.robotTargetPose.x;  tgtPoseBuf[1] = app.robotTargetPose.y;
+                tgtPoseBuf[2] = app.robotTargetPose.z;  tgtPoseBuf[3] = app.robotTargetPose.rx;
+                tgtPoseBuf[4] = app.robotTargetPose.ry; tgtPoseBuf[5] = app.robotTargetPose.rz;
+                LeaveCriticalSection(&app.robotPoseMutex);
+            }
+            pushForceFrame(sixForcePtr[0], sixForcePtr[1], sixForcePtr[2],
+                            app.forceData.filtered[0], app.forceData.filtered[1], app.forceData.filtered[2],
+                            tgtPoseBuf, app.forceData.tcpPoseActual);
 
             // 看门狗兜底: 每 300ms 检查一次 (GLUT 可能已死)
             static DWORD lastWatchdogCheck = 0;
@@ -935,6 +955,15 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
     double dy = current.y - m_lastTouchPos.y;
     double dz = current.z - m_lastTouchPos.z;
     m_lastTouchPos = current;  // always update touch reference
+        // ★★ 2026-09-24: 位置增量的【带记忆死区】—— 见 Config::TOUCH_POS_DEADZONE_MM 那一段。
+        //   现场：重压时下发的横向目标每帧在跳 0.2~0.55 mm ⇒ 机械臂被命令着左右晃。
+        //   ⚠ 上面那行 m_lastTouchPos 已经【无条件】跟到真实位置（在 dx/dy/dz 之后）：
+        //     参照必须追真值，否则余量会把同一段位移重复计入（死区就成了放大器）。
+        static double s_posResX = 0.0, s_posResY = 0.0, s_posResZ = 0.0;
+        dx = stictionGate(s_posResX, dx, Config::TOUCH_POS_DEADZONE_MM);
+        dy = stictionGate(s_posResY, dy, Config::TOUCH_POS_DEADZONE_MM);
+        dz = stictionGate(s_posResZ, dz, Config::TOUCH_POS_DEADZONE_MM);
+
 
     Vec3 clamped = m_targetPos;  // default: fixed TCP (orientation-only mode)
 
