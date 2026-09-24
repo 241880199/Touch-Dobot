@@ -2746,6 +2746,20 @@ static bool g_motionProbeDone = false;
 static DWORD g_motionProbeStartMs = 0;
 static DWORD g_motionProbeLastUpdateMs = 0;   // 去重用, 与 BiasCheck::sample 同一套办法
 static int g_motionProbeCount = 0;
+// ★ 2026-09-24 追加：本探针的【第二个用途】—— 判 @624 的**姿态**三位是什么约定。
+//   位置那三位早已实测一致（盘上 180 行 `pos=` 与 `tcp=` 逐位相同到 ±0.001 mm），
+//   而**姿态那三位从来没被读过或打印过**（`tcpPoseActual[3..5]` 全仓零读者），
+//   厂商文档也只写"TCP笛卡尔实际坐标值"、**没写欧拉约定** ⇒ 只能测。
+// 【判据】同一物理姿态下 `posR`(GetPose 的 rx,ry,rz) 与 `tcpR`(@624 的 rx,ry,rz)
+//   **逐位相等（±0.05°）** ⇒ 约定相同，可把重力项 `A·g` 的输入换成**同帧**的 @624
+//   （那是 ③"关节模式运动时手上有大力"的修法，根因是现在用的姿态只有 ~5~10 Hz）；
+//   **不等** ⇒ 记下差值，据此写显式转换（别猜）。
+// ⚠ 陷阱：只在"三个角里**只有一个非零**"的姿态下比会**巧合相等**（不同约定在该点重合）
+//   ⇒ 必须扫过几个"三个角都非零"的姿态。所以触发条件不只是启动那 30 帧：
+//     之后每**转过 ≥5°**再打一行，上限 200 行（免得刷屏）。
+static double g_motionProbeLastR[3] = {0.0, 0.0, 0.0};   // 上一次【打印】时的姿态
+static DWORD  g_motionProbeLastPrintMs = 0;               // 上一次打印的时刻（时间门）
+static int    g_motionProbePoseCount = 0;                 // 姿态触发那一段已打的行数
 
 static void runMotionProbe() {
     if (g_motionProbeDone) return;
@@ -2770,19 +2784,50 @@ static void runMotionProbe() {
     if (fd.lastUpdateMs == g_motionProbeLastUpdateMs) return;
     g_motionProbeLastUpdateMs = fd.lastUpdateMs;
 
-    // 原始位姿 (mm), 与 pollForce 同法在锁内读取 (RelayCore.cpp:1605-1612)。
-    double px, py, pz;
+    // 原始位姿 (mm + 姿态), 与 pollForce 同法在锁内读取 (RelayCore.cpp:1605-1612)。
+    double px, py, pz, prx, pry, prz;
     EnterCriticalSection(&appState.robotPoseMutex);
     px = appState.robotActualPose.x;
     py = appState.robotActualPose.y;
     pz = appState.robotActualPose.z;
+    prx = appState.robotActualPose.rx;
+    pry = appState.robotActualPose.ry;
+    prz = appState.robotActualPose.rz;
     LeaveCriticalSection(&appState.robotPoseMutex);
+
+    // 本行要不要打？启动 30 帧一律打（看 10Hz 阶梯）；之后只在【姿态转过 ≥5°】时打，
+    // 上限 200 行 —— 目的是扫过多个"三个角都非零"的姿态去比 @624 的约定（见文件头那段）。
+    const double posR[3] = { prx, pry, prz };
+    bool probePrint = false;
+    if (g_motionProbeCount < 30) {
+        probePrint = true;
+    } else if (g_motionProbePoseCount < 200) {
+        double dmax = 0.0;
+        for (int i = 0; i < 3; i++) {
+            const double d = fabs(posR[i] - g_motionProbeLastR[i]);
+            if (d > dmax) dmax = d;
+        }
+        // ⚠ 还要一道【时间门】: 手腕 90°/s 时 ≥5° 每 ~55ms 就满足 ⇒ 没有时间门的话
+        //   200 行预算十几秒就烧完, 后面几个姿态一个都打不出来。500ms 一行 ⇒ 上限
+        //   200 行 ≈ 100 秒的扫描时间, 而判 @624 只需要十几个"三角都非零"的姿态。
+        if (dmax >= 5.0 && (now - g_motionProbeLastPrintMs) >= 500) probePrint = true;
+    }
+    if (!probePrint) {
+        // 两段都打满了 ⇒ 永久收工。
+        if (g_motionProbeCount >= 30 && g_motionProbePoseCount >= 200) g_motionProbeDone = true;
+        return;
+    }
+    if (g_motionProbeCount >= 30) g_motionProbePoseCount++;
+    for (int i = 0; i < 3; i++) g_motionProbeLastR[i] = posR[i];
+    g_motionProbeLastPrintMs = now;
 
     double vel[3], acc[3];
     int still = ForceCompensation::motionState(vel, acc) ? 1 : 0;
-    // tcp= / tcpV= 取自上面那份 ForceData 快照 (同一个 forceDataMutex 临界区), 不再二次加锁。
-    printf("[Force] 运动检测 #%02d: pos=(%.3f,%.3f,%.3f)mm  tcp=(%.3f,%.3f,%.3f)mm  vel=%.6f m/s (阈值 %.4f)  acc=%.6f m/s² (阈值 %.4f)  tcpV=(%.4f,%.4f,%.4f)  isStill=%d\n",
-           g_motionProbeCount + 1,
+    // tcp= / tcpR= / tcpV= 取自上面那份 ForceData 快照 (同一个 forceDataMutex 临界区), 不再二次加锁。
+    // ⚠ `posR` 与 `tcpR` 是【两个不同来源的同一个量】: posR 来自 GetPose()(~10Hz 的仪表盘查询),
+    //   tcpR 来自 30004 帧里的 ToolVectorActual @624(同帧, ~123Hz)。这一行就是拿来比它们的。
+    printf("[Force] 运动检测 #%02d: pos=(%.3f,%.3f,%.3f)mm  tcp=(%.3f,%.3f,%.3f)mm  vel=%.6f m/s (阈值 %.4f)  acc=%.6f m/s² (阈值 %.4f)  tcpV=(%.4f,%.4f,%.4f)  isStill=%d  posR=(%.3f,%.3f,%.3f)  tcpR=(%.3f,%.3f,%.3f)\n",
+           g_motionProbeCount + g_motionProbePoseCount,   // 两段共用一个单调行号（见上）
            px, py, pz,
            fd.tcpPoseActual[0], fd.tcpPoseActual[1], fd.tcpPoseActual[2],
            sqrt(vel[0]*vel[0] + vel[1]*vel[1] + vel[2]*vel[2]),
@@ -2790,10 +2835,12 @@ static void runMotionProbe() {
            sqrt(acc[0]*acc[0] + acc[1]*acc[1] + acc[2]*acc[2]),
            Config::FORCE_MOTION_ACC_THRESH_MSS,
            fd.tcpSpeedActual[0], fd.tcpSpeedActual[1], fd.tcpSpeedActual[2],
-           still);
+           still,
+           posR[0], posR[1], posR[2],
+           fd.tcpPoseActual[3], fd.tcpPoseActual[4], fd.tcpPoseActual[5]);
 
-    // 30 行后永久停: 够看出阶梯节奏, 又不至于一直刷屏。
-    if (++g_motionProbeCount >= 30) g_motionProbeDone = true;
+    // 启动那 30 行打满后不再靠它计数（见上面 probePrint 的两段逻辑）。
+    if (g_motionProbeCount < 30) g_motionProbeCount++;
 }
 
 // ===== 采集类模式互斥 =====
