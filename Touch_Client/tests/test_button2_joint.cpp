@@ -1226,8 +1226,11 @@ static void test_solve_wrist_keeps_base_joints_across_random_poses() {
 //      ⇒ 断言的只能是【不变量】：**返回 true ⇒ 解真的到得了目标**。这也是末尾自验门存在的
 //        唯一理由（它把"没解出来"翻译成 `false`，而不是一个看起来像解的值）。
 //    ⚠ 失败分支断言"out 逐位退回参照"是**另一条**契约（与 `button2Mat3Inv` 同款），一并钉住。
-static void test_solve_wrist_invariant_holds_on_wrist_singularities() {
-    TEST(㉔ 不变量：返回 true ⇒ FK(解) 必须真的等于目标（腕部奇异位姿：可达/不可达各若干）);
+// ⚠ 2026-09-29 Task 3 复审 M-8：函数名从 `..._on_wrist_singularities` 改成现在这个 ——
+//   原名说"腕部奇异位姿：可达/不可达"，而 c2 被拒的原因是**步长预算**、**不是**奇异
+//   （实测把 `maxStepDeg` 换成 30° 它就解得出来，见下面那段注释）⇒ 名字按事实写。
+static void test_solve_wrist_invariant_holds_and_budget_refusal_is_exercised() {
+    TEST(㉔ 不变量：返回 true ⇒ FK(解) 必须真的等于目标（可达若干 + 一组因【步长预算】被拒）);
     // 三组输入**刻意覆盖两个分支**（缺一类就有个负对照打不到，见下面 ⚠）：
     //   c0/c1 —— 奇异位姿 + 附近可达目标（60°）⇒ 解应当出来 ⇒ 走 else 分支（把 FK 回验执行到）；
     //   c2    —— 奇异位姿 + 极端目标（179°）⇒ **步长预算**内解不出来 ⇒ 走 fail 分支（把"退回参照"执行到）。
@@ -1241,8 +1244,14 @@ static void test_solve_wrist_invariant_holds_on_wrist_singularities() {
     //   · 若只有"解不出来"的位姿："在 return true 前把解弄错"那个兜底对照**不会**让本用例红
     //     —— 它走 fail 分支，够不到 return true。
     //   两个负对照各需要一类 ⇒ 两类都要在。哪一组解出来/解不出来的探针记录见 task-3-report.md。
+    // ★★ 2026-09-29 Task 3 复审 I-1：上面那条"两类都要在"以前**只写在注释里** —— 那是**空的**：
+    //   c2 落进 fail 分支靠的是步长预算（`BTN2_WRIST_MAX_ITER × maxStepDeg`），而 `maxStepDeg`
+    //   是**明确可调的入参**、`BTN2_WRIST_MAX_ITER` 是普通常数 ⇒ 谁把任一个调大，c2 就解得出来
+    //   ⇒ fail 分支（连同对照 D 的目标）**静默失效**、对照 A 也不再能红本用例，而**没有任何东西会报**。
+    //   下面 `failedCount` 就是给这条"空转"上的守卫（改 `>= 99` 会立刻红，见 report 的负对照）。
     const double refs[3][6] = {{0,0,0,0,0,0}, {0,0,0,0,180,0}, {0,0,0,0,0,0}};
     const double bigs[3][3] = {{0,60,0}, {0,0,60}, {0,179,0}};
+    int failedCount = 0;   // ★ 抗空转：走 fail 分支的输入个数（见上面 I-1 那段）
     for (int c = 0; c < 3; ++c) {
         double Rr[9]; fkR(refs[c], Rr);
         double Md[9], Rt[9];
@@ -1251,6 +1260,7 @@ static void test_solve_wrist_invariant_holds_on_wrist_singularities() {
         double out[6] = {9,9,9,9,9,9};                           // 哨兵：失败时必须被覆盖成 ref
         const bool ok = button2SolveWrist(refs[c], Rt, Config::ORIENT_MAX_STEP_DEG, out);
         if (!ok) {
+            ++failedCount;
             for (int i = 0; i < 6; ++i) CHECK(out[i] == refs[c][i]);   // 失败 ⇒ 必须原样退回参照
         } else {
             double Ro[9]; fkR(out, Ro);
@@ -1258,6 +1268,10 @@ static void test_solve_wrist_invariant_holds_on_wrist_singularities() {
             for (int i = 0; i < 3; ++i) CHECK(out[i] == refs[c][i]);   // 且 J1/J2/J3 仍不动
         }
     }
+    // ★ 抗空转：这一条保证上面的 `!ok` 分支【真的被执行过】。
+    //   它靠的是"有一组输入解不出来"，而那取决于 maxStepDeg 与 BTN2_WRIST_MAX_ITER
+    //   ⇒ 谁把它们调大，本条就会红着告诉你"失败分支死了"，而不是静默空转。
+    CHECK(failedCount >= 1);
     PASS();
 }
 
@@ -1295,7 +1309,7 @@ int main() {
     test_solve_wrist_identity_target_returns_reference();        // ㉒ 2026-09-29 Task 3：腕部求解
     test_solve_wrist_fk_roundtrip_across_random_poses();         // ㉓(a) ★ 跨位姿 FK 回验
     test_solve_wrist_keeps_base_joints_across_random_poses();    // ㉓(b) 只动腕
-    test_solve_wrist_invariant_holds_on_wrist_singularities();   // ㉔ ★ 不变量（能红）
+    test_solve_wrist_invariant_holds_and_budget_refusal_is_exercised();   // ㉔ ★ 不变量（能红）
 
     std::cout << "\nResults: " << g_passed << " passed, " << g_failed << " failed" << std::endl;
     return g_failed == 0 ? 0 : 1;

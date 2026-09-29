@@ -138,6 +138,42 @@ inline void rotVecDeg(const double R[9], double rv[3]) {
     for (int i = 0; i < 3; ++i) rv[i] = th * kR2D * ax[i] / n;
 }
 
+// 腕部求解器的**误差度量**：把 ref[0..2] 与腕角 q[0..2] 拼成六个关节、跑一次 FK，
+// 返回"当前末端朝向到 targetR 的世界系旋转向量的模"（度）。
+//   式子是 `|rotVecDeg(targetR · Rqᵀ)|` —— 展开点与每一步的含义见 `button2SolveWrist`
+//   上面那两段注释（尤其"误差为什么右乘 Rqᵀ"）。
+// ★ 2026-09-29 Task 3 复审 M-3：这一段（composeTransform → Rq → Rqᵀ → D = targetR·Rqᵀ →
+//   rotVecDeg → 取模）原来在 `button2SolveWrist` 里**逐字写了两遍**（循环体一次、末尾自验门
+//   一次）。抄两遍的代价不是行数，而是**两处会各自漂移**：任何一次"只改一处"（比如换误差
+//   口径、或补一个 NaN 守卫）都会让迭代判据与自验判据分家，而那正是本任务要保证的不变量的
+//   两个端点。⇒ 收成这一处，两处都调它。
+// ⚠ 【比复审给的签名多一个出参 —— 这是必须的，不是顺手】复审写的是三参版（只返回模）。
+//   但**模不够用**：循环体那一步 `dq = Jwᵀ·(Jw·Jwᵀ+λ²I)⁻¹·e` 要的是**误差向量 e 本身**，
+//   不只是它的模（见下面 `y[r] = ... * e[0] ...` 那三行）。若只给模，循环就得把
+//   `Rq`/`D`/`e` 再自己展开一份 ⇒ 正是本条要消灭的"抄两遍"。
+//   ⇒ `eOut` 可空的出参：`eOut != nullptr` 时把向量一并写回。**取模那一段仍然只有一份**。
+//   ⚠ 末尾自验门只要模 ⇒ 它按三参形式调用（`eOut` 取默认的 `nullptr`），与复审的写法一致。
+// ⚠ 纯算术、无状态、不读 Config、不写"结果"（误差不是可下发的量）⇒ 它是**文件内的实现
+//   细节**，不放头文件（测试走 `button2SolveWrist` 的黑盒，不经这里）。
+//   ⚠ 它在匿名命名空间内 ⇒ 内部链接（等价于文件内 `static`），与 `rotVecDeg` 同一待遇。
+static double wristErrDeg(const double ref[6], const double q[3], const double targetR[9],
+                          double eOut[3] = nullptr) {
+    const double joints[6] = { ref[0], ref[1], ref[2], q[0], q[1], q[2] };
+
+    double T[4][4];
+    Kinematics::composeTransform(joints, T);
+    double Rq[9];                                // 齐次阵的左上 3×3
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 3; ++c) Rq[r * 3 + c] = T[r][c];
+
+    double RqT[9], D[9], e[3];
+    button2Mat3T(Rq, RqT);
+    button2Mat3Mul(targetR, RqT, D);
+    rotVecDeg(D, e);                             // 直接调本文件匿名命名空间里的实现
+    if (eOut != nullptr) { eOut[0] = e[0]; eOut[1] = e[1]; eOut[2] = e[2]; }
+    return std::sqrt(e[0] * e[0] + e[1] * e[1] + e[2] * e[2]);
+}
+
 }   // namespace
 
 // 仅供测试：把文件内的 rotVecDeg 暴露出来（不改实现，只转发）
@@ -304,32 +340,27 @@ bool button2SolveWrist(const double ref[6], const double targetR[9], double maxS
     double lam = Config::BTN2_WRIST_DAMP;       // λ 初值（阻尼下限）
     double prevErr = 0.0;
     bool havePrev = false;
-    bool converged = false;
+    // ⚠ 这里原来还有 `bool converged` —— 复审 M-2 去掉末尾那个 `if (!converged)` 之后它只剩
+    //   写、没有读 ⇒ 跟着删（循环里的 `converged = true;` 那半句也删了，只留 `break`）。
     int iter = 0;
 
     for (; iter < Config::BTN2_WRIST_MAX_ITER; ++iter) {
         const double joints[6] = { ref[0], ref[1], ref[2], q[0], q[1], q[2] };
 
-        // FK：当前末端旋转 Rq（取齐次阵的左上 3×3）与角雅可比 Jw
-        double T[4][4];
-        Kinematics::composeTransform(joints, T);
-        double Rq[9];
-        for (int r = 0; r < 3; ++r)
-            for (int c = 0; c < 3; ++c) Rq[r * 3 + c] = T[r][c];
-
+        // 角雅可比 Jw（行 3..5、列 3..5，见上面第一段说明）。
+        //   ⚠ FK 与误差取值那一段（`Rq` / `D` / `e`）在下面那句 `wristErrDeg` 里 ——
+        //     它与末尾自验门**共用同一个实现**（复审 M-3），别在这里再展开一份。
         double J[6][6];
         Kinematics::jacobian(joints, J);
-        double Jw[9];                            // 行 3..5、列 3..5（见上面第一段说明）
+        double Jw[9];
         for (int r = 0; r < 3; ++r)
             for (int c = 0; c < 3; ++c) Jw[r * 3 + c] = J[3 + r][3 + c];
 
-        // 世界系误差 e = rotvec(targetR · Rqᵀ)（度）
-        double RqT[9], D[9], e[3];
-        button2Mat3T(Rq, RqT);
-        button2Mat3Mul(targetR, RqT, D);
-        rotVecDeg(D, e);                         // 直接调本文件匿名命名空间里的实现
-        const double err = std::sqrt(e[0] * e[0] + e[1] * e[1] + e[2] * e[2]);
-        if (err < Config::BTN2_WRIST_TOL_DEG) { converged = true; break; }
+        // 世界系误差（度）：`err = |e|`，`e` = rotvec(targetR · Rqᵀ)。
+        //   ⚠ 这里**必须**把 e 取出来（下面最小二乘那一步要它），不能只要模。
+        double e[3];
+        const double err = wristErrDeg(ref, q, targetR, e);
+        if (err < Config::BTN2_WRIST_TOL_DEG) break;
 
         // λ 自适应：这一轮比上一轮更接近目标 ⇒ 减半（更信雅可比）；否则加倍（更信阻尼）。
         //   ⚠ 与 `Kinematics::inverse` 同一形状（那里 λ 夹 [0.001, 10]；这里按计划夹
@@ -374,23 +405,27 @@ bool button2SolveWrist(const double ref[6], const double targetR[9], double maxS
     }
 
     // ---- 末尾自验（★ 这条不变量唯一能被抓住的地方）------------------------------------
-    // 迭代跑满 `MAX_ITER` 而没在循环里判收敛时，**再算一次** FK 与误差；仍不达门限 ⇒ false。
-    //   ⚠ 循环里那句 `err < TOL` 已经判过一次收敛 ⇒ 走到这里时 q 是"最后一次迭代后"的值，
-    //     必须重新评估（`err` 是上一轮的，不是当前 q 的）。
-    if (!converged) {
-        const double joints[6] = { ref[0], ref[1], ref[2], q[0], q[1], q[2] };
-        double T[4][4];
-        Kinematics::composeTransform(joints, T);
-        double Rq[9];
-        for (int r = 0; r < 3; ++r)
-            for (int c = 0; c < 3; ++c) Rq[r * 3 + c] = T[r][c];
-        double RqT[9], D[9], e[3];
-        button2Mat3T(Rq, RqT);
-        button2Mat3Mul(targetR, RqT, D);
-        rotVecDeg(D, e);
-        const double err = std::sqrt(e[0] * e[0] + e[1] * e[1] + e[2] * e[2]);
+    // **无条件**再算一次 FK 与误差（不管刚才是"循环里判了收敛而 break"还是"跑满 MAX_ITER
+    //   掉出来"）；仍不达门限 ⇒ false（out 仍是 ref）。
+    // ★ 2026-09-29 Task 3 复审 M-2：这里原来是 `if (!converged) { ... }` —— 而头文件那一段
+    //   写的是"末尾**无条件**再自验一次" ⇒ **文档与代码不一致**。两条里选了这一条（去掉 `if`，
+    //   让措辞为真），理由：
+    //     ① 头文件那句的后半是"自验是'返回 true ⇒ 真的到得了'这条不变量**唯一**的执行点"——
+    //        带上 `if` 时那句**是假的**：收敛那一支根本没有走到这里，它的保证来自**循环里**
+    //        那句 `err < TOL` ⇒ 判据实际有**两处**（正是 M-3 要消灭的形状：两处会各自漂移）。
+    //        去掉 `if` 后，这句措辞与"单一执行点"这个设计意图一起成立。
+    //     ② 安全性（复审要求先确认的那一条）：循环里那句 `break` 发生在**改 q 之前**
+    //        （`q[i] += dq[i]` 在 break 之后的代码里）⇒ 收敛那一刻的 q 就是 `err` 所对应的
+    //        那个 q ⇒ 这里重算得到的是**同一个表达式、同一份实现、同一个输入**，逐位相同，
+    //        不会因为"多算一次"而把一条本来成功的解判成失败。整套用例（㉒/㉓(a)(b)/㉔）就是
+    //        这条的反证：若 q 在那之后变过，它们会立刻红。
+    //   ⇒ `converged` 这个变量随之变成死的（只剩写、没有读）⇒ 一并删掉，别留一个"看起来在
+    //     记账、其实没人看"的标志。
+    //   ⚠ 走到这里 q 是"最后一次迭代后"的值，而循环里的 `err` 可能是**上一轮**的 ⇒
+    //     必须重新评估（这也是这条自验不能省的理由）。
+    {
+        const double err = wristErrDeg(ref, q, targetR);
         if (err >= Config::BTN2_WRIST_TOL_DEG) return false;   // out 仍是 ref
-        converged = true;
     }
 
     // ---- 成功：只覆盖腕三关节（J1/J2/J3 保持参照）---------------------------------------
