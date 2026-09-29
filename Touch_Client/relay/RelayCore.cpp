@@ -1603,7 +1603,7 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
         //   **回滚 = 翻 `Config::BTN2_ORIENT_TARGET_ENABLED` 一个 bool**（配置在 Config.h；
         //   那里也写着"旧路一个字都不许改"）。设计见
         //   `Docs/superpowers/specs/2026-09-29-button2-orientation-target-design.md`（读【修订】那一节）。
-        //   ⚠ 两条路入参次序不同：`m_jointRef` 是 j1..j6，`m_btn2StylusFilt` 是笔杆 Rx,Ry,Rz；
+        //   ⚠ 两个入参的次序约定不同：`m_jointRef` 是 j1..j6，`m_btn2StylusFilt` 是笔杆 Rx,Ry,Rz；
         //     新函数的签名把这两者叫作 `refJoints` 与 `curStylus`，位置与旧调用点一一对应。
         if (Config::BTN2_ORIENT_TARGET_ENABLED) {
             button2OrientJointTarget(m_jointRef, sRef, m_btn2StylusFilt, j);
