@@ -1252,6 +1252,8 @@ static void test_solve_wrist_invariant_holds_and_budget_refusal_is_exercised() {
     const double refs[3][6] = {{0,0,0,0,0,0}, {0,0,0,0,180,0}, {0,0,0,0,0,0}};
     const double bigs[3][3] = {{0,60,0}, {0,0,60}, {0,179,0}};
     int failedCount = 0;   // ★ 抗空转：走 fail 分支的输入个数（见上面 I-1 那段）
+    int solvedCount = 0;   // ★ 抗空转：走 else 分支的输入个数 —— 与 failedCount **成对**，
+                           //   两条一起才叫"两个分支都真的走过"（见下面守卫处的 I-1 补充）
     for (int c = 0; c < 3; ++c) {
         double Rr[9]; fkR(refs[c], Rr);
         double Md[9], Rt[9];
@@ -1263,15 +1265,26 @@ static void test_solve_wrist_invariant_holds_and_budget_refusal_is_exercised() {
             ++failedCount;
             for (int i = 0; i < 6; ++i) CHECK(out[i] == refs[c][i]);   // 失败 ⇒ 必须原样退回参照
         } else {
+            ++solvedCount;
             double Ro[9]; fkR(out, Ro);
             CHECK(angBetweenDeg(Rt, Ro) < Config::BTN2_WRIST_TOL_DEG); // ★ 真的不变量（**能红**）
             for (int i = 0; i < 3; ++i) CHECK(out[i] == refs[c][i]);   // 且 J1/J2/J3 仍不动
         }
     }
-    // ★ 抗空转：这一条保证上面的 `!ok` 分支【真的被执行过】。
-    //   它靠的是"有一组输入解不出来"，而那取决于 maxStepDeg 与 BTN2_WRIST_MAX_ITER
-    //   ⇒ 谁把它们调大，本条就会红着告诉你"失败分支死了"，而不是静默空转。
+    // ★ 抗空转守卫（两条，成对；缺一条就有一个静默失效方向没人管）：
+    //   · `failedCount >= 1` 防的是【失败分支空转】：它靠的是"有一组输入解不出来"，
+    //     而那取决于 maxStepDeg 与 BTN2_WRIST_MAX_ITER ⇒ 谁把它们调大，本条就红着告诉你
+    //     "失败分支死了"（对照 D 的目标随之失效），而不是静默空转。
+    //   · `solvedCount >= 2` 防的是【成功分支空转】——**本轮复审 I-1 补的那条**：
+    //     如果 c0/c1 **也不再可解**（同一条"入参可调"的路：把预算调小，或把 `bigs` 那两组
+    //     的目标调大），三组输入会**全落进 `!ok`** ⇒ `failedCount = 3 >= 1` 照样通过、
+    //     六条 `out == ref` 也照样通过；而 `else` 里那句 `angBetweenDeg(Rt, Ro) < TOL`
+    //     是本用例**唯一能红的断言**，它一次都不会被执行 ⇒ 本用例在【一条 FK 回验都没跑】
+    //     的情况下变绿，**连主对照 A（删末尾自验门）也不再能把它染红**。
+    //     要求 `>= 2`（不是 `>= 1`）是因为 c0 与 c1 是**两组不同的**输入，两组都必须真的
+    //     走到那条 FK 回验；只要求 1 会漏掉"其中一组退化成不可解"的情形。
     CHECK(failedCount >= 1);
+    CHECK(solvedCount >= 2);
     PASS();
 }
 
