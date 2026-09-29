@@ -1606,7 +1606,85 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
         //   ⚠ 两个入参的次序约定不同：`m_jointRef` 是 j1..j6，`m_btn2StylusFilt` 是笔杆 Rx,Ry,Rz；
         //     新函数的签名把这两者叫作 `refJoints` 与 `curStylus`，位置与旧调用点一一对应。
         if (Config::BTN2_ORIENT_TARGET_ENABLED) {
-            button2OrientJointTarget(m_jointRef, sRef, m_btn2StylusFilt, j);
+            // ================= ★★ 2026-09-29 整支终审 I-1：求解失败**现场必须看得见** ==========
+            // 【为什么现在才做】这个纯函数**原来返回 `void`** ⇒ 它把三种结局（成功 / 笔杆
+            //   NaN/Inf 守卫拦下 / **腕部求解没解出来**）在出口上写成了**同一件事**（六位数，
+            //   后两种逐位相同、都等于参照）⇒ 调用方**没有任何办法**分辨，于是这里
+            //   **一行日志都没有**。现场能看到的只有"臂不再跟手、往按下位姿收回去"，
+            //   而控制台**一声不响** —— 操作员无从知道该查什么。
+            //   ⇒ 邻座那三道门（I1 参照 / I2 目标限位 / FK 位置门）都是"每次按下打一次
+            //     `cerr`"，这一条**同款**补上。返回值的定义与三档的逐行含义写在
+            //     `relay/Button2Joint.h` 的 `Btn2JointResult` 上。
+            const Btn2JointResult btn2Res =
+                button2OrientJointTarget(m_jointRef, sRef, m_btn2StylusFilt, j);
+            // 【为什么"每次按下只报一次"】与 I2/FK 那两条**同一条理由**（不是"瞬时"）：
+            //   笔杆偏移一直保持很大 ⇒ 目标一直超出求解的步长预算 ⇒ **整个按住期间恒成立**；
+            //   NaN 那种（`m_btn2StylusFilt` 里已经进了 NaN）同样不会自己好。而 `cerr` 写在
+            //   **触觉回调线程**上，不压就是"按住多久刷多久"（~30 Hz）——
+            //   控制台阻塞（QuickEdit）→ 看门狗 → EmergencyStop 那条链本仓已记录在案。
+            //   ⚠ 压的是**消息**，不是别的：见下面"没有任何 `return`"那一条。
+            //   ⚠ 标记复位在 `onButton2Press`（与 `m_btn2JointMode`/`m_jointRef` 同一个临界区）
+            //     ⇒ 下一次按下会再报。
+            //   ⚠ 一个旗标盖住两档 ⇒ **一次按下里只有先出现的那一档会被报出来**。这是刻意的：
+            //     两档在本函数的出口上是**同一个效果**（六位全回参照、臂不再跟手），
+            //     所以"这一档还是那一档"是**理由**、不是新的现象；理由换一个不必再喊一遍。
+            //     要分辨的是"跟底下那几条 `REJECT` 是不是一回事"，而那由消息里的措辞回答。
+            if (btn2Res != Btn2JointResult::Ok && !m_btn2JointFallbackLogged) {
+                m_btn2JointFallbackLogged = true;
+                if (btn2Res == Btn2JointResult::SolveFailed) {
+                    // 措辞逐条对着 `button2OrientJointTarget` 与 `button2SolveWrist` 的实现写：
+                    //   · 跑到这里的前提是笔杆**有限**（NaN/Inf 在守卫那条出口就返回了）⇒
+                    //     拒发来自 `button2SolveWrist` 返回 false，它的两处 `return false` 是
+                    //     "`Jw·Jwᵀ + λ²I` 求逆失败"与"跑完 `BTN2_WRIST_MAX_ITER` 轮仍没到
+                    //     `BTN2_WRIST_TOL_DEG`"。**这两者在这一层已经不可分**（它只回 bool）
+                    //     ⇒ 消息**不猜**是哪一种（含糊地猜一种比不说更坏）。
+                    //   · 后果（**现场报告**，不是本任务这一侧量的）：六位 = 按下那一刻的参照
+                    //     ⇒ 本帧下发的是"回到按下位姿"那个目标（经下面的 `clampJointStep`
+                    //     按 `ORIENT_MAX_STEP_DEG` 逐帧挪过去，现值 3°/帧）⇒ 臂**不再跟手**、
+                    //     往按下位姿收回去。**现场看到的就是这个现象**（见终审 I-1 的描述）。
+                    std::cerr << "[Safety] Btn2 joint SOLVE FAILED - J4/J5/J6 could not be solved for "
+                              << "the requested tip pose (the iterative solver ran out of its step "
+                              << "budget / hit a degenerate Jacobian; it reports only true/false, so "
+                              << "the two cannot be told apart here). ALL SIX joints fall back to the "
+                              << "press-time reference this frame => the arm stops following the "
+                              << "stylus and is driven back toward where button 2 was pressed. "
+                              << "Reported ONCE per press (every frame falls back the same way). "
+                              << "It solves again as soon as the requested change is small enough "
+                              << "to fit the budget - bring the stylus back toward the press-time "
+                              << "orientation. ref=("
+                              << m_jointRef[0] << "," << m_jointRef[1] << "," << m_jointRef[2] << ","
+                              << m_jointRef[3] << "," << m_jointRef[4] << "," << m_jointRef[5] << ")"
+                              << std::endl;
+                } else {
+                    // `StylusUntrustworthy`：守卫那一条**任何求解之前**就返回了 ⇒ 与上面那档
+                    //   **不是**同一个原因，措辞必须分开（这正是 I-1 要修的第二件事）。
+                    //   守卫判的是 `refStylus` **与** `curStylus` 的**每个**分量（`std::isfinite`）
+                    //   ⇒ 消息里两个都点名，不猜是哪一个。
+                    //   ⚠ 与底下 I1 那条 `REF UNTRUSTWORTHY` **不是**一回事：那条判的是**关节
+                    //     参照**（`m_jointRef`，六个数）；这一条判的是**笔杆姿态角**
+                    //     （`m_orientRefStylus` / `m_btn2StylusFilt`，各三元组）。两条消息里
+                    //     分别点了名，别把它们读成同一条。
+                    //   ⚠ 后果与上一档**逐位相同**（六位 = 参照）—— 代码里那两处的写法逐字
+                    //     相同，是本函数刻意的纪律（见 `Button2Joint.h` 那段 ⚠★）。
+                    std::cerr << "[Safety] Btn2 joint STYLUS ORIENTATION UNTRUSTWORTHY (NaN/Inf in "
+                              << "the stylus angles - this is the STYLUS, not the joint reference of "
+                              << "the other REF UNTRUSTWORTHY message) - ALL SIX joints fall back to "
+                              << "the press-time reference this frame => the arm stops following the "
+                              << "stylus and is driven back toward where button 2 was pressed. "
+                              << "Reported ONCE per press (every frame falls back the same way). "
+                              << "ref=("
+                              << m_jointRef[0] << "," << m_jointRef[1] << "," << m_jointRef[2] << ","
+                              << m_jointRef[3] << "," << m_jointRef[4] << "," << m_jointRef[5] << ")"
+                              << std::endl;
+                }
+            }
+            // ⚠⚠ 【这里**没有**、也**不许**加 `return`】被"拒"的只有**目标**，不是**整帧**：
+            //   求解失败时 `j` 逐位 = `m_jointRef`，而下面 I1/I2/FK 三道门与
+            //   `clampJointStep` 对它照旧逐条执行 ⇒ 本帧**照样发**，发的是"被步长限幅挪回
+            //   按下位姿"的那个目标。**这正是现场看到"收回去"的原因**，也正是它**不能**
+            //   被改成"本帧不下发"的地方 —— 那是**行为改变**（臂会原地冻住而不是慢慢回位），
+            //   而 I-1 只加可观察性。（**下面** I1/I2/FK 三处的 `return` 是**它们自己的**
+            //   判据，与本条无关，一个字都没动。）
         } else {
             button2JointTarget(m_jointRef, sRef, m_btn2StylusFilt, j);   // 旧路，**逐字保留**
         }
@@ -1991,13 +2069,17 @@ void RelayCore::onButton2Press(const Vec3& stylusOrient) {
         //     就已经是 true）⇒ 受影响的只有**同帧**那一种，也就是最不容易被注意的那种。
 
         // ★ 2026-09-23 复审 Minor 2：一次性标记与"模式"同生共死 ⇒ **在这里复位**
-        //   （同一个临界区、同一份"这一次按下"的快照），见 `RelayCore.h` 里那四个成员的注释。
+        //   （同一个临界区、同一份"这一次按下"的快照），见 `RelayCore.h` 里那一组
+        //   （★ I-1 之后是**五个**）成员的注释。
         //   ★ 2026-09-23 整支终审 (A)：原先是**两条**（Minor 2 那轮），本轮把 I2 与 FK 那两道
         //   `cerr` 也压成"每次按下只报一次" ⇒ 变成**四条**，一起在这里复位。
+        //   ★ 2026-09-29 整支终审 I-1：再加**一条**（纯函数报回来的求解失败/笔杆不可信）
+        //   ⇒ **五条**，同一个复位点、同一份"这一次按下"的快照。
         m_btn2JointBtn1Noticed = false;
         m_btn2JointRefRejectLogged = false;
         m_btn2JointTargetRejectLogged = false;
         m_btn2JointFkRejectLogged = false;
+        m_btn2JointFallbackLogged = false;
 
         // M2：步长限幅积分器的种子 = 参照本身 ⇒ 第一帧"本帧要走的量"为 0（与纯函数返回参照一致）。
         m_btn2JointCmd[0] = m_jointRef[0];

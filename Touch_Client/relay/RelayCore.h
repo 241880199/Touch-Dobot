@@ -290,12 +290,14 @@ private:
     //     不是"算过什么"。
     double m_btn2JointCmd[6] = {0, 0, 0, 0, 0, 0};
 
-    // ★★ 2026-09-23 (Task 2 修复轮 / 复审 Important#1 与 Minor 2)：两条**每次按下只报一次**的
-    //   一次性标记。两个条件都【不是瞬时的】⇒ 不设标记就是"按住多久就刷多久"，而这两处写的
+    // ★★ 2026-09-23 (Task 2 修复轮 / 复审 Important#1 与 Minor 2)：一组**每次按下只报一次**的
+    //   一次性标记。★ 2026-09-29 整支终审 I-1 之后是**五条**（原文写"两条"，而那时实际已经
+    //   被 (A) 那轮加成了四条 —— 这个数字一直是旧的，本次一并改成"数出来的"）。
+    //   这些条件都【不是瞬时的】⇒ 不设标记就是"按住多久就刷多久"，而它们写的
     //   都是 `cout`/`cerr`，落在**触觉回调线程**上 —— 而控制台阻塞（QuickEdit 选中即冻结）
     //   是本仓已记录的危险（见 `2026-09-22-watchdog-heartbeat-lied` 那条）。
     //   ⚠ 复位点在 `onButton2Press`（与 `m_btn2JointMode`/`m_jointRef` **同一个临界区**）：
-    //     "一次按下"正是本文件里那个"模式"的生命周期 ⇒ 两个标记与它同生共死，
+    //     "一次按下"正是本文件里那个"模式"的生命周期 ⇒ 这些标记与它同生共死，
     //     下一次按住自然再报一次。
     //   · `m_btn2JointBtn1Noticed` —— 按住期间按钮1 **第一次**被按下 ⇒ 打印一次"平移被忽略"。
     //       它描述的是"这次按住锁存成了关节模式"的一个**后果**，重复打印没有新信息。
@@ -313,6 +315,16 @@ private:
     bool  m_btn2JointRefRejectLogged = false;
     bool  m_btn2JointTargetRejectLogged = false;
     bool  m_btn2JointFkRejectLogged = false;
+    //   · `m_btn2JointFallbackLogged`（★ 2026-09-29 整支终审 I-1）—— 纯函数
+    //     `button2OrientJointTarget` 报回来的**两档失败**（`SolveFailed` / `StylusUntrustworthy`）
+    //     各只报**一次**。与上面三条**同款、同一个复位点**，但**必须是一个自己的旗标**：
+    //     复用任何一条都会让"两条互不相干的坏消息"互相压制（I1 判的是**关节参照**，
+    //     这里判的是**笔杆姿态/求解**）。
+    //     ⚠ 它**故意**一旗盖两档 ⇒ 一次按下里只有**先出现**的那档会被报出来；理由写在
+    //       调用点（两档在出口上是同一个效果，只有理由不同）。
+    //     ⚠ 只压**消息**，不压别的：这一档**本来就没有** `return`（被"拒"的是目标、不是整帧）
+    //        ⇒ 接线那边一个字都没改，见调用点那段。
+    bool  m_btn2JointFallbackLogged = false;
 
     CRITICAL_SECTION m_basePointLock;
     std::vector<IExtension*> m_extensions;

@@ -278,7 +278,13 @@ bool button2SolveWrist(const double ref[6], const double targetR[9], double maxS
 //   ② 笔杆任一分量 NaN/Inf ⇒ **六位全回参照**（与 `button2JointTarget` 的守卫逐条对齐）。
 //   ③ 否则：`refR = FK(refJoints)` 的旋转部分当参照姿态 → `button2OrientTarget`（Task 2）
 //      算出想要的末端朝向 → `button2SolveWrist`（Task 3）解 J4/J5/J6；
-//      **求解失败 ⇒ 六位全回参照**（"本帧不下发"的形状，与 RelayCore 里 I1/I2/FK 那三处同款）。
+//      **求解失败 ⇒ 六位全回参照**。
+//      ⚠★ 2026-09-29 整支终审 I-1 订正：这句原来接着写「"本帧不下发"的形状，与 RelayCore 里
+//        I1/I2/FK 那三处同款」—— **那是错的**（逐行核过 `RelayCore.cpp` 的调用点）：
+//        I1/I2/FK 三处是 `cerr` + `return`（本帧**什么都不发**）；而本函数的失败**不产生
+//        任何 `return`** —— 写回参照之后调用方照常走 `clampJointStep` → FK 门 → `ServoJ`，
+//        发出去的是"被步长限幅慢慢挪回按下位姿"的那个目标（这正是现场看到的"臂不再跟手、
+//        往按下位姿收回去"）。两件事形状**不同**，别按前者读这一段。
 //
 // 【四入参里没有位置分量】平移在**结构上**进不来 —— 这是**编译期**性质（同 `button2JointTarget`），
 //   运行期测不出来 ⇒ 由 test_button2_joint.cpp ㉕(c) 用**函数指针类型**钉住（签名一变就编译不过）。
@@ -296,8 +302,30 @@ bool button2SolveWrist(const double ref[6], const double targetR[9], double maxS
 // ⚠ 【`refJoints` 非有限 ⇒ 本函数**原样传出去**】与 `button2JointTarget` 逐字相同：那一刻没有
 //   安全的兜底可退（0 是一个**真实**关节角，机械臂会真的转过去）—— 守卫只守**笔杆侧**，
 //   **不**保证返回值一定有限。这一层由调用方负责（`refJoints` 抄自 `app.robotActualPose.j1..j6`）。
-void button2OrientJointTarget(const double refJoints[6], const double refStylus[3],
-                              const double curStylus[3], double outJoints[6]);
+
+// ★★ 2026-09-29 整支终审 I-1：本函数**原来返回 `void`** —— 调用方因此**分不开**下面三种结局
+//   （三种都只表现为"六位被写了一遍"）⇒ 现场"求解失败"这件事**一声不响**地发生。
+//   现在返回这个枚举，把三种结局分开。**数值行为一个字都没变**：三种结局下 `outJoints`
+//   的写法与改之前**逐位相同**（见下面各分支的说明），新增的只有返回值。
+//   ⚠ 三档的含义都是**逐行核过实现**的（`Button2Joint.cpp` 的同名函数），不是推断：
+//     · `Ok`                  —— `button2SolveWrist` 返回 true ⇒ `outJoints[0..2] = refJoints[0..2]`、
+//                                `outJoints[3..5]` = 解出的腕三位（解**真的**到得了目标：那是它的末尾自验门）。
+//     · `StylusUntrustworthy` —— `refStylus` / `curStylus` 任一分量非有限（NaN/Inf）⇒
+//                                守卫在**任何求解之前**拦下 ⇒ 六位 = 参照。
+//     · `SolveFailed`         —— 笔杆有限、但 `button2SolveWrist` 返回 false（它的两处
+//                                `return false`：`Jw·Jwᵀ + λ²I` 求逆失败 / 迭代跑完仍没到
+//                                `BTN2_WRIST_TOL_DEG`）⇒ 六位 = 参照。
+//   ⚠ 后两档在**本函数出口**上写出的六个数**逐位相同**（都是参照）⇒ 光看 `outJoints`
+//     **永远分不开**它们，只有返回值能分。这正是加这个返回值的全部理由。
+//   ⚠ 调用方**必须**看返回值再说话：含糊地把两者报成一句，就是把诊断成本推给操作员。
+enum class Btn2JointResult {
+    Ok,                    // 解出来了（六位 = 参照的 J1/J2/J3 + 解出的 J4/J5/J6）
+    StylusUntrustworthy,   // 笔杆 NaN/Inf 守卫拦下（六位 = 参照）
+    SolveFailed            // 腕部求解没解出来（六位 = 参照）
+};
+
+Btn2JointResult button2OrientJointTarget(const double refJoints[6], const double refStylus[3],
+                                         const double curStylus[3], double outJoints[6]);
 
 // ============================================================================
 //  接线层的两条纯判据（2026-09-23 Task 2 修复轮：从 RelayCore.cpp **抽出来**）

@@ -1309,8 +1309,13 @@ static void test_solve_wrist_invariant_holds_and_budget_refusal_is_exercised() {
 //   它们定义在文件中间，㉕(a) 要用；放在更靠前的位置就得自己处理声明顺序（**不许**为了
 //   省事再写第二份实现）。放在文件末尾（㉔ 之后、main 之前）天然满足这一条。
 
-// 签名里【没有位置入参】是编译期性质，用函数指针类型钉住（与旧函数用例③同一招）
-typedef void (*Btn2OrientSig)(const double[6], const double[3], const double[3], double[6]);
+// 签名里【没有位置入参】是编译期性质，用函数指针类型钉住（与旧函数用例③同一招）。
+// ★ 2026-09-29 整支终审 I-1：返回类型从 `void` 改成 `Btn2JointResult` ⇒ 这个钉子**如设计那样
+//   先编译不过**（改动当场实测，原文存 `.superpowers/sdd/task-final-B-report.md`）：
+//     error C2440: “初始化”: 无法从“Btn2JointResult (__cdecl *)(const double [],const double
+//     [],const double [],double [])”转换为“Btn2OrientSig”
+//   ⇒ 这一行**同步**成新签名（钉子照旧只钉"没有位置入参"这件事，返回类型只是跟着走）。
+typedef Btn2JointResult (*Btn2OrientSig)(const double[6], const double[3], const double[3], double[6]);
 
 // ㉕(a) ★ 端到端：任意参照位姿 + 任意小摆动 ⇒ FK(解) 必须真的到得了目标。
 //    【它与 ㉓(a) 的分工】㉓(a) 喂的是"**直接构造的**目标矩阵"；这一条喂的是"**笔杆角度**"，
@@ -1336,6 +1341,7 @@ static void test_orient_joint_end_to_end_reaches_target() {
     unsigned seed = 20260929u;
     auto rnd = [&seed]() { seed = seed*1103515245u + 12345u; return (double)((seed>>16)&0x7FFF)/32767.0; };
     int ok = 0, ran = 0;
+    int okOk = 0;   // ★ I-1：报告 `Ok` 的组数（见循环末尾与它那三条断言）
     for (int t = 0; t < 60; ++t) {
         double ref[6] = { rnd()*720-360, rnd()*720-360, rnd()*310-155,
                           rnd()*720-360, rnd()*720-360, rnd()*720-360 };
@@ -1350,9 +1356,9 @@ static void test_orient_joint_end_to_end_reaches_target() {
         const double refStylus[3] = {0,0,0};
 
         double out[6];
-        button2OrientJointTarget(ref, refStylus, cur, out);
+        const Btn2JointResult res = button2OrientJointTarget(ref, refStylus, cur, out);
         ++ran;
-        // J1/J2/J3 必须逐位不变
+        // J1/J2/J3 必须逐位不变（**三种结局都成立**：Ok 写参照、另两档也写参照 ⇒ 无条件的）
         CHECK(out[0] == ref[0]);
         CHECK(out[1] == ref[1]);
         CHECK(out[2] == ref[2]);
@@ -1362,9 +1368,18 @@ static void test_orient_joint_end_to_end_reaches_target() {
         button2OrientTarget(refR, refStylus, cur, Config::BTN2_TILT_PHI_DEG, tgtR);
         double outR[9]; fkR(out, outR);
         if (angBetweenDeg(tgtR, outR) < Config::BTN2_WRIST_TOL_DEG) ++ok;
+        // ★ 2026-09-29 整支终审 I-1：返回值必须与"FK 真的到得了目标"**逐组一致** ——
+        //   报 `Ok` 的组数必须**恰好**等于 FK 命中目标的组数。两边都会变红的方向是分开的：
+        //     · 少报（解出来了却回 `SolveFailed`）⇒ `okOk < ok`；
+        //     · 多报（没解出来却回 `Ok`）⇒ `okOk > ok`（这一条正是本条要防的"无声失败"）。
+        //   ⚠ 不写成循环里的 `CHECK(res == Ok)`：那会**取消**本用例原有的容忍度
+        //     （实测 60 组里有 2 组本来就解不出来、由自验门拒掉 —— 见上面的 `ok >= 55`）。
+        if (res == Btn2JointResult::Ok) ++okOk;
     }
     CHECK(ran == 60);
     CHECK(ok >= 55);      // 容许少数位姿真的解不出来（那正是自验门该拒的）
+    CHECK(okOk >= 55);    // 同上：报告成功的组数也要够多（防空转）
+    CHECK(okOk == ok);    // ★ I-1：返回值与"真的到得了目标"必须逐组一致
     PASS();
 }
 
@@ -1379,31 +1394,41 @@ static void test_orient_joint_identity_and_nan() {
     double out[6];
     {   // 不动
         const double s[3] = {0,0,0};
-        button2OrientJointTarget(ref, s, s, out);
+        // ★ I-1：笔杆不动 ⇒ 目标就是参照 ⇒ 恒等求解**成功**，必须报 `Ok`（**不是** `SolveFailed`）。
+        //   ⚠ 这一条与本文件新增的 ㉕(d) 是一对：**两者的 `outJoints` 逐位相同**（都是参照）
+        //     ⇒ 返回值是**唯一**能分开"没动"与"没解出来"的东西（这正是 I-1 要修的那件事）。
+        CHECK(button2OrientJointTarget(ref, s, s, out) == Btn2JointResult::Ok);
         for (int i = 0; i < 6; ++i) CHECK(out[i] == ref[i]);
     }
-    // ⚠★ 【㉕(b) 的 NaN 段钉的是"行为"，不是"守卫存在"】本段（NaN / Inf 两档）的断言只有一条：
-    //    六位**逐位等于参照**（不动）。实测（`task-4-report.md` §3.3）：把守卫那个
-    //    `if (stylusBad) { … return; }`
-    //    **整块删掉**，本段**照旧全绿** —— 因为不进守卫也照样落回 `out == ref`：`rpyToMatrix(NaN,…)`
-    //    ⇒ 非有限 `dR` ⇒ `rotVecDeg` 落进**最后一个退化分支** ⇒ `rv = {0,0,0}` ⇒ `ω = 0` ⇒
+    // ⚠★ 【本段的牙齿在 I-1 之后换了来源 —— 这条历史仍值得读，别按旧结论照抄】
+    //    I-1 之前，本段的断言**只有一条**"六位逐位等于参照"，而那条**没有**牙齿：实测
+    //    （`task-4-report.md` §3.3）把守卫那个 `if (stylusBad) { … return; }` **整块删掉**，
+    //    本段**照旧全绿** —— 因为不进守卫也照样落回 `out == ref`：`rpyToMatrix(NaN,…)` ⇒
+    //    非有限 `dR` ⇒ `rotVecDeg` 落进**最后一个退化分支** ⇒ `rv = {0,0,0}` ⇒ `ω = 0` ⇒
     //    `targetR == refR` ⇒ 求解器在恒等目标上**第 0 轮就 break** ⇒ `out == ref`。
-    //    **删守卫不红 ≠ 本段空转**：给它牙齿的是改**守卫写入的值**那条对照（报告 §3.4：把
-    //    守卫体改成只写 `outJoints[5] = refJoints[5] + 1.0;` ⇒ 本段 `FAIL: out[i] == ref[i]`，
-    //    实测 35/1）⇒ 本段钉住的是"守卫那条出口写回的是**参照**"。
+    //    当时给它牙齿的只能是"改守卫**写入的值**"那条对照（报告 §3.4）。
+    //  ★ 2026-09-29 整支终审 I-1 之后：本段两档**各多了一条返回值断言**
+    //    （`== StylusUntrustworthy`）⇒ **删掉守卫这一支现在会当场红**：删了之后 NaN 输入会
+    //    一路走到底、在恒等目标上**成功**（上面刚推导过）⇒ 返回 `Ok` ⇒ 本段 `FAIL`。
+    //    ⚠ 那条对照**实测过**（原文见 `.superpowers/sdd/task-final-B-report.md` §4 负对照 B：
+    //      `FAIL: … == Btn2JointResult::StylusUntrustworthy`，37 passed / 1 failed），不是推断
+    //      —— 这正是"含糊的返回值把诊断成本推给操作员"的反面：有了它，
+    //      "守卫在不在"这件事第一次有了自动化证据。
     //    ⚠ 别把牙齿归给"求解失败回退"那条对照：它红的是**㉕(a)**（`FAIL: out[0] == ref[0]`，
     //      报告 §3.2），而本段这两档输入在守卫在时就**已返回**；就算守卫被删也是恒等目标、
-    //      第 0 轮 break ⇒ 成功 —— **这条回退根本不在本段的路线上**。
+    //      第 0 轮 break ⇒ 成功 —— **这条回退根本不在本段的路线上**（它现在只会经返回值显形）。
     {   // NaN 在 curStylus
         const double s0[3] = {0,0,0};
         const double sN[3] = {0, std::numeric_limits<double>::quiet_NaN(), 0};
-        button2OrientJointTarget(ref, s0, sN, out);
+        // ★ I-1：守卫那条出口必须报 `StylusUntrustworthy`（**不是** `SolveFailed`：
+        //   守卫在求解**之前**就返回了 ⇒ 报成求解失败会把操作员指到错的地方去）。
+        CHECK(button2OrientJointTarget(ref, s0, sN, out) == Btn2JointResult::StylusUntrustworthy);
         for (int i = 0; i < 6; ++i) CHECK(out[i] == ref[i]);
     }
     {   // Inf 在 refStylus
         const double sI[3] = {std::numeric_limits<double>::infinity(), 0, 0};
         const double s0[3] = {0,0,0};
-        button2OrientJointTarget(ref, sI, s0, out);
+        CHECK(button2OrientJointTarget(ref, sI, s0, out) == Btn2JointResult::StylusUntrustworthy);
         for (int i = 0; i < 6; ++i) CHECK(out[i] == ref[i]);
     }
     PASS();
@@ -1418,6 +1443,42 @@ static void test_orient_joint_signature_has_no_position_input() {
     TEST(㉕(c) 签名里没有位置入参（编译期性质）);
     Btn2OrientSig fp = &button2OrientJointTarget;
     CHECK(fp != nullptr);
+    PASS();
+}
+
+// ㉕(d) ★ 2026-09-29 整支终审 I-1：**求解失败**必须能被调用方看见（返回值），且六位逐位回参照。
+//    【为什么非有不可】这正是 I-1 要修的缺陷：三条出口**都只写六个数**、而返回值原来根本不存在
+//      ⇒ 现场"臂不再跟手、往按下位姿收回去"时**控制台一声不响**，谁也分不出是没解出来。
+//    【怎么造出"解不出来"的输入 —— 实测出来的机制，不是猜的】笔杆绕器件 X 转 150° ⇒
+//      ΔR 的旋转角 = 150° ⇒ 目标朝向离参照 **150°**；而求解器一轮最多走
+//      `Config::ORIENT_MAX_STEP_DEG`（现 3°）、最多 `Config::BTN2_WRIST_MAX_ITER`（现 24）轮
+//      ⇒ **步长预算 72° < 150°** ⇒ 解不到，自验门判 false。实测探针（记录见 report）：
+//      同一个目标把 `maxStepDeg` 换成 12° 就**解得出来** ⇒ 拒发的原因是**预算**，
+//      **不是**几何不可达 ✓（这两句话的来源见 report，不是推的）。
+//    ⚠ 150° 正是 `Config::ORIENT_MAX_OFFSET_DEG` 的**上限**（限幅只在 `th > 150` 时才缩比
+//      ⇒ 150 原样保留）⇒ 这是**入口能造出的最远目标**。用字面量 150 而不是那个常数：
+//      常数被调小时目标会跟着缩、反而落回预算内 ⇒ 那会让本用例静默失去意义。
+//    ⚠ 这个输入**挂在两个预算常数上**（与 ㉔ 的 c2 同一类）：谁把 `ORIENT_MAX_STEP_DEG`
+//      或 `BTN2_WRIST_MAX_ITER` 调到 24×step ≥ 150，本用例会红着说"这条输入不再解不出来"
+//      —— 那正是它该说的话（否则下面的失败分支会**静默**变成空转）。**别**为了让它绿去改 150。
+//    ⚠ `refStylus`/`curStylus` 全为**有限**值 ⇒ 本用例走的**不是** NaN 守卫那条路
+//      （那一条由 ㉕(b) 钉）⇒ 两档失败在返回值上被分开断言。
+static void test_orient_joint_solve_failure_is_visible_and_falls_back() {
+    TEST(㉕(d) ★ 求解失败 ⇒ 返回 `SolveFailed` 且六位逐位回参照（I-1）);
+    // 与 ㉕(b) 同一个参照：本用例与它**只差在返回值上**（两边的 `outJoints` 都是参照）
+    //   ⇒ 一对用例合起来证明"返回值是唯一能分开'没动'与'没解出来'的东西"。
+    const double ref[6] = {10, -20, 30, 40, -50, 60};
+    const double s0[3] = {0, 0, 0};
+    const double sFar[3] = {150.0, 0, 0};   // 绕器件 X 转 150°（见上面那段：超出步长预算）
+    double out[6] = {9,9,9,9,9,9};          // 哨兵：失败时必须被覆盖成参照
+    const Btn2JointResult res = button2OrientJointTarget(ref, s0, sFar, out);
+    CHECK(res == Btn2JointResult::SolveFailed);
+    for (int i = 0; i < 6; ++i) CHECK(out[i] == ref[i]);   // 逐位（`==`，不是"接近"）
+    // 另一组参照（全 0 的腕部姿态是奇异位姿，是"腕部求解"最容易被拒的地方）
+    const double ref0[6] = {0,0,0,0,0,0};
+    double out0[6] = {9,9,9,9,9,9};
+    CHECK(button2OrientJointTarget(ref0, s0, sFar, out0) == Btn2JointResult::SolveFailed);
+    for (int i = 0; i < 6; ++i) CHECK(out0[i] == ref0[i]);
     PASS();
 }
 
@@ -1512,6 +1573,7 @@ int main() {
     test_orient_joint_end_to_end_reaches_target();                 // ㉕(a) 2026-09-29 Task 4：端到端
     test_orient_joint_identity_and_nan();                          // ㉕(b)
     test_orient_joint_signature_has_no_position_input();           // ㉕(c) ★ 编译期钉子
+    test_orient_joint_solve_failure_is_visible_and_falls_back();   // ㉕(d) ★ I-1：求解失败可见
     test_roll_end_to_end_moves_only_j6();                          // ㉖ ★ 端到端：纯自转 ⇒ 只动 J6
 
     std::cout << "\nResults: " << g_passed << " passed, " << g_failed << " failed" << std::endl;

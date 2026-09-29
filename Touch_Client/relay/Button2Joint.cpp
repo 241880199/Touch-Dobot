@@ -447,8 +447,17 @@ bool button2SolveWrist(const double ref[6], const double targetR[9], double maxS
 //   `TcpCalibration::rpyToMatrix(refStylus)`：Task 2 要的是"在**当前末端朝向**上摆动"，
 //   而那个"当前末端朝向"必须与 Task 3 里 FK 回代所用的是**同一个量**（`composeTransform`）
 //   —— 用别的来源当 refR 会让"目标"与"能解到的"分处两套约定，Task 3 的自验门就会莫名其妙地拒。
-void button2OrientJointTarget(const double refJoints[6], const double refStylus[3],
-                              const double curStylus[3], double outJoints[6]) {
+// ★★ 2026-09-29 整支终审 I-1：本函数**从 `void` 改成返回 `Btn2JointResult`**（枚举定义与三档的
+//   逐行含义写在 `Button2Joint.h`）。这里只写"为什么是这三处 `return`"：
+//   ⚠ 返回值是本次唯一的行为变化 —— 三档对应的 `outJoints` 写法与改之前**逐位相同**：
+//     · `StylusUntrustworthy` 挂在**原有的**守卫那句 `return;` 上（只是把 `return;` 变成
+//       `return Btn2JointResult::StylusUntrustworthy;`），写法一个字没动；
+//     · `SolveFailed` 挂在**原有的** `if (!button2SolveWrist(...))` 上（失败回退那六行也没动）；
+//     · `Ok` 是函数末尾的落出口。
+//   ⇒ 别在任何一个分支里顺手多写/少写 `outJoints` 的下标：这个函数的价值一半就在这里
+//     （"三种结局都写六位"这条纪律，见上面那段的 ⚠★）。
+Btn2JointResult button2OrientJointTarget(const double refJoints[6], const double refStylus[3],
+                                         const double curStylus[3], double outJoints[6]) {
     // ---- 第一句就写 J1/J2/J3，且【无条件】-------------------------------------
     // 这三行在最上面、在任何分支之前，**第一句无条件写**；此后**任何分支只允许把它们写回
     // 同一个参照值**。本函数里这样的重复写入有**两处**（都是"整六位 = 参照"，两句**逐字相同**）：
@@ -491,7 +500,7 @@ void button2OrientJointTarget(const double refJoints[6], const double refStylus[
         if (!std::isfinite(refStylus[i]) || !std::isfinite(curStylus[i])) stylusBad = true;
     if (stylusBad) {
         for (int i = 0; i < 6; ++i) outJoints[i] = refJoints[i];
-        return;
+        return Btn2JointResult::StylusUntrustworthy;   // 写法未动，只是把这个出口**报出去**
     }
 
     // ---- 参照姿态（FK 的旋转部分，行主序）-------------------------------------
@@ -518,7 +527,15 @@ void button2OrientJointTarget(const double refJoints[6], const double refStylus[
     //   本函数**自己成立**。
     if (!button2SolveWrist(refJoints, targetR, Config::ORIENT_MAX_STEP_DEG, outJoints)) {
         for (int i = 0; i < 6; ++i) outJoints[i] = refJoints[i];
+        // ★ I-1：这个出口从前**没有任何人知道**走到了 —— 调用方只能看到"六位 = 参照"，
+        //   而那与"笔杆不可信"、乃至与"笔杆本来就没动、解出来的就是参照"**长得一模一样**
+        //   （后者是 `Ok`！见用例 ㉕(b) 第一段）。⇒ 现在把三档分开报。
+        //   ⚠ 失败理由（求逆失败 / 迭代没到门限）在 `button2SolveWrist` 内部**已经不可分**
+        //     —— 它只回 `bool`。这里**不**假装知道是哪一个（含糊地猜一种比不说更坏）。
+        return Btn2JointResult::SolveFailed;
     }
+
+    return Btn2JointResult::Ok;
 }
 
 // ============================================================================
