@@ -972,8 +972,11 @@ static void test_deadzone_swallows_below_and_admits_exactly_at_threshold() {
         const double a[3] = { Config::ORIENT_DEADZONE_DEG, 0, 0 };
         button2RotVecToMatDeg(a, Rx); button2Mat3Mul(Rs, Rx, Rsc); matToZyRpy(Rsc, cur);
         button2OrientTarget(refR, refStylus, cur, Config::BTN2_TILT_PHI_DEG, outR);
-        double outT[9], D[9], refT[9];
-        button2Mat3T(outR, outT); button2Mat3T(refR, refT); button2Mat3Mul(outR, refT, D);
+        // ⚠ 2026-09-29 Task 3（复审 M3）：这里原来多一行 `button2Mat3T(outR, outT);` —— 它的
+        //   结果 `outT` **算完没人读**（下面只用 `refT`）⇒ 删掉那一行连同它的声明。这不是
+        //   行为改变：`outT` 从未参与任何断言。
+        double D[9], refT[9];
+        button2Mat3T(refR, refT); button2Mat3Mul(outR, refT, D);
         double rv2[3]; button2RotVecDegForTest(D, rv2);
         CHECK(std::fabs(std::fabs(rv2[0]) - Config::ORIENT_DEADZONE_DEG) < 1e-9);
     }
@@ -1109,6 +1112,151 @@ static void test_roll_only_spins_around_the_styluses_own_axis() {
     PASS();
 }
 
+// ============================================================================
+//  ㉒ ~ ㉔ 2026-09-29 Task 3：`button2SolveWrist`（3×3 角雅可比 + FK 回代 + 阻尼 + 自验门）
+// ============================================================================
+// 【这一组在测什么】给定"想要的末端朝向"（Task 2 的 `button2OrientTarget` 产出的那一半），
+//   解出 J4/J5/J6 使 FK(J1..J6) 的旋转 = 目标。**判据的形状**（照简报，且刻意如此）：
+//     · ㉒ 恒等：目标 = 参照姿态 ⇒ 解 = 参照（初值即解，一步都不走）；
+//     · ㉓ ★ **跨位姿 FK 回验** —— 这是"解对了"的**直接证据**，且【不依赖任何符号常数】
+//       （三个 `BTN2_*_SIGN` 都不进这条：它只问"FK(解) 到不到得了目标"）；
+//     · ㉔ 腕部奇异位姿上的**不变量**：返回 true ⇒ FK(解) 必须**真的**等于目标。
+//   ⚠ ㉓ 拆成 (a)/(b) 两个独立函数：`CHECK` 的失败路径是 `return;` ⇒ 挤在一个函数里时，
+//     排在前面的断言一红，"FK 回验"这条最重要的判据**根本不会跑**（一个红遮住一个结论）。
+//     与 ⑲ / ⑳ 2026-09-29 的教训同一条。
+//   ⚠ 每条都是 `static void` + 末尾 `PASS()`：`CHECK` 展开成 `return;`（不能写进 `int main()`，
+//     那里 `return;` 不是合法 C++；漏 `PASS()` 则跑绿与"整条删掉"输出逐字相同）。
+
+// 测试侧【读数器】：从关节角取 FK 旋转（行主序 9 元）。不是被测逻辑。
+static void fkR(const double j[6], double R[9]) {
+    double T[4][4]; Kinematics::composeTransform(j, T);
+    for (int r = 0; r < 3; ++r) for (int c = 0; c < 3; ++c) R[r*3+c] = T[r][c];
+}
+// 两个旋转之间的夹角（度）：|rotvec(A·Bᵀ)|。只经 `rotVecDeg` 的薄壳，不复写约定。
+static double angBetweenDeg(const double A[9], const double B[9]) {
+    double Bt[9], D[9]; button2Mat3T(B, Bt); button2Mat3Mul(A, Bt, D);
+    double rv[3]; button2RotVecDegForTest(D, rv);
+    return std::sqrt(rv[0]*rv[0] + rv[1]*rv[1] + rv[2]*rv[2]);
+}
+
+// 测试侧【随机可达目标】构造器：给定 RNG 状态，造出 `ref[6]` 与"在 FK(ref) 上左乘一个小旋转"
+//   得到的目标 `Rt`。返回 false = 这一轮抽到退化轴（调用方跳过，且**不再**多消耗 RNG）。
+//   ⚠ 判据依赖它的两条性质：① 目标是**附近可达**的（≤ ~26°）；② 位姿遍布 J4/J5/J6 全域。
+//     它若退化成"目标恒等于参照"，㉓ 就成了空转 —— ㉒ 的存在正是不让这一层悄悄发生。
+static bool makeRandomReachTarget(unsigned& seed, double ref[6], double Rt[9]) {
+    auto rnd = [&seed]() { seed = seed * 1103515245u + 12345u;
+                           return (double)((seed >> 16) & 0x7FFF) / 32767.0; };
+    ref[0] = rnd()*720-360; ref[1] = rnd()*720-360; ref[2] = rnd()*310-155;
+    ref[3] = rnd()*720-360; ref[4] = rnd()*720-360; ref[5] = rnd()*720-360;
+    double Rr[9]; fkR(ref, Rr);
+    const double ax[3] = { rnd()*2-1, rnd()*2-1, rnd()*2-1 };
+    double n = std::sqrt(ax[0]*ax[0]+ax[1]*ax[1]+ax[2]*ax[2]);
+    if (n < 1e-6) return false;
+    const double sv[3] = { ax[0]/n*15*rnd(), ax[1]/n*15*rnd(), ax[2]/n*15*rnd() };
+    double Md[9]; button2RotVecToMatDeg(sv, Md); button2Mat3Mul(Md, Rr, Rt);
+    return true;
+}
+
+// ㉒ 目标 = 参考姿态 ⇒ 误差为 0 ⇒ 初值即解（一轮不走），解 = 参照（逐位）。
+//    【为什么非有不可】它把"解出来了"这件事与"目标就在原地"这个平凡情形钉在一起：
+//      若 ㉓ 的输入构造坏了（目标 ≈ 参照），只会让 ㉓ 变松 —— ㉒ 单独把平凡解的形状测掉。
+static void test_solve_wrist_identity_target_returns_reference() {
+    TEST(㉒ 目标 = 参考姿态 ⇒ 解 = 参考（恒等）);
+    const double poses[3][6] = {
+        {0,0,0,0,-90,0}, {30,-60,45,20,-70,10}, {-120,40,-30,90,-45,180}
+    };
+    for (int p = 0; p < 3; ++p) {
+        double R[9]; fkR(poses[p], R);
+        double out[6] = {9,9,9,9,9,9};
+        CHECK(button2SolveWrist(poses[p], R, Config::ORIENT_MAX_STEP_DEG, out));
+        for (int i = 0; i < 6; ++i) CHECK(std::fabs(out[i] - poses[p][i]) < 1e-6);
+    }
+    PASS();
+}
+
+// ㉓(a) ★★【本任务最重要的一条】跨位姿 FK 回验：解得出来 ⇒ FK(解) 必须真的等于目标。
+//    【为什么它是"直接证据"】它只问"我把解代回 FK，末端朝向对不对"，**不碰任何符号常数**
+//      （`BTN2_TILT_SIGN_*` / `BTN2_ROLL_SIGN` 都不进这条）—— 即使三个符号全反，只要解出的
+//      q 能让 FK 命中目标，这条就绿。符号的账由 Task 2 那一组与上机去结。
+//    ⚠ 判据写在循环**里**逐次断（而不是累加成 ok 再断）：第一个不满足的样本立刻红，且报出的是
+//      那句本质判据，不是一个 "ok=189" 的聚合数。
+//    ⚠ `solved >= 190` 是**防空转**：若实现恒返回 false，循环里那句一次都不会执行 ⇒ 全绿。
+static void test_solve_wrist_fk_roundtrip_across_random_poses() {
+    TEST(㉓(a) ★ 跨位姿 FK 回验：随机 200 组，解出来后 FK(解) 必须等于目标（< 0.05°）);
+    unsigned seed = 20260929u;
+    int solved = 0;
+    for (int t = 0; t < 200; ++t) {
+        double ref[6], Rt[9];
+        if (!makeRandomReachTarget(seed, ref, Rt)) continue;          // 抽到退化轴：跳过
+        double out[6];
+        if (!button2SolveWrist(ref, Rt, Config::ORIENT_MAX_STEP_DEG, out)) continue;  // 拒发：跳过
+        ++solved;
+        double Ro[9]; fkR(out, Ro);
+        // ★ 本任务最重要的判据：解出来了 ⇒ FK(解) 必须真的到得了目标。
+        CHECK(angBetweenDeg(Rt, Ro) < Config::BTN2_WRIST_TOL_DEG);
+    }
+    CHECK(solved >= 190);   // 容许 ~5% 因腕部奇异/不可达被拒，但绝大多数必须解得出来
+    PASS();
+}
+
+// ㉓(b) 解腕【只】动 J4/J5/J6：J1/J2/J3 必须**逐位**不变（用 `==`，不是"接近"）。
+//    【为什么与 (a) 分开】这是本任务第二条不变量，而 `CHECK` 的失败是 `return;` ⇒ 与 (a) 同函数
+//      时会被 (a) 的 FK 断言遮住（或反过来）。两条各带自己的 `PASS()`，各自失败。
+static void test_solve_wrist_keeps_base_joints_across_random_poses() {
+    TEST(㉓(b) 跨位姿：解腕只动 J4/J5/J6，J1/J2/J3 逐位不变);
+    unsigned seed = 20260929u;   // 与 ㉓(a) 同种子 ⇒ 跑的是同一批位姿
+    int solved = 0;
+    for (int t = 0; t < 200; ++t) {
+        double ref[6], Rt[9];
+        if (!makeRandomReachTarget(seed, ref, Rt)) continue;
+        double out[6];
+        if (!button2SolveWrist(ref, Rt, Config::ORIENT_MAX_STEP_DEG, out)) continue;
+        ++solved;
+        for (int i = 0; i < 3; ++i) CHECK(out[i] == ref[i]);
+    }
+    CHECK(solved >= 190);
+    PASS();
+}
+
+// ㉔ 腕部奇异位姿上的**不变量**：**返回 true ⇒ FK(解) 必须真的等于目标**。
+//    ★★ 这条【不能】写成"奇异位姿必须拒发"。理由两条，都是实测/算术：
+//      ① 写死"必须拒发"= 让用例替实现背书（在 ref 附近腕部未必解不出）；
+//      ② 更要命的是它**结构上无法变红** —— 不收敛会被末尾自验门转成 `false`，而失败分支
+//         断言的是 `out == ref` ⇒ 删掉自验门后它照旧绿（本轮复审实测证伪，见 task-3-report.md）。
+//      ⇒ 断言的只能是【不变量】：**返回 true ⇒ 解真的到得了目标**。这也是末尾自验门存在的
+//        唯一理由（它把"没解出来"翻译成 `false`，而不是一个看起来像解的值）。
+//    ⚠ 失败分支断言"out 逐位退回参照"是**另一条**契约（与 `button2Mat3Inv` 同款），一并钉住。
+static void test_solve_wrist_invariant_holds_on_wrist_singularities() {
+    TEST(㉔ 不变量：返回 true ⇒ FK(解) 必须真的等于目标（腕部奇异位姿：可达/不可达各若干）);
+    // 三组输入**刻意覆盖两个分支**（缺一类就有个负对照打不到，见下面 ⚠）：
+    //   c0/c1 —— 奇异位姿 + 附近可达目标（60°）⇒ 解应当出来 ⇒ 走 else 分支（把 FK 回验执行到）；
+    //   c2    —— 奇异位姿 + 极端目标（179°）⇒ 步长预算内解不出来 ⇒ 走 fail 分支（把"退回参照"执行到）。
+    // ⚠ 为什么两类【必须】都在（这是本轮实测出来的，不是推的）：
+    //   · 若只有"解得出来"的位姿：删末尾自验门**不会**让本用例红 —— 收敛在循环里就发生了，
+    //     自验门**没被走到**（主对照空转）；
+    //   · 若只有"解不出来"的位姿："在 return true 前把解弄错"那个兜底对照**不会**让本用例红
+    //     —— 它走 fail 分支，够不到 return true。
+    //   两个负对照各需要一类 ⇒ 两类都要在。哪一组解出来/解不出来的探针记录见 task-3-report.md。
+    const double refs[3][6] = {{0,0,0,0,0,0}, {0,0,0,0,180,0}, {0,0,0,0,0,0}};
+    const double bigs[3][3] = {{0,60,0}, {0,0,60}, {0,179,0}};
+    for (int c = 0; c < 3; ++c) {
+        double Rr[9]; fkR(refs[c], Rr);
+        double Md[9], Rt[9];
+        button2RotVecToMatDeg(bigs[c], Md);
+        button2Mat3Mul(Md, Rr, Rt);                              // 目标 = 世界系旋转 · FK(ref)
+        double out[6] = {9,9,9,9,9,9};                           // 哨兵：失败时必须被覆盖成 ref
+        const bool ok = button2SolveWrist(refs[c], Rt, Config::ORIENT_MAX_STEP_DEG, out);
+        if (!ok) {
+            for (int i = 0; i < 6; ++i) CHECK(out[i] == refs[c][i]);   // 失败 ⇒ 必须原样退回参照
+        } else {
+            double Ro[9]; fkR(out, Ro);
+            CHECK(angBetweenDeg(Rt, Ro) < Config::BTN2_WRIST_TOL_DEG); // ★ 真的不变量（**能红**）
+            for (int i = 0; i < 3; ++i) CHECK(out[i] == refs[c][i]);   // 且 J1/J2/J3 仍不动
+        }
+    }
+    PASS();
+}
+
 int main() {
     std::cout << "--- Button2Joint (按钮2 关节空间映射：笔杆姿态增量 -> 关节增量) ---" << std::endl;
     test_each_stylus_axis_moves_exactly_one_joint();
@@ -1140,6 +1288,10 @@ int main() {
     test_offset_cap_scales_rotation_angle_and_keeps_the_axis();      // ⑳c
     test_phi_is_not_a_dead_constant();                     // ⑳d ★ 专治"常数没被用上"
     test_roll_only_spins_around_the_styluses_own_axis();   // ㉑
+    test_solve_wrist_identity_target_returns_reference();        // ㉒ 2026-09-29 Task 3：腕部求解
+    test_solve_wrist_fk_roundtrip_across_random_poses();         // ㉓(a) ★ 跨位姿 FK 回验
+    test_solve_wrist_keeps_base_joints_across_random_poses();    // ㉓(b) 只动腕
+    test_solve_wrist_invariant_holds_on_wrist_singularities();   // ㉔ ★ 不变量（能红）
 
     std::cout << "\nResults: " << g_passed << " passed, " << g_failed << " failed" << std::endl;
     return g_failed == 0 ? 0 : 1;

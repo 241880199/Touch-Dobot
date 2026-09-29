@@ -235,7 +235,10 @@ void button2OrientTarget(const double refR[9], const double refStylus[3],
         double rvAll[3];
         rotVecDeg(dR, rvAll);
         const double th = std::sqrt(rvAll[0]*rvAll[0] + rvAll[1]*rvAll[1] + rvAll[2]*rvAll[2]);
-        if (th > Config::ORIENT_MAX_OFFSET_DEG && th > 1e-12) {
+        // ⚠ 2026-09-29 Task 3（复审 M1）：这里原来还挂着一句 `&& th > 1e-12` —— 它**不可达**
+        //   （`th > 150` 已蕴含 `th > 1e-12`），读起来像个除零守卫、其实不是（下面除的是 `th`，
+        //   而 `th > 150` 早已排除 `th ≈ 0`）⇒ 删掉。这个条件今天只剩一个子句。
+        if (th > Config::ORIENT_MAX_OFFSET_DEG) {
             const double k = Config::ORIENT_MAX_OFFSET_DEG / th;
             for (int i = 0; i < 3; ++i) rv[i] *= k;      // 缩比在【分量】上做：三个分量同一个 k ⇒ 轴不变
         }
@@ -264,6 +267,136 @@ void button2OrientTarget(const double refR[9], const double refStylus[3],
     const double rollAxis[3] = { 0.0, 0.0, roll };      // MSVC 的 C++ 不支持 C99 复合字面量
     button2RotVecToMatDeg(rollAxis, Mr);
     button2Mat3Mul(Rtilt, Mr, outR);
+}
+
+// ============================================================================
+//  按钮2 腕部求解（2026-09-29 Task 3）：给定"想要的末端朝向"，解 J4/J5/J6
+// ============================================================================
+// 契约、算法要点、失败语义（失败 ⇒ out 逐位退回 ref）全部写在 `Button2Joint.h`；这里只写
+// 【为什么正好是这几行】以及几处容易写错的地方。
+//
+// ⚠ **为什么是角雅可比 `J[3+i][3+j]`**：`Kinematics::jacobian`（Kinematics.cpp:272 起）填的是
+//   `J[0..2][i] = z_i × (p_ee − p_i)`（线速度）与 `J[3..5][i] = z_i`（**角速度**，各关节 z 轴
+//   在世界系）。我们要的是"腕三个关节（下标 3/4/5）的角速度 → 世界系角速度" ⇒ 取**行 3..5、
+//   列 3..5** 的 3×3 块。这是本任务与 FK 回代配对的全部数学。
+//
+// ⚠ **误差为什么右乘 `Rqᵀ`**：`D = targetR · Rqᵀ` 是"把**当前**末端朝向转到**目标**所需的世界系
+//   旋转"（左乘世界系旋转 ⇒ 与上面那 3×3 角雅可比的表达坐标系一致）。`rotVecDeg(D)` 就是那一下
+//   的旋转向量（度）—— FK 回代每一轮都重算 Rq，所以这是**牛顿法**、不是一次线性外推。
+//
+// ⚠ **单位自洽**：`Jw` 无量纲（z 轴是单位向量），`e` 与 `dq` 都是**度** —— 两者按同一比例
+//   (度↔弧度) 缩放，比值不变 ⇒ 直接用度算 `dq` 是对的（不必先转弧度）。**别"顺手转弧度"**：
+//   转了还要转回来，多两处能写错的地方。
+//
+// ⚠ **`Jw·Jwᵀ + λ²I` 为什么一定可逆**：加的是 λ²I（λ ≥ 1e-6 ⇒ λ² ≥ 1e-12）⇒ 特征值都 ≥ 1e-12。
+//   而 `button2Mat3Inv` 的失败门是 `|det| < 1e-12` ⇒ **理论上**它可能仍判失败（det 是三个特征值
+//   之积，λ 极小时确实可能压到门限下）。那一支 `return false` 是**真实的**（不是理论摆设）：
+//   它正是"雅可比退化"这条失败路径的执行点（`out` 此刻已是 ref）。
+bool button2SolveWrist(const double ref[6], const double targetR[9], double maxStepDeg, double out[6]) {
+    // ---- 失败契约：第一句就把 out 退回参照 --------------------------------------------
+    // 成功时下面会覆盖 out[3..5]（out[0..2] 本就等于 ref）；任何一条失败路径（雅可比退化、
+    // 迭代不收敛、末尾自验不过）都**不再动 out** ⇒ 自动满足"失败 ⇒ out 逐位退回 ref"。
+    // ⚠ 放在最前、且**所有**失败支路都不写 out —— 这样成功/失败的分叉只由返回值表达，
+    //   与 `button2Mat3Inv` 的失败契约同一条纪律（"结果只能看返回值，别把陈旧值当结果"）。
+    for (int i = 0; i < 6; ++i) out[i] = ref[i];
+
+    double q[3] = { ref[3], ref[4], ref[5] };   // 腕角初值 = 参照
+    double lam = Config::BTN2_WRIST_DAMP;       // λ 初值（阻尼下限）
+    double prevErr = 0.0;
+    bool havePrev = false;
+    bool converged = false;
+    int iter = 0;
+
+    for (; iter < Config::BTN2_WRIST_MAX_ITER; ++iter) {
+        const double joints[6] = { ref[0], ref[1], ref[2], q[0], q[1], q[2] };
+
+        // FK：当前末端旋转 Rq（取齐次阵的左上 3×3）与角雅可比 Jw
+        double T[4][4];
+        Kinematics::composeTransform(joints, T);
+        double Rq[9];
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c) Rq[r * 3 + c] = T[r][c];
+
+        double J[6][6];
+        Kinematics::jacobian(joints, J);
+        double Jw[9];                            // 行 3..5、列 3..5（见上面第一段说明）
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c) Jw[r * 3 + c] = J[3 + r][3 + c];
+
+        // 世界系误差 e = rotvec(targetR · Rqᵀ)（度）
+        double RqT[9], D[9], e[3];
+        button2Mat3T(Rq, RqT);
+        button2Mat3Mul(targetR, RqT, D);
+        rotVecDeg(D, e);                         // 直接调本文件匿名命名空间里的实现
+        const double err = std::sqrt(e[0] * e[0] + e[1] * e[1] + e[2] * e[2]);
+        if (err < Config::BTN2_WRIST_TOL_DEG) { converged = true; break; }
+
+        // λ 自适应：这一轮比上一轮更接近目标 ⇒ 减半（更信雅可比）；否则加倍（更信阻尼）。
+        //   ⚠ 与 `Kinematics::inverse` 同一形状（那里 λ 夹 [0.001, 10]；这里按计划夹
+        //     [1e-6, 1.0]，且用 λ² —— 见头文件的算法那一节）。
+        if (havePrev) { if (err < prevErr) lam *= 0.5; else lam *= 2.0; }
+        havePrev = true;
+        prevErr = err;
+        if (lam < 1e-6) lam = 1e-6;
+        if (lam > 1.0) lam = 1.0;
+
+        // M = Jw·Jwᵀ + λ²·I
+        double M[9];
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c) {
+                double s = 0.0;
+                for (int k = 0; k < 3; ++k) s += Jw[r * 3 + k] * Jw[c * 3 + k];
+                M[r * 3 + c] = s;
+            }
+        const double l2 = lam * lam;
+        M[0] += l2; M[4] += l2; M[8] += l2;
+
+        double Minv[9];
+        // 失败 ⇒ out 已是 ref（第一句写过），直接退。
+        if (!button2Mat3Inv(M, Minv)) return false;
+
+        // y = Minv · e；dq = Jwᵀ · y（阻尼最小二乘的一步）
+        double y[3];
+        for (int r = 0; r < 3; ++r)
+            y[r] = Minv[r * 3 + 0] * e[0] + Minv[r * 3 + 1] * e[1] + Minv[r * 3 + 2] * e[2];
+        double dq[3];
+        for (int i = 0; i < 3; ++i)
+            dq[i] = Jw[0 * 3 + i] * y[0] + Jw[1 * 3 + i] * y[1] + Jw[2 * 3 + i] * y[2];
+
+        // 逐轴夹到 ±maxStepDeg，再累加。
+        //   ⚠ 次序照抄 `clampJointStep`：**先比上界、再比下界**（两条独立 if，不是 else-if）——
+        //     `maxStepDeg` 为负时两条都会执行到，结果 = |maxStepDeg|（荒谬但与原处一致）。
+        for (int i = 0; i < 3; ++i) {
+            if (dq[i] >  maxStepDeg) dq[i] =  maxStepDeg;
+            if (dq[i] < -maxStepDeg) dq[i] = -maxStepDeg;
+            q[i] += dq[i];
+        }
+    }
+
+    // ---- 末尾自验（★ 这条不变量唯一能被抓住的地方）------------------------------------
+    // 迭代跑满 `MAX_ITER` 而没在循环里判收敛时，**再算一次** FK 与误差；仍不达门限 ⇒ false。
+    //   ⚠ 循环里那句 `err < TOL` 已经判过一次收敛 ⇒ 走到这里时 q 是"最后一次迭代后"的值，
+    //     必须重新评估（`err` 是上一轮的，不是当前 q 的）。
+    if (!converged) {
+        const double joints[6] = { ref[0], ref[1], ref[2], q[0], q[1], q[2] };
+        double T[4][4];
+        Kinematics::composeTransform(joints, T);
+        double Rq[9];
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c) Rq[r * 3 + c] = T[r][c];
+        double RqT[9], D[9], e[3];
+        button2Mat3T(Rq, RqT);
+        button2Mat3Mul(targetR, RqT, D);
+        rotVecDeg(D, e);
+        const double err = std::sqrt(e[0] * e[0] + e[1] * e[1] + e[2] * e[2]);
+        if (err >= Config::BTN2_WRIST_TOL_DEG) return false;   // out 仍是 ref
+        converged = true;
+    }
+
+    // ---- 成功：只覆盖腕三关节（J1/J2/J3 保持参照）---------------------------------------
+    out[0] = ref[0]; out[1] = ref[1]; out[2] = ref[2];
+    out[3] = q[0];   out[4] = q[1];   out[5] = q[2];
+    return true;
 }
 
 // ============================================================================
