@@ -104,29 +104,42 @@ static void bodyAxisEuler(const double refRpy[3], int axis, double deg, double o
     matToZyRpy(Rc, outRpy);
 }
 
-// ⚠ 只在本【用例文件】里用：矩阵 → ZYX 欧拉（度）。用来【造输入】（Task 2 的 ⑳/⑳b/⑳c/⑳d/㉑）。
-//   生产路径【不】用它的逆 —— `TcpCalibration::rpyToMatrix` 才是欧拉约定的唯一真相源。
-//   ⚠ 本文件**上面已经有一个** `matToZyRpy`（旧路径造输入用，⑦ 用它并自检过）。两者在
-//     **非退化支路**上逐字相同；差的只有万向锁那一支的取舍（`atan2(-R[5],R[4])` vs
-//     `atan2(-R[7],R[4])`）。**保留两份是 Task 2 简报的明确要求**（简报要求"用例侧自写一个
-//     `matToRpyZYX`"，而不是去扩生产头文件的接口）⇒ 这处重复【已记账】，不是没看见。
-//     ⚠ 前提订正：简报写"本仓没有矩阵→欧拉"—— 对**生产代码**成立，对**本测试文件**不成立
-//       （`matToZyRpy` 在 :87）。详见 task-2-report.md「自己复审发现的」。
-static void matToRpyZYX(const double R[9], double rpy[3]) {
-    const double D2R = 3.14159265358979323846 / 180.0;
-    const double R2D = 1.0 / D2R;
-    double sy = -R[6];
-    if (sy > 1.0) sy = 1.0;  if (sy < -1.0) sy = -1.0;
-    const double ry = std::asin(sy);
-    double rx, rz;
-    if (std::fabs(sy) < 0.999999) {                 // 常规支路
-        rx = std::atan2(R[7], R[8]);
-        rz = std::atan2(R[3], R[0]);
-    } else {                                        // 万向锁：rz 置 0（与 HapticCallback 同一取舍）
-        rx = std::atan2(-R[5], R[4]);
-        rz = 0.0;
+// ⚠★ 2026-09-29 修复轮 F1：这里**删掉**了一份 `matToRpyZYX` —— 它与本文件上面 :87 的
+//   `matToZyRpy` 是"同一约定两份实现"（本仓最忌的一种缺陷）。全部调用点
+//   （⑳/⑳b/⑳c/⑳d/㉑）已改走 `matToZyRpy`；本文件里矩阵→欧拉现在**只有这一份实现**。
+//   【为什么当初会误加】派单简报断言"本仓没有矩阵→欧拉"，于是照着这层意思新写了一份 ——
+//     而那句对**生产代码**成立、对**本测试文件**不成立（`matToZyRpy` 早就在 :87，⑦ 用它造
+//     输入并自检过）。真实差别只有**万向锁那一支**的取舍（`atan2(-R[5],R[4])` vs
+//     `atan2(-R[7],R[4])`）；**非退化支路**上两者逐字相同 —— 而本组用例全部落在非退化支路
+//     （最大也只是 ±58.93° 这类小角度、|ry| ≪ 90）。
+//   ⚠ 等价性**不靠**上面那句"逐字相同"的口头结论：下面这条往返断言把它实测钉住。
+//     「为什么不直接删了不管」的答案就在这条用例里 —— 换过去若不等价，它必红。
+//   ⚠ `matToZyRpy` 本身**一个字都没改**（既有用例 ⑦ 依赖它构造输入）。
+static void test_mat_to_rpy_roundtrip_on_task2_inputs() {
+    TEST(⑳x F1 等价性：matToZyRpy(rpyToMatrix(x)) 回到 x（⑳/㉑ 实际用到的输入，非退化）);
+    // (1) ⑳ 实际喂进去的两个 refStylus：全 0 与现场那个按下姿态
+    const double refs[2][3] = {{0, 0, 0}, {-58.93, 11.83, -6.41}};
+    for (int q = 0; q < 2; ++q) {
+        double R[9], back[3];
+        TcpCalibration::rpyToMatrix(refs[q][0], refs[q][1], refs[q][2], R);
+        matToZyRpy(R, back);
+        for (int i = 0; i < 3; ++i)
+            CHECK(std::fabs(back[i] - refs[q][i]) < 1e-9);   // 往返回到原值
     }
-    rpy[0] = rx * R2D; rpy[1] = ry * R2D; rpy[2] = rz * R2D;
+    // (2) ⑳ 用 Rx(10)、㉑ 用 Rz(20) 造 curStylus —— 两条构造路径各走一遍（矩阵→欧拉→矩阵）
+    const double devs[2][3] = {{10, 0, 0}, {0, 0, 20}};
+    for (int q = 0; q < 2; ++q) {
+        double Rs[9], Rd[9], Rsc[9], back[3];
+        TcpCalibration::rpyToMatrix(0, 0, 0, Rs);
+        button2RotVecToMatDeg(devs[q], Rd);
+        button2Mat3Mul(Rs, Rd, Rsc);
+        matToZyRpy(Rsc, back);                        // 与 ⑳/㉑ 里构造 curStylus 的同一句
+        double R2[9];
+        TcpCalibration::rpyToMatrix(back[0], back[1], back[2], R2);
+        for (int i = 0; i < 9; ++i)
+            CHECK(std::fabs(R2[i] - Rsc[i]) < 1e-9);  // 反解回同一个矩阵
+    }
+    PASS();
 }
 
 
@@ -831,8 +844,66 @@ static void test_rotvec_mat3_inverse() {
 //      （正位下"左乘"与"右乘"退化到同一件事）⇒ 只测一个正位，坏实现照样绿。
 //    【为什么参考笔杆姿态要有第二个】要看的是"**与参考笔杆姿态无关**"（映射吃的是 ΔR = R_refᵀ·R_cur，
 //      不是绝对姿态）⇒ 参考取 {-58.93, 11.83, -6.41}（现场那个按下姿态）再走一遍。
+//    ⚠★ 2026-09-29 修复轮 F2：本用例原来把**两条**断言挤在【一个】 `static void` 里，而 `CHECK`
+//      的失败路径是 `return;` ⇒ 排在前面的"逐元素等于 `Mw·refR`"一红，**后面那条真正的验收判据
+//      根本不会跑**（一个红遮住一个结论）。现拆成 **⑳(a) / ⑳(b) 两个独立函数**：两条断言各自
+//      失败、各带自己的 `PASS()`。**断言内容一个字都没有放宽**，只是把它们分开放。
+//      ⚠ 为什么是 `static void` 而不是直接写进 `main()`：`CHECK` 展开成 `return;`，而 `return;`
+//        在 `int main()` 里不是合法 C++（同 ⑲ 2026-09-29 实测那条 C2561）。
+//      ⚠ 拆开后**两个函数各自持有**那份"`refR` 得是旋转"的自检：少了它，函数二可能在坏夹具上
+//        静默通过（又是一次"看起来跑了但其实空转"）⇒ 自检必须跟着断言走，不能只留一份。
+//
+// ⑳(a) 展开式断言：`outR` **逐元素**等于 `Mw·refR`（`Mw = rotVecToMatDeg(SX·10, 0, 0)`）。
+//      这是"实现与期望的**精确值**相等"那一条 —— 最紧，也最容易被实现自己背书（期望值经 SX 表达）。
+static void test_tilt_target_equals_world_rotation_times_ref() {
+    TEST(⑳(a) 前摆 ⇒ outR 逐元素等于 Mw·refR（三个位姿 × 两个参考笔杆姿态）);
+    const double poses[3][6] = {
+        {0,0,0,0,-90,0}, {30,-60,45,20,-70,10}, {-120,40,-30,90,-45,180}
+    };
+    const double refs[2][3] = {{0,0,0}, {-58.93, 11.83, -6.41}};
+    for (int p = 0; p < 3; ++p) {
+        double T[4][4]; Kinematics::composeTransform(poses[p], T);
+        double refR[9];
+        for (int r = 0; r < 3; ++r) for (int c = 0; c < 3; ++c) refR[r*3+c] = T[r][c];
+        // 自检：refR 得是**旋转**，否则下面那组期望值不再是"一次世界系旋转"（空转）。
+        {
+            double rt[9], pr[9], e = 0.0;
+            button2Mat3T(refR, rt);
+            button2Mat3Mul(refR, rt, pr);
+            for (int i = 0; i < 9; ++i) e += std::fabs(pr[i] - (i % 4 == 0 ? 1.0 : 0.0));
+            CHECK(e < 1e-12);
+        }
+        for (int q = 0; q < 2; ++q) {
+            // 造输入：绕【器件 X】转 10° ⇒ R_cur = R_refStylus · Rx(10)
+            double Rs[9], Rx[9], Rsc[9];
+            TcpCalibration::rpyToMatrix(refs[q][0], refs[q][1], refs[q][2], Rs);
+            const double a10[3] = {10, 0, 0};
+            button2RotVecToMatDeg(a10, Rx);
+            button2Mat3Mul(Rs, Rx, Rsc);
+            double curStylus[3]; matToZyRpy(Rsc, curStylus);
+
+            double outR[9];
+            button2OrientTarget(refR, refs[q], curStylus, Config::BTN2_TILT_PHI_DEG, outR);
+
+            // 期望 = rotVecToMatDeg(SX·10, 0, 0) · refR  ← 经 SX 表达，【不写死符号】
+            double Mw[9], expR[9];
+            const double w[3] = { Config::BTN2_TILT_SIGN_X * 10.0, 0.0, 0.0 };
+            button2RotVecToMatDeg(w, Mw);
+            button2Mat3Mul(Mw, refR, expR);
+            for (int i = 0; i < 9; ++i) CHECK(std::fabs(outR[i] - expR[i]) < 1e-9);
+        }
+    }
+    PASS();
+}
+
+// ⑳(b) ★【与实现无关的验收判据】这次姿态变化的【世界系旋转向量】必须**沿基座 X 轴**
+//      （即"往 +Y 摆"的那根轴）：Y、Z 分量 < 1e-9，且 |X| 分量**恰为 10°**。
+//      ⚠ 这条**不查实现算出来的任何中间量** —— 它只问"末端朝向变了多少、绕哪根轴变"，
+//        符号约定、乘法次序、坐标约定都改不动它 ⇒ 正是拆开前会被 ⑳(a) 遮住的那条。
+//      ⚠ 拆开后它自带一份"refR 是旋转"的自检（与 ⑳(a) 的那份同因不同用）：
+//        没有它，坏夹具下 `D = outR·refRᵀ` 不再是"这次变化的世界系旋转"（空转）。
 static void test_tilt_moves_tip_toward_base_plus_y_in_any_pose() {
-    TEST(⑳ 前摆 ⇒ 末端 tip 往基座 +Y 摆（三个位姿 × 两个参考笔杆姿态）);
+    TEST(⑳(b) 前摆 ⇒ 末端 tip 往基座 +Y 摆（世界系旋转向量沿基座 X，三个位姿 × 两个参考笔杆姿态）);
     const double poses[3][6] = {
         {0,0,0,0,-90,0}, {30,-60,45,20,-70,10}, {-120,40,-30,90,-45,180}
     };
@@ -856,17 +927,10 @@ static void test_tilt_moves_tip_toward_base_plus_y_in_any_pose() {
             const double a10[3] = {10, 0, 0};
             button2RotVecToMatDeg(a10, Rx);
             button2Mat3Mul(Rs, Rx, Rsc);
-            double curStylus[3]; matToRpyZYX(Rsc, curStylus);
+            double curStylus[3]; matToZyRpy(Rsc, curStylus);
 
             double outR[9];
             button2OrientTarget(refR, refs[q], curStylus, Config::BTN2_TILT_PHI_DEG, outR);
-
-            // 期望 = rotVecToMatDeg(SX·10, 0, 0) · refR  ← 经 SX 表达，【不写死符号】
-            double Mw[9], expR[9];
-            const double w[3] = { Config::BTN2_TILT_SIGN_X * 10.0, 0.0, 0.0 };
-            button2RotVecToMatDeg(w, Mw);
-            button2Mat3Mul(Mw, refR, expR);
-            for (int i = 0; i < 9; ++i) CHECK(std::fabs(outR[i] - expR[i]) < 1e-9);
 
             // ★ 与实现无关的【验收判据】：这次姿态变化的【世界系旋转向量】必须
             //   **沿基座 X 轴**（即"往 +Y 摆"的那根轴），其余两分量必须是 0，大小恰为 10°。
@@ -898,7 +962,7 @@ static void test_deadzone_swallows_below_and_admits_exactly_at_threshold() {
         double Rs[9], Rx[9], Rsc[9], cur[3], outR[9];
         TcpCalibration::rpyToMatrix(0,0,0, Rs);
         const double a[3] = { Config::ORIENT_DEADZONE_DEG * 0.5, 0, 0 };
-        button2RotVecToMatDeg(a, Rx); button2Mat3Mul(Rs, Rx, Rsc); matToRpyZYX(Rsc, cur);
+        button2RotVecToMatDeg(a, Rx); button2Mat3Mul(Rs, Rx, Rsc); matToZyRpy(Rsc, cur);
         button2OrientTarget(refR, refStylus, cur, Config::BTN2_TILT_PHI_DEG, outR);
         for (int i = 0; i < 9; ++i) CHECK(std::fabs(outR[i] - refR[i]) < 1e-12);
     }
@@ -906,7 +970,7 @@ static void test_deadzone_swallows_below_and_admits_exactly_at_threshold() {
         double Rs[9], Rx[9], Rsc[9], cur[3], outR[9];
         TcpCalibration::rpyToMatrix(0,0,0, Rs);
         const double a[3] = { Config::ORIENT_DEADZONE_DEG, 0, 0 };
-        button2RotVecToMatDeg(a, Rx); button2Mat3Mul(Rs, Rx, Rsc); matToRpyZYX(Rsc, cur);
+        button2RotVecToMatDeg(a, Rx); button2Mat3Mul(Rs, Rx, Rsc); matToZyRpy(Rsc, cur);
         button2OrientTarget(refR, refStylus, cur, Config::BTN2_TILT_PHI_DEG, outR);
         double outT[9], D[9], refT[9];
         button2Mat3T(outR, outT); button2Mat3T(refR, refT); button2Mat3Mul(outR, refT, D);
@@ -936,7 +1000,7 @@ static void test_offset_cap_scales_rotation_angle_and_keeps_the_axis() {
         double Rs[9], Ra[9], Rsc[9], cur[3], outR[9];
         TcpCalibration::rpyToMatrix(0,0,0, Rs);
         const double a[3] = {170.0, 0.0, 0.0};
-        button2RotVecToMatDeg(a, Ra); button2Mat3Mul(Rs, Ra, Rsc); matToRpyZYX(Rsc, cur);
+        button2RotVecToMatDeg(a, Ra); button2Mat3Mul(Rs, Ra, Rsc); matToZyRpy(Rsc, cur);
         button2OrientTarget(refR, refStylus, cur, Config::BTN2_TILT_PHI_DEG, outR);
         double refT[9], D[9];
         button2Mat3T(refR, refT); button2Mat3Mul(outR, refT, D);
@@ -953,7 +1017,7 @@ static void test_offset_cap_scales_rotation_angle_and_keeps_the_axis() {
         const double k = cap / n;
         double Rs[9], Ra[9], Rsc[9], cur[3], outR[9];
         TcpCalibration::rpyToMatrix(0,0,0, Rs);
-        button2RotVecToMatDeg(a, Ra); button2Mat3Mul(Rs, Ra, Rsc); matToRpyZYX(Rsc, cur);
+        button2RotVecToMatDeg(a, Ra); button2Mat3Mul(Rs, Ra, Rsc); matToZyRpy(Rsc, cur);
         button2OrientTarget(refR, refStylus, cur, Config::BTN2_TILT_PHI_DEG, outR);
         double refT[9], D[9];
         button2Mat3T(refR, refT); button2Mat3Mul(outR, refT, D);
@@ -984,7 +1048,7 @@ static void test_phi_is_not_a_dead_constant() {
     const double a[3] = {0, 10, 0};                       // 器件 Y 轴 +10°（左右摆）
     button2RotVecToMatDeg(a, Ry10);
     button2Mat3Mul(Rs, Ry10, Rsc);
-    matToRpyZYX(Rsc, cur);
+    matToZyRpy(Rsc, cur);
     button2OrientTarget(refR, refStylus, cur, 90.0, outR);   // ← φ = 90
 
     double refT[9], D[9];
@@ -1017,7 +1081,7 @@ static void test_roll_only_spins_around_the_styluses_own_axis() {
         const double a20[3] = {0, 0, 20};
         button2RotVecToMatDeg(a20, Rz20);
         button2Mat3Mul(Rs, Rz20, Rsc);
-        double curStylus[3]; matToRpyZYX(Rsc, curStylus);
+        double curStylus[3]; matToZyRpy(Rsc, curStylus);
 
         double outR[9];
         button2OrientTarget(refR, refStylus, curStylus, Config::BTN2_TILT_PHI_DEG, outR);
@@ -1069,7 +1133,9 @@ int main() {
     test_rotvec_matrix_specific_rx90();                    // ⑲(b)
     test_rotvec_mat3_mul_and_transpose();                  // ⑲(c)
     test_rotvec_mat3_inverse();                            // ⑲(d)
-    test_tilt_moves_tip_toward_base_plus_y_in_any_pose();  // ⑳  2026-09-29 Task 2：姿态目标
+    test_mat_to_rpy_roundtrip_on_task2_inputs();           // ⑳x 修复轮 F1：矩阵→欧拉统一后的往返自检
+    test_tilt_target_equals_world_rotation_times_ref();    // ⑳(a) 2026-09-29 Task 2：姿态目标（展开式断言）
+    test_tilt_moves_tip_toward_base_plus_y_in_any_pose();  // ⑳(b) ★ 验收判据（F2 拆开后独立失败）
     test_deadzone_swallows_below_and_admits_exactly_at_threshold();  // ⑳b
     test_offset_cap_scales_rotation_angle_and_keeps_the_axis();      // ⑳c
     test_phi_is_not_a_dead_constant();                     // ⑳d ★ 专治"常数没被用上"
