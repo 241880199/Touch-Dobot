@@ -234,8 +234,11 @@ git commit -m "feat(btn2): 3×3 纯算术（rotVec↔Mat / 乘 / 转置 / 求逆
 - Produces:
   ```cpp
   // refR/outR: 行主序 3x3；refStylus/curStylus: {Rx,Ry,Rz} 度（同 appState.stylusOrient 次序）
+  // ★ phiDeg 是【入参】而不是直接读 Config —— 理由见下面实现那一段的 ⚠：
+  //   编译期常数在运行期改不了 ⇒ 用例写不出有牙齿的对照（那本案就会退化成让实现自己给自己背书）。
+  //   **所有调用点（用例 ⑳/⑳b/⑳c/⑳d/㉑ 与 Task 4）一律传 `Config::BTN2_TILT_PHI_DEG`。**
   void button2OrientTarget(const double refR[9], const double refStylus[3],
-                           const double curStylus[3], double outR[9]);
+                           const double curStylus[3], double phiDeg, double outR[9]);
   ```
 
 **公式（设计 §1 修订版）：**
@@ -450,6 +453,35 @@ static void matToRpyZYX(const double R[9], double rpy[3]) {
 ⚠ ⑳c 的完整断言照 ⑳ 的写法（`rotvec(outR·refRᵀ)` 的三个分量）来写；
 **负对照**：把整体缩比换成逐分量 `clamp` ⇒ ⑳c 的"轴不变"必须红。
 
+```cpp
+    {
+        TEST(⑳d ★ φ 不是死常数：φ=90° 时"器件左右摆"必须映到【绕基座 Z 转】);
+        //   今天 φ=0 ⇒ 左右摆映到绕基座 Y。把 φ 传成 90° 时，(0,cosφ,sinφ) = (0,0,1)
+        //   ⇒ 世界系旋转向量必须【沿基座 Z】且大小仍是 10°。**这一条专治"常数没被用上"**。
+        const double refR[9] = {1,0,0, 0,1,0, 0,0,1};
+        const double refStylus[3] = {0,0,0};
+        double Rs[9], Ry10[9], Rsc[9], cur[3], outR[9];
+        TcpCalibration::rpyToMatrix(0,0,0, Rs);
+        const double a[3] = {0, 10, 0};                       // 器件 Y 轴 +10°（左右摆）
+        button2RotVecToMatDeg(a, Ry10);
+        button2Mat3Mul(Rs, Ry10, Rsc);
+        matToRpyZYX(Rsc, cur);
+        button2OrientTarget(refR, refStylus, cur, 90.0, outR);   // ← φ = 90
+
+        double refT[9], D[9];
+        button2Mat3T(refR, refT);
+        button2Mat3Mul(outR, refT, D);                        // 世界系增量
+        double rvw[3]; button2RotVecDegForTest(D, rvw);
+        CHECK(std::fabs(rvw[0]) < 1e-9);                      // 无基座 X 分量
+        CHECK(std::fabs(rvw[1]) < 1e-9);                      // 无基座 Y 分量
+        CHECK(std::fabs(std::fabs(rvw[2]) - 10.0) < 1e-9);    // 大小 = 10°（方向由 SY 定，故取绝对值）
+    }
+```
+**★ 负对照（**保证红**，不依赖任何假设）**：把实现里的 `phi` 恒置 0（即把入参丢掉）
+⇒ `rvw[2]` 会变成 ≈0、而 `rvw[1]` 变成 ±10 ⇒ **⑳d 必须红**。
+⚠ 特别提醒：**这条对照是写给"常数没被用上"这个具体缺陷的** —— 本仓栽过"常数写进去但没人读"，
+而那种缺陷**在 φ=0 的默认值下完全看不出来**（今天正是 φ=0）。
+
 - [ ] **Step 3: 跑，确认失败**（未声明）
 - [ ] **Step 4: 实现 `button2OrientTarget`**
 
@@ -463,8 +495,16 @@ void button2OrientTarget(const double refR[9], const double refStylus[3],
     button2Mat3Mul(RrefT, Rcur, dR);                    // ΔR = R_refᵀ · R_cur（器件系）
     double rv[3]; button2RotVecDegForTest(dR, rv);
 
-    const double w[3] = { Config::BTN2_TILT_SIGN_X * rv[0],
-                          Config::BTN2_TILT_SIGN_Y * rv[1], 0.0 };
+    // 摆动向量先按逐轴符号折进去，再整体乘 M = Rx(φ)。
+    //   ⚠ φ 必须【真的被用上】，而且必须【能测】：
+    //     ① 写成"硬编成 0"会把这个常数变成**死常数**（上机调它没效果，调用方以为调了）；
+    //     ② 它若是编译期常数，用例就没法在运行期改它 ⇒ 写不出有牙齿的对照。
+    //   ⇒ **φ 是入参**，调用点传 `Config::BTN2_TILT_PHI_DEG`（见 Task 5）。默认 0 ⇒ M = I。
+    const double D2R0 = 3.14159265358979323846 / 180.0;
+    const double phi = phiDeg * D2R0;
+    const double t0 = Config::BTN2_TILT_SIGN_X * rv[0];
+    const double t1 = Config::BTN2_TILT_SIGN_Y * rv[1];
+    const double w[3] = { t0, std::cos(phi) * t1, std::sin(phi) * t1 };   // = Rx(φ)·(t0,t1,0)
     double Rtilt[9], Mw[9];
     button2RotVecToMatDeg(w, Mw);
     button2Mat3Mul(Mw, refR, Rtilt);                     // 左乘 = 基座系里摆
