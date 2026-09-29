@@ -1194,8 +1194,14 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
         //     ⇒ 哪天 RPY 开关翻回 false，**关节路径的入参也会跟着冻住** —— 那是静默耦合
         //     （关掉 A 却改了 B 的行为）。放这里 ⇒ 两条路径共用同一份"过门+低通"的中间量。
         //   ⚠ NaN：`dr*` 是 NaN 时这里会把 NaN 抄进去 —— **无害**，且不靠巧合：
-        //     `button2JointTarget` 自己的守卫（Button2Joint.cpp 的 allFinite3）会让返回值
-        //     **退回参照** ⇒ 关节不动、正解出的位置也有限。⇒ NaN 到不了 ServoJ，也到不了安全门。
+        //     下面那个调用点有【两个候选函数】（分叉见 `Config::BTN2_ORIENT_TARGET_ENABLED`），
+        //     **两个各自都带笔杆侧守卫**：旧 `button2JointTarget` 用 `allFinite3`、
+        //     新 `button2OrientJointTarget` 用 `std::isfinite`；两边都同时判 `refStylus` 与
+        //     `curStylus` 那三个分量 ⇒ 任一分量非有限时**六位全退回参照**
+        //     ⇒ 关节不动、正解出的位置也有限。⇒ NaN 到不了 ServoJ，也到不了安全门。
+        //   ⚠ 这两个守卫都**只覆盖笔杆侧**：`refJoints`（= `m_jointRef`）自己若为 NaN，会**原样
+        //     传出去**（两个函数逐字相同的边界，见 Button2Joint.h）—— 那一支不是这里接住的，
+        //     而是下面的 I1 判据对它放行（`isWithinJointLimits` 遇 NaN 返 true）、由 ② 的 FK 门 REJECT。
         //   ⚠ 死区把三轴全归 0 时，这里写入的就是 `m_orientRefStylus` 本身 ⇒ 纯函数返回
         //     逐位等于 `m_jointRef` 的目标 ⇒ 机械臂**原地保持**（不是"这一帧不下发"）。
         m_btn2StylusFilt[0] = m_orientRefStylus.x + drx;
@@ -1591,7 +1597,19 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
         sRef[0] = m_orientRefStylus.x;
         sRef[1] = m_orientRefStylus.y;
         sRef[2] = m_orientRefStylus.z;
-        button2JointTarget(m_jointRef, sRef, m_btn2StylusFilt, j);
+        // ★★★ 2026-09-29：按钮2 的两套映射在这里分叉。
+        //   开 ⇒ 新实现（"先算想要的末端姿态，再解 J4/J5/J6"，Task 2 + Task 3 + Task 4）；
+        //   关 ⇒ 旧实现（"一根器件轴喂一个关节"，即上面 ① 那段描述的映射）—— **这一行逐字保留**。
+        //   **回滚 = 翻 `Config::BTN2_ORIENT_TARGET_ENABLED` 一个 bool**（配置在 Config.h；
+        //   那里也写着"旧路一个字都不许改"）。设计见
+        //   `Docs/superpowers/specs/2026-09-29-button2-orientation-target-design.md`（读【修订】那一节）。
+        //   ⚠ 两条路入参次序不同：`m_jointRef` 是 j1..j6，`m_btn2StylusFilt` 是笔杆 Rx,Ry,Rz；
+        //     新函数的签名把这两者叫作 `refJoints` 与 `curStylus`，位置与旧调用点一一对应。
+        if (Config::BTN2_ORIENT_TARGET_ENABLED) {
+            button2OrientJointTarget(m_jointRef, sRef, m_btn2StylusFilt, j);
+        } else {
+            button2JointTarget(m_jointRef, sRef, m_btn2StylusFilt, j);   // 旧路，**逐字保留**
+        }
 
         // ================= 复审 I1（Important）：参照不可信 ⇒ **拒发** =================
         // 【场景】`app.robotActualPose.j1..j6` 的初值**全 0**，唯一写入点是 `queryJointAngles`

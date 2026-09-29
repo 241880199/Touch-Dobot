@@ -953,7 +953,10 @@ namespace Config {
     const double BTN2_ROLL_SIGN     = -1.0;   // 沿用 BTN2_J6_SIGN 的实测结论
     const double BTN2_WRIST_TOL_DEG = 0.05;   // 牛顿迭代收敛门限（度）
     const int    BTN2_WRIST_MAX_ITER = 24;
-    const double BTN2_WRIST_DAMP    = 1e-3;   // 阻尼 λ 的下限
+    const double BTN2_WRIST_DAMP    = 1e-3;   // 阻尼 λ 的**初值**（不是下限）：`button2SolveWrist`
+                                              // 每轮比上一轮误差小 ⇒ ×0.5、否则 ×2，**之后**才夹到
+                                              // [1e-6, 1.0] —— 那两个夹取界的字面量在 Button2Joint.cpp
+                                              // 里，不是本常数（2026-09-29 订正：原文写"下限"与代码不符）
 
     // ★★★ 2026-09-29 一次性【探针】：`ServoP` 到底吃不吃额外的伺服参数？
     //
