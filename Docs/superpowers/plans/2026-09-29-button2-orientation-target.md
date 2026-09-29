@@ -823,29 +823,79 @@ static void test_orient_joint_signature_has_no_position_input() {
 
 ### Task 5: 接线（`RelayCore.cpp` 的调用点分叉）
 
-**Files:** Modify `Touch_Client/relay/RelayCore.cpp`（按钮2 关节分支里那一处调用，约 :1544）
-Modify `Touch_Client/config/Config.h`（开关 + 4 个常数）
+**Files:**
+- Modify `Touch_Client/relay/RelayCore.cpp` —— **调用点在 `:1594`**（⚠ 写计划时写的"约 :1544"是**旧的**；
+  `grep -n "button2JointTarget" Touch_Client/relay/RelayCore.cpp` 现场核过，真实落点是 **`:1594`**。
+  例外见下面 Step 0 里那条"逐行核实"的要求 —— 别照抄这个数，**动手前再 grep 一次**。）
+- Modify `Touch_Client/config/Config.h` —— **只改一行注释**（见 Step 0b）
 
-⚠ **本文件不被任何测试编译** ⇒ 这一步**只能靠复审 + 上机**。报告里必须写明。
+⚠ **`RelayCore.cpp` 不被任何测试编译** ⇒ 这一步**只能靠复审 + 上机**。报告里必须写明这句。
 
 > ⚠ **本任务不加 `Config` 常数** —— 它们在 **Task 2 的 Step 0** 就加了（否则 Task 2 编不过）。
-> 本任务只做**接线**。
+> 本任务只做**接线** + 两处注释订正。
+
+- [ ] **Step 0: 动手前先 `grep` 三个名字**（本仓有成文教训：**常数与行号一样脆**）
+
+```
+grep -n "button2JointTarget"            Touch_Client/relay/RelayCore.cpp          # 找调用点
+grep -n "BTN2_ORIENT_TARGET_ENABLED"    Touch_Client/config/Config.h              # 确认开关在
+grep -n "BTN2_WRIST_DAMP"               Touch_Client/config/Config.h              # 见 Step 0b
+```
+**以 grep 的输出为准**，不要用本文件里的任何行号。
+
+- [ ] **Step 0b: 顺手订正一处**跨文件常数角色不符**（Task 3 复审的 Minor）**
+
+`Config.h` 里 `BTN2_WRIST_DAMP` 的注释写的是"阻尼 λ 的下限"，而 `Button2Joint.cpp` 里
+它是 λ 的**初值**（真正夹的下限是代码里的字面量 `1e-6`，上界 `1.0`）。
+⇒ 把注释改成如实（例如"阻尼 λ 的**初值**（每轮按误差变大/变小先 ×2 / ×0.5，再夹到 [1e-6, 1.0]）"）。
+**只改注释，不改数值。** ⚠ 这条是"注释说假话"类 —— 本仓最忌，所以哪怕只是一行也顺手改掉。
 
 - [ ] **Step 1: 调用点分叉**
 
-在 `RelayCore.cpp` 现有 `button2JointTarget(m_jointRef, sRef, m_btn2StylusFilt, j);` 那一行改成：
+在 `RelayCore.cpp` 里那一行 `button2JointTarget(m_jointRef, sRef, m_btn2StylusFilt, j);`（grep 到的落点）
+改成：
 
 ```cpp
+        // ★★★ 2026-09-29：按钮2 的新实现（"姿态目标 + 解 J4/J5/J6"）与旧实现（"一根器件轴喂一个关节"）
+        //   在这里分叉。**回滚 = 翻 Config::BTN2_ORIENT_TARGET_ENABLED 一个 bool。**
+        //   设计见 `Docs/superpowers/specs/2026-09-29-button2-orientation-target-design.md`（读【修订】那一节）。
         if (Config::BTN2_ORIENT_TARGET_ENABLED) {
             button2OrientJointTarget(m_jointRef, sRef, m_btn2StylusFilt, j);
         } else {
-            button2JointTarget(m_jointRef, sRef, m_btn2StylusFilt, j);   // 旧路，逐字保留
+            button2JointTarget(m_jointRef, sRef, m_btn2StylusFilt, j);   // 旧路，**逐字保留**
         }
 ```
+
 **下游（I1 参照闸 / I2 关节限位闸 / FK 位置门 / `clampJointStep` / `ServoJ`）一行不改。**
 
-- [ ] **Step 2: 编译 + 负对照**（往 `RelayCore.cpp` 注入语法错误 ⇒ 必须报 `error C…`，证明这次构建确实在编它）
-- [ ] **Step 3: 整床 + 提交**
+⚠ **上面那句"NaN 到不了 ServoJ"的既有注释要核一遍**：它现在的理由是"`button2JointTarget` 自己的
+守卫（`allFinite3`）会让返回值退回参照"。**新函数也必须有同款守卫**（Task 4 的契约里写了）
+⇒ **现场核 `Button2Joint.cpp` 的新函数确有该守卫**；若没有，那条注释就变成了假话，
+要么补守卫、要么改注释。**别放过这一条 —— 它是安全链路上的一句注释。**
+
+- [ ] **Step 2: 编译 + 负对照**
+
+1. 正常编译：**0 error**（既有的 `CALLBACK` 宏重定义警告不算）。
+2. **负对照 A**：往 `RelayCore.cpp` 里注入一处语法错误 ⇒ **必须报 `error C…`**
+   （证明这次构建**确实在编它**，而不是因为增量构建把它跳过了）。
+3. **负对照 B（本任务特有）**：把开关临时改成 `false` ⇒ 编译通过；再核
+   **旧的那一行仍然逐字在**（`git diff` 里 `else` 支那一行应当是**纯新增**，不是"移动"）。
+   ⚠ 这一步**测不出行为**（本文件无自动化用例）⇒ 它只证明"两行都在"，**不是**功能验证。
+
+- [ ] **Step 3: 逐条确认四个常数**真的被读**（Task 2 复审留下的要求）**
+
+在报告里**逐条**给出 `grep` 结果，证明这四个常数**每个都有一个真实的消费点**：
+`BTN2_ORIENT_TARGET_ENABLED`（本步的分叉）· `BTN2_TILT_PHI_DEG`（Task 4 传进 `button2OrientTarget`）·
+`BTN2_WRIST_TOL_DEG` / `BTN2_WRIST_MAX_ITER` / `BTN2_WRIST_DAMP`（`button2SolveWrist` 内部）。
+**任何一个没有消费点 ⇒ 报出来**（本仓栽过"常数写进去没人读"）。
+
+- [ ] **Step 4: 整床 + 提交**
+
+⚠ 提交信息里必须写明：**`RelayCore.cpp` 不被任何测试编译 ⇒ 接线这一层仍只有复审 + 上机。**
+⚠ **仍开着的一个问题（等用户裁决，不是本任务的阻塞项）**：本任务会把
+`Config::ORIENT_MAX_STEP_DEG`（=3.0）当作 `button2SolveWrist` 的**内部牛顿步长上限**传进去
+⇒ **单次调用可改变的朝向被限在 24×3° = 72°**，而设计里 `ORIENT_MAX_OFFSET_DEG` 写的是 150°
+⇒ 实际生效上限是 **72° 不是 150°**。**在提交信息与报告中如实点名**，等用户定"72 够不够"。
 
 ---
 
