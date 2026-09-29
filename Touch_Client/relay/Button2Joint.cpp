@@ -140,6 +140,12 @@ inline void rotVecDeg(const double R[9], double rv[3]) {
 
 }   // namespace
 
+// 仅供测试：把文件内的 rotVecDeg 暴露出来（不改实现，只转发）
+// ⚠ 必须放在匿名命名空间【之外】才有外部链接 —— 测试（test_button2_joint.cpp 的 ⑲(a)）
+//   要拿 `button2RotVecToMatDeg` 造出的矩阵**经同一个 rotVecDeg** 还原，才能证明
+//   "旋转向量 ↔ 矩阵"这一对在**同一份实现**下自洽。声明在 Button2Joint.h。
+void button2RotVecDegForTest(const double R[9], double rv[3]) { rotVecDeg(R, rv); }
+
 void button2JointTarget(const double refJoints[6],
                         const double refStylus[3],
                         const double curStylus[3],

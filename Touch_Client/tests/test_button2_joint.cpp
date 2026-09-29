@@ -715,6 +715,10 @@ static void test_crossing_the_pm180_seam_is_only_two_degrees() {
 }
 
 
+// ⑲ 的用例体较长（四个子用例 + 一段"为什么包成函数而不是写进 main"的说明）⇒
+//   定义放在 main() 之后，这里只给前向声明。（本文件其余用例都定义在 main() 之前。）
+static void test_rotvec_matrix_3x3_arithmetic();
+
 int main() {
     std::cout << "--- Button2Joint (按钮2 关节空间映射：笔杆姿态增量 -> 关节增量) ---" << std::endl;
     test_each_stylus_axis_moves_exactly_one_joint();
@@ -735,6 +739,64 @@ int main() {
     test_clamp_step_limits_a_large_offset_per_axis();   // ⑯
     test_accumulator_reaches_a_large_target_over_several_frames();  // ⑰ ★ 不会永久截断
     test_crossing_the_pm180_seam_is_only_two_degrees();   // ⑱ 2026-09-24 换实现后新增（跨 ±180）
+    test_rotvec_matrix_3x3_arithmetic();                   // ⑲ 2026-09-29 Task 1：3×3 纯算术地基
+
     std::cout << "\nResults: " << g_passed << " passed, " << g_failed << " failed" << std::endl;
     return g_failed == 0 ? 0 : 1;
+}
+
+// ⑲ 3×3 纯算术：旋转向量↔矩阵 的往返 + 一个【具体数】的已知值
+//    ⚠ 不用"动了就算过"的断言：这里钉的是具体数值。
+//    ⚠ 为什么包在 static void 函数里、而不是像简报 Step 1 那样直接写进 main()：
+//       `CHECK` 的失败路径是 `return;`，而 `return;` 出现在 `int main()` 里**不是合法 C++**
+//       —— 2026-09-29 实测 MSVC 报 C2561「"main": 函数必须返回值」（原始输出见
+//       `.superpowers/sdd/task-1-report.md` 的 Step 2 记录）。包成 void 函数后：
+//       CHECK 失败只退回【本用例】（与本文件其余 18 个用例同一形状），main 照常打印
+//       `Results:` 并 `return g_failed == 0 ? 0 : 1` ⇒ 失败会真的让整套件 exit 非 0，
+//       而 run_tests.bat 判的正是退出码。若照简报写进 main，失败会打印 FAIL 却让 main
+//       以「流到末尾」的方式返回 0 ⇒ 假绿。
+//    ⚠ 用例体【逐字照抄简报】，只额外写了这个包装函数。
+static void test_rotvec_matrix_3x3_arithmetic() {
+    {
+        TEST(⑲(a) 往返: rotVecDeg∘rotVecToMatDeg 还原原向量);
+        const double cases[4][3] = {{0,0,0}, {10,0,0}, {0,-25,0}, {12,-7,3}};
+        for (int c = 0; c < 4; ++c) {
+            double R[9], rv[3];
+            button2RotVecToMatDeg(cases[c], R);
+            button2RotVecDegForTest(R, rv);        // 复用 Button2Joint.cpp 里的实现，经下面 Step 3 暴露
+            for (int i = 0; i < 3; ++i)
+                CHECK(std::fabs(rv[i] - cases[c][i]) < 1e-9);
+        }
+    }
+    {
+        TEST(⑲(b) 绕 X 转 90° 的具体矩阵);
+        const double rv[3] = {90, 0, 0};
+        double R[9];
+        button2RotVecToMatDeg(rv, R);
+        // Rx(90) = [[1,0,0],[0,0,-1],[0,1,0]]（行主序）
+        const double exp[9] = {1,0,0, 0,0,-1, 0,1,0};
+        for (int i = 0; i < 9; ++i) CHECK(std::fabs(R[i] - exp[i]) < 1e-9);
+    }
+    {
+        TEST(⑲(c) 乘与转置：A·Aᵀ == I（A 是旋转）);
+        const double rv[3] = {12, -7, 3};
+        double A[9], At[9], P[9];
+        button2RotVecToMatDeg(rv, A);
+        button2Mat3T(A, At);
+        button2Mat3Mul(A, At, P);
+        for (int i = 0; i < 9; ++i)
+            CHECK(std::fabs(P[i] - (i % 4 == 0 ? 1.0 : 0.0)) < 1e-9);
+    }
+    {
+        TEST(⑲(d) 求逆：A·A⁻¹ == I；奇异矩阵返回 false);
+        const double rv[3] = {12, -7, 3};
+        double A[9], Ai[9], P[9];
+        button2RotVecToMatDeg(rv, A);
+        CHECK(button2Mat3Inv(A, Ai));
+        button2Mat3Mul(A, Ai, P);
+        for (int i = 0; i < 9; ++i)
+            CHECK(std::fabs(P[i] - (i % 4 == 0 ? 1.0 : 0.0)) < 1e-9);
+        const double sing[9] = {1,2,3, 2,4,6, 0,0,1};   // 第 1、2 行线性相关
+        CHECK(!button2Mat3Inv(sing, Ai));
+    }
 }

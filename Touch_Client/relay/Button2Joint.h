@@ -1,5 +1,10 @@
 #pragma once
 
+// ⚠ 2026-09-29 Task 1：本头文件从"无 include"变成需要 `<cmath>` —— 下面那组 3×3 纯算术
+//   （inline）用了 std::sqrt / std::cos / std::sin / std::fabs。头文件必须自带它自己的
+//   依赖（不能赌调用方先 include 了 <cmath>），所以这一行是【必需】而不是顺手加。
+#include <cmath>
+
 // ============================================================================
 //  按钮2 关节空间映射：笔杆姿态增量 → 关节增量（纯函数，可单测）
 // ============================================================================
@@ -95,6 +100,62 @@
 //     "返回值一定有限"：那一刻没有安全的兜底可退（0 是一个真实关节角，机械臂会真的转过去），
 //     那一层只能由调用者负责（`refJoints` 抄自 `app.robotActualPose.j1..j6`，它若已是 NaN，
 //     说明机器人状态本身已经坏了）。该行为被用例⑥钉住（断言的是**现状**，且是**刻意**的现状）。
+// ============================================================================
+//  3×3 纯算术（inline，放头文件里是为了【可测】—— 同 ForcePipeline.h 的 softDeadzone 先例）
+// ============================================================================
+// ⚠ 行主序：R[r*3+c] = 第 r 行第 c 列。与 Kinematics 的 T[i][j] 同一约定（已核 Kinematics.cpp:19-45）。
+// ⚠ 单位：角度一律【度】。
+inline void button2RotVecToMatDeg(const double rv[3], double R[9]) {
+    const double D2R = 3.14159265358979323846 / 180.0;
+    const double x = rv[0] * D2R, y = rv[1] * D2R, z = rv[2] * D2R;
+    const double th2 = std::sqrt(x * x + y * y + z * z);
+    if (th2 < 1e-12) {                       // θ≈0 ⇒ 单位阵（含 rv 全 0）
+        R[0]=1; R[1]=0; R[2]=0; R[3]=0; R[4]=1; R[5]=0; R[6]=0; R[7]=0; R[8]=1;
+        return;
+    }
+    // Rodrigues：R = I + sinθ·[u]× + (1-cosθ)·[u]×²
+    const double k = 1.0 / th2;              // 归一化
+    const double ux = x * k, uy = y * k, uz = z * k;
+    const double c = std::cos(th2), s = std::sin(th2), t = 1.0 - c;
+    R[0] = c + ux*ux*t;        R[1] = ux*uy*t - uz*s;   R[2] = ux*uz*t + uy*s;
+    R[3] = uy*ux*t + uz*s;     R[4] = c + uy*uy*t;      R[5] = uy*uz*t - ux*s;
+    R[6] = uz*ux*t - uy*s;     R[7] = uz*uy*t + ux*s;   R[8] = c + uz*uz*t;
+}
+
+inline void button2Mat3Mul(const double A[9], const double B[9], double out[9]) {
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 3; ++c) {
+            double s = 0.0;
+            for (int k = 0; k < 3; ++k) s += A[r*3+k] * B[k*3+c];
+            out[r*3+c] = s;
+        }
+}
+
+inline void button2Mat3T(const double A[9], double out[9]) {
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 3; ++c) out[c*3+r] = A[r*3+c];
+}
+
+// 伴随矩阵法求逆；|det| 太小 ⇒ false（调用方据此拒发，别给一个离谱的解）
+inline bool button2Mat3Inv(const double A[9], double out[9]) {
+    const double c00 = A[4]*A[8] - A[5]*A[7];
+    const double c01 = A[5]*A[6] - A[3]*A[8];
+    const double c02 = A[3]*A[7] - A[4]*A[6];
+    const double det = A[0]*c00 + A[1]*c01 + A[2]*c02;
+    if (std::fabs(det) < 1e-12) return false;
+    const double id = 1.0 / det;
+    out[0] = c00*id;                              out[1] = (A[2]*A[7]-A[1]*A[8])*id;  out[2] = (A[1]*A[5]-A[2]*A[4])*id;
+    out[3] = c01*id;                              out[4] = (A[0]*A[8]-A[2]*A[6])*id;  out[5] = (A[2]*A[3]-A[0]*A[5])*id;
+    out[6] = c02*id;                              out[7] = (A[1]*A[6]-A[0]*A[7])*id;  out[8] = (A[0]*A[4]-A[1]*A[3])*id;
+    return true;
+}
+
+// ⚠★【只为测试暴露】把 `Button2Joint.cpp` 匿名命名空间里的 `rotVecDeg` 转发出来。
+//   生产路径**不经它**（`button2JointTarget` 直接调文件内的 `rotVecDeg`）—— 它不改变实现，
+//   只是一个薄壳，存在的唯一理由是：那个函数在匿名命名空间里，测试看不见。
+//   ⚠ 契约与 `Button2Joint.cpp` 的 `rotVecDeg` 逐字相同（退化分支、量程、单位度）。
+void button2RotVecDegForTest(const double R[9], double rv[3]);
+
 void button2JointTarget(const double refJoints[6],
                         const double refStylus[3],
                         const double curStylus[3],
