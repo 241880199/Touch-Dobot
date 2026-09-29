@@ -566,37 +566,64 @@ static double angBetweenDeg(const double A[9], const double B[9]) {
         CHECK(ok >= 190);   // 容许 ~5% 因奇异/不可达被拒
     }
     {
-        TEST(㉔ 拒发：腕部奇异（J5≈0）与不可达 ⇒ false 且 out == ref);
-        // (a) 腕部奇异：J5 = 0 ⇒ z4 ∥ z6 ⇒ Jw 退化
-        double ref[6] = {0, 0, 0, 0, 0, 0};
-        double Rr[9]; fkR(ref, Rr);
-        const double big[3] = {0, 60, 0};          // 绕基座 Y 转 60° —— 腕附近做不到
-        double Md[9], Rt[9]; button2RotVecToMatDeg(big, Md); button2Mat3Mul(Md, Rr, Rt);
-        double out[6] = {9,9,9,9,9,9};
-        const bool ok = button2SolveWrist(ref, Rt, Config::ORIENT_MAX_STEP_DEG, out);
-        if (!ok) for (int i = 0; i < 6; ++i) CHECK(out[i] == ref[i]);   // 失败必须原样退回
-        else     for (int i = 0; i < 6; ++i) CHECK(std::fabs(out[i]-ref[i]) < 180);  // 真能解也不许离谱
+        TEST(㉔ 不变量：若返回 true，则 FK(解) 必须【真的】等于目标（两个腕部奇异位姿）);
+        // ★★ 这条【不能】写成"奇异位姿必须拒发"。理由两条，都是实测/算术：
+        //   ① 写死"必须拒发"= 让用例替实现背书（在 ref 附近腕部未必解不出）；
+        //   ② 更要命的是它**结构上无法变红** —— 见下面 Step 5 的裁决。
+        //   ⇒ 断言的只能是【不变量】：**返回 true ⇒ 解真的到得了目标**。
+        const double refs[2][6] = {{0,0,0,0,0,0}, {0,0,0,0,180,0}};  // J5=0 与 J5=±180 两处腕部奇异
+        const double bigs[2][3] = {{0,60,0}, {0,0,60}};
+        for (int c = 0; c < 2; ++c) {
+            double Rr[9]; fkR(refs[c], Rr);
+            double Md[9], Rt[9];
+            button2RotVecToMatDeg(bigs[c], Md);
+            button2Mat3Mul(Md, Rr, Rt);
+            double out[6] = {9,9,9,9,9,9};
+            const bool ok = button2SolveWrist(refs[c], Rt, Config::ORIENT_MAX_STEP_DEG, out);
+            if (!ok) {
+                for (int i = 0; i < 6; ++i) CHECK(out[i] == refs[c][i]);   // 失败 ⇒ 必须原样退回参照
+            } else {
+                double Ro[9]; fkR(out, Ro);
+                CHECK(angBetweenDeg(Rt, Ro) < Config::BTN2_WRIST_TOL_DEG); // ★ 真的不变量（**能红**）
+                for (int i = 0; i < 3; ++i) CHECK(out[i] == refs[c][i]);
+            }
+        }
     }
 ```
 
-⚠ ㉔ 的写法**刻意两边都接受**（"拒了要退回参照；真解出来也要合理"）——
-本仓有成文教训：把"拒发"写死成期望，而实现在某些位姿上其实解得出来 ⇒ **用例替实现背书**。
-**上机前必须实测**：把 `BTN2_WRIST_DAMP` 置 0 ⇒ ㉔(a) 应红。
+⚠ **不要**把 `else` 分支写成 `CHECK(std::fabs(out[i]-ref[i]) < 180)` —— 那是**恒真式**：
+`maxStepDeg = ORIENT_MAX_STEP_DEG = 3.0`、迭代 ≤ `BTN2_WRIST_MAX_ITER = 24`
+⇒ `|out−ref| ≤ 72° < 180°` **永远成立** ⇒ 那条断言抓不住任何东西。
+（这是本轮复审实测出来的第 5 条空转负对照，作者是控制方本人。）
 
 - [ ] **Step 2: 跑，确认失败**（未声明）
 - [ ] **Step 3: 实现 `button2SolveWrist`**（照上面「算法」那一节逐行写；`λ` 初值取 `BTN2_WRIST_DAMP`，
   每轮 `|e|` 变小则 `λ*=0.5`、变大则 `λ*=2.0`，夹在 `[1e-6, 1.0]`）
 - [ ] **Step 4: 跑，确认通过**
-- [ ] **Step 5: 负对照（**两条都必须实测红**）**
+- [ ] **Step 5: 负对照（**必须实测红**）**
 
-> ⚠ **预检时抓到**：这条原来写的对照之一是"去掉逐轮阻尼（λ ≡ 0）⇒ ㉔ 必须红"——**它不成立**：
-> 阻尼去掉后**不收敛**，末尾的自验门会把它转成 `return false` ⇒ ㉔ 照旧绿。
-> ⇒ 换成下面这两条**真的有牙齿**的：
+> ⚠⚠ **这一条已被复审实测推翻过两次，两版都作废 —— 读清楚再动手**：
+> · 一版「λ≡0 ⇒ 红」：**空转** —— 不收敛会被自验门转成 `return false` ⇒ ㉔ 照旧绿。
+> · 二版「(b) 把容差改成 `1e9`」：**不成立** —— ① ㉔ 里**根本没有** `angBetweenDeg`（它在 ㉓ 里）；
+>   ② **把容差放宽只会更绿，永远不会红**（方向反了）。
+> · 二版「(a) 拆自验门」：**要先证明它会红**（见下）。
+> ⇒ 教训一句话：**负对照必须先在用例的输入端算一遍"被突变的那段会不会真的变"。**
 
-- **(a) 拆掉自验门**（把末尾那次 `|e| < TOL` 的判断删掉、无条件 `return true`）⇒ **㉔(a) 必须红**
-  （它会把一个错的 `out` 当成功返回，而 ㉔ 断言"若返回 true 则 FK 必须等于目标"）⇒ 改回。
-- **(b) 把用例自己的断言弄瞎**：把 ㉔ 里 `angBetweenDeg(Tt, Ro)` 的容差从 `TOL` 改成 `1e9` ⇒ **㉔ 必须红**。
-  ⚠ 这条是**对用例本身**的对照 —— 本仓有成文教训：**没有负对照的断言等于没有断言**（"动了就算过"那种）。改回。
+**主对照（期望红，但【必须实测】）**：
+把 `button2SolveWrist` 末尾的自验门删掉（无条件 `return true`）⇒ **㉔ 的
+`CHECK(angBetweenDeg(Rt, Ro) < BTN2_WRIST_TOL_DEG)` 必须红**。
+⚠ **它成立的前提是"那个位姿上确实解不出来"**。若实测**没红**，说明自验门在该位姿上没起作用
+⇒ **如实写进报告，并换一个更极端的位姿重试**，**不要假装通过**。
+
+**兜底对照（**保证红**，用来证明 ㉔ 这条断言有牙齿）**：
+在 `button2SolveWrist` 返回前插入 `out[4] += 30.0;`（故意把解弄错）**但仍 `return true`**
+⇒ ㉔ **必须红**。它**不依赖**任何"解不出来"的假设 ⇒ 一定红。
+两条各自改回、重建、确认复绿。
+
+⛔ **不要再写这两种**（它们都在这一轮被实测证伪）：
+- 「删掉雅可比退化守卫 `if (std::fabs(det) < 1e-12) return false;` ⇒ ㉔ 红」——**不保证**：
+  不收敛会被自验门转成 `false`，而 ㉔ 的失败分支断言的是 `out == ref` ⇒ 仍绿。
+- 「把用例的容差放宽 ⇒ 红」——**方向反了**。
 - [ ] **Step 6: 整床 + 提交**
 
 ---
