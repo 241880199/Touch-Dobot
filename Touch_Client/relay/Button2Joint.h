@@ -261,6 +261,39 @@ void button2OrientTarget(const double refR[9], const double refStylus[3],
 bool button2SolveWrist(const double ref[6], const double targetR[9], double maxStepDeg, double out[6]);
 
 // ============================================================================
+//  按钮2 对外入口（2026-09-29 Task 4）：Task 2 的目标朝向 + Task 3 的腕部求解 拼成一句
+// ============================================================================
+// 【这一步只做"拼"】它不引入任何新的数学：参照姿态、想要的末端朝向、腕部求解三件都在上面
+//   各自成篇。这里的三句就是把它们串起来，加上两条**与旧函数逐条对齐**的契约。
+//
+// 【流水线（三句）】
+//   ① `out[0..2] = ref[0..2]` —— **无条件、第一句就写**，下面**任何分支都不许再碰**这三个
+//      下标。本方案的"J1/J2/J3 保持"就是这三行（与 `button2JointTarget` 同一条纪律）。
+//   ② 笔杆任一分量 NaN/Inf ⇒ **六位全回参照**（与 `button2JointTarget` 的守卫逐条对齐）。
+//   ③ 否则：`refR = FK(refJoints)` 的旋转部分当参照姿态 → `button2OrientTarget`（Task 2）
+//      算出想要的末端朝向 → `button2SolveWrist`（Task 3）解 J4/J5/J6；
+//      **求解失败 ⇒ 六位全回参照**（"本帧不下发"的形状，与 RelayCore 里 I1/I2/FK 那三处同款）。
+//
+// 【四入参里没有位置分量】平移在**结构上**进不来 —— 这是**编译期**性质（同 `button2JointTarget`），
+//   运行期测不出来 ⇒ 由 test_button2_joint.cpp ㉕(c) 用**函数指针类型**钉住（签名一变就编译不过）。
+//
+// 【步长与累加器的分工】本函数把 `Config::ORIENT_MAX_STEP_DEG` 传进 Task 3 的**迭代**限幅
+//   （每轮 `dq` 的步长上限）；**逐帧累加器仍由调用方 `clampJointStep` 持有**（Task 5 接线）。
+//   本函数**不**做逐帧限幅 —— 同一件事写两处就会两处各自漂移。
+//
+// ⚠★ 【本函数直接读 `Config::BTN2_TILT_PHI_DEG`，这与 `button2OrientTarget` 把 `phiDeg` 做成
+//   **入参**并不矛盾】把 φ 做成入参是为了让 Task 2 自己的用例能写"φ≠0 时行为确实变了"（⑳d）；
+//   而本函数是**接线层的对外形状**，它就该读那个常数（Task 5 的调用点读的是同一个）。
+//   ⇒ 想验 φ 的用例请直接测 `button2OrientTarget`（那里 φ 可传），
+//     **不要**为了"能测 φ"给本函数加参数（那会把对外形状改歪，而收益为零）。
+//
+// ⚠ 【`refJoints` 非有限 ⇒ 本函数**原样传出去**】与 `button2JointTarget` 逐字相同：那一刻没有
+//   安全的兜底可退（0 是一个**真实**关节角，机械臂会真的转过去）—— 守卫只守**笔杆侧**，
+//   **不**保证返回值一定有限。这一层由调用方负责（`refJoints` 抄自 `app.robotActualPose.j1..j6`）。
+void button2OrientJointTarget(const double refJoints[6], const double refStylus[3],
+                              const double curStylus[3], double outJoints[6]);
+
+// ============================================================================
 //  接线层的两条纯判据（2026-09-23 Task 2 修复轮：从 RelayCore.cpp **抽出来**）
 // ============================================================================
 //

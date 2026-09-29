@@ -1248,7 +1248,15 @@ static void test_solve_wrist_invariant_holds_and_budget_refusal_is_exercised() {
     //   c2 落进 fail 分支靠的是步长预算（`BTN2_WRIST_MAX_ITER × maxStepDeg`），而 `maxStepDeg`
     //   是**明确可调的入参**、`BTN2_WRIST_MAX_ITER` 是普通常数 ⇒ 谁把任一个调大，c2 就解得出来
     //   ⇒ fail 分支（连同对照 D 的目标）**静默失效**、对照 A 也不再能红本用例，而**没有任何东西会报**。
-    //   下面 `failedCount` 就是给这条"空转"上的守卫（改 `>= 99` 会立刻红，见 report 的负对照）。
+    //   下面 `failedCount` / `solvedCount` 就是给这条"空转"上的守卫。
+    //   ⚠ 2026-09-29 Task 4 订正：这句以前写的是"（改 `>= 99` 会立刻红，见 report 的负对照）"——
+    //     **那条对照已被本轮复审判定为"不够"**：它只证明"这行会被执行、且能失败"，而本仓的
+    //     标准是**对照必须复现"守卫存在的那个场景"**。`>= 99` 是把门限人为抬到不可能满足，
+    //     它连"入参被调大 ⇒ 失败分支静默失效"这条真实路径都没碰到（改回去仍是原值）。
+    //   ⇒ 本守卫**真正**对应的对照是：**把 c0/c1 的 `maxStepDeg` 临时调小**（例如 0.5°/轮，
+    //     预算 24×0.5 = 12°），使三组输入**全落 `!ok`** ⇒ `failedCount = 3 >= 1` 照样通过、
+    //     六条 `out == ref` 也照样通过，而 `solvedCount = 0 >= 2` **必须红**。
+    //     这正是上面那段描述的"成功分支空转"场景的复现，而不是一个人造门限。
     const double refs[3][6] = {{0,0,0,0,0,0}, {0,0,0,0,180,0}, {0,0,0,0,0,0}};
     const double bigs[3][3] = {{0,60,0}, {0,0,60}, {0,179,0}};
     int failedCount = 0;   // ★ 抗空转：走 fail 分支的输入个数（见上面 I-1 那段）
@@ -1288,6 +1296,110 @@ static void test_solve_wrist_invariant_holds_and_budget_refusal_is_exercised() {
     PASS();
 }
 
+// ============================================================================
+//  ㉕ 2026-09-29 Task 4：对外入口 `button2OrientJointTarget`（Task 2 + Task 3 拼起来）
+// ============================================================================
+// ⚠ 这三个用例**必须在 `fkR` / `angBetweenDeg` 的定义（上面 :1131/:1136）之后** ——
+//   它们定义在文件中间，㉕(a) 要用；放在更靠前的位置就得自己处理声明顺序（**不许**为了
+//   省事再写第二份实现）。放在文件末尾（㉔ 之后、main 之前）天然满足这一条。
+
+// 签名里【没有位置入参】是编译期性质，用函数指针类型钉住（与旧函数用例③同一招）
+typedef void (*Btn2OrientSig)(const double[6], const double[3], const double[3], double[6]);
+
+// ㉕(a) ★ 端到端：任意参照位姿 + 任意小摆动 ⇒ FK(解) 必须真的到得了目标。
+//    【它与 ㉓(a) 的分工】㉓(a) 喂的是"**直接构造的**目标矩阵"；这一条喂的是"**笔杆角度**"，
+//      中间隔着 Task 2 的整条流水线 ⇒ 它把 Task 2 与 Task 3 **串起来**验：
+//      **不依赖 任何符号常数**（它比的是"Task 2 算出来的目标"与"Task 3 解出来的朝向"，
+//      两边都走同一套常数 ⇒ 符号全翻也绿；符号的账由 Task 2 那一组与上机去结）。
+//    ⚠ 判据写在循环里（不是累加成 ok 再断）：第一个不满足的样本立刻红，报出的是本质判据。
+//    ⚠ `ok >= 55` 是**防空转**：若入口恒返回参照，60 组里能对上目标的只会是碰巧，多半全落。
+//      容许少数位姿真的解不出来（那正是自验门该拒的）。**实测余量：ok = 58/60（只差 3 才到限）**
+//      —— 余量薄，但种子固定 ⇒ 不 flake；若 `Config` 里步长预算/收敛门限那几个常数被调紧，
+//      这条会先红，那正是它该说的话。
+//    ⚠★ 2026-09-29 Task 4 负对照实测（简报 Step 4(a) 那条**不红**，别照抄它当证据）：
+//      把入口**第一句** `outJoints[0] = refJoints[0];` 改成 `+ 1.0` ⇒ **整套仍 36/0 全绿**。
+//      原因：`button2SolveWrist` 自己第一句写 `out[i] = ref[i]`、成功路径又再写
+//      `out[0..2] = ref[0..2]` ⇒ 入口的三条出口**每一条**都会把这三个下标重写成参照
+//      （详见 `Button2Joint.cpp` 那段 ⚠★）。⇒ **本用例"J1/J2/J3 保持"这条断言能红的对照是**：
+//      把求解失败的回退 `outJoints[i] = refJoints[i];` 改成 `= 0.0` ⇒ 立刻红在
+//      `FAIL: out[0] == ref[0]`（实测 35/1）。那条才是这条不变量在本组合里真正被执行到的路径。
+static void test_orient_joint_end_to_end_reaches_target() {
+    TEST(㉕(a) ★ 端到端：任意参照位姿 + 任意小摆动 ⇒ FK(解) 必须真的到得了目标);
+    unsigned seed = 20260929u;
+    auto rnd = [&seed]() { seed = seed*1103515245u + 12345u; return (double)((seed>>16)&0x7FFF)/32767.0; };
+    int ok = 0, ran = 0;
+    for (int t = 0; t < 60; ++t) {
+        double ref[6] = { rnd()*720-360, rnd()*720-360, rnd()*310-155,
+                          rnd()*720-360, rnd()*720-360, rnd()*720-360 };
+        // 笔杆从"单位姿态"转到"绕器件某轴 ≤15°"——用测试侧的 matToZyRpy 造输入（别再写第二份！）
+        double Rs[9], Rd[9], Rsc[9], cur[3];
+        TcpCalibration::rpyToMatrix(0,0,0, Rs);
+        const double rv[3] = { rnd()*30-15, rnd()*30-15, rnd()*30-15 };
+        button2RotVecToMatDeg(rv, Rd);
+        button2Mat3Mul(Rs, Rd, Rsc);
+        matToZyRpy(Rsc, cur);
+        const double refStylus[3] = {0,0,0};
+
+        double out[6];
+        button2OrientJointTarget(ref, refStylus, cur, out);
+        ++ran;
+        // J1/J2/J3 必须逐位不变
+        CHECK(out[0] == ref[0]);
+        CHECK(out[1] == ref[1]);
+        CHECK(out[2] == ref[2]);
+        // 目标朝向（用同一套纯函数算一遍）与 FK(解) 必须一致
+        double refR[9]; fkR(ref, refR);
+        double tgtR[9];
+        button2OrientTarget(refR, refStylus, cur, Config::BTN2_TILT_PHI_DEG, tgtR);
+        double outR[9]; fkR(out, outR);
+        if (angBetweenDeg(tgtR, outR) < Config::BTN2_WRIST_TOL_DEG) ++ok;
+    }
+    CHECK(ran == 60);
+    CHECK(ok >= 55);      // 容许少数位姿真的解不出来（那正是自验门该拒的）
+    PASS();
+}
+
+// ㉕(b) 笔杆不动 ⇒ 六关节逐位不动（含"输入退化成恒等"这一档）；NaN/Inf ⇒ 六位全回参照。
+//    【为什么"不动"这一档是本质的】笔杆不动 ⇒ rv = 0 ⇒ 目标 = 参照姿态 ⇒ 解 = 参照。
+//      它是入口的**恒等情形**，也是"手停住时臂就该停住"这条手感要求的实现路径。
+//    ⚠ 三段（不动 / NaN 在 curStylus / Inf 在 refStylus）**刻意覆盖守卫的两个入参位置**：
+//      只测一边会漏掉"另一半守卫写反了"（旧函数 ⑥ 因同一理由也分了三段）。
+static void test_orient_joint_identity_and_nan() {
+    TEST(㉕(b) 笔杆不动 ⇒ 六关节逐位不动；NaN/Inf ⇒ 六位全回参照);
+    const double ref[6] = {10, -20, 30, 40, -50, 60};
+    double out[6];
+    {   // 不动
+        const double s[3] = {0,0,0};
+        button2OrientJointTarget(ref, s, s, out);
+        for (int i = 0; i < 6; ++i) CHECK(out[i] == ref[i]);
+    }
+    {   // NaN 在 curStylus
+        const double s0[3] = {0,0,0};
+        const double sN[3] = {0, std::numeric_limits<double>::quiet_NaN(), 0};
+        button2OrientJointTarget(ref, s0, sN, out);
+        for (int i = 0; i < 6; ++i) CHECK(out[i] == ref[i]);
+    }
+    {   // Inf 在 refStylus
+        const double sI[3] = {std::numeric_limits<double>::infinity(), 0, 0};
+        const double s0[3] = {0,0,0};
+        button2OrientJointTarget(ref, sI, s0, out);
+        for (int i = 0; i < 6; ++i) CHECK(out[i] == ref[i]);
+    }
+    PASS();
+}
+
+// ㉕(c) 签名里没有位置入参（编译期性质）。
+//    【为什么这条必须单独存在】"笔杆平移 ⇒ 机械臂不动"在本方案里是**结构性**保证：函数根本
+//      没有位置分量可吃。结构性质运行期测不出来 ⇒ 只能钉在类型上：谁给入口加第 5 个（位置）
+//      参数，下面这行**立刻编译不过**。`fp != nullptr` 那个断言只是让这条用例在运行期也有
+//      一个 PASS 可数（真正干活的是**这一行的编译**）。
+static void test_orient_joint_signature_has_no_position_input() {
+    TEST(㉕(c) 签名里没有位置入参（编译期性质）);
+    Btn2OrientSig fp = &button2OrientJointTarget;
+    CHECK(fp != nullptr);
+    PASS();
+}
+
 int main() {
     std::cout << "--- Button2Joint (按钮2 关节空间映射：笔杆姿态增量 -> 关节增量) ---" << std::endl;
     test_each_stylus_axis_moves_exactly_one_joint();
@@ -1323,6 +1435,9 @@ int main() {
     test_solve_wrist_fk_roundtrip_across_random_poses();         // ㉓(a) ★ 跨位姿 FK 回验
     test_solve_wrist_keeps_base_joints_across_random_poses();    // ㉓(b) 只动腕
     test_solve_wrist_invariant_holds_and_budget_refusal_is_exercised();   // ㉔ ★ 不变量（能红）
+    test_orient_joint_end_to_end_reaches_target();                 // ㉕(a) 2026-09-29 Task 4：端到端
+    test_orient_joint_identity_and_nan();                          // ㉕(b)
+    test_orient_joint_signature_has_no_position_input();           // ㉕(c) ★ 编译期钉子
 
     std::cout << "\nResults: " << g_passed << " passed, " << g_failed << " failed" << std::endl;
     return g_failed == 0 ? 0 : 1;
