@@ -3127,6 +3127,50 @@ namespace ForceNoiseProbe {
         // ⚠ 用 steady_clock 微秒: GetTickCount 的粒度是 ~15.6 ms, 【分辨不出】8 ms 的帧间隔 ——
         //   而那正是这里要量的东西 (文档说 8 ms, 从没实测过)。
         const double spanMs = (double)(buf[n - 1].tickUs - buf[0].tickUs) / 1000.0;
+
+        // ★ 2026-09-29 恢复 + 扩列：**顺手把这段波形落盘**。
+        //   统计量答不了"抖动是甲还是乙"这个问题，波形能；而且判"目标/实际/手柄/力"四条腿的
+        //   幅度比与相位差**必须同帧**，分开两台仪器量过一整晚都对齐不上（见 09-24 那次）。
+        //   追加写 + 块头（与 `calib_poses` 那套同风格）⇒ 多次按键能攒在同一份里。
+        //   ⚠ 环里只有 1024 帧（≈8.3 s @123Hz）⇒ **每按一次只带走最近那 8 秒**。
+        //   ⚠ 相对路径（与 `FORCE_LOG_PATH` 同一约定）⇒ **从 `x64/Release` 启动就落在那边**，
+        //     两处都要看（本仓已因读错文件白找过半小时）。
+        //   列的定义与判据在 `relay/RelayCore.h` 的 `ForceFrameSample` 那一段；
+        //   前 22 列与 `2026-09-24-force-wave-loop-confirmed-dev.csv` **逐字同构**，
+        //   新的 `ff` 与 `tcpV_*` 一律**追加在最后**，老分析脚本不用改。
+        {
+            FILE* wf = fopen("force_wave.csv", "a");
+            if (wf) {
+                SYSTEMTIME st; GetLocalTime(&st);
+                fprintf(wf, "# wave %04d-%02d-%02d %02d:%02d:%02d.%03d  frames=%d\n",
+                        st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond,
+                        st.wMilliseconds, n);
+                fprintf(wf, "# t_us,raw_x,raw_y,raw_z,filt_x,filt_y,filt_z,"
+                            "tgt_x_mm,tgt_y_mm,tgt_z_mm,tgt_rx_deg,tgt_ry_deg,tgt_rz_deg,"
+                            "act_x_mm,act_y_mm,act_z_mm,act_rx_deg,act_ry_deg,act_rz_deg,"
+                            "dev_x_mm,dev_y_mm,dev_z_mm,ff,tcpV_x,tcpV_y,tcpV_z\n");
+                for (int i = 0; i < n; i++) {
+                    fprintf(wf, "%llu,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,"
+                                "%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,"
+                                "%.3f,%.3f,%.3f,%d,%.3f,%.3f,%.3f\n",
+                            buf[i].tickUs, buf[i].f[0], buf[i].f[1], buf[i].f[2],
+                            buf[i].g[0], buf[i].g[1], buf[i].g[2],
+                            buf[i].tgt[0], buf[i].tgt[1], buf[i].tgt[2],
+                            buf[i].tgt[3], buf[i].tgt[4], buf[i].tgt[5],
+                            buf[i].act[0], buf[i].act[1], buf[i].act[2],
+                            buf[i].act[3], buf[i].act[4], buf[i].act[5],
+                            buf[i].dev[0], buf[i].dev[1], buf[i].dev[2],
+                            buf[i].ffEnabled,
+                            buf[i].tcpV[0], buf[i].tcpV[1], buf[i].tcpV[2]);
+                }
+                fclose(wf);
+                std::cout << "  [ok] 波形已追加到 force_wave.csv（" << n << " 帧，26 列）"
+                          << std::endl;
+            } else {
+                std::cout << "  [warn] 波形落盘失败（force_wave.csv 打不开）" << std::endl;
+            }
+        }
+
         double maxGapMs = 0.0;
         for (int i = 1; i < n; i++) {
             const double d = (double)(buf[i].tickUs - buf[i - 1].tickUs) / 1000.0;

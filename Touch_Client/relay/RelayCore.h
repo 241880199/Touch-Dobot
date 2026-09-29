@@ -48,6 +48,32 @@ public:
         unsigned long long tickUs;   // steady_clock 微秒 (不能用 GetTickCount: 15.6 ms 粒度
                                      // 分辨不出 8 ms 的帧间隔 —— 那正是要量的东西)
         double f[3];                 // @1304 的 Fx,Fy,Fz (原始值, 未补偿)
+        double g[3];                 // 本帧的 compensated 之后、映射之前的 filtered[0..2]
+        // ★★ 2026-09-24 深夜（`d8d3cf9` 加的，`ad0486f` 那次回退里丢了；2026-09-29 恢复）：
+        //   现场说的"抖动"是**机械臂在动**（不是手上的力）⇒ 必须同时看这两组：
+        //   · tgt[6] = 本帧**下发目标的位姿**（app.robotTargetPose 的 x,y,z,rx,ry,rz）
+        //   · act[6] = 本帧**机械臂实际位姿**（@624，与本帧的力/滤波同源）
+        //   判据：目标平滑而实际在跳 ⇒ 机械臂自身伺服/机械（不归软件）；
+        //         目标本身在跳 ⇒ 我们的映射/控制（能修）。
+        //   ★ 2026-09-29 离线分析（`_analyze_loop_act.py`）实测：`act(t) ≈ tgt(t − 106~203ms)`，
+        //     7 块全部复现（r=0.987~0.998）。**这批数据分不开"真伺服滞后"与"@624 是回显"**
+        //     ⇒ 上机判别实验的执行单见 `Docs/superpowers/specs/2026-09-29-*.md`。
+        double tgt[6];
+        double act[6];
+        // ★★ 2026-09-24 深夜：**器件(Touch 手柄)自己的位置**（器件系 mm）。判"闭环"的第一环要用它：
+        //   力推手柄 ⇒ 手柄动 ⇒ 位置映射读到它 ⇒ 命令臂跟着动。若手柄其实【没动】，
+        //   那目标里的抖动就出在我们自己的代码里，与"力驱位置"的环路无关。
+        //   ⚠ 读它用 app.devicePosMutex —— 那是【叶子锁】(全文件只单独取过一次、从不嵌套)
+        //     ⇒ 在 forceDataMutex 之外先取先放，不引入锁环。
+        double dev[3];
+        // ★ 2026-09-29 新增两列（与上面的"恢复"分开记账 —— 这两条是**新加的**，不是回退前就有的）：
+        //   · ffEnabled = app.forceFeedbackEnabled（原子）。判"关掉力反馈就不抖"那条对照要按帧分段，
+        //     不能靠事后回忆；它是 1 个 int，读取无锁。
+        //   · tcpV[3] = app.forceData.tcpSpeedActual 的 x,y,z（@672 TCPSpeedActual，123 Hz）。
+        //     证据报告"下次开工三步"的第 1 条（核 @672 的坐标系与质量）就是它 —— 它**已经在解析**
+        //     （`RelayCore.cpp` 的 `tcpSpeedPtr` 那一段），只是从来没跟力/位姿同时落过盘。
+        int    ffEnabled;
+        double tcpV[3];
     };
     // 取最近收到的 ≤maxN 帧, 按【从旧到新】写进 out。返回实际帧数。
     int copyRecentForceFrames(ForceFrameSample* out, int maxN);

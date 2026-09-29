@@ -138,7 +138,11 @@ static bool                     s_noiseLockInit = false;
 
 // 只在 ForceReader 线程调用。加锁的理由: 读它的是主线程 (按键), 【不是】因为写入慢 ——
 // 125 Hz 下一次临界区可以忽略。与 forceDataMutex 分开, 免得探针的读把力数据的路径也拖住。
-static void pushForceFrame(double fx, double fy, double fz) {
+static void pushForceFrame(double fx, double fy, double fz,
+                          double gx, double gy, double gz,
+                          const double tgt[6], const double act[6],
+                          const double tcpV[3], const double dev[3],
+                          int ffEnabled) {
     if (!s_noiseLockInit) return;   // 初始化竞态里的最早期帧, 丢掉即可 (不改变任何判决)
     const unsigned long long us =
         (unsigned long long)std::chrono::duration_cast<std::chrono::microseconds>(
@@ -148,6 +152,18 @@ static void pushForceFrame(double fx, double fy, double fz) {
     s_noiseBuf[s_noiseWrite].f[0] = fx;
     s_noiseBuf[s_noiseWrite].f[1] = fy;
     s_noiseBuf[s_noiseWrite].f[2] = fz;
+    s_noiseBuf[s_noiseWrite].g[0] = gx;
+    s_noiseBuf[s_noiseWrite].g[1] = gy;
+    s_noiseBuf[s_noiseWrite].g[2] = gz;
+    for (int i = 0; i < 6; i++) {
+        s_noiseBuf[s_noiseWrite].tgt[i] = tgt[i];
+        s_noiseBuf[s_noiseWrite].act[i] = act[i];
+    }
+    for (int i = 0; i < 3; i++) {
+        s_noiseBuf[s_noiseWrite].dev[i]  = dev[i];
+        s_noiseBuf[s_noiseWrite].tcpV[i] = tcpV[i];
+    }
+    s_noiseBuf[s_noiseWrite].ffEnabled = ffEnabled;
     s_noiseWrite = (s_noiseWrite + 1) % kNoiseCap;
     if (s_noiseCount < kNoiseCap) s_noiseCount++;
     LeaveCriticalSection(&s_noiseLock);
@@ -355,7 +371,41 @@ static DWORD WINAPI forceReaderThread(LPVOID) {
             // 帧率噪声探针: 存下这一帧的原始 @1304 三轴。
             // ⚠ 位置在【本帧解析完之后、且与本帧的赋值同源】—— 存的是刚读进来的 sixForcePtr,
             //   不是别的快照。存的这一列要拿来量"帧率下噪声的结构", 错一帧就白量。
-            pushForceFrame(sixForcePtr[0], sixForcePtr[1], sixForcePtr[2]);
+            // ★ 2026-09-29 恢复（`d8d3cf9` 有、`ad0486f` 那次回退里丢了）+ 两条新列：
+            //   同一帧上还要带走 目标位姿 / 实际位姿 / 器件位置 / 力(comp 前) / ff开关 / @672 速度。
+            //   理由与判据写在 `relay/RelayCore.h` 的 `ForceFrameSample` 那一段。
+            //
+            //   ★★ 锁序（回退前就核过，这里逐字照搬）：**每一个锁都是"单独取、立刻放"，绝不嵌套**。
+            //     `devicePosMutex` 与 `robotPoseMutex` 都在 `forceDataMutex` **之外**取 —— 本行
+            //     已经在上面 `LeaveCriticalSection(&app.forceDataMutex)` 之后，所以不存在嵌套。
+            //     ⚠ 别把这两段挪到上面那个临界区里面去：`robotPoseMutex` 先于 `forceDataMutex`
+            //       是本文件既有的锁序（见 `:273-275`），反过来就是锁环。
+            //   ★ `app.forceData.*` 这三列（filtered / tcpPoseActual / tcpSpeedActual）
+            //     **不加锁直接读**是安全的：`forceData` 的**唯一写者就是本线程**（同一次解析里
+            //     刚写完），读者与写者是同一个执行流 ⇒ 没有竞态。
+            //   ★ `forceFeedbackEnabled` 是 `std::atomic<bool>` ⇒ 无锁读。
+            double devPosBuf[3];
+            {
+                EnterCriticalSection(&app.devicePosMutex);
+                devPosBuf[0] = app.devicePos[0];
+                devPosBuf[1] = app.devicePos[1];
+                devPosBuf[2] = app.devicePos[2];
+                LeaveCriticalSection(&app.devicePosMutex);
+            }
+            double tgtPoseBuf[6];
+            {
+                EnterCriticalSection(&app.robotPoseMutex);
+                tgtPoseBuf[0] = app.robotTargetPose.x;  tgtPoseBuf[1] = app.robotTargetPose.y;
+                tgtPoseBuf[2] = app.robotTargetPose.z;  tgtPoseBuf[3] = app.robotTargetPose.rx;
+                tgtPoseBuf[4] = app.robotTargetPose.ry; tgtPoseBuf[5] = app.robotTargetPose.rz;
+                LeaveCriticalSection(&app.robotPoseMutex);
+            }
+            pushForceFrame(sixForcePtr[0], sixForcePtr[1], sixForcePtr[2],
+                           app.forceData.filtered[0], app.forceData.filtered[1],
+                           app.forceData.filtered[2],
+                           tgtPoseBuf, app.forceData.tcpPoseActual,
+                           app.forceData.tcpSpeedActual, devPosBuf,
+                           app.forceFeedbackEnabled ? 1 : 0);
 
             // 看门狗兜底: 每 300ms 检查一次 (GLUT 可能已死)
             static DWORD lastWatchdogCheck = 0;
