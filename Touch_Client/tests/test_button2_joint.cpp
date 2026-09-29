@@ -1183,6 +1183,12 @@ static void test_solve_wrist_identity_target_returns_reference() {
 //    ⚠ `solved >= 190` 是**防空转**：若实现恒返回 false，循环里那句一次都不会执行 ⇒ 全绿。
 static void test_solve_wrist_fk_roundtrip_across_random_poses() {
     TEST(㉓(a) ★ 跨位姿 FK 回验：随机 200 组，解出来后 FK(解) 必须等于目标（< 0.05°）);
+    // ★ 值域钉（照 ⑨ 的招数：一条**不经过实现**的断言）：`BTN2_WRIST_TOL_DEG` **同时**是
+    //   `button2SolveWrist` 的收敛门限（`Button2Joint.cpp` 两处）与**本文件**的"到位"容差
+    //   （㉓(a) / ㉔ / ㉕(a) 三处都用它）⇒ 把它放宽（例如 5.0）会让【全套用例照绿】，
+    //   而交付精度静默变差 —— 没有任何别的断言会响。这一行挡的就是那个；
+    //   0.1 的理由：比今天的 0.05 宽一倍（给调参留一点余地），又把它钉在"度"的小量级上。
+    CHECK(Config::BTN2_WRIST_TOL_DEG <= 0.1);
     unsigned seed = 20260929u;
     int solved = 0;
     for (int t = 0; t < 200; ++t) {
@@ -1415,6 +1421,59 @@ static void test_orient_joint_signature_has_no_position_input() {
     PASS();
 }
 
+// ㉖ ★ 端到端：纯自转（器件 Z 转 20°）⇒ 【只动 J6】。
+//    【为什么非补不可】㉑ 只断言**目标朝向**的第三列不变、㉕(a) 只断言 `FK(解) ≈ 目标`
+//      —— 两者都**没有**断言"解出来的关节只动了 J6"。而球腕下"右乘 Rz(roll) ⇒ 只动 J6"
+//      是可离线证明的，也是用户定下的规格（"自转沿用原来的 J6 方案"）⇒ 需要一条端到端断言
+//      把它钉住：喂一个**纯自转**的笔杆输入，经 `button2OrientJointTarget` 走完整条流水线
+//      （Task 2 的目标朝向 + Task 3 的腕部求解），断言解出来的 J4/J5 几乎不动、
+//      而 J6 恰好是 `BTN2_ROLL_SIGN × 20°`。
+//    【为什么要有第二个（非正位）参照】正位上"只动 J6"最容易成立；第二个取**非正位**的参照
+//      关节姿态 + **非零**参照笔杆姿态（现场那个按下姿态）⇒ 只测正位的话，"自转随姿态散到
+//      别的关节上"这个病**测不出来**（与 ⑦ 存在的理由同一条）。
+//    【容差怎么选】实测两组的残差：J4 ≤ 1.9e-10°、J5 ≤ 2.9e-11°、J6 ≤ 5.6e-10°（度）；
+//      而真实的串扰是**度级**的（旧的逐欧拉路把自转 10° 送成 J4 +1.52 / J5 +5.48，
+//      见 ⑦ 的说明）⇒ 取 `kTolDeg = 1e-6`：比实测残差大 4 个数量级、比任何真实串扰小
+//      6 个数量级 ⇒ 能干净区分"只动 J6"与"三个都动"，且不挂在任何单个测量值上。
+//    ⚠ 期望值经 `Config::BTN2_ROLL_SIGN` 表达，【一个 ±1 都不写死】（与文件头 ② 同一条规矩）。
+static void test_roll_end_to_end_moves_only_j6() {
+    TEST(㉖ ★ 端到端：纯自转（器件 Z 转 20°）⇒ 只动 J6);
+    const double kTolDeg = 1e-6;      // 见上面【容差怎么选】
+    const double poses[2][6] = {
+        {0,0,0,0,-90,0}, {30,-60,45,20,-70,10}
+    };
+    const double stylus[2][3] = {
+        {0,0,0}, {-58.93, 11.83, -6.41}
+    };
+    const double rollDeg = 20.0;
+    for (int p = 0; p < 2; ++p) {
+        // 造输入：绕【器件 Z】转 rollDeg ⇒ curStylus = R_stylus · Rz(rollDeg)
+        //   （用测试侧既有的 bodyAxisEuler —— 它内部走 matToZyRpy，别再写第二份矩阵→欧拉）
+        double cur[3];
+        bodyAxisEuler(stylus[p], 2, rollDeg, cur);
+
+        double out[6];
+        button2OrientJointTarget(poses[p], stylus[p], cur, out);
+
+        // ★ 本用例的核心判据：J4/J5 几乎不动（容差见上），J6 恰为 ROLL_SIGN × 20°
+        CHECK(std::fabs(out[3] - poses[p][3]) < kTolDeg);
+        CHECK(std::fabs(out[4] - poses[p][4]) < kTolDeg);
+        CHECK(std::fabs((out[5] - poses[p][5]) - Config::BTN2_ROLL_SIGN * rollDeg) < kTolDeg);
+        // J1/J2/J3 逐位不变
+        CHECK(out[0] == poses[p][0]);
+        CHECK(out[1] == poses[p][1]);
+        CHECK(out[2] == poses[p][2]);
+        // 自检：解真的成立（FK(解) ≈ 目标）。若求解器被拒，out 会退回参照 ⇒ 上面 J6 那条本就会红；
+        //   这一句把"目标与 FK 的来源是同一个量"一并说清楚，并排除"坏夹具导致空转"。
+        double refR[9]; fkR(poses[p], refR);
+        double tgtR[9];
+        button2OrientTarget(refR, stylus[p], cur, Config::BTN2_TILT_PHI_DEG, tgtR);
+        double outR[9]; fkR(out, outR);
+        CHECK(angBetweenDeg(tgtR, outR) < Config::BTN2_WRIST_TOL_DEG);
+    }
+    PASS();
+}
+
 int main() {
     std::cout << "--- Button2Joint (按钮2 关节空间映射：笔杆姿态增量 -> 关节增量) ---" << std::endl;
     test_each_stylus_axis_moves_exactly_one_joint();
@@ -1453,6 +1512,7 @@ int main() {
     test_orient_joint_end_to_end_reaches_target();                 // ㉕(a) 2026-09-29 Task 4：端到端
     test_orient_joint_identity_and_nan();                          // ㉕(b)
     test_orient_joint_signature_has_no_position_input();           // ㉕(c) ★ 编译期钉子
+    test_roll_end_to_end_moves_only_j6();                          // ㉖ ★ 端到端：纯自转 ⇒ 只动 J6
 
     std::cout << "\nResults: " << g_passed << " passed, " << g_failed << " failed" << std::endl;
     return g_failed == 0 ? 0 : 1;
