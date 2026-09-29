@@ -1376,12 +1376,18 @@ static void test_orient_joint_identity_and_nan() {
         button2OrientJointTarget(ref, s, s, out);
         for (int i = 0; i < 6; ++i) CHECK(out[i] == ref[i]);
     }
-    // ⚠★ 【㉕(b) 的 NaN 段钉的是"行为"（NaN 进来六位不动），不是"守卫存在"】实测：**删掉**
-    //    本函数（`button2OrientJointTarget`）的 NaN/Inf 守卫，这一档**照旧全绿** —— NaN 经
-    //    `rpyToMatrix` → `rotVecDeg` 会落进最后一个退化分支 ⇒ `rv = {0,0,0}` ⇒ `targetR == refR`
-    //    ⇒ 求解器第 0 轮就 break ⇒ `out == ref`，**根本走不到"守卫"那条路**。
-    //    ⇒ 真正给这段牙齿的是"把失败回退 `outJoints[i] = refJoints[i]` 改成 `+1.0`"那条对照
-    //      （见 ㉕(a) 的 ⚠★）。别把"这段绿了"读成"守卫被测到了"。
+    // ⚠★ 【㉕(b) 的 NaN 段钉的是"行为"，不是"守卫存在"】本段（NaN / Inf 两档）的断言只有一条：
+    //    六位**逐位等于参照**（不动）。实测（`task-4-report.md` §3.3）：把守卫那个
+    //    `if (stylusBad) { … return; }`
+    //    **整块删掉**，本段**照旧全绿** —— 因为不进守卫也照样落回 `out == ref`：`rpyToMatrix(NaN,…)`
+    //    ⇒ 非有限 `dR` ⇒ `rotVecDeg` 落进**最后一个退化分支** ⇒ `rv = {0,0,0}` ⇒ `ω = 0` ⇒
+    //    `targetR == refR` ⇒ 求解器在恒等目标上**第 0 轮就 break** ⇒ `out == ref`。
+    //    **删守卫不红 ≠ 本段空转**：给它牙齿的是改**守卫写入的值**那条对照（报告 §3.4：把
+    //    守卫体改成只写 `outJoints[5] = refJoints[5] + 1.0;` ⇒ 本段 `FAIL: out[i] == ref[i]`，
+    //    实测 35/1）⇒ 本段钉住的是"守卫那条出口写回的是**参照**"。
+    //    ⚠ 别把牙齿归给"求解失败回退"那条对照：它红的是**㉕(a)**（`FAIL: out[0] == ref[0]`，
+    //      报告 §3.2），而本段这两档输入在守卫在时就**已返回**；就算守卫被删也是恒等目标、
+    //      第 0 轮 break ⇒ 成功 —— **这条回退根本不在本段的路线上**。
     {   // NaN 在 curStylus
         const double s0[3] = {0,0,0};
         const double sN[3] = {0, std::numeric_limits<double>::quiet_NaN(), 0};
