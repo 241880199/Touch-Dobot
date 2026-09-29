@@ -100,6 +100,12 @@
 //     "返回值一定有限"：那一刻没有安全的兜底可退（0 是一个真实关节角，机械臂会真的转过去），
 //     那一层只能由调用者负责（`refJoints` 抄自 `app.robotActualPose.j1..j6`，它若已是 NaN，
 //     说明机器人状态本身已经坏了）。该行为被用例⑥钉住（断言的是**现状**，且是**刻意**的现状）。
+
+void button2JointTarget(const double refJoints[6],
+                        const double refStylus[3],
+                        const double curStylus[3],
+                        double outJoints[6]);
+
 // ============================================================================
 //  3×3 纯算术（inline，放头文件里是为了【可测】—— 同 ForcePipeline.h 的 softDeadzone 先例）
 // ============================================================================
@@ -155,11 +161,6 @@ inline bool button2Mat3Inv(const double A[9], double out[9]) {
 //   只是一个薄壳，存在的唯一理由是：那个函数在匿名命名空间里，测试看不见。
 //   ⚠ 契约与 `Button2Joint.cpp` 的 `rotVecDeg` 逐字相同（退化分支、量程、单位度）。
 void button2RotVecDegForTest(const double R[9], double rv[3]);
-
-void button2JointTarget(const double refJoints[6],
-                        const double refStylus[3],
-                        const double curStylus[3],
-                        double outJoints[6]);
 
 // ============================================================================
 //  接线层的两条纯判据（2026-09-23 Task 2 修复轮：从 RelayCore.cpp **抽出来**）
