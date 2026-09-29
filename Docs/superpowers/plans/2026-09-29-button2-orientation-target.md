@@ -678,6 +678,9 @@ static double angBetweenDeg(const double A[9], const double B[9]) {
   void button2OrientJointTarget(const double refJoints[6], const double refStylus[3],
                                 const double curStylus[3], double outJoints[6]);
   ```
+
+  ⚠ **本段签名是【历史记录】**：Task 4 当时就是按这个签名实现的；其后提交 `223dd8b`（整支终审 I-1）把返回类型从 `void` 改成 `Btn2JointResult` ⇒ 上面两行与下面 Step 1 的代码只反映**当时**，现行签名见 `Touch_Client/relay/Button2Joint.h`。
+
 - **契约（与旧函数逐条对齐，除了"一根轴喂一个关节"那条被设计取代）**：
   - `out[0..2] = ref[0..2]` **无条件**（第一句就写，任何分支都不许再碰这三个下标）
   - 笔杆任一分量 NaN/Inf ⇒ **六位全回参照**

@@ -519,7 +519,9 @@ Btn2JointResult button2OrientJointTarget(const double refJoints[6], const double
     button2OrientTarget(refR, refStylus, curStylus, Config::BTN2_TILT_PHI_DEG, targetR);
 
     // ---- 解 J4/J5/J6（Task 3）；**失败 ⇒ 六位全回参照**--------------------------
-    // 与 I1/I2/FK 门的"本帧不下发"同款形状：宁可原地不动，也不给控制器一个没解出来的目标。
+    // ⚠ **不是**"本帧不下发"（与 I1/I2/FK 三处的 `cerr` + `return` 形状**不同**）：失败时本函数
+    //   **没有 `return`**，写回参照后照常返回 ⇒ 调用方仍会下发本帧的 `ServoJ` 目标，臂**顺着
+    //   步长限幅往按下位姿收回去**（判据见头文件那段 ⚠★ 与 `RelayCore.cpp:1681-1687` 的 ⚠⚠）。
     // ⚠ 失败时**重新**逐位写一遍六位（而不是只写腕三位）：`button2SolveWrist` 的失败契约已经
     //   保证它把 out 退回参照了，这里再写一遍是**防御性的重复**吗？不是 —— 本函数的"失败 ⇒
     //   六位全回参照"是一条**自己的**契约，它不该依赖被调函数的失败副作用的细节（那条契约
