@@ -1800,9 +1800,30 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
         for (int i = 0; i < 6; ++i) m_btn2JointCmd[i] = j[i];
     } else {
         // ================= 旧路径（**逐字**）=================
-        snprintf(cmd, sizeof(cmd), "ServoP(%.2f,%.2f,%.2f,%.2f,%.2f,%.2f)",
-            servoCmdX, servoCmdY, servoCmdZ,
-            targetRx, targetRy, targetRz);
+        // ★ 2026-09-29 一次性探针：`ServoP` 吃不吃额外的伺服参数？（见
+        //   `Config::SERVOP_EXTRA_PARAMS_ENABLED` 那一段的来龙去脉与用法。）
+        //   ⚠ **默认 false ⇒ 下面那个 `else` 支逐字不变**，回滚 = 翻一个 bool。
+        //   ⚠ 这一段**没有任何自动化用例**（本文件不被任何测试编译）⇒ 只能靠复审 + 上机。
+        if (Config::SERVOP_EXTRA_PARAMS_ENABLED) {
+            snprintf(cmd, sizeof(cmd), "ServoP(%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.4f,%.1f,%.1f)",
+                servoCmdX, servoCmdY, servoCmdZ,
+                targetRx, targetRy, targetRz,
+                Config::SERVOP_T, Config::SERVOP_LOOKAHEAD, Config::SERVOP_GAIN);
+            // 一次性出声：把"这一刻发的是哪一种形态"变成可观测的。
+            //   ⚠ 只打一次（这一段在 30 Hz 的发送路径上，不压就是 30 行/秒刷屏）。
+            static bool s_servoPProbeReported = false;
+            if (!s_servoPProbeReported) {
+                s_servoPProbeReported = true;
+                std::cout << "[Probe] ServoP 走【9 参数】形态（t=" << Config::SERVOP_T
+                          << " lookahead=" << Config::SERVOP_LOOKAHEAD
+                          << " gain=" << Config::SERVOP_GAIN
+                          << "）—— 若控制器不接受，控制台会有报错，且【手臂不再跟随】。" << std::endl;
+            }
+        } else {
+            snprintf(cmd, sizeof(cmd), "ServoP(%.2f,%.2f,%.2f,%.2f,%.2f,%.2f)",
+                servoCmdX, servoCmdY, servoCmdZ,
+                targetRx, targetRy, targetRz);
+        }
     }
 
     bool sent = robotSendMotion(cmd);

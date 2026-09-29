@@ -67,3 +67,13 @@ Touch_Client/force_demo_log.csv
 Touch_Client/tests/_nc_gold_hash.txt
 # 未被任何文档引用的原始采集（留盘不入库; 若以后要引用它, 把这一行删掉即可）
 Docs/superpowers/evidence/2026-09-24-force-wave-press-cycles-raw-only.csv
+
+# ===== 2026-09-29: `'n'` 键的波形落盘 —— 上面那条规则【漏了它】=====
+#   【为什么会漏】`FORCE_LOG_PATH` 与 `force_wave.csv` **都是相对路径**（见
+#     `Config::FORCE_LOG_PATH` 与 `main.cpp` 里 `fopen("force_wave.csv","a")`）⇒
+#     从哪个目录启动就落在哪里。历次落在过 `x64/Release/`，2026-09-29 那次落在 `Touch_Client/`。
+#   ⇒ **两个都要点名列**，否则 `git add -A` 会再一次把它们卷进去（47cb454 那次的教训）。
+#   ⚠ 仍然【逐条点名】，不用 `*.csv` —— `Docs/superpowers/evidence/` 下有刻意入库的
+#     波形证据（`2026-09-24-force-wave-loop-confirmed-dev.csv` 等），宽通配会误伤它们。
+Touch_Client/force_wave.csv
+Touch_Client/x64/Release/force_wave.csv
