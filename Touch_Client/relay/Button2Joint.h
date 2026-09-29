@@ -128,6 +128,11 @@ inline void button2RotVecToMatDeg(const double rv[3], double R[9]) {
     R[6] = uz*ux*t - uy*s;     R[7] = uz*uy*t + ux*s;   R[8] = c + uz*uz*t;
 }
 
+// ⚠★【别名不安全】`out` **不得**与 `A` 或 `B` 是同一块内存。实现是逐元素
+//   "读 A 的元素、写 out 的元素"的嵌套循环 ⇒ 同一块内存时**先写的元素会被后面当成 A/B 再读**，
+//   结果是一团糊（不是"算错一点点"）。⚠ 本任务（Task 2）正好要用它做**三次连乘**
+//   （`button2OrientTarget`）⇒ 每次都用独立缓冲（`Mw` / `Rtilt` / `Mr` / `outR`），**别图省事
+//   原地乘**。要原地乘（`A = A·B`）必须先复制到临时数组。
 inline void button2Mat3Mul(const double A[9], const double B[9], double out[9]) {
     for (int r = 0; r < 3; ++r)
         for (int c = 0; c < 3; ++c) {
@@ -137,12 +142,22 @@ inline void button2Mat3Mul(const double A[9], const double B[9], double out[9]) 
         }
 }
 
+// ⚠★【别名不安全】同 `button2Mat3Mul`：`out` 不得与 `A` 同一块内存。
+//   转置是"边读边写、且**下标互换了**"（`out[c*3+r] = A[r*3+c]`）⇒ 原地转置会在写完之后
+//   又把**已经写进去的新值**当旧值读回来（对称位置上成对地互相覆盖）。要原地转置得走临时数组。
 inline void button2Mat3T(const double A[9], double out[9]) {
     for (int r = 0; r < 3; ++r)
         for (int c = 0; c < 3; ++c) out[c*3+r] = A[r*3+c];
 }
 
 // 伴随矩阵法求逆；|det| 太小 ⇒ false（调用方据此拒发，别给一个离谱的解）
+// ⚠★【失败契约】返回 `false` 时**一个字节都不写 `out`**（判 det 的那句在任何赋值之前）——
+//   调用方**不得**把 `out` 当结果用。要判"到底解出来没有"只能看返回值：`out` 里可能是
+//   调用方自己的**陈旧值**，而陈旧值长得和成功结果一模一样。
+//   真正的修法在调用方：`if (!button2Mat3Inv(A, Ai)) { 拒发; return; }`。
+//   ⚠ **本条目前只写在契约里，没有用例钉住**：⑲(d) 只钉了"奇异矩阵**返回 false**"，
+//     没有断言"`out` 没被写"。这是**已知的欠账**（Task 2 复审的 Minor 要求只是"写明"，
+//     未要求补用例）—— 别把"这里写了"读成"这里测过了"。
 inline bool button2Mat3Inv(const double A[9], double out[9]) {
     const double c00 = A[4]*A[8] - A[5]*A[7];
     const double c01 = A[5]*A[6] - A[3]*A[8];
@@ -161,6 +176,46 @@ inline bool button2Mat3Inv(const double A[9], double out[9]) {
 //   只是一个薄壳，存在的唯一理由是：那个函数在匿名命名空间里，测试看不见。
 //   ⚠ 契约与 `Button2Joint.cpp` 的 `rotVecDeg` 逐字相同（退化分支、量程、单位度）。
 void button2RotVecDegForTest(const double R[9], double rv[3]);
+
+// ============================================================================
+//  按钮2 姿态目标（2026-09-29 Task 2：摆动锁基座 + 自转绕自身轴）
+// ============================================================================
+// `refR` / `outR`：行主序 3×3（`R[r*3+c]`，与 Kinematics 的 `T[i][j]` 同一约定）。
+// `refStylus` / `curStylus`：`{Rx,Ry,Rz}` 度，**同 `appState.stylusOrient` 的次序**（同上面那个函数）。
+//
+// 【流水线】逐行对照 `Docs/superpowers/specs/2026-09-29-button2-orientation-target-design.md` §1（修订版）：
+//   ① R_s_ref = rpyToMatrix(refStylus) · R_s_cur = rpyToMatrix(curStylus)   （ZYX，输入为度）
+//   ② ΔR = R_s_refᵀ · R_s_cur        （**器件系**增量；与旧路同一写法）
+//   ③ rv = rotVecDeg(ΔR)             （度，|rv| ≤ 180）
+//   ④ 摆动（**左乘**）：ω = (SX·rv[0], cosφ·SY·rv[1], sinφ·SY·rv[1])
+//                       R_tilt = rotVecToMatDeg(ω) · refR
+//                       左乘 = 在【基座系】里摆 ⇒ "前摆 ⇒ 末端往基座 +Y 摆"**任意位姿下都成立**
+//                       （这正是本次要修的那一条：旧路的摆动方向随末端姿态跑）。
+//   ⑤ 自转（**右乘**）：R_new = R_tilt · Rz(ROLL_SIGN·rv[2])
+//                       右乘 = 绕【新的】末端自身轴拧 ⇒ 自转不改变末端轴指向（`outR` 的第三列不动）。
+//   ⇒ **摆动锁基座、自转绕自身轴的【混合】形状**。两边**不能对调**：一律左乘会坏掉自转
+//     （设计 §"为什么不能一律用基座系"），一律右乘会让摆动方向随姿态跑。
+//
+// 【死区与偏移限幅】两个现有常数在这里的**语义被重定**（设计 §3）：
+//   · `ORIENT_DEADZONE_DEG`(0.05°) 门的仍然是**笔杆的逐轴偏移**（`rv` 的分量，不是关节量）；
+//   · `ORIENT_MAX_OFFSET_DEG`(150°) 夹的是 **ΔR 的旋转角**（= 目标朝向相对参照的旋转角），
+//     而且是**整体缩比**（轴不变、只缩幅度），**不是逐分量夹** —— 逐分量夹会把轴也夹歪，
+//     解出来的末端就朝错的方向走（⑳c 的负对照就是它）。
+//
+// ⚠★ `phiDeg` 是【入参】而不是在函数里直接读 Config —— 两个理由，缺一不可：
+//     ① 编译期常数在运行期改不了 ⇒ 用例写不出**有牙齿**的对照（那本案就退化成
+//        让实现自己给自己背书）；
+//     ② 把 0 写死会让这个常数变成**死常数**（上机拧它没效果，调用方以为拧了）——
+//        而默认值**正是 0**，这种缺陷在默认值下**完全看不出来**（用例 ⑳d 专治它）。
+//   ⇒ 所有调用点（用例 ⑳/⑳b/⑳c/⑳d/㉑ 与 Task 5 的接线）一律传 `Config::BTN2_TILT_PHI_DEG`。
+//     φ=0 ⇒ M=I ⇒ 器件轴 = 基座轴（用户 2026-09-29 定案）。
+//
+// ⚠ 非有限入参**没有**守卫（旧函数 `button2JointTarget` 有，本函数**没有**）：
+//   上面的契约只覆盖有限入参，`refStylus`/`curStylus` 非有限时会发生什么**没有被用例钉住**，
+//   也**没有**在本函数里做任何规定。这是 Task 5 接线时要一起定的事 —— 在定下来之前，
+//   **别把"没崩"读成"已经安全"**，也别按"反正会退回去"来推理。
+void button2OrientTarget(const double refR[9], const double refStylus[3],
+                         const double curStylus[3], double phiDeg, double outR[9]);
 
 // ============================================================================
 //  接线层的两条纯判据（2026-09-23 Task 2 修复轮：从 RelayCore.cpp **抽出来**）

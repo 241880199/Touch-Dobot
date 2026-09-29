@@ -196,6 +196,77 @@ void button2JointTarget(const double refJoints[6],
 }
 
 // ============================================================================
+//  按钮2 姿态目标（2026-09-29 Task 2）：摆动锁基座 + 自转绕自身轴
+// ============================================================================
+// 契约、流水线（①~⑤）、以及"φ 为什么是入参"、"两个常数语义被重定"、"非有限入参没有守卫"
+// 这几条**全部**写在 `Button2Joint.h` 上；这里只写"为什么正好是这几行"。
+//
+// ⚠ 左边三次连乘**各自一块独立缓冲**（`Mw` / `Rtilt` / `Mr` / `outR`）—— 不是风格，是契约：
+//   `button2Mat3Mul` **别名不安全**（见头文件），`out` 与 `A`/`B` 同一块内存会算出一团糊。
+//   摆动与自转那两处【左乘/右乘】的分工见头文件；对调会被 ⑳ / ㉑ 各自抓住（Task 2 Step 6 的负对照）。
+void button2OrientTarget(const double refR[9], const double refStylus[3],
+                         const double curStylus[3], double phiDeg, double outR[9]) {
+    // ---- ①ΔR：器件系增量（与旧路 `button2JointTarget` 逐字同一条式子）----------------
+    double Rref[9], Rcur[9], RrefT[9], dR[9];
+    TcpCalibration::rpyToMatrix(refStylus[0], refStylus[1], refStylus[2], Rref);
+    TcpCalibration::rpyToMatrix(curStylus[0],   curStylus[1],   curStylus[2],   Rcur);
+    button2Mat3T(Rref, RrefT);
+    button2Mat3Mul(RrefT, Rcur, dR);                    // ΔR = R_refᵀ · R_cur（器件系）
+
+    double rv[3];
+    rotVecDeg(dR, rv);                                  // 直接调文件内的 `rotVecDeg`
+
+    // ---- ② 逐分量死区（`>=` 门限才放行，与旧实现 axisGate **逐字同语义**）--------------
+    // ⚠ 写 `if (!(std::fabs(rv[i]) >= dz))` 而**不是** `if (std::fabs(rv[i]) < dz)`：
+    //   后者对 NaN 会**放行**（NaN < dz 为假 ⇒ 不归零），前者对 NaN 会归零。两者在有限输入下
+    //   完全等价，本条只是把 NaN 的落点钉在"归零"这一侧。`>` 语义（恰好等于门限时吞掉）
+    //   由用例 ⑳b 的第二半钉住 —— 换成 `>` 那条用例必红（Task 2 的负对照之一）。
+    const double dz = Config::ORIENT_DEADZONE_DEG;
+    for (int i = 0; i < 3; ++i)
+        if (!(std::fabs(rv[i]) >= dz)) rv[i] = 0.0;
+
+    // ---- ③ 整体偏移限幅：ΔR 的【旋转角】θ > 150° ⇒ 把 ΔR【整体缩比】到 150°（轴不变）----
+    // ⚠ 缩比做在**分量**上（三个分量同一个 k）⇒ 方向不变。**不许换成逐分量 clamp**：
+    //   逐分量夹会改变方向（某一根分量先到顶、别的还在长），末端就朝错的方向走。
+    //   ⚠ 这条负对照只有在**多分量**输入下才会红：纯单轴输入时"整体缩比"与"逐分量夹"
+    //   给出**同一个结果**（只有一个分量、且它就是要缩的那根）⇒ 用例 ⑳c 因此分 (a)(b) 两半。
+    // ⚠ 用**未经死区的** `dR` 重算一次 θ（死区改的是 `rv`；而"这次偏移有多大"必须按原值判）。
+    {
+        double rvAll[3];
+        rotVecDeg(dR, rvAll);
+        const double th = std::sqrt(rvAll[0]*rvAll[0] + rvAll[1]*rvAll[1] + rvAll[2]*rvAll[2]);
+        if (th > Config::ORIENT_MAX_OFFSET_DEG && th > 1e-12) {
+            const double k = Config::ORIENT_MAX_OFFSET_DEG / th;
+            for (int i = 0; i < 3; ++i) rv[i] *= k;      // 缩比在【分量】上做：三个分量同一个 k ⇒ 轴不变
+        }
+    }
+
+    // ---- ④ 摆动：【左乘】= 在基座系里摆 ------------------------------------------------
+    // 旋量 = Rx(φ)·(SX·rv[0], SY·rv[1], 0)：φ 是**入参**（见头文件那两个理由）。
+    // ⚠ `cos(phi)*t1` / `sin(phi)*t1` 用的是 `t1 = SY*rv[1]`（**已折符号**），顺序不能换 ——
+    //   先折符号再进 M，与"先 M 再折符号"在 φ≠0 时**不是**同一件事（M 会把 y 分量转到 y/z 上，
+    //   而在转了之后按 y 折符号就折错轴了）。
+    const double D2R0 = 3.14159265358979323846 / 180.0;
+    const double phi = phiDeg * D2R0;
+    const double t0 = Config::BTN2_TILT_SIGN_X * rv[0];
+    const double t1 = Config::BTN2_TILT_SIGN_Y * rv[1];
+    const double w[3] = { t0, std::cos(phi) * t1, std::sin(phi) * t1 };
+    double Mw[9], Rtilt[9];
+    button2RotVecToMatDeg(w, Mw);
+    button2Mat3Mul(Mw, refR, Rtilt);                    // 左乘 = 基座系里摆
+
+    // ---- ⑤ 自转：【右乘】= 绕【新的】末端自身轴 -----------------------------------------
+    // ⚠ 右乘 `Rtilt · Rz` 而不是 `Rz · Rtilt`：右乘绕的是**摆动之后**的末端轴（"自身"轴），
+    //   左乘绕的是参照姿态的轴 —— 两者只在 rtilt 与 refR 同轴时才等价。
+    //   对调会被 ㉑ 抓住（它的判据 1 就是"接近轴（第三列）逐位不变"）。
+    const double roll = Config::BTN2_ROLL_SIGN * rv[2];
+    double Mr[9];
+    const double rollAxis[3] = { 0.0, 0.0, roll };      // MSVC 的 C++ 不支持 C99 复合字面量
+    button2RotVecToMatDeg(rollAxis, Mr);
+    button2Mat3Mul(Rtilt, Mr, outR);
+}
+
+// ============================================================================
 //  接线层的两条纯判据（从 RelayCore.cpp 抽出来 —— 那里不被任何测试编译）
 // ============================================================================
 // 契约、边界（尤其是 NaN 与负数 maxStep 这两处"刻意照抄"）全部写在 Button2Joint.h 上；

@@ -942,6 +942,19 @@ namespace Config {
     //     · (F) 积分器的失败模式订正：**每帧有界、连续丢包数无界**（不是"不放大"）。
     const bool   BTN2_JOINT_SPACE_ENABLED = true;
 
+    // ★★★ 2026-09-29 按钮2 新实现（"姿态目标 + 解 J4/J5/J6"）—— 设计见
+    //   `Docs/superpowers/specs/2026-09-29-button2-orientation-target-design.md`（读【修订】那一节）
+    //   回滚 = 翻 `BTN2_ORIENT_TARGET_ENABLED` ⇒ 逐字走旧的 `button2JointTarget`
+    //   （那是"一根器件轴喂一个关节"的老映射，**一个字都不许改**）。
+    const bool   BTN2_ORIENT_TARGET_ENABLED = true;
+    const double BTN2_TILT_PHI_DEG  = 0.0;    // M = Rx(φ)。φ=0 由用户 2026-09-29 定案（M = I）
+    const double BTN2_TILT_SIGN_X   = -1.0;   // ⚠ 器件侧约定，**【上机看方向确认】**，默认沿用 BTN2_J4_SIGN
+    const double BTN2_TILT_SIGN_Y   = -1.0;   // ⚠ 同上，默认沿用 BTN2_J5_SIGN
+    const double BTN2_ROLL_SIGN     = -1.0;   // 沿用 BTN2_J6_SIGN 的实测结论
+    const double BTN2_WRIST_TOL_DEG = 0.05;   // 牛顿迭代收敛门限（度）
+    const int    BTN2_WRIST_MAX_ITER = 24;
+    const double BTN2_WRIST_DAMP    = 1e-3;   // 阻尼 λ 的下限
+
     // ★★★ 2026-09-29 一次性【探针】：`ServoP` 到底吃不吃额外的伺服参数？
     //
     // 【为什么问】厂商文档 `Docs/机械臂资料/TCP_IP远程控制接口文档.md` 里：
