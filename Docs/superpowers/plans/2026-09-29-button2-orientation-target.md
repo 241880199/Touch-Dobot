@@ -685,9 +685,139 @@ static double angBetweenDeg(const double A[9], const double B[9]) {
   - 签名里**没有位置入参**（编译期性质，用函数指针类型钉住，用例 ③ 的做法）
   - `maxStepDeg` 传进 Task 3 的内部限幅；**逐帧累加器仍由调用方 `clampJointStep` 持有**（不重复）
 
-- [ ] **Step 1~2: 用例 ㉕**（J1/J2/J3 保持 · 不动就不动 · NaN 守卫 · 求解失败回参照 · 无位置入参）
-- [ ] **Step 3~5: 实现 + 跑 + 负对照**
-- [ ] **Step 6: 整床 + 提交**
+- [ ] **Step 1: 实现（**完整代码**）**
+
+```cpp
+void button2OrientJointTarget(const double refJoints[6], const double refStylus[3],
+                              const double curStylus[3], double outJoints[6]) {
+    // ---- 第一句就写 J1/J2/J3，且【无条件】—— 与旧函数同一条纪律：
+    //      下面任何分支都不许再碰这三个下标。
+    outJoints[0] = refJoints[0];
+    outJoints[1] = refJoints[1];
+    outJoints[2] = refJoints[2];
+
+    // ---- 笔杆 NaN/Inf 守卫（与旧函数的契约逐条对齐）----
+    //   ⚠ 只守【笔杆侧】：`refJoints` 若非有限，本函数**原样传出去**（没有安全值可退，
+    //     那一刻 0 是一个真实关节角，机械臂会真的转过去）。这一点与旧函数**逐字相同**。
+    bool stylusBad = false;
+    for (int i = 0; i < 3; ++i)
+        if (!std::isfinite(refStylus[i]) || !std::isfinite(curStylus[i])) stylusBad = true;
+    if (stylusBad) {
+        for (int i = 0; i < 6; ++i) outJoints[i] = refJoints[i];
+        return;
+    }
+
+    // ---- 参照姿态（FK 的旋转部分，行主序）----
+    double refR[9];
+    {
+        double T[4][4];
+        Kinematics::composeTransform(refJoints, T);
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c) refR[r*3 + c] = T[r][c];
+    }
+
+    // ---- 想要的末端朝向（Task 2）----
+    double targetR[9];
+    button2OrientTarget(refR, refStylus, curStylus, Config::BTN2_TILT_PHI_DEG, targetR);
+
+    // ---- 解 J4/J5/J6（Task 3）；**失败 ⇒ 六位全回参照**（与 I1/I2/FK 门的"本帧不下发"同款形状）
+    if (!button2SolveWrist(refJoints, targetR, Config::ORIENT_MAX_STEP_DEG, outJoints)) {
+        for (int i = 0; i < 6; ++i) outJoints[i] = refJoints[i];
+    }
+}
+```
+
+- [ ] **Step 2: 五个用例（**完整代码**；都在 `static void` 里，`main()` 依次调用）**
+
+```cpp
+// 签名里【没有位置入参】是编译期性质，用函数指针类型钉住（与旧函数用例③同一招）
+typedef void (*Btn2OrientSig)(const double[6], const double[3], const double[3], double[6]);
+
+static void test_orient_joint_end_to_end_reaches_target() {
+    TEST(㉕(a) ★ 端到端：任意参照位姿 + 任意小摆动 ⇒ FK(解) 必须真的到得了目标);
+    //   这一条把 Task 2 与 Task 3 串起来验：**不依赖 sx/sy/s6**（它比的是"算出来的目标"与"解出来的朝向"）。
+    unsigned seed = 20260929u;
+    auto rnd = [&seed]() { seed = seed*1103515245u + 12345u; return (double)((seed>>16)&0x7FFF)/32767.0; };
+    int ok = 0, ran = 0;
+    for (int t = 0; t < 60; ++t) {
+        double ref[6] = { rnd()*720-360, rnd()*720-360, rnd()*310-155,
+                          rnd()*720-360, rnd()*720-360, rnd()*720-360 };
+        // 笔杆从"单位姿态"转到"绕器件某轴 ≤15°"——用测试侧的 matToZyRpy 造输入（别再写第二份！）
+        double Rs[9], Rd[9], Rsc[9], cur[3];
+        TcpCalibration::rpyToMatrix(0,0,0, Rs);
+        const double rv[3] = { rnd()*30-15, rnd()*30-15, rnd()*30-15 };
+        button2RotVecToMatDeg(rv, Rd);
+        button2Mat3Mul(Rs, Rd, Rsc);
+        matToZyRpy(Rsc, cur);
+        const double refStylus[3] = {0,0,0};
+
+        double out[6];
+        button2OrientJointTarget(ref, refStylus, cur, out);
+        ++ran;
+        // J1/J2/J3 必须逐位不变
+        CHECK(out[0] == ref[0]);
+        CHECK(out[1] == ref[1]);
+        CHECK(out[2] == ref[2]);
+        // 目标朝向（用同一套纯函数算一遍）与 FK(解) 必须一致
+        double refR[9]; fkR(ref, refR);
+        double tgtR[9];
+        button2OrientTarget(refR, refStylus, cur, Config::BTN2_TILT_PHI_DEG, tgtR);
+        double outR[9]; fkR(out, outR);
+        if (angBetweenDeg(tgtR, outR) < Config::BTN2_WRIST_TOL_DEG) ++ok;
+    }
+    CHECK(ran == 60);
+    CHECK(ok >= 55);      // 容许少数位姿真的解不出来（那正是自验门该拒的）
+    PASS();
+}
+
+static void test_orient_joint_identity_and_nan() {
+    TEST(㉕(b) 笔杆不动 ⇒ 六关节逐位不动；NaN/Inf ⇒ 六位全回参照);
+    const double ref[6] = {10, -20, 30, 40, -50, 60};
+    double out[6];
+    {   // 不动
+        const double s[3] = {0,0,0};
+        button2OrientJointTarget(ref, s, s, out);
+        for (int i = 0; i < 6; ++i) CHECK(out[i] == ref[i]);
+    }
+    {   // NaN 在 curStylus
+        const double s0[3] = {0,0,0};
+        const double sN[3] = {0, std::numeric_limits<double>::quiet_NaN(), 0};
+        button2OrientJointTarget(ref, s0, sN, out);
+        for (int i = 0; i < 6; ++i) CHECK(out[i] == ref[i]);
+    }
+    {   // Inf 在 refStylus
+        const double sI[3] = {std::numeric_limits<double>::infinity(), 0, 0};
+        const double s0[3] = {0,0,0};
+        button2OrientJointTarget(ref, sI, s0, out);
+        for (int i = 0; i < 6; ++i) CHECK(out[i] == ref[i]);
+    }
+    PASS();
+}
+
+static void test_orient_joint_signature_has_no_position_input() {
+    TEST(㉕(c) 签名里没有位置入参（编译期性质）);
+    Btn2OrientSig fp = &button2OrientJointTarget;
+    CHECK(fp != nullptr);
+    PASS();
+}
+```
+
+⚠ `fkR` / `angBetweenDeg` / `matToZyRpy` 都是**测试文件里已有的**（`matToZyRpy` 在 `:87` 附近，
+另两个是 Task 3 加的）—— **一个都不许重写**。
+
+- [ ] **Step 3: 跑，确认通过**（`Results:` 应从 Task 3 结束时的数再涨 3）
+- [ ] **Step 4: 负对照（**必须实测红**）**
+
+- **(a) 把 J1/J2/J3 的保持去掉**（例如把 `outJoints[0] = refJoints[0];` 改成
+  `outJoints[0] = refJoints[0] + 1.0;`）⇒ **㉕(a) 必须红**（它逐位断言 `out[0] == ref[0]`）。改回。
+- **(b) 把 NaN 守卫删掉** ⇒ **㉕(b) 必须红**。改回。
+  ⚠ 删守卫后 `rpyToMatrix(NaN,…)` 会产出非有限矩阵 ⇒ 后续要么是 NaN 关节角、要么被 Task 3 的自验门拒掉后
+  **回退成 `out == ref`（那 ㉕(b) 就照旧绿）**。**若实测不红，如实报告**，并改用下面这条：
+- **(c)【保证红】** 把 NaN 分支里的 `for (int i = 0; i < 6; ++i) outJoints[i] = refJoints[i];`
+  改成 `outJoints[5] = refJoints[5] + 1.0;` ⇒ **㉕(b) 的 NaN 那一段必须红**（它逐位比六个）。
+  ⚠ 它**不依赖**任何"下游会不会把 NaN 转成回退"的假设 ⇒ 一定红。
+
+- [ ] **Step 5: 整床 + 提交**
 
 ---
 
