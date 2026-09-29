@@ -1311,7 +1311,9 @@ typedef void (*Btn2OrientSig)(const double[6], const double[3], const double[3],
 //      中间隔着 Task 2 的整条流水线 ⇒ 它把 Task 2 与 Task 3 **串起来**验：
 //      **不依赖 任何符号常数**（它比的是"Task 2 算出来的目标"与"Task 3 解出来的朝向"，
 //      两边都走同一套常数 ⇒ 符号全翻也绿；符号的账由 Task 2 那一组与上机去结）。
-//    ⚠ 判据写在循环里（不是累加成 ok 再断）：第一个不满足的样本立刻红，报出的是本质判据。
+//    ⚠ 判据写法分两种，别混：三条 `out[i] == ref[i]`（J1/J2/J3 保持）**写在循环里** ——
+//      第一个不满足的样本立刻红，报出的是本质判据；而 FK 匹配那一条恰恰是**累加**的
+//      （循环里 `if (...) ++ok;`，循环外才 `CHECK(ok >= 55)`）。
 //    ⚠ `ok >= 55` 是**防空转**：若入口恒返回参照，60 组里能对上目标的只会是碰巧，多半全落。
 //      容许少数位姿真的解不出来（那正是自验门该拒的）。**实测余量：ok = 58/60（只差 3 才到限）**
 //      —— 余量薄，但种子固定 ⇒ 不 flake；若 `Config` 里步长预算/收敛门限那几个常数被调紧，
@@ -1331,7 +1333,8 @@ static void test_orient_joint_end_to_end_reaches_target() {
     for (int t = 0; t < 60; ++t) {
         double ref[6] = { rnd()*720-360, rnd()*720-360, rnd()*310-155,
                           rnd()*720-360, rnd()*720-360, rnd()*720-360 };
-        // 笔杆从"单位姿态"转到"绕器件某轴 ≤15°"——用测试侧的 matToZyRpy 造输入（别再写第二份！）
+        // 笔杆从"单位姿态"转到"绕器件某轴 ≤ ~26°"（rv 三分量各在 ±15° ⇒ 模长上限 15√3 ≈ 26°）
+        //   ——用测试侧的 matToZyRpy 造输入（别再写第二份！）。与 makeRandomReachTarget 的措辞一致。
         double Rs[9], Rd[9], Rsc[9], cur[3];
         TcpCalibration::rpyToMatrix(0,0,0, Rs);
         const double rv[3] = { rnd()*30-15, rnd()*30-15, rnd()*30-15 };
@@ -1373,6 +1376,12 @@ static void test_orient_joint_identity_and_nan() {
         button2OrientJointTarget(ref, s, s, out);
         for (int i = 0; i < 6; ++i) CHECK(out[i] == ref[i]);
     }
+    // ⚠★ 【㉕(b) 的 NaN 段钉的是"行为"（NaN 进来六位不动），不是"守卫存在"】实测：**删掉**
+    //    本函数（`button2OrientJointTarget`）的 NaN/Inf 守卫，这一档**照旧全绿** —— NaN 经
+    //    `rpyToMatrix` → `rotVecDeg` 会落进最后一个退化分支 ⇒ `rv = {0,0,0}` ⇒ `targetR == refR`
+    //    ⇒ 求解器第 0 轮就 break ⇒ `out == ref`，**根本走不到"守卫"那条路**。
+    //    ⇒ 真正给这段牙齿的是"把失败回退 `outJoints[i] = refJoints[i]` 改成 `+1.0`"那条对照
+    //      （见 ㉕(a) 的 ⚠★）。别把"这段绿了"读成"守卫被测到了"。
     {   // NaN 在 curStylus
         const double s0[3] = {0,0,0};
         const double sN[3] = {0, std::numeric_limits<double>::quiet_NaN(), 0};
