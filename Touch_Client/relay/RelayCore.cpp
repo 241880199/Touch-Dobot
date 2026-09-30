@@ -1656,6 +1656,15 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
                               << m_jointRef[3] << "," << m_jointRef[4] << "," << m_jointRef[5] << ")"
                               << std::endl;
                 } else {
+                    // ⚠⚠ 2026-09-30 终审 Minor 1：**这是一个不完备的 `if/else`** —— 它靠的是
+                    //   "`Btn2JointResult` 今天只有三个值、而上面已经把 `Ok` 与 `SolveFailed`
+                    //   排除掉" ⇒ 落到 `else` 的一律当成 `StylusUntrustworthy`。
+                    //   **将来若给枚举加第四个值**（例如把"求逆失败"与"没收敛"拆成两档），
+                    //   它会**静默**被报成 `STYLUS ... UNTRUSTWORTHY` —— 消息指错方向、
+                    //   而没有任何东西会红（本文件**不被任何测试编译**）。
+                    //   ⇒ 加枚举值时**先来改这里**（改成显式 `switch` 或补上分支）。
+                    //   ⚠ 本轮**刻意不动控制流**（同一个理由：零测试覆盖，动它没人兜底）——
+                    //     这里只留这条注释。
                     // `StylusUntrustworthy`：守卫那一条**任何求解之前**就返回了 ⇒ 与上面那档
                     //   **不是**同一个原因，措辞必须分开（这正是 I-1 要修的第二件事）。
                     //   守卫判的是 `refStylus` **与** `curStylus` 的**每个**分量（`std::isfinite`）
