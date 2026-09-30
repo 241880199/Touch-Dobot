@@ -708,7 +708,7 @@ namespace Config {
     const int    FORCE_GUARD_REPORT_MS = 5000;
 
     // ========== 姿态控制参数 ==========
-    // ⚠★ 2026-09-23 复审 Minor 4：本常数现在有**两个**消费方，而它们量的是**不同的量**
+    // ⚠★ 2026-09-23 复审 Minor 4：本常数现在有**三个**消费方，而它们量的是**不同的量**
     //   —— 名字与右边那句"单步最大角度增量"只描述了**前者**，别按名字读它：
     //     · 旧路径（本文件【靠下】的 `ORIENT_SEAM_FIX_ENABLED` 那一带、`RelayCore.cpp` 的 RPY 块）：
     //       ⚠ 2026-09-23 复审订正：原文写的是"本文件**上面**"，与事实【相反】—— 该开关整段都在
@@ -716,10 +716,15 @@ namespace Config {
     //       限的是**末端姿态表示量的逐帧增量**（degree，RPY 的三个分量各自）；
     //     · 关节空间路径（`relay/Button2Joint.cpp` 的 `clampJointStep`，按钮2 关节模式）：
     //       限的是**关节角的逐帧增量**（degree，J1~J6 各自）。
+    //     · ★ 2026-09-29 Task 7 新增第三个：腕部求解器（`relay/Button2Joint.cpp` 的
+    //       `button2SolveWrist`，由 `button2OrientJointTarget` 调用，按钮2 姿态目标新实现）：
+    //       限的是**牛顿迭代每一轮**的关节增量（degree，J4/J5/J6 各自）—— 是**每迭代**、
+    //       **不是**每帧（同一帧里可走很多轮）⇒ 本常数只管"一轮走多大"，
+    //       单次调用的**总**预算 = 本值 × `Config::BTN2_WRIST_MAX_ITER`。
     //   量纲碰巧都是"度"、值碰巧都可比 —— 但**语义不同**（一个是表示量、一个是物理关节角）。
     //   这是与 `ORIENT_MAX_OFFSET_DEG` / `ORIENT_DEADZONE_DEG` 同一类的"单位变了"记账，
     //   见 `relay/Button2Joint.h` 的「单位变了」那一段。**要分家就得新开一个常数**（别改语义）。
-    const double ORIENT_MAX_STEP_DEG = 3.0;          // 单步最大角度增量 (degrees) —— 见上：两个消费方
+    const double ORIENT_MAX_STEP_DEG = 3.0;          // 单步最大角度增量 (degrees) —— 见上：三个消费方
     // 姿态回路的【逐轴】响应门限 (degrees)。
     //
     // 【现状 —— 参照式, 2026-09-21】那条回路已改成:
@@ -952,7 +957,20 @@ namespace Config {
     const double BTN2_TILT_SIGN_Y   = -1.0;   // ⚠ 同上，默认沿用 BTN2_J5_SIGN
     const double BTN2_ROLL_SIGN     = -1.0;   // 沿用 BTN2_J6_SIGN 的实测结论
     const double BTN2_WRIST_TOL_DEG = 0.05;   // 牛顿迭代收敛门限（度）
-    const int    BTN2_WRIST_MAX_ITER = 24;
+    const int    BTN2_WRIST_MAX_ITER = 60;    // 每腕关节单次预算 = 本值 × ORIENT_MAX_STEP_DEG
+                                              //   = 60 × 3.0 = **180°**（2026-09-29 用户裁决：由 24 调上来）
+                                              // ★ 为什么是 180：入口的 `ORIENT_MAX_OFFSET_DEG`(150°) 只夹
+                                              //   **倾斜**分量，**自转**分量不过它，而 `rotvec` 的最短弧上限
+                                              //   恒为 180° ⇒ 入口能造出的最大目标量是 180°，**不是** 150°。
+                                              //   预算 < 180 ⇒ "输入端允许、求解器却到不了"这种自相矛盾的
+                                              //   输入仍然存在（24×3 = 72 就是那个病）。
+                                              // ⚠ **零余量**：非正交位姿（`|z4·z6| = |cos J5|`）下关节需求可以
+                                              //   大于转角 ⇒ 接近腕部奇异（J5→0 或 ±180）时**仍会**求解失败，
+                                              //   那是**对的**（那时臂不该硬转）。别读成"从此不会失败"。
+                                              // ⚠ **别改 `ORIENT_MAX_STEP_DEG` 来达到同样效果**：它同时是
+                                              //   姿态路径与 `clampJointStep` 的**每帧**步长（两条已被现场
+                                              //   验证过的路），而且"每轮步子大 ⇒ 更易跳解支"。
+                                              //   改迭代上限 ⇒ 每轮仍是 3°、"小步偏向近解"这条性质逐字不变。
     const double BTN2_WRIST_DAMP    = 1e-3;   // 阻尼 λ 的**初值**（不是下限）：`button2SolveWrist`
                                               // 每轮比上一轮误差小 ⇒ ×0.5、否则 ×2，**之后**才夹到
                                               // [1e-6, 1.0] —— 那两个夹取界的字面量在 Button2Joint.cpp

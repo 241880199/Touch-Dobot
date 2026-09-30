@@ -1240,8 +1240,12 @@ static void test_solve_wrist_invariant_holds_and_budget_refusal_is_exercised() {
     // 三组输入**刻意覆盖两个分支**（缺一类就有个负对照打不到，见下面 ⚠）：
     //   c0/c1 —— 奇异位姿 + 附近可达目标（60°）⇒ 解应当出来 ⇒ 走 else 分支（把 FK 回验执行到）；
     //   c2    —— 奇异位姿 + 极端目标（179°）⇒ **步长预算**内解不出来 ⇒ 走 fail 分支（把"退回参照"执行到）。
-    //     ⚠ c2 被拒的机制是【24 轮 × 3°/轮 = 72° 的步长预算】，**不是**腕部奇异的几何不可达 ——
-    //       实测：把 `maxStepDeg` 换成 30° 后 c2 **解得出来**（三组全 ok=1，FK 回验仍绿）。
+    //     ★ 2026-09-29 Task 7：该案的 `maxStepDeg` 取 **1.0°**（预算 60 × 1.0 = 60° < 需求的 179°）
+    //       —— 逐案的 `steps[]` 见下面那两行；预算不再是 72°（那是 `BTN2_WRIST_MAX_ITER = 24` 时代的数）。
+    //     ⚠ c2 被拒的机制是【步长预算 = `maxStepDeg` × `BTN2_WRIST_MAX_ITER`】，**不是**腕部奇异的
+    //       几何不可达 —— 实测（2026-09-29 Task 7 在 `BTN2_WRIST_MAX_ITER = 60` 下重跑）：把 c2 的
+    //       `maxStepDeg` 换成 **30.0°** ⇒ 预算 30 × 60 = 1800° ⇒ c2 **解得出来** ⇒ `failedCount = 0`
+    //       ⇒ 本用例改红在 `FAIL: failedCount >= 1`（**是守卫在干活**，不变量本身没被破坏）。
     //       这里只断言"返回 true ⇒ FK 到得了目标"这条不变量，**不**断言"该位姿必须被拒"
     //       （后者会让用例替实现背书，且结构上无法变红）。
     // ⚠ 为什么两类【必须】都在（这是本轮实测出来的，不是推的）：
@@ -1260,11 +1264,20 @@ static void test_solve_wrist_invariant_holds_and_budget_refusal_is_exercised() {
     //     标准是**对照必须复现"守卫存在的那个场景"**。`>= 99` 是把门限人为抬到不可能满足，
     //     它连"入参被调大 ⇒ 失败分支静默失效"这条真实路径都没碰到（改回去仍是原值）。
     //   ⇒ 本守卫**真正**对应的对照是：**把 c0/c1 的 `maxStepDeg` 临时调小**（例如 0.5°/轮，
-    //     预算 24×0.5 = 12°），使三组输入**全落 `!ok`** ⇒ `failedCount = 3 >= 1` 照样通过、
-    //     六条 `out == ref` 也照样通过，而 `solvedCount = 0 >= 2` **必须红**。
+    //     预算 = 0.5 × `BTN2_WRIST_MAX_ITER`；2026-09-29 Task 7 实测：该值在 60 下 = 30°，
+    //     仍使三组输入**全落 `!ok`**、红在 `FAIL: solvedCount >= 2`），⇒ `failedCount = 3 >= 1`
+    //     照样通过、六条 `out == ref` 也照样通过，而 `solvedCount = 0 >= 2` **必须红**。
     //     这正是上面那段描述的"成功分支空转"场景的复现，而不是一个人造门限。
     const double refs[3][6] = {{0,0,0,0,0,0}, {0,0,0,0,180,0}, {0,0,0,0,0,0}};
     const double bigs[3][3] = {{0,60,0}, {0,0,60}, {0,179,0}};
+    // ★ 2026-09-29 Task 7：**逐案**的步长（原来是三案共用 `Config::ORIENT_MAX_STEP_DEG`）。
+    //   c2 用 1.0° ⇒ 预算 60 × 1.0 = **60°** < 它的需求 179° ⇒ **按构造**必然落进 fail 分支，
+    //   与 `BTN2_WRIST_MAX_ITER` 的取值**无关**（硬上界 = 逐轴夹取循环
+    //   `// 逐轴夹到 ±maxStepDeg，再累加。` 那条，见 `Button2Joint.cpp`）。
+    //   ⚠ 为什么不能靠"把 bigs 调大到超出预算"：误差走 `rotVecDeg` ⇒ 最短弧恒 ≤ 180°，
+    //     而预算已是 180° ⇒ 需求**永远**超不过它。见本任务 Step 5 的说明。
+    //   ⚠ c0/c1 仍用**默认**步长 ⇒ 它们量的仍是"真实生产路径"下的可解性。
+    const double steps[3] = {Config::ORIENT_MAX_STEP_DEG, Config::ORIENT_MAX_STEP_DEG, 1.0};
     int failedCount = 0;   // ★ 抗空转：走 fail 分支的输入个数（见上面 I-1 那段）
     int solvedCount = 0;   // ★ 抗空转：走 else 分支的输入个数 —— 与 failedCount **成对**，
                            //   两条一起才叫"两个分支都真的走过"（见下面守卫处的 I-1 补充）
@@ -1274,7 +1287,7 @@ static void test_solve_wrist_invariant_holds_and_budget_refusal_is_exercised() {
         button2RotVecToMatDeg(bigs[c], Md);
         button2Mat3Mul(Md, Rr, Rt);                              // 目标 = 世界系旋转 · FK(ref)
         double out[6] = {9,9,9,9,9,9};                           // 哨兵：失败时必须被覆盖成 ref
-        const bool ok = button2SolveWrist(refs[c], Rt, Config::ORIENT_MAX_STEP_DEG, out);
+        const bool ok = button2SolveWrist(refs[c], Rt, steps[c], out);
         if (!ok) {
             ++failedCount;
             for (int i = 0; i < 6; ++i) CHECK(out[i] == refs[c][i]);   // 失败 ⇒ 必须原样退回参照
@@ -1446,39 +1459,36 @@ static void test_orient_joint_signature_has_no_position_input() {
     PASS();
 }
 
-// ㉕(d) ★ 2026-09-29 整支终审 I-1：**求解失败**必须能被调用方看见（返回值），且六位逐位回参照。
-//    【为什么非有不可】这正是 I-1 要修的缺陷：三条出口**都只写六个数**、而返回值原来根本不存在
-//      ⇒ 现场"臂不再跟手、往按下位姿收回去"时**控制台一声不响**，谁也分不出是没解出来。
-//    【怎么造出"解不出来"的输入 —— 实测出来的机制，不是猜的】笔杆绕器件 X 转 150° ⇒
-//      ΔR 的旋转角 = 150° ⇒ 目标朝向离参照 **150°**；而求解器一轮最多走
-//      `Config::ORIENT_MAX_STEP_DEG`（现 3°）、最多 `Config::BTN2_WRIST_MAX_ITER`（现 24）轮
-//      ⇒ **步长预算 72° < 150°** ⇒ 解不到，自验门判 false。实测探针（记录见 report）：
-//      同一个目标把 `maxStepDeg` 换成 12° 就**解得出来** ⇒ 拒发的原因是**预算**，
-//      **不是**几何不可达 ✓（这两句话的来源见 report，不是推的）。
-//    ⚠ 150° 正是 `Config::ORIENT_MAX_OFFSET_DEG` 的**上限**（限幅只在 `th > 150` 时才缩比
-//      ⇒ 150 原样保留）⇒ 这是**入口能造出的最远目标**。用字面量 150 而不是那个常数：
-//      常数被调小时目标会跟着缩、反而落回预算内 ⇒ 那会让本用例静默失去意义。
-//    ⚠ 这个输入**挂在两个预算常数上**（与 ㉔ 的 c2 同一类）：谁把 `ORIENT_MAX_STEP_DEG`
-//      或 `BTN2_WRIST_MAX_ITER` 调到 24×step ≥ 150，本用例会红着说"这条输入不再解不出来"
-//      —— 那正是它该说的话（否则下面的失败分支会**静默**变成空转）。**别**为了让它绿去改 150。
-//    ⚠ `refStylus`/`curStylus` 全为**有限**值 ⇒ 本用例走的**不是** NaN 守卫那条路
-//      （那一条由 ㉕(b) 钉）⇒ 两档失败在返回值上被分开断言。
-static void test_orient_joint_solve_failure_is_visible_and_falls_back() {
-    TEST(㉕(d) ★ 求解失败 ⇒ 返回 `SolveFailed` 且六位逐位回参照（I-1）);
-    // 与 ㉕(b) 同一个参照：本用例与它**只差在返回值上**（两边的 `outJoints` 都是参照）
-    //   ⇒ 一对用例合起来证明"返回值是唯一能分开'没动'与'没解出来'的东西"。
-    const double ref[6] = {10, -20, 30, 40, -50, 60};
-    const double s0[3] = {0, 0, 0};
-    const double sFar[3] = {150.0, 0, 0};   // 绕器件 X 转 150°（见上面那段：超出步长预算）
-    double out[6] = {9,9,9,9,9,9};          // 哨兵：失败时必须被覆盖成参照
-    const Btn2JointResult res = button2OrientJointTarget(ref, s0, sFar, out);
-    CHECK(res == Btn2JointResult::SolveFailed);
-    for (int i = 0; i < 6; ++i) CHECK(out[i] == ref[i]);   // 逐位（`==`，不是"接近"）
-    // 另一组参照（全 0 的腕部姿态是奇异位姿，是"腕部求解"最容易被拒的地方）
-    const double ref0[6] = {0,0,0,0,0,0};
-    double out0[6] = {9,9,9,9,9,9};
-    CHECK(button2OrientJointTarget(ref0, s0, sFar, out0) == Btn2JointResult::SolveFailed);
-    for (int i = 0; i < 6; ++i) CHECK(out0[i] == ref0[i]);
+// ㉕(d) ★ 2026-09-29 Task 7：**输入端上限处的 150° 倾斜必须解得出来**（预算 ≥ 输入上限）。
+//    【为什么从"必须失败"翻成"必须成功"】本条原为 I-1 的用例，用 {150,0,0} 造"求解失败"，
+//      靠的正是 24×3 = 72° 的步长预算 < 150°。Task 7 把预算抬到 60×3 = 180° 之后，
+//      这条输入**必然解得出来** ⇒ 原判据变成**假判据**（若照抄不改，它会是"实现背书的对偶"：
+//      一条永远为真、且无法变红的断言）。
+//    【它与 ㉗ 的分工】本用例量**端到端行为**（入口 → 流水线 → 求解器）；常数之间那条
+//      "预算 ≥ 输入上限"的**关系**由 ㉗ 单独钉（那里才是能对常数变化报警的地方）。
+//    【负对照（实测，写进报告）】把 `BTN2_WRIST_MAX_ITER` 改回 24 ⇒ 本条**必须红**
+//      （预期红在 `FAIL: res == Btn2JointResult::Ok`）。★ 这正是本任务的主对照。
+//    ⚠ 150 用**字面量**、不用 `Config::ORIENT_MAX_OFFSET_DEG`：那个常数若被调小，目标会跟着缩、
+//      反而落回预算内 ⇒ 用例**静默**失去意义（与它原来那条 ⚠ 同一条理由）。
+//    ⚠ `refStylus`/`curStylus` 全**有限** ⇒ 本用例走的**不是** NaN 守卫那条路（那条由 ㉕(b) 钉）。
+static void test_orient_joint_reaches_max_input_offset() {
+    TEST(㉕(d) ★ 输入端上限（150° 倾斜）必须解得出来（预算 ≥ 输入上限）);
+    const double s0[3]  = {0, 0, 0};
+    const double sFar[3] = {150.0, 0, 0};   // 见上：|rv| = 150 = 限幅的上界 ⇒ 原样保留、不缩比
+    // 两个参照：非正位（腕部一般位姿）+ 全零（J5 = 0 ⇒ **腕部奇异**位姿，最容易被拒的地方）
+    const double refs[2][6] = { {10, -20, 30, 40, -50, 60}, {0,0,0,0,0,0} };
+    for (int c = 0; c < 2; ++c) {
+        double out[6] = {9,9,9,9,9,9};                 // 哨兵：必须被真正改写
+        const Btn2JointResult res = button2OrientJointTarget(refs[c], s0, sFar, out);
+        CHECK(res == Btn2JointResult::Ok);
+        // ★ 真有牙齿的那一条：解得出来还不够，必须**真的到得了**入口算出来的那个目标。
+        //   目标用**入口同一套常数**重算（与 ㉕(a) 同一招）⇒ 不依赖任何符号常数的取值。
+        double Rr[9]; fkR(refs[c], Rr);
+        double targetR[9];
+        button2OrientTarget(Rr, s0, sFar, Config::BTN2_TILT_PHI_DEG, targetR);
+        double Ro[9]; fkR(out, Ro);
+        CHECK(angBetweenDeg(targetR, Ro) < Config::BTN2_WRIST_TOL_DEG);
+    }
     PASS();
 }
 
@@ -1535,6 +1545,50 @@ static void test_roll_end_to_end_moves_only_j6() {
     PASS();
 }
 
+// ㉗ ★ 常数关系：**求解预算必须盖住输入端能造出的最大目标**。
+//    【为什么值一条独立断言】这条关系**跨两个文件、两种语义**（入口的目标限幅 vs 求解器的迭代预算）。
+//      两边各自的用例都绿、而它们之间的**关系**坏了的时候，症状是"某些输入永远解不出来 ⇒
+//      臂停在按下位姿"，**一次上机才会发现**。今天这条 72° 就是关系坏了（72 < 150）而全套绿灯。
+//    【它能红（实测）】把 `BTN2_WRIST_MAX_ITER` 改回 24 ⇒ `72 >= 180` 假 ⇒ 红。
+//    【右端为什么是 180 而不是 `ORIENT_MAX_OFFSET_DEG`】那条限幅只夹**倾斜**分量，
+//      **自转**分量（`rv[2]`）不过它；而 `rotVecDeg` 的最短弧上限恒为 **180°**
+//      ⇒ 入口能造出的最大目标量是 180°、**不是** 150°。取 150 会给出一个**偏高**的许可。
+//    ⚠ 这条是**必要**条件，**不是**充分条件 —— 非正交位姿下关节需求会大于转角
+//      （`|z4·z6| = |cos J5|`）⇒ 接近腕部奇异时仍会求解失败。别把它读成"到此为止就万事大吉"。
+static void test_wrist_budget_covers_input_cap() {
+    const double budgetDeg = Config::ORIENT_MAX_STEP_DEG * (double)Config::BTN2_WRIST_MAX_ITER;
+    TEST(㉗ ★ 常数关系：求解预算 ≥ 入口能造出的最大目标（180°）);
+    CHECK(budgetDeg >= 180.0);
+    PASS();
+}
+
+// ㉘ ★ 2026-09-29 Task 7 Step 7 的探针产物：**入口层仍能造出 `SolveFailed`**。
+//    【为什么问】`SolveFailed` 是 I-1 那条"求解失败要出声"的**唯一**数据来源。Task 7 把预算从
+//      72° 抬到 180° 之后，很容易以为"预算 ≥ 输入上限 ⇒ 入口层再也失败不了" —— 本用例就是
+//      这条**想当然**的对照。**实测：它失败得出来。**
+//    【机制 —— 几何退化，不是预算】`ref` 的 J5 = 0 ⇒ 腕部奇异（z4 ∥ z6，`|z4·z6| = |cos J5|` = 1）
+//      ⇒ 秩亏 ⇒ 150° 的倾斜目标**在这条腕上无解**。实测（探针，见 `task-7-report.md` §5）：
+//      该样本在把 `maxStepDeg` 加倍（预算 6°×60 = 360°）之后**仍然失败** ⇒ 不是预算不够。
+//    【与 ㉕(d) 的分工】㉕(d) 问"**一般位姿**下输入端上限（150°）解得出来吗"⇒ 答：解得出来；
+//      本条问"**奇异位姿**下呢" ⇒ 答：解不出来。两条**不冲突**：㉕(d) 的两个参照都不是奇异位姿。
+//    【负对照（实测，见报告 §3）】把 `button2SolveWrist` 末尾自验那道门临时改成**永不拒绝**
+//      （`if (err >= Config::BTN2_WRIST_TOL_DEG) return false;` ⇒ `if (false) return false;`）
+//      ⇒ 本条红在 `FAIL: button2OrientJointTarget(…) == Btn2JointResult::SolveFailed`（本样本不靠预算，
+//      所以**不能**用调预算的方式把它弄红 —— 那正是它与 ㉔ 的 c2 的分工）。
+//    ⚠ 本样本**不是**全部现象的代表：探针在 237276 个样本里扫出 8158 个 `SolveFailed`，
+//      其中绝大多数在**非奇异**位姿上、且把预算抬到 18000° 就消失（预算/迭代受限），
+//      只有 46 个（全在 J5 ∈ {0, ±180}）是几何退化。本条钉的是**后者**（稳健、不随常数漂）。
+static void test_orient_joint_entry_layer_can_still_fail() {
+    TEST(㉘ ★ 入口层仍能造出 SolveFailed（预算 ≥ 输入上限【不】足以保证解得出）);
+    const double ref[6]  = {0, 0, 0, 180, 0, -180};   // J5 = 0 ⇒ 腕部奇异
+    const double s0[3]   = {0, 0, 0};
+    const double sFar[3] = {150.0, 0, 0};             // 与 ㉕(d) 同一个"输入端上限"输入
+    double out[6] = {9,9,9,9,9,9};                    // 哨兵：失败时必须被覆盖成参照
+    CHECK(button2OrientJointTarget(ref, s0, sFar, out) == Btn2JointResult::SolveFailed);
+    for (int i = 0; i < 6; ++i) CHECK(out[i] == ref[i]);   // 失败 ⇒ 六位逐位退回参照
+    PASS();
+}
+
 int main() {
     std::cout << "--- Button2Joint (按钮2 关节空间映射：笔杆姿态增量 -> 关节增量) ---" << std::endl;
     test_each_stylus_axis_moves_exactly_one_joint();
@@ -1573,8 +1627,10 @@ int main() {
     test_orient_joint_end_to_end_reaches_target();                 // ㉕(a) 2026-09-29 Task 4：端到端
     test_orient_joint_identity_and_nan();                          // ㉕(b)
     test_orient_joint_signature_has_no_position_input();           // ㉕(c) ★ 编译期钉子
-    test_orient_joint_solve_failure_is_visible_and_falls_back();   // ㉕(d) ★ I-1：求解失败可见
+    test_orient_joint_reaches_max_input_offset();                 // ㉕(d) ★ Task 7：输入端上限必须解得出来
     test_roll_end_to_end_moves_only_j6();                          // ㉖ ★ 端到端：纯自转 ⇒ 只动 J6
+    test_wrist_budget_covers_input_cap();                          // ㉗ ★ 常数关系：预算 ≥ 输入上限
+    test_orient_joint_entry_layer_can_still_fail();                // ㉘ ★ 入口层仍能造出 SolveFailed
 
     std::cout << "\nResults: " << g_passed << " passed, " << g_failed << " failed" << std::endl;
     return g_failed == 0 ? 0 : 1;
