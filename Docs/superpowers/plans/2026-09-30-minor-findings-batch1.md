@@ -93,12 +93,13 @@ static void test_forced_always_sends() {
 }
 
 // ===== 格 3: Throttled 值没变 ⇒ 不发, 且【顺手清掉 pending】 =====
-// 这是抽取时最容易漏的一条 (今天写在 RelayCore.cpp:2808-2812)。
+// 这是抽取时最容易漏的一条 (抽取前在 RelayCore.cpp 的 SkipUnchanged 分支里 ——
+// ⚠ 别记行号: Task 2 会把这些行搬走, 按内容找)。
 static void test_unchanged_clears_pending() {
     TEST(unchanged_clears_pending);
     State s;
     CHECK(s.beginSend(SendMode::Throttled, 120.0, 1000));   // 发, 记 120 @1000
-    CHECK(s.beginSend(SendMode::Throttled, 130.0, 1010));   // 值变了但太近 ⇒ 挡, 置 pending
+    CHECK(!s.beginSend(SendMode::Throttled, 130.0, 1010));  // 值变了但太近 ⇒ 挡, 置 pending
     CHECK(s.pending());
     CHECK(!s.beginSend(SendMode::Throttled, 120.0, 1020));  // 值又变回 120 ⇒ 没可报的
     CHECK(!s.pending());                                    // ★ 顺手清
@@ -171,8 +172,14 @@ int main() {
 
 - [ ] **Step 2: 跑，确认红（编译失败）**
 
-Run: `Touch_Client\tests\build_gain_readback_state_test.bat`（还没建 ⇒ 先用下面这条等价命令）
-`cmd //c "cd /d D:\Projects\Touch\Touch_Client\tests && cl /EHsc /std:c++17 /DWIN32 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS test_gain_readback_state.cpp /Fe:test_gain_readback_state.exe"`
+Run（**必须先带 vcvarsall 守卫** —— 少了它在新开的 shell 里 `cl` 不存在，得到的是**噪音红**而不是想要的那条；
+仓库里每个 `build_*.bat` 顶上那一句就是干这个的）：
+
+```
+if not defined VCINSTALLDIR call "D:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat" x64
+cd /d "D:\Projects\Touch\Touch_Client\tests"
+cl /EHsc /std:c++17 /DWIN32 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS test_gain_readback_state.cpp /Fe:test_gain_readback_state.exe
+```
 
 Expected: **编译失败**，形如 `cannot open source file "../relay/GainReadback.h"`。
 **把原文抄进报告**（没有这一段就没有"判据先写死"的证据）。
@@ -299,7 +306,8 @@ Expected: `BUILD_EXIT=0`；**`7 passed, 0 failed`**、exit 0。
 - [ ] **Step 6: 负对照（**必须实测**，三条）—— 改坏实现，每条都要看到对应那格红，然后改回**
 
 1. 把 `SkipUnchanged` 分支里的 `m_pending.store(false);` 删掉 ⇒ **格 3 红**（`FAIL: !s.pending()`）。
-2. 把 `SkipTooSoon` 分支整个并进 `Send`（即删掉 `SkipTooSoon` 这个 case，让它落到发送）⇒ **格 4 红**（`FAIL: !s.beginSend(...)`）。
+2. 把 `SkipTooSoon` 分支整个并进 `Send`（即删掉 `SkipTooSoon` 这个 case，让它落到发送）⇒
+   **格 3 / 4 / 5 三条都红**（它们都断言"太近的那一次被挡"；**如实记下红的是哪几条**，别写成只红格 4）。
 3. 在 `beginSend` 开头加 `mode = SendMode::Throttled;`（把 Forced 降级）⇒ **格 2 与格 6 红**。
 
 把三条红原文抄进报告；**改回后必须再跑一遍全绿**。
