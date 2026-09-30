@@ -422,6 +422,11 @@
 
 **再往大转**：松**开**按钮2、**重按**，可以接着往同方向继续转
 （`onButton2Press` 会把关节参照与笔杆参照**一起重取**、并重置低通 ⇒ 参照、预算、滤波三者**同时**重置）。
+★ 2026-09-30 回源码核过（`RelayCore::onButton2Press`，`relay/RelayCore.cpp`，同一个临界区内）：
+`m_jointRef[0..5] = app.robotActualPose.j1..j6`（关节参照）· `m_orientRefStylus = stylusOrient`
+（笔杆参照）· `resetStylusOffsetFilter()`（笔杆偏移的低通）· `m_btn2StylusFilt = stylusOrient`
+（关节路径那份"当前笔杆姿态"）· `m_btn2JointCmd[0..5] = m_jointRef[0..5]`（步长限幅积分器的种子）
+⇒ **这次重取是真的**。
 这一条要**两遍**都做：**正位**与**非正位（J1 转约 45°）**。
 
 **转到超过 150° 的目标** ⇒ **✅ 过**：幅度被**缩到 150°**、**方向不变**（限幅是"缩比"不是"回退"）——
