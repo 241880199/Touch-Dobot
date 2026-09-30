@@ -138,7 +138,49 @@ inline void rotVecDeg(const double R[9], double rv[3]) {
     for (int i = 0; i < 3; ++i) rv[i] = th * kR2D * ax[i] / n;
 }
 
+// 腕部求解器的**误差度量**：把 ref[0..2] 与腕角 q[0..2] 拼成六个关节、跑一次 FK，
+// 返回"当前末端朝向到 targetR 的世界系旋转向量的模"（度）。
+//   式子是 `|rotVecDeg(targetR · Rqᵀ)|` —— 展开点与每一步的含义见 `button2SolveWrist`
+//   上面那两段注释（尤其"误差为什么右乘 Rqᵀ"）。
+// ★ 2026-09-29 Task 3 复审 M-3：这一段（composeTransform → Rq → Rqᵀ → D = targetR·Rqᵀ →
+//   rotVecDeg → 取模）原来在 `button2SolveWrist` 里**逐字写了两遍**（循环体一次、末尾自验门
+//   一次）。抄两遍的代价不是行数，而是**两处会各自漂移**：任何一次"只改一处"（比如换误差
+//   口径、或补一个 NaN 守卫）都会让迭代判据与自验判据分家，而那正是本任务要保证的不变量的
+//   两个端点。⇒ 收成这一处，两处都调它。
+// ⚠ 【比复审给的签名多一个出参 —— 这是必须的，不是顺手】复审写的是三参版（只返回模）。
+//   但**模不够用**：循环体那一步 `dq = Jwᵀ·(Jw·Jwᵀ+λ²I)⁻¹·e` 要的是**误差向量 e 本身**，
+//   不只是它的模（见下面 `y[r] = ... * e[0] ...` 那三行）。若只给模，循环就得把
+//   `Rq`/`D`/`e` 再自己展开一份 ⇒ 正是本条要消灭的"抄两遍"。
+//   ⇒ `eOut` 可空的出参：`eOut != nullptr` 时把向量一并写回。**取模那一段仍然只有一份**。
+//   ⚠ 末尾自验门只要模 ⇒ 它按三参形式调用（`eOut` 取默认的 `nullptr`），与复审的写法一致。
+// ⚠ 纯算术、无状态、不读 Config、不写"结果"（误差不是可下发的量）⇒ 它是**文件内的实现
+//   细节**，不放头文件（测试走 `button2SolveWrist` 的黑盒，不经这里）。
+//   ⚠ 它在匿名命名空间内 ⇒ 内部链接（等价于文件内 `static`），与 `rotVecDeg` 同一待遇。
+static double wristErrDeg(const double ref[6], const double q[3], const double targetR[9],
+                          double eOut[3] = nullptr) {
+    const double joints[6] = { ref[0], ref[1], ref[2], q[0], q[1], q[2] };
+
+    double T[4][4];
+    Kinematics::composeTransform(joints, T);
+    double Rq[9];                                // 齐次阵的左上 3×3
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 3; ++c) Rq[r * 3 + c] = T[r][c];
+
+    double RqT[9], D[9], e[3];
+    button2Mat3T(Rq, RqT);
+    button2Mat3Mul(targetR, RqT, D);
+    rotVecDeg(D, e);                             // 直接调本文件匿名命名空间里的实现
+    if (eOut != nullptr) { eOut[0] = e[0]; eOut[1] = e[1]; eOut[2] = e[2]; }
+    return std::sqrt(e[0] * e[0] + e[1] * e[1] + e[2] * e[2]);
+}
+
 }   // namespace
+
+// 仅供测试：把文件内的 rotVecDeg 暴露出来（不改实现，只转发）
+// ⚠ 必须放在匿名命名空间【之外】才有外部链接 —— 测试（test_button2_joint.cpp 的 ⑲(a)）
+//   要拿 `button2RotVecToMatDeg` 造出的矩阵**经同一个 rotVecDeg** 还原，才能证明
+//   "旋转向量 ↔ 矩阵"这一对在**同一份实现**下自洽。声明在 Button2Joint.h。
+void button2RotVecDegForTest(const double R[9], double rv[3]) { rotVecDeg(R, rv); }
 
 void button2JointTarget(const double refJoints[6],
                         const double refStylus[3],
@@ -187,6 +229,315 @@ void button2JointTarget(const double refJoints[6],
     outJoints[3] = refJoints[3] + clampJointDelta(dJ4);
     outJoints[4] = refJoints[4] + clampJointDelta(dJ5);
     outJoints[5] = refJoints[5] + clampJointDelta(dJ6);
+}
+
+// ============================================================================
+//  按钮2 姿态目标（2026-09-29 Task 2）：摆动锁基座 + 自转绕自身轴
+// ============================================================================
+// 契约、流水线（①~⑤）、以及"φ 为什么是入参"、"两个常数语义被重定"、"非有限入参没有守卫"
+// 这几条**全部**写在 `Button2Joint.h` 上；这里只写"为什么正好是这几行"。
+//
+// ⚠ 左边三次连乘**各自一块独立缓冲**（`Mw` / `Rtilt` / `Mr` / `outR`）—— 不是风格，是契约：
+//   `button2Mat3Mul` **别名不安全**（见头文件），`out` 与 `A`/`B` 同一块内存会算出一团糊。
+//   摆动与自转那两处【左乘/右乘】的分工见头文件；对调会被 ⑳ / ㉑ 各自抓住（Task 2 Step 6 的负对照）。
+void button2OrientTarget(const double refR[9], const double refStylus[3],
+                         const double curStylus[3], double phiDeg, double outR[9]) {
+    // ---- ①ΔR：器件系增量（与旧路 `button2JointTarget` 逐字同一条式子）----------------
+    double Rref[9], Rcur[9], RrefT[9], dR[9];
+    TcpCalibration::rpyToMatrix(refStylus[0], refStylus[1], refStylus[2], Rref);
+    TcpCalibration::rpyToMatrix(curStylus[0],   curStylus[1],   curStylus[2],   Rcur);
+    button2Mat3T(Rref, RrefT);
+    button2Mat3Mul(RrefT, Rcur, dR);                    // ΔR = R_refᵀ · R_cur（器件系）
+
+    double rv[3];
+    rotVecDeg(dR, rv);                                  // 直接调文件内的 `rotVecDeg`
+
+    // ---- ② 逐分量死区（`>=` 门限才放行，与旧实现 axisGate **逐字同语义**）--------------
+    // ⚠ 写 `if (!(std::fabs(rv[i]) >= dz))` 而**不是** `if (std::fabs(rv[i]) < dz)`：
+    //   后者对 NaN 会**放行**（NaN < dz 为假 ⇒ 不归零），前者对 NaN 会归零。两者在有限输入下
+    //   完全等价，本条只是把 NaN 的落点钉在"归零"这一侧。`>` 语义（恰好等于门限时吞掉）
+    //   由用例 ⑳b 的第二半钉住 —— 换成 `>` 那条用例必红（Task 2 的负对照之一）。
+    const double dz = Config::ORIENT_DEADZONE_DEG;
+    for (int i = 0; i < 3; ++i)
+        if (!(std::fabs(rv[i]) >= dz)) rv[i] = 0.0;
+
+    // ---- ③ 整体偏移限幅：ΔR 的【旋转角】θ > 150° ⇒ 把 ΔR【整体缩比】到 150°（轴不变）----
+    // ⚠ 缩比做在**分量**上（三个分量同一个 k）⇒ 方向不变。**不许换成逐分量 clamp**：
+    //   逐分量夹会改变方向（某一根分量先到顶、别的还在长），末端就朝错的方向走。
+    //   ⚠ 这条负对照只有在**多分量**输入下才会红：纯单轴输入时"整体缩比"与"逐分量夹"
+    //   给出**同一个结果**（只有一个分量、且它就是要缩的那根）⇒ 用例 ⑳c 因此分 (a)(b) 两半。
+    // ⚠ 用**未经死区的** `dR` 重算一次 θ（死区改的是 `rv`；而"这次偏移有多大"必须按原值判）。
+    {
+        double rvAll[3];
+        rotVecDeg(dR, rvAll);
+        const double th = std::sqrt(rvAll[0]*rvAll[0] + rvAll[1]*rvAll[1] + rvAll[2]*rvAll[2]);
+        // ⚠ 2026-09-29 Task 3（复审 M1）：这里原来还挂着一句 `&& th > 1e-12` —— 它**不可达**
+        //   （`th > 150` 已蕴含 `th > 1e-12`），读起来像个除零守卫、其实不是（下面除的是 `th`，
+        //   而 `th > 150` 早已排除 `th ≈ 0`）⇒ 删掉。这个条件今天只剩一个子句。
+        if (th > Config::ORIENT_MAX_OFFSET_DEG) {
+            const double k = Config::ORIENT_MAX_OFFSET_DEG / th;
+            for (int i = 0; i < 3; ++i) rv[i] *= k;      // 缩比在【分量】上做：三个分量同一个 k ⇒ 轴不变
+        }
+    }
+
+    // ---- ④ 摆动：【左乘】= 在基座系里摆 ------------------------------------------------
+    // 旋量 = Rx(φ)·(SX·rv[0], SY·rv[1], 0)：φ 是**入参**（见头文件那两个理由）。
+    // ⚠ `cos(phi)*t1` / `sin(phi)*t1` 用的是 `t1 = SY*rv[1]`（**已折符号**），顺序不能换 ——
+    //   先折符号再进 M，与"先 M 再折符号"在 φ≠0 时**不是**同一件事（M 会把 y 分量转到 y/z 上，
+    //   而在转了之后按 y 折符号就折错轴了）。
+    const double D2R0 = 3.14159265358979323846 / 180.0;
+    const double phi = phiDeg * D2R0;
+    const double t0 = Config::BTN2_TILT_SIGN_X * rv[0];
+    const double t1 = Config::BTN2_TILT_SIGN_Y * rv[1];
+    const double w[3] = { t0, std::cos(phi) * t1, std::sin(phi) * t1 };
+    double Mw[9], Rtilt[9];
+    button2RotVecToMatDeg(w, Mw);
+    button2Mat3Mul(Mw, refR, Rtilt);                    // 左乘 = 基座系里摆
+
+    // ---- ⑤ 自转：【右乘】= 绕【新的】末端自身轴 -----------------------------------------
+    // ⚠ 右乘 `Rtilt · Rz` 而不是 `Rz · Rtilt`：右乘绕的是**摆动之后**的末端轴（"自身"轴），
+    //   左乘绕的是参照姿态的轴 —— 两者只在 rtilt 与 refR 同轴时才等价。
+    //   对调会被 ㉑ 抓住（它的判据 1 就是"接近轴（第三列）逐位不变"）。
+    const double roll = Config::BTN2_ROLL_SIGN * rv[2];
+    double Mr[9];
+    const double rollAxis[3] = { 0.0, 0.0, roll };      // MSVC 的 C++ 不支持 C99 复合字面量
+    button2RotVecToMatDeg(rollAxis, Mr);
+    button2Mat3Mul(Rtilt, Mr, outR);
+}
+
+// ============================================================================
+//  按钮2 腕部求解（2026-09-29 Task 3）：给定"想要的末端朝向"，解 J4/J5/J6
+// ============================================================================
+// 契约、算法要点、失败语义（失败 ⇒ out 逐位退回 ref）全部写在 `Button2Joint.h`；这里只写
+// 【为什么正好是这几行】以及几处容易写错的地方。
+//
+// ⚠ **为什么是角雅可比 `J[3+i][3+j]`**：`Kinematics::jacobian`（Kinematics.cpp:272 起）填的是
+//   `J[0..2][i] = z_i × (p_ee − p_i)`（线速度）与 `J[3..5][i] = z_i`（**角速度**，各关节 z 轴
+//   在世界系）。我们要的是"腕三个关节（下标 3/4/5）的角速度 → 世界系角速度" ⇒ 取**行 3..5、
+//   列 3..5** 的 3×3 块。这是本任务与 FK 回代配对的全部数学。
+//
+// ⚠ **误差为什么右乘 `Rqᵀ`**：`D = targetR · Rqᵀ` 是"把**当前**末端朝向转到**目标**所需的世界系
+//   旋转"（左乘世界系旋转 ⇒ 与上面那 3×3 角雅可比的表达坐标系一致）。`rotVecDeg(D)` 就是那一下
+//   的旋转向量（度）—— FK 回代每一轮都重算 Rq，所以这是**牛顿法**、不是一次线性外推。
+//
+// ⚠ **单位自洽**：`Jw` 无量纲（z 轴是单位向量），`e` 与 `dq` 都是**度** —— 两者按同一比例
+//   (度↔弧度) 缩放，比值不变 ⇒ 直接用度算 `dq` 是对的（不必先转弧度）。**别"顺手转弧度"**：
+//   转了还要转回来，多两处能写错的地方。
+//
+// ⚠ **`Jw·Jwᵀ + λ²I` 为什么一定可逆**：加的是 λ²I（λ ≥ 1e-6 ⇒ λ² ≥ 1e-12）⇒ 特征值都 ≥ 1e-12。
+//   而 `button2Mat3Inv` 的失败门是 `|det| < 1e-12` ⇒ **理论上**它可能仍判失败（det 是三个特征值
+//   之积，λ 极小时确实可能压到门限下）。那一支 `return false` 是**真实的**（不是理论摆设）：
+//   它正是"雅可比退化"这条失败路径的执行点（`out` 此刻已是 ref）。
+bool button2SolveWrist(const double ref[6], const double targetR[9], double maxStepDeg, double out[6]) {
+    // ---- 失败契约：第一句就把 out 退回参照 --------------------------------------------
+    // 成功时下面会覆盖 out[3..5]（out[0..2] 本就等于 ref）；任何一条失败路径（雅可比退化、
+    // 迭代不收敛、末尾自验不过）都**不再动 out** ⇒ 自动满足"失败 ⇒ out 逐位退回 ref"。
+    // ⚠ 放在最前、且**所有**失败支路都不写 out —— 这样成功/失败的分叉只由返回值表达，
+    //   与 `button2Mat3Inv` 的失败契约同一条纪律（"结果只能看返回值，别把陈旧值当结果"）。
+    for (int i = 0; i < 6; ++i) out[i] = ref[i];
+
+    double q[3] = { ref[3], ref[4], ref[5] };   // 腕角初值 = 参照
+    double lam = Config::BTN2_WRIST_DAMP;       // λ 初值（阻尼下限）
+    double prevErr = 0.0;
+    bool havePrev = false;
+    // ⚠ 这里原来还有 `bool converged` —— 复审 M-2 去掉末尾那个 `if (!converged)` 之后它只剩
+    //   写、没有读 ⇒ 跟着删（循环里的 `converged = true;` 那半句也删了，只留 `break`）。
+    int iter = 0;
+
+    for (; iter < Config::BTN2_WRIST_MAX_ITER; ++iter) {
+        const double joints[6] = { ref[0], ref[1], ref[2], q[0], q[1], q[2] };
+
+        // 角雅可比 Jw（行 3..5、列 3..5，见上面第一段说明）。
+        //   ⚠ FK 与误差取值那一段（`Rq` / `D` / `e`）在下面那句 `wristErrDeg` 里 ——
+        //     它与末尾自验门**共用同一个实现**（复审 M-3），别在这里再展开一份。
+        double J[6][6];
+        Kinematics::jacobian(joints, J);
+        double Jw[9];
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c) Jw[r * 3 + c] = J[3 + r][3 + c];
+
+        // 世界系误差（度）：`err = |e|`，`e` = rotvec(targetR · Rqᵀ)。
+        //   ⚠ 这里**必须**把 e 取出来（下面最小二乘那一步要它），不能只要模。
+        double e[3];
+        const double err = wristErrDeg(ref, q, targetR, e);
+        if (err < Config::BTN2_WRIST_TOL_DEG) break;
+
+        // λ 自适应：这一轮比上一轮更接近目标 ⇒ 减半（更信雅可比）；否则加倍（更信阻尼）。
+        //   ⚠ 与 `Kinematics::inverse` 同一形状（那里 λ 夹 [0.001, 10]；这里按计划夹
+        //     [1e-6, 1.0]，且用 λ² —— 见头文件的算法那一节）。
+        if (havePrev) { if (err < prevErr) lam *= 0.5; else lam *= 2.0; }
+        havePrev = true;
+        prevErr = err;
+        if (lam < 1e-6) lam = 1e-6;
+        if (lam > 1.0) lam = 1.0;
+
+        // M = Jw·Jwᵀ + λ²·I
+        double M[9];
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c) {
+                double s = 0.0;
+                for (int k = 0; k < 3; ++k) s += Jw[r * 3 + k] * Jw[c * 3 + k];
+                M[r * 3 + c] = s;
+            }
+        const double l2 = lam * lam;
+        M[0] += l2; M[4] += l2; M[8] += l2;
+
+        double Minv[9];
+        // 失败 ⇒ out 已是 ref（第一句写过），直接退。
+        if (!button2Mat3Inv(M, Minv)) return false;
+
+        // y = Minv · e；dq = Jwᵀ · y（阻尼最小二乘的一步）
+        double y[3];
+        for (int r = 0; r < 3; ++r)
+            y[r] = Minv[r * 3 + 0] * e[0] + Minv[r * 3 + 1] * e[1] + Minv[r * 3 + 2] * e[2];
+        double dq[3];
+        for (int i = 0; i < 3; ++i)
+            dq[i] = Jw[0 * 3 + i] * y[0] + Jw[1 * 3 + i] * y[1] + Jw[2 * 3 + i] * y[2];
+
+        // 逐轴夹到 ±maxStepDeg，再累加。
+        //   ⚠ 次序照抄 `clampJointStep`：**先比上界、再比下界**（两条独立 if，不是 else-if）——
+        //     `maxStepDeg` 为负时两条都会执行到，结果 = |maxStepDeg|（荒谬但与原处一致）。
+        for (int i = 0; i < 3; ++i) {
+            if (dq[i] >  maxStepDeg) dq[i] =  maxStepDeg;
+            if (dq[i] < -maxStepDeg) dq[i] = -maxStepDeg;
+            q[i] += dq[i];
+        }
+    }
+
+    // ---- 末尾自验（★ 这条不变量唯一能被抓住的地方）------------------------------------
+    // **无条件**再算一次 FK 与误差（不管刚才是"循环里判了收敛而 break"还是"跑满 MAX_ITER
+    //   掉出来"）；仍不达门限 ⇒ false（out 仍是 ref）。
+    // ★ 2026-09-29 Task 3 复审 M-2：这里原来是 `if (!converged) { ... }` —— 而头文件那一段
+    //   写的是"末尾**无条件**再自验一次" ⇒ **文档与代码不一致**。两条里选了这一条（去掉 `if`，
+    //   让措辞为真），理由：
+    //     ① 头文件那句的后半是"自验是'返回 true ⇒ 真的到得了'这条不变量**唯一**的执行点"——
+    //        带上 `if` 时那句**是假的**：收敛那一支根本没有走到这里，它的保证来自**循环里**
+    //        那句 `err < TOL` ⇒ 判据实际有**两处**（正是 M-3 要消灭的形状：两处会各自漂移）。
+    //        去掉 `if` 后，这句措辞与"单一执行点"这个设计意图一起成立。
+    //     ② 安全性（复审要求先确认的那一条）：循环里那句 `break` 发生在**改 q 之前**
+    //        （`q[i] += dq[i]` 在 break 之后的代码里）⇒ 收敛那一刻的 q 就是 `err` 所对应的
+    //        那个 q ⇒ 这里重算得到的是**同一个表达式、同一份实现、同一个输入**，逐位相同，
+    //        不会因为"多算一次"而把一条本来成功的解判成失败。整套用例（㉒/㉓(a)(b)/㉔）就是
+    //        这条的反证：若 q 在那之后变过，它们会立刻红。
+    //   ⇒ `converged` 这个变量随之变成死的（只剩写、没有读）⇒ 一并删掉，别留一个"看起来在
+    //     记账、其实没人看"的标志。
+    //   ⚠ 走到这里 q 是"最后一次迭代后"的值，而循环里的 `err` 可能是**上一轮**的 ⇒
+    //     必须重新评估（这也是这条自验不能省的理由）。
+    {
+        const double err = wristErrDeg(ref, q, targetR);
+        if (err >= Config::BTN2_WRIST_TOL_DEG) return false;   // out 仍是 ref
+    }
+
+    // ---- 成功：只覆盖腕三关节（J1/J2/J3 保持参照）---------------------------------------
+    out[0] = ref[0]; out[1] = ref[1]; out[2] = ref[2];
+    out[3] = q[0];   out[4] = q[1];   out[5] = q[2];
+    return true;
+}
+
+// ============================================================================
+//  按钮2 对外入口（2026-09-29 Task 4）：Task 2 的目标朝向 + Task 3 的腕部求解
+// ============================================================================
+// 契约、三句流水线、以及"φ 为什么在这里直接读 Config"、"与旧函数的 NaN 契约逐条对齐"这几条
+// **全部**写在 `Button2Joint.h` 上；这里只写"为什么正好是这几行"。
+//
+// ⚠ 本函数**不引入任何新的数学**：参照姿态 / 目标朝向 / 腕部求解三件都各自成篇（Task 1/2/3），
+//   这里只有"串起来"与两条契约。任何在这里新展开的算式都是"同一约定第 N 份实现"。
+//
+// ⚠ 参照姿态用 `Kinematics::composeTransform(refJoints)` **自己的**旋转部分，而**不是**
+//   `TcpCalibration::rpyToMatrix(refStylus)`：Task 2 要的是"在**当前末端朝向**上摆动"，
+//   而那个"当前末端朝向"必须与 Task 3 里 FK 回代所用的是**同一个量**（`composeTransform`）
+//   —— 用别的来源当 refR 会让"目标"与"能解到的"分处两套约定，Task 3 的自验门就会莫名其妙地拒。
+// ★★ 2026-09-29 整支终审 I-1：本函数**从 `void` 改成返回 `Btn2JointResult`**（枚举定义与三档的
+//   逐行含义写在 `Button2Joint.h`）。这里只写"为什么是这三处 `return`"：
+//   ⚠ 返回值是本次唯一的行为变化 —— 三档对应的 `outJoints` 写法与改之前**逐位相同**：
+//     · `StylusUntrustworthy` 挂在**原有的**守卫那句 `return;` 上（只是把 `return;` 变成
+//       `return Btn2JointResult::StylusUntrustworthy;`），写法一个字没动；
+//     · `SolveFailed` 挂在**原有的** `if (!button2SolveWrist(...))` 上（失败回退那六行也没动）；
+//     · `Ok` 是函数末尾的落出口。
+//   ⇒ 别在任何一个分支里顺手多写/少写 `outJoints` 的下标：这个函数的价值一半就在这里
+//     （"三种结局都写六位"这条纪律，见上面那段的 ⚠★）。
+Btn2JointResult button2OrientJointTarget(const double refJoints[6], const double refStylus[3],
+                                         const double curStylus[3], double outJoints[6]) {
+    // ---- 第一句就写 J1/J2/J3，且【无条件】-------------------------------------
+    // 这三行在最上面、在任何分支之前，**第一句无条件写**；此后**任何分支只允许把它们写回
+    // 同一个参照值**。本函数里这样的重复写入有**两处**（都是"整六位 = 参照"，两句**逐字相同**）：
+    //   · 笔杆 NaN/Inf 守卫那句 `for (int i = 0; i < 6; ++i) outJoints[i] = refJoints[i];`；
+    //   · 求解失败回退那句（与上面那句一模一样）。
+    //   ⚠ 两条循环的门都是 `i < 6` ⇒ **两条都写 index 0..2**（读码可核）。别把上面那条纪律
+    //     读成"只有失败回退一处在写" —— 守卫那条出口同样写这三个下标。
+    // ⇒ 无论后面怎么早退/守卫/求解失败，J1~J3 都逐位等于参照。
+    // （㉕(a) 在 60 组随机位姿上逐位断言它、㉕(b) 在不动/NaN/Inf 三种输入上再断一遍。）
+    // ⚠ **"J1/J2/J3 保持"不是这三行单独保证的**：被调函数 `button2SolveWrist` 在入口（:337）
+    //   与成功路径（`out[0..2] = ref[0..2]`）上都会把 `out[0..2]` 写回参照 ⇒ **入口这三行在本
+    //   组合里单独【不可观测】**（实测：把它们改成 `+1.0`，用例照旧全绿，36/0 ——
+    //   `task-4-report.md` §3.1）。
+    //   不变量本身成立，且被用例逐位断言，但**负对照只证明后半句** —— 别把"这三行还在"
+    //   读成"这三行被测到了"。
+    // ⚠★ 【2026-09-29 Task 4 负对照实测】守卫那句与失败回退那句，**两条都是可观测的**（不是
+    //   只有一处）：
+    //   ① 守卫那句 —— 改它写入的值（报告 §3.4 把守卫体改成只写 `outJoints[5] = refJoints[5] + 1.0;`）
+    //      ⇒ ㉕(b) 红（`FAIL: out[i] == ref[i]`，实测 35/1）；
+    //   ② 失败回退那句 —— 改成 `= 0.0` ⇒ ㉕(a) 红（`FAIL: out[0] == ref[0]`，实测 35/1 —— 报告
+    //      §3.2；60 组里有 2 组真解不出来 ⇒ 这条回退确实被走到）。
+    //   ⚠ "失败回退是**唯一**的重复写入"与"某一句是该不变量**唯一**的执行点"这两套说法被上面
+    //     两条对照一起证否（守卫那条出口也在写、也测得到）⇒ **别再那么写**。
+    //   ⇒ 保留这三行的理由不是"它现在有观测效果"，而是**第一句无条件写**这条纪律本身：它让
+    //     "J1/J2/J3 保持"先于一切分支在**本函数内**成立、读代码时一眼可读，而**不建立在"被调
+    //     函数会在自己的出口上重写这三个下标"之上**（那条今天成立、也写进了它的契约，但它是
+    //     **别人**的行为；本函数自己那句"失败 ⇒ 六位全回参照"就是不依赖它、同款纪律的一例）。
+    //     ⚠ 本任务**没能**造出"删掉/改掉这三行"能红的对照（报告 §3.1 与 §5.1）⇒ 别删，
+    //       也别以为它被测到了。
+    outJoints[0] = refJoints[0];
+    outJoints[1] = refJoints[1];
+    outJoints[2] = refJoints[2];
+
+    // ---- 笔杆 NaN/Inf 守卫（与旧函数的契约逐条对齐）---------------------------
+    // ⚠ 只守【笔杆侧】：`refJoints` 若非有限，本函数**原样传出去**（没有安全值可退，
+    //   那一刻 0 是一个真实关节角，机械臂会真的转过去）。这一点与旧函数**逐字相同**。
+    //   头文件那一段写了这个边界的去向（调用方负责），别把它读成"本函数保证有限"。
+    bool stylusBad = false;
+    for (int i = 0; i < 3; ++i)
+        if (!std::isfinite(refStylus[i]) || !std::isfinite(curStylus[i])) stylusBad = true;
+    if (stylusBad) {
+        for (int i = 0; i < 6; ++i) outJoints[i] = refJoints[i];
+        return Btn2JointResult::StylusUntrustworthy;   // 写法未动，只是把这个出口**报出去**
+    }
+
+    // ---- 参照姿态（FK 的旋转部分，行主序）-------------------------------------
+    // 见上面那段：与 Task 3 的 FK 回代**同一个来源**，否则"目标"与"解得到"会分家。
+    double refR[9];
+    {
+        double T[4][4];
+        Kinematics::composeTransform(refJoints, T);
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c) refR[r*3 + c] = T[r][c];
+    }
+
+    // ---- 想要的末端朝向（Task 2）----------------------------------------------
+    // ⚠ φ 在这里直接读 `Config::BTN2_TILT_PHI_DEG`（理由见头文件那段，与 ⑳d 的入参不冲突）。
+    double targetR[9];
+    button2OrientTarget(refR, refStylus, curStylus, Config::BTN2_TILT_PHI_DEG, targetR);
+
+    // ---- 解 J4/J5/J6（Task 3）；**失败 ⇒ 六位全回参照**--------------------------
+    // ⚠ **不是**"本帧不下发"（与 I1/I2/FK 三处的 `cerr` + `return` 形状**不同**）：失败时本函数
+    //   **没有 `return`**，写回参照后照常返回 ⇒ 调用方仍会下发本帧的 `ServoJ` 目标，臂**顺着
+    //   步长限幅往按下位姿收回去**（判据见头文件那段 ⚠★ 与 `RelayCore.cpp:1681-1687` 的 ⚠⚠）。
+    // ⚠ 失败时**重新**逐位写一遍六位（而不是只写腕三位）：`button2SolveWrist` 的失败契约已经
+    //   保证它把 out 退回参照了，这里再写一遍是**防御性的重复**吗？不是 —— 本函数的"失败 ⇒
+    //   六位全回参照"是一条**自己的**契约，它不该依赖被调函数的失败副作用的细节（那条契约
+    //   哪天改成"失败时不写 out"就会在这里静默漏掉 J1~J3 之外的位）。多写这六行买的是
+    //   本函数**自己成立**。
+    if (!button2SolveWrist(refJoints, targetR, Config::ORIENT_MAX_STEP_DEG, outJoints)) {
+        for (int i = 0; i < 6; ++i) outJoints[i] = refJoints[i];
+        // ★ I-1：这个出口从前**没有任何人知道**走到了 —— 调用方只能看到"六位 = 参照"，
+        //   而那与"笔杆不可信"、乃至与"笔杆本来就没动、解出来的就是参照"**长得一模一样**
+        //   （后者是 `Ok`！见用例 ㉕(b) 第一段）。⇒ 现在把三档分开报。
+        //   ⚠ 失败理由（求逆失败 / 迭代没到门限）在 `button2SolveWrist` 内部**已经不可分**
+        //     —— 它只回 `bool`。这里**不**假装知道是哪一个（含糊地猜一种比不说更坏）。
+        return Btn2JointResult::SolveFailed;
+    }
+
+    return Btn2JointResult::Ok;
 }
 
 // ============================================================================

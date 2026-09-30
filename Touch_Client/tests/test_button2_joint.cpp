@@ -104,6 +104,44 @@ static void bodyAxisEuler(const double refRpy[3], int axis, double deg, double o
     matToZyRpy(Rc, outRpy);
 }
 
+// ⚠★ 2026-09-29 修复轮 F1：这里**删掉**了一份 `matToRpyZYX` —— 它与本文件上面 :87 的
+//   `matToZyRpy` 是"同一约定两份实现"（本仓最忌的一种缺陷）。全部调用点
+//   （⑳/⑳b/⑳c/⑳d/㉑）已改走 `matToZyRpy`；本文件里矩阵→欧拉现在**只有这一份实现**。
+//   【为什么当初会误加】派单简报断言"本仓没有矩阵→欧拉"，于是照着这层意思新写了一份 ——
+//     而那句对**生产代码**成立、对**本测试文件**不成立（`matToZyRpy` 早就在 :87，⑦ 用它造
+//     输入并自检过）。真实差别只有**万向锁那一支**的取舍（`atan2(-R[5],R[4])` vs
+//     `atan2(-R[7],R[4])`）；**非退化支路**上两者逐字相同 —— 而本组用例全部落在非退化支路
+//     （最大也只是 ±58.93° 这类小角度、|ry| ≪ 90）。
+//   ⚠ 等价性**不靠**上面那句"逐字相同"的口头结论：下面这条往返断言把它实测钉住。
+//     「为什么不直接删了不管」的答案就在这条用例里 —— 换过去若不等价，它必红。
+//   ⚠ `matToZyRpy` 本身**一个字都没改**（既有用例 ⑦ 依赖它构造输入）。
+static void test_mat_to_rpy_roundtrip_on_task2_inputs() {
+    TEST(⑳x F1 等价性：matToZyRpy(rpyToMatrix(x)) 回到 x（⑳/㉑ 实际用到的输入，非退化）);
+    // (1) ⑳ 实际喂进去的两个 refStylus：全 0 与现场那个按下姿态
+    const double refs[2][3] = {{0, 0, 0}, {-58.93, 11.83, -6.41}};
+    for (int q = 0; q < 2; ++q) {
+        double R[9], back[3];
+        TcpCalibration::rpyToMatrix(refs[q][0], refs[q][1], refs[q][2], R);
+        matToZyRpy(R, back);
+        for (int i = 0; i < 3; ++i)
+            CHECK(std::fabs(back[i] - refs[q][i]) < 1e-9);   // 往返回到原值
+    }
+    // (2) ⑳ 用 Rx(10)、㉑ 用 Rz(20) 造 curStylus —— 两条构造路径各走一遍（矩阵→欧拉→矩阵）
+    const double devs[2][3] = {{10, 0, 0}, {0, 0, 20}};
+    for (int q = 0; q < 2; ++q) {
+        double Rs[9], Rd[9], Rsc[9], back[3];
+        TcpCalibration::rpyToMatrix(0, 0, 0, Rs);
+        button2RotVecToMatDeg(devs[q], Rd);
+        button2Mat3Mul(Rs, Rd, Rsc);
+        matToZyRpy(Rsc, back);                        // 与 ⑳/㉑ 里构造 curStylus 的同一句
+        double R2[9];
+        TcpCalibration::rpyToMatrix(back[0], back[1], back[2], R2);
+        for (int i = 0; i < 9; ++i)
+            CHECK(std::fabs(R2[i] - Rsc[i]) < 1e-9);  // 反解回同一个矩阵
+    }
+    PASS();
+}
+
 
 
 // ① ★ 结构判据（本方案的核心，且与符号无关）：一次只动笔杆一根轴 ⇒ 恰好一个关节动。
@@ -715,6 +753,868 @@ static void test_crossing_the_pm180_seam_is_only_two_degrees() {
 }
 
 
+// ⑲ 3×3 纯算术：旋转向量↔矩阵 的往返 + 一个【具体数】的已知值 + 乘/转置/求逆。
+//    ⚠ 不用"动了就算过"的断言：这里钉的是具体数值。
+//    ⚠★ 2026-09-29 评审修复轮：原来四个子块挤在【一个】`static void` 里，而 `CHECK` 的失败路径是
+//      `return;` ⇒ (a) 一红，(b)(c)(d) **根本不会跑**（一个红遮住三个结论；实测：突变 `R[2]` 后
+//      只印出 ⑲(a) 的 FAIL，⑲(b)(c)(d) 连标签都没打）。现拆成【四个】独立函数，与本文件其余
+//      18 条用例同一形状：一条红只停它自己。
+//    ⚠ 为什么是 `static void` 函数而不是直接写进 `main()`：`CHECK` 展开成 `return;`，而 `return;`
+//      在 `int main()` 里**不是合法 C++**（2026-09-29 实测 MSVC C2561「"main": 函数必须返回值」）。
+//      包成 void 函数后失败只退回本用例，main 照常 `return g_failed == 0 ? 0 : 1` ⇒ 真红会让
+//      整套件 exit 非 0（而 run_tests.bat 判的正是退出码）。
+//    ⚠★ 每个子块末尾都必须有 `PASS()`：`PASS()` 是本文件里【唯一】给 `g_passed` 计数的宏。
+//      没有它时，"跑绿"与"把这四条全删掉"的输出**逐字相同**、`Results:` 的计数也不涨（评审实测：一直是 18）。
+//
+// ⑲(a) 往返：rotVecDeg ∘ rotVecToMatDeg 还原原向量
+static void test_rotvec_matrix_roundtrip() {
+    TEST(⑲(a) 往返: rotVecDeg∘rotVecToMatDeg 还原原向量);
+    const double cases[4][3] = {{0,0,0}, {10,0,0}, {0,-25,0}, {12,-7,3}};
+    for (int c = 0; c < 4; ++c) {
+        double R[9], rv[3];
+        button2RotVecToMatDeg(cases[c], R);
+        button2RotVecDegForTest(R, rv);        // 复用 Button2Joint.cpp 里的实现（经头文件薄壳暴露）
+        for (int i = 0; i < 3; ++i)
+            CHECK(std::fabs(rv[i] - cases[c][i]) < 1e-9);
+    }
+    PASS();
+}
+
+// ⑲(b) 绕 X 转 90° 的具体矩阵
+static void test_rotvec_matrix_specific_rx90() {
+    TEST(⑲(b) 绕 X 转 90° 的具体矩阵);
+    const double rv[3] = {90, 0, 0};
+    double R[9];
+    button2RotVecToMatDeg(rv, R);
+    // Rx(90) = [[1,0,0],[0,0,-1],[0,1,0]]（行主序）
+    const double exp[9] = {1,0,0, 0,0,-1, 0,1,0};
+    for (int i = 0; i < 9; ++i) CHECK(std::fabs(R[i] - exp[i]) < 1e-9);
+    PASS();
+}
+
+// ⑲(c) 乘与转置：A·Aᵀ == I（A 是旋转）
+static void test_rotvec_mat3_mul_and_transpose() {
+    TEST(⑲(c) 乘与转置：A·Aᵀ == I（A 是旋转）);
+    const double rv[3] = {12, -7, 3};
+    double A[9], At[9], P[9];
+    button2RotVecToMatDeg(rv, A);
+    button2Mat3T(A, At);
+    button2Mat3Mul(A, At, P);
+    for (int i = 0; i < 9; ++i)
+        CHECK(std::fabs(P[i] - (i % 4 == 0 ? 1.0 : 0.0)) < 1e-9);
+    PASS();
+}
+
+// ⑲(d) 求逆：A·A⁻¹ == I；奇异矩阵返回 false
+static void test_rotvec_mat3_inverse() {
+    TEST(⑲(d) 求逆：A·A⁻¹ == I；奇异矩阵返回 false);
+    const double rv[3] = {12, -7, 3};
+    double A[9], Ai[9], P[9];
+    button2RotVecToMatDeg(rv, A);
+    CHECK(button2Mat3Inv(A, Ai));
+    button2Mat3Mul(A, Ai, P);
+    for (int i = 0; i < 9; ++i)
+        CHECK(std::fabs(P[i] - (i % 4 == 0 ? 1.0 : 0.0)) < 1e-9);
+    const double sing[9] = {1,2,3, 2,4,6, 0,0,1};   // 第 1、2 行线性相关
+    CHECK(!button2Mat3Inv(sing, Ai));
+    PASS();
+}
+
+// ============================================================================
+//  ⑳ ~ ㉑ 2026-09-29 Task 2：`button2OrientTarget`（摆动锁基座 + 自转绕自身轴）
+// ============================================================================
+// 【这一组用例在测什么，以及为什么是这个形状】
+//   旧路（`button2JointTarget`，本文件其余 18 条钉着）把"一根器件轴"直接喂给"一个关节"。
+//   新路先算出**想要的末端朝向**（摆动在**基座系**里、自转绕**末端自身**轴），再由 Task 3 解 J4/J5/J6。
+//   本文件这一组只测**目标朝向那一半**（它是纯算术）；解关节那一半在 Task 3。
+//
+// ⚠ 三条判据的形状是刻意的，别"顺手改成更直观的写法"：
+//   ① **不去查 FK 的列**。要断言"前摆 ⇒ 末端往基座 +Y 摆"，最省事的写法是拿 `Kinematics`
+//      算出末端轴、看它的 tip 往哪挪 —— 但那要先认定"末端系的哪一列是笔尖指向"。
+//      那是**未核实的前提**（计划自审时抓到的）⇒ 改成对**这次姿态变化本身**取旋转向量：
+//      `D = outR · refRᵀ`。绕基座 +X 正转 θ **就是**"末端轴（朝下时）往 +Y 摆"那件事的
+//      坐标无关说法 ⇒ 只断言 D 的旋转向量沿基座 X、大小 = 输入角。**与位姿无关、与符号约定无关。**
+//   ② **期望值经 Config 表达，一个 ±1 都不写死**（与文件头 ② 同一条规矩）：摆动两路用
+//      `BTN2_TILT_SIGN_X/Y`、自转用 `BTN2_ROLL_SIGN`。⇒ Task 3 上机翻符号不会让用例红。
+//   ③ **φ 一律经入参传**（`Config::BTN2_TILT_PHI_DEG`，只有 ⑳d 传 90.0）。原因见头文件：
+//      编译期常数在运行期改不了 ⇒ 写不出有牙齿的对照。
+
+// ⑳ ★【验收标准本身】器件前摆 ⇒ 末端往基座 +Y 摆 —— **任意位姿下都成立**（这正是本次要修的）。
+//    【为什么是三个位姿 × 两个参考笔杆姿态】"摆动方向随姿态跑"这个病只在**非正位**上显形
+//      （正位下"左乘"与"右乘"退化到同一件事）⇒ 只测一个正位，坏实现照样绿。
+//    【为什么参考笔杆姿态要有第二个】要看的是"**与参考笔杆姿态无关**"（映射吃的是 ΔR = R_refᵀ·R_cur，
+//      不是绝对姿态）⇒ 参考取 {-58.93, 11.83, -6.41}（现场那个按下姿态）再走一遍。
+//    ⚠★ 2026-09-29 修复轮 F2：本用例原来把**两条**断言挤在【一个】 `static void` 里，而 `CHECK`
+//      的失败路径是 `return;` ⇒ 排在前面的"逐元素等于 `Mw·refR`"一红，**后面那条真正的验收判据
+//      根本不会跑**（一个红遮住一个结论）。现拆成 **⑳(a) / ⑳(b) 两个独立函数**：两条断言各自
+//      失败、各带自己的 `PASS()`。**断言内容一个字都没有放宽**，只是把它们分开放。
+//      ⚠ 为什么是 `static void` 而不是直接写进 `main()`：`CHECK` 展开成 `return;`，而 `return;`
+//        在 `int main()` 里不是合法 C++（同 ⑲ 2026-09-29 实测那条 C2561）。
+//      ⚠ 拆开后**两个函数各自持有**那份"`refR` 得是旋转"的自检：少了它，函数二可能在坏夹具上
+//        静默通过（又是一次"看起来跑了但其实空转"）⇒ 自检必须跟着断言走，不能只留一份。
+//
+// ⑳(a) 展开式断言：`outR` **逐元素**等于 `Mw·refR`（`Mw = rotVecToMatDeg(SX·10, 0, 0)`）。
+//      这是"实现与期望的**精确值**相等"那一条 —— 最紧，也最容易被实现自己背书（期望值经 SX 表达）。
+static void test_tilt_target_equals_world_rotation_times_ref() {
+    TEST(⑳(a) 前摆 ⇒ outR 逐元素等于 Mw·refR（三个位姿 × 两个参考笔杆姿态）);
+    const double poses[3][6] = {
+        {0,0,0,0,-90,0}, {30,-60,45,20,-70,10}, {-120,40,-30,90,-45,180}
+    };
+    const double refs[2][3] = {{0,0,0}, {-58.93, 11.83, -6.41}};
+    for (int p = 0; p < 3; ++p) {
+        double T[4][4]; Kinematics::composeTransform(poses[p], T);
+        double refR[9];
+        for (int r = 0; r < 3; ++r) for (int c = 0; c < 3; ++c) refR[r*3+c] = T[r][c];
+        // 自检：refR 得是**旋转**，否则下面那组期望值不再是"一次世界系旋转"（空转）。
+        {
+            double rt[9], pr[9], e = 0.0;
+            button2Mat3T(refR, rt);
+            button2Mat3Mul(refR, rt, pr);
+            for (int i = 0; i < 9; ++i) e += std::fabs(pr[i] - (i % 4 == 0 ? 1.0 : 0.0));
+            CHECK(e < 1e-12);
+        }
+        for (int q = 0; q < 2; ++q) {
+            // 造输入：绕【器件 X】转 10° ⇒ R_cur = R_refStylus · Rx(10)
+            double Rs[9], Rx[9], Rsc[9];
+            TcpCalibration::rpyToMatrix(refs[q][0], refs[q][1], refs[q][2], Rs);
+            const double a10[3] = {10, 0, 0};
+            button2RotVecToMatDeg(a10, Rx);
+            button2Mat3Mul(Rs, Rx, Rsc);
+            double curStylus[3]; matToZyRpy(Rsc, curStylus);
+
+            double outR[9];
+            button2OrientTarget(refR, refs[q], curStylus, Config::BTN2_TILT_PHI_DEG, outR);
+
+            // 期望 = rotVecToMatDeg(SX·10, 0, 0) · refR  ← 经 SX 表达，【不写死符号】
+            double Mw[9], expR[9];
+            const double w[3] = { Config::BTN2_TILT_SIGN_X * 10.0, 0.0, 0.0 };
+            button2RotVecToMatDeg(w, Mw);
+            button2Mat3Mul(Mw, refR, expR);
+            for (int i = 0; i < 9; ++i) CHECK(std::fabs(outR[i] - expR[i]) < 1e-9);
+        }
+    }
+    PASS();
+}
+
+// ⑳(b) ★【与实现无关的验收判据】这次姿态变化的【世界系旋转向量】必须**沿基座 X 轴**
+//      （即"往 +Y 摆"的那根轴）：Y、Z 分量 < 1e-9，且 |X| 分量**恰为 10°**。
+//      ⚠ 这条**不查实现算出来的任何中间量** —— 它只问"末端朝向变了多少、绕哪根轴变"，
+//        符号约定、乘法次序、坐标约定都改不动它 ⇒ 正是拆开前会被 ⑳(a) 遮住的那条。
+//      ⚠ 拆开后它自带一份"refR 是旋转"的自检（与 ⑳(a) 的那份同因不同用）：
+//        没有它，坏夹具下 `D = outR·refRᵀ` 不再是"这次变化的世界系旋转"（空转）。
+static void test_tilt_moves_tip_toward_base_plus_y_in_any_pose() {
+    TEST(⑳(b) 前摆 ⇒ 末端 tip 往基座 +Y 摆（世界系旋转向量沿基座 X，三个位姿 × 两个参考笔杆姿态）);
+    const double poses[3][6] = {
+        {0,0,0,0,-90,0}, {30,-60,45,20,-70,10}, {-120,40,-30,90,-45,180}
+    };
+    const double refs[2][3] = {{0,0,0}, {-58.93, 11.83, -6.41}};
+    for (int p = 0; p < 3; ++p) {
+        double T[4][4]; Kinematics::composeTransform(poses[p], T);
+        double refR[9];
+        for (int r = 0; r < 3; ++r) for (int c = 0; c < 3; ++c) refR[r*3+c] = T[r][c];
+        // 自检：refR 得是**旋转**，否则下面 D = outR·refRᵀ 不再是"这次变化的世界系旋转"（空转）。
+        {
+            double rt[9], pr[9], e = 0.0;
+            button2Mat3T(refR, rt);
+            button2Mat3Mul(refR, rt, pr);
+            for (int i = 0; i < 9; ++i) e += std::fabs(pr[i] - (i % 4 == 0 ? 1.0 : 0.0));
+            CHECK(e < 1e-12);
+        }
+        for (int q = 0; q < 2; ++q) {
+            // 造输入：绕【器件 X】转 10° ⇒ R_cur = R_refStylus · Rx(10)
+            double Rs[9], Rx[9], Rsc[9];
+            TcpCalibration::rpyToMatrix(refs[q][0], refs[q][1], refs[q][2], Rs);
+            const double a10[3] = {10, 0, 0};
+            button2RotVecToMatDeg(a10, Rx);
+            button2Mat3Mul(Rs, Rx, Rsc);
+            double curStylus[3]; matToZyRpy(Rsc, curStylus);
+
+            double outR[9];
+            button2OrientTarget(refR, refs[q], curStylus, Config::BTN2_TILT_PHI_DEG, outR);
+
+            // ★ 与实现无关的【验收判据】：这次姿态变化的【世界系旋转向量】必须
+            //   **沿基座 X 轴**（即"往 +Y 摆"的那根轴），其余两分量必须是 0，大小恰为 10°。
+            double refT[9], D[9];
+            button2Mat3T(refR, refT);
+            button2Mat3Mul(outR, refT, D);              // D = outR · refRᵀ
+            double rvw[3]; button2RotVecDegForTest(D, rvw);
+            CHECK(std::fabs(rvw[1]) < 1e-9);            // 无基座 Y 分量
+            CHECK(std::fabs(rvw[2]) < 1e-9);            // 无基座 Z 分量
+            CHECK(std::fabs(std::fabs(rvw[0]) - 10.0) < 1e-9);   // 大小 = 10°（方向经 SX 表达）
+        }
+    }
+    PASS();
+}
+
+// ⑳b 死区：**低于**门限的分量必须归 0；**恰好等于**门限必须放行（`>=` 而不是 `>`）。
+//    【为什么后半条非有不可】只测"0.005 不动"的话，把门限写成 `>`（恰好等于时被吞掉）
+//      这个错**测不出来** —— 而它与旧实现 `axisGate` 的语义不符 ⇒ 那正是实现与接线分家的地方。
+//    ⚠★ 实测过一件事再写这条：这里的**输入构造**（rotVecToMatDeg → 欧拉 → rpyToMatrix）
+//      绕了一圈三角函数，理论上可能把 `rv[0]` 压到门限**之下一个 ulp** ⇒ 正确实现也会红
+//      （"掷硬币"式的假红）。上机前先用探针实测：`rv[0] == dz` **逐位相等**、diff = 0.000e+00
+//      ⇒ 这条不存在那个脆弱性（探针记录在 task-2-report.md）。
+static void test_deadzone_swallows_below_and_admits_exactly_at_threshold() {
+    TEST(⑳b 死区：低于门限的分量必须归 0；恰好等于门限必须放行);
+    const double refR[9] = {1,0,0, 0,1,0, 0,0,1};
+    const double refStylus[3] = {0,0,0};
+    CHECK(Config::ORIENT_DEADZONE_DEG > 0.0);       // 自检：门限非正 ⇒ 下面两条同义
+    {   // 低于门限 ⇒ 输出 == refR（一点没动）
+        double Rs[9], Rx[9], Rsc[9], cur[3], outR[9];
+        TcpCalibration::rpyToMatrix(0,0,0, Rs);
+        const double a[3] = { Config::ORIENT_DEADZONE_DEG * 0.5, 0, 0 };
+        button2RotVecToMatDeg(a, Rx); button2Mat3Mul(Rs, Rx, Rsc); matToZyRpy(Rsc, cur);
+        button2OrientTarget(refR, refStylus, cur, Config::BTN2_TILT_PHI_DEG, outR);
+        for (int i = 0; i < 9; ++i) CHECK(std::fabs(outR[i] - refR[i]) < 1e-12);
+    }
+    {   // 恰好等于门限 ⇒ 必须放行（与 `>` 相反）
+        double Rs[9], Rx[9], Rsc[9], cur[3], outR[9];
+        TcpCalibration::rpyToMatrix(0,0,0, Rs);
+        const double a[3] = { Config::ORIENT_DEADZONE_DEG, 0, 0 };
+        button2RotVecToMatDeg(a, Rx); button2Mat3Mul(Rs, Rx, Rsc); matToZyRpy(Rsc, cur);
+        button2OrientTarget(refR, refStylus, cur, Config::BTN2_TILT_PHI_DEG, outR);
+        // ⚠ 2026-09-29 Task 3（复审 M3）：这里原来多一行 `button2Mat3T(outR, outT);` —— 它的
+        //   结果 `outT` **算完没人读**（下面只用 `refT`）⇒ 删掉那一行连同它的声明。这不是
+        //   行为改变：`outT` 从未参与任何断言。
+        double D[9], refT[9];
+        button2Mat3T(refR, refT); button2Mat3Mul(outR, refT, D);
+        double rv2[3]; button2RotVecDegForTest(D, rv2);
+        CHECK(std::fabs(std::fabs(rv2[0]) - Config::ORIENT_DEADZONE_DEG) < 1e-9);
+    }
+    PASS();
+}
+
+// ⑳c 偏移限幅：超 150° ⇒ 旋转角被夹到 150°，且**【轴不变】**。
+//    ⚠★ 这条必须分两半，因为**(a) 单独根本区分不了两种实现**（这是写之前先算出来的）：
+//      "整体缩比"（正确）与"逐分量 clamp"（错误）在**纯单轴**输入下给出**同一个结果** ——
+//      只有一个分量非零、而它正是要缩的那一根 ⇒ 两者都得 (150,0,0)。
+//      ⇒ (b) 用**两根非零分量**的旋转向量（|rv| = √(170²+20²) ≈ 171.2° > 150°）：
+//        整体缩比 ⇒ (SX·170k, SY·20k, 0)（**方向不变**，k = 150/|rv|）；
+//        逐分量夹 ⇒ (SX·150, SY·20, 0)（**方向被夹歪**，且幅度也不再是 150）。
+//      负对照（把缩比换成逐分量 clamp）**只在 (b) 变红**，见 task-2-report.md。
+static void test_offset_cap_scales_rotation_angle_and_keeps_the_axis() {
+    TEST(⑳c 偏移限幅：超 150° ⇒ 夹到 150° 且【轴不变】);
+    const double refR[9] = {1,0,0, 0,1,0, 0,0,1};
+    const double refStylus[3] = {0,0,0};
+    const double cap = Config::ORIENT_MAX_OFFSET_DEG;
+    CHECK(cap > 0.0 && cap < 180.0);                // 自检：否则"超限"不可构造
+
+    // (a) 纯器件 X 轴转 170°（> cap）⇒ 世界系旋转向量 = 基座 X × 符号 × cap，另两维恰为 0
+    {
+        double Rs[9], Ra[9], Rsc[9], cur[3], outR[9];
+        TcpCalibration::rpyToMatrix(0,0,0, Rs);
+        const double a[3] = {170.0, 0.0, 0.0};
+        button2RotVecToMatDeg(a, Ra); button2Mat3Mul(Rs, Ra, Rsc); matToZyRpy(Rsc, cur);
+        button2OrientTarget(refR, refStylus, cur, Config::BTN2_TILT_PHI_DEG, outR);
+        double refT[9], D[9];
+        button2Mat3T(refR, refT); button2Mat3Mul(outR, refT, D);
+        double rvw[3]; button2RotVecDegForTest(D, rvw);
+        CHECK(std::fabs(rvw[1]) < 1e-9);
+        CHECK(std::fabs(rvw[2]) < 1e-9);
+        CHECK(std::fabs(std::fabs(rvw[0]) - cap) < 1e-9);
+    }
+
+    // (b) ★【轴不变】的判别器：两根非零分量、模长 > cap
+    {
+        const double a[3] = {170.0, 20.0, 0.0};
+        const double n = std::sqrt(170.0*170.0 + 20.0*20.0);
+        const double k = cap / n;
+        double Rs[9], Ra[9], Rsc[9], cur[3], outR[9];
+        TcpCalibration::rpyToMatrix(0,0,0, Rs);
+        button2RotVecToMatDeg(a, Ra); button2Mat3Mul(Rs, Ra, Rsc); matToZyRpy(Rsc, cur);
+        button2OrientTarget(refR, refStylus, cur, Config::BTN2_TILT_PHI_DEG, outR);
+        double refT[9], D[9];
+        button2Mat3T(refR, refT); button2Mat3Mul(outR, refT, D);
+        double rvw[3]; button2RotVecDegForTest(D, rvw);
+        // 期望：方向不变、幅度缩到 cap ⇒ rv_new = 原方向 × cap = (SX·170k, SY·20k, 0)
+        CHECK(std::fabs(rvw[0] - Config::BTN2_TILT_SIGN_X * 170.0 * k) < 1e-9);
+        CHECK(std::fabs(rvw[1] - Config::BTN2_TILT_SIGN_Y *  20.0 * k) < 1e-9);
+        CHECK(std::fabs(rvw[2]) < 1e-9);
+        // 自检：本条与 (a) 确实不同（若 n ≤ cap，(b) 就退化成 (a)，判别力归零）
+        CHECK(n - cap > 1.0);
+    }
+    PASS();
+}
+
+// ⑳d ★ φ 不是死常数：φ=90° 时"器件左右摆"必须映到【绕基座 Z 转】。
+//    今天 φ=0 ⇒ 左右摆映到绕基座 Y。把 φ 传成 90° 时，(0,cosφ,sinφ) = (0,0,1)
+//    ⇒ 世界系旋转向量必须【沿基座 Z】且大小仍是 10°。**这一条专治"常数没被用上"**。
+//    ⚠★ 本仓栽过"常数写进去但没人读"，而那种缺陷**在默认值下完全看不出来** —— 这里默认值
+//      正是 0（今天就是 0）⇒ 不测 φ≠0 就等于没测这个常数。
+//    【负对照（保证红，不依赖任何假设）】把实现里的 φ 恒置 0（即把入参丢掉）⇒ rvw[2] 变 ≈0、
+//      rvw[1] 变 ±10 ⇒ 下面第三句必红。实测记录见 task-2-report.md。
+static void test_phi_is_not_a_dead_constant() {
+    TEST(⑳d ★ φ 不是死常数：φ=90° 时"左右摆"映到绕基座 Z 转);
+    const double refR[9] = {1,0,0, 0,1,0, 0,0,1};
+    const double refStylus[3] = {0,0,0};
+    double Rs[9], Ry10[9], Rsc[9], cur[3], outR[9];
+    TcpCalibration::rpyToMatrix(0,0,0, Rs);
+    const double a[3] = {0, 10, 0};                       // 器件 Y 轴 +10°（左右摆）
+    button2RotVecToMatDeg(a, Ry10);
+    button2Mat3Mul(Rs, Ry10, Rsc);
+    matToZyRpy(Rsc, cur);
+    button2OrientTarget(refR, refStylus, cur, 90.0, outR);   // ← φ = 90
+
+    double refT[9], D[9];
+    button2Mat3T(refR, refT);
+    button2Mat3Mul(outR, refT, D);                        // 世界系增量
+    double rvw[3]; button2RotVecDegForTest(D, rvw);
+    CHECK(std::fabs(rvw[0]) < 1e-9);                      // 无基座 X 分量
+    CHECK(std::fabs(rvw[1]) < 1e-9);                      // 无基座 Y 分量
+    CHECK(std::fabs(std::fabs(rvw[2]) - 10.0) < 1e-9);    // 大小 = 10°（方向由 SY 定，故取绝对值）
+    PASS();
+}
+
+// ㉑ 自转 ⇒ **末端轴指向不变**、只绕【末端自身轴】拧 ROLL_SIGN·20°。
+//    【判据 1 为什么是"第三列逐位不变"】`outR = R_tilt · Rz(roll)` 里 `Rz` 的第三列恰是 (0,0,1)
+//      ⇒ `outR` 的第三列 == `R_tilt` 的第三列。20° 的输入下 `R_tilt == refR`（摆动那两路
+//      的分量都是 0）⇒ 第三列必须**逐位**等于 `refR` 的第三列。
+//      ⚠ 这一句正是"右乘 vs 左乘"的判别器：左乘 `Rz·refR` 会把第三列一起转走 ⇒ 必红。
+//    【判据 2】`outR·outRᵀ == I` —— 顺带证明 `outR` 还是旋转矩阵（连乘没有把它乘坏）。
+//    【判据 3】`rotvec(outR·refRᵀ)` 必须恰为 `refR` 的第三列（归一化）× ROLL_SIGN·20°。
+static void test_roll_only_spins_around_the_styluses_own_axis() {
+    TEST(㉑ 自转 ⇒ 末端轴指向不变、绕自身轴转 ROLL_SIGN·20°);
+    const double poses[2][6] = {{0,0,0,0,-90,0}, {30,-60,45,20,-70,10}};
+    for (int p = 0; p < 2; ++p) {
+        double T[4][4]; Kinematics::composeTransform(poses[p], T);
+        double refR[9];
+        for (int r = 0; r < 3; ++r) for (int c = 0; c < 3; ++c) refR[r*3+c] = T[r][c];
+        const double refStylus[3] = {0, 0, 0};
+        double Rs[9], Rz20[9], Rsc[9];
+        TcpCalibration::rpyToMatrix(0,0,0, Rs);
+        const double a20[3] = {0, 0, 20};
+        button2RotVecToMatDeg(a20, Rz20);
+        button2Mat3Mul(Rs, Rz20, Rsc);
+        double curStylus[3]; matToZyRpy(Rsc, curStylus);
+
+        double outR[9];
+        button2OrientTarget(refR, refStylus, curStylus, Config::BTN2_TILT_PHI_DEG, outR);
+
+        // 判据1：接近轴（第 3 列）逐位不变
+        for (int r = 0; r < 3; ++r) CHECK(std::fabs(outR[r*3+2] - refR[r*3+2]) < 1e-9);
+        // 判据2：outR·outRᵀ 应 ≈ I（两矩阵都正交）—— 顺带证明 outR 是旋转
+        double outT[9], D[9];
+        button2Mat3T(outR, outT);
+        button2Mat3Mul(outR, outT, D);
+        for (int i = 0; i < 9; ++i)
+            CHECK(std::fabs(D[i] - (i % 4 == 0 ? 1.0 : 0.0)) < 1e-9);
+        // 判据3：outR·refRᵀ 是绕"接近轴"转 ROLL_SIGN·20° 的旋转
+        double Rs2[9], dR[9];
+        button2Mat3T(refR, Rs2);
+        button2Mat3Mul(outR, Rs2, dR);
+        double rvd[3]; button2RotVecDegForTest(dR, rvd);
+        double ax[3] = {refR[2], refR[5], refR[8]};      // 接近轴（第三列）
+        double n = std::sqrt(ax[0]*ax[0]+ax[1]*ax[1]+ax[2]*ax[2]);
+        CHECK(std::fabs(n - 1.0) < 1e-12);               // 自检：refR 正交 ⇒ 第三列是单位向量
+        for (int i = 0; i < 3; ++i) ax[i] /= n;
+        for (int i = 0; i < 3; ++i)
+            CHECK(std::fabs(rvd[i] - ax[i] * Config::BTN2_ROLL_SIGN * 20.0) < 1e-6);
+    }
+    PASS();
+}
+
+// ============================================================================
+//  ㉒ ~ ㉔ 2026-09-29 Task 3：`button2SolveWrist`（3×3 角雅可比 + FK 回代 + 阻尼 + 自验门）
+// ============================================================================
+// 【这一组在测什么】给定"想要的末端朝向"（Task 2 的 `button2OrientTarget` 产出的那一半），
+//   解出 J4/J5/J6 使 FK(J1..J6) 的旋转 = 目标。**判据的形状**（照简报，且刻意如此）：
+//     · ㉒ 恒等：目标 = 参照姿态 ⇒ 解 = 参照（初值即解，一步都不走）；
+//     · ㉓ ★ **跨位姿 FK 回验** —— 这是"解对了"的**直接证据**，且【不依赖任何符号常数】
+//       （三个 `BTN2_*_SIGN` 都不进这条：它只问"FK(解) 到不到得了目标"）；
+//     · ㉔ 腕部奇异位姿上的**不变量**：返回 true ⇒ FK(解) 必须**真的**等于目标。
+//   ⚠ ㉓ 拆成 (a)/(b) 两个独立函数：`CHECK` 的失败路径是 `return;` ⇒ 挤在一个函数里时，
+//     排在前面的断言一红，"FK 回验"这条最重要的判据**根本不会跑**（一个红遮住一个结论）。
+//     与 ⑲ / ⑳ 2026-09-29 的教训同一条。
+//   ⚠ 每条都是 `static void` + 末尾 `PASS()`：`CHECK` 展开成 `return;`（不能写进 `int main()`，
+//     那里 `return;` 不是合法 C++；漏 `PASS()` 则跑绿与"整条删掉"输出逐字相同）。
+
+// 测试侧【读数器】：从关节角取 FK 旋转（行主序 9 元）。不是被测逻辑。
+static void fkR(const double j[6], double R[9]) {
+    double T[4][4]; Kinematics::composeTransform(j, T);
+    for (int r = 0; r < 3; ++r) for (int c = 0; c < 3; ++c) R[r*3+c] = T[r][c];
+}
+// 两个旋转之间的夹角（度）：|rotvec(A·Bᵀ)|。只经 `rotVecDeg` 的薄壳，不复写约定。
+static double angBetweenDeg(const double A[9], const double B[9]) {
+    double Bt[9], D[9]; button2Mat3T(B, Bt); button2Mat3Mul(A, Bt, D);
+    double rv[3]; button2RotVecDegForTest(D, rv);
+    return std::sqrt(rv[0]*rv[0] + rv[1]*rv[1] + rv[2]*rv[2]);
+}
+
+// 测试侧【随机可达目标】构造器：给定 RNG 状态，造出 `ref[6]` 与"在 FK(ref) 上左乘一个小旋转"
+//   得到的目标 `Rt`。返回 false = 这一轮抽到退化轴（调用方跳过，且**不再**多消耗 RNG）。
+//   ⚠ 判据依赖它的两条性质：① 目标是**附近可达**的（≤ ~26°）；② 位姿遍布 J4/J5/J6 全域。
+//     它若退化成"目标恒等于参照"，㉓ 就成了空转 —— ㉒ 的存在正是不让这一层悄悄发生。
+static bool makeRandomReachTarget(unsigned& seed, double ref[6], double Rt[9]) {
+    auto rnd = [&seed]() { seed = seed * 1103515245u + 12345u;
+                           return (double)((seed >> 16) & 0x7FFF) / 32767.0; };
+    ref[0] = rnd()*720-360; ref[1] = rnd()*720-360; ref[2] = rnd()*310-155;
+    ref[3] = rnd()*720-360; ref[4] = rnd()*720-360; ref[5] = rnd()*720-360;
+    double Rr[9]; fkR(ref, Rr);
+    const double ax[3] = { rnd()*2-1, rnd()*2-1, rnd()*2-1 };
+    double n = std::sqrt(ax[0]*ax[0]+ax[1]*ax[1]+ax[2]*ax[2]);
+    if (n < 1e-6) return false;
+    const double sv[3] = { ax[0]/n*15*rnd(), ax[1]/n*15*rnd(), ax[2]/n*15*rnd() };
+    double Md[9]; button2RotVecToMatDeg(sv, Md); button2Mat3Mul(Md, Rr, Rt);
+    return true;
+}
+
+// ㉒ 目标 = 参考姿态 ⇒ 误差为 0 ⇒ 初值即解（一轮不走），解 = 参照（逐位）。
+//    【为什么非有不可】它把"解出来了"这件事与"目标就在原地"这个平凡情形钉在一起：
+//      若 ㉓ 的输入构造坏了（目标 ≈ 参照），只会让 ㉓ 变松 —— ㉒ 单独把平凡解的形状测掉。
+static void test_solve_wrist_identity_target_returns_reference() {
+    TEST(㉒ 目标 = 参考姿态 ⇒ 解 = 参考（恒等）);
+    const double poses[3][6] = {
+        {0,0,0,0,-90,0}, {30,-60,45,20,-70,10}, {-120,40,-30,90,-45,180}
+    };
+    for (int p = 0; p < 3; ++p) {
+        double R[9]; fkR(poses[p], R);
+        double out[6] = {9,9,9,9,9,9};
+        CHECK(button2SolveWrist(poses[p], R, Config::ORIENT_MAX_STEP_DEG, out));
+        for (int i = 0; i < 6; ++i) CHECK(std::fabs(out[i] - poses[p][i]) < 1e-6);
+    }
+    PASS();
+}
+
+// ㉓(a) ★★【本任务最重要的一条】跨位姿 FK 回验：解得出来 ⇒ FK(解) 必须真的等于目标。
+//    【为什么它是"直接证据"】它只问"我把解代回 FK，末端朝向对不对"，**不碰任何符号常数**
+//      （`BTN2_TILT_SIGN_*` / `BTN2_ROLL_SIGN` 都不进这条）—— 即使三个符号全反，只要解出的
+//      q 能让 FK 命中目标，这条就绿。符号的账由 Task 2 那一组与上机去结。
+//    ⚠ 判据写在循环**里**逐次断（而不是累加成 ok 再断）：第一个不满足的样本立刻红，且报出的是
+//      那句本质判据，不是一个 "ok=189" 的聚合数。
+//    ⚠ `solved >= 190` 是**防空转**：若实现恒返回 false，循环里那句一次都不会执行 ⇒ 全绿。
+static void test_solve_wrist_fk_roundtrip_across_random_poses() {
+    TEST(㉓(a) ★ 跨位姿 FK 回验：随机 200 组，解出来后 FK(解) 必须等于目标（< 0.05°）);
+    // ★ 值域钉（照 ⑨ 的招数：一条**不经过实现**的断言）：`BTN2_WRIST_TOL_DEG` **同时**是
+    //   `button2SolveWrist` 的收敛门限（`Button2Joint.cpp` 两处）与**本文件**的"到位"容差
+    //   （㉓(a) / ㉔ / ㉕(a) 三处都用它）⇒ 把它放宽（例如 5.0）会让【全套用例照绿】，
+    //   而交付精度静默变差 —— 没有任何别的断言会响。这一行挡的就是那个；
+    //   0.1 的理由：比今天的 0.05 宽一倍（给调参留一点余地），又把它钉在"度"的小量级上。
+    CHECK(Config::BTN2_WRIST_TOL_DEG <= 0.1);
+    unsigned seed = 20260929u;
+    int solved = 0;
+    for (int t = 0; t < 200; ++t) {
+        double ref[6], Rt[9];
+        if (!makeRandomReachTarget(seed, ref, Rt)) continue;          // 抽到退化轴：跳过
+        double out[6];
+        if (!button2SolveWrist(ref, Rt, Config::ORIENT_MAX_STEP_DEG, out)) continue;  // 拒发：跳过
+        ++solved;
+        double Ro[9]; fkR(out, Ro);
+        // ★ 本任务最重要的判据：解出来了 ⇒ FK(解) 必须真的到得了目标。
+        CHECK(angBetweenDeg(Rt, Ro) < Config::BTN2_WRIST_TOL_DEG);
+    }
+    CHECK(solved >= 190);   // 容许 ~5% 因腕部奇异/不可达被拒，但绝大多数必须解得出来
+    PASS();
+}
+
+// ㉓(b) 解腕【只】动 J4/J5/J6：J1/J2/J3 必须**逐位**不变（用 `==`，不是"接近"）。
+//    【为什么与 (a) 分开】这是本任务第二条不变量，而 `CHECK` 的失败是 `return;` ⇒ 与 (a) 同函数
+//      时会被 (a) 的 FK 断言遮住（或反过来）。两条各带自己的 `PASS()`，各自失败。
+static void test_solve_wrist_keeps_base_joints_across_random_poses() {
+    TEST(㉓(b) 跨位姿：解腕只动 J4/J5/J6，J1/J2/J3 逐位不变);
+    unsigned seed = 20260929u;   // 与 ㉓(a) 同种子 ⇒ 跑的是同一批位姿
+    int solved = 0;
+    for (int t = 0; t < 200; ++t) {
+        double ref[6], Rt[9];
+        if (!makeRandomReachTarget(seed, ref, Rt)) continue;
+        double out[6];
+        if (!button2SolveWrist(ref, Rt, Config::ORIENT_MAX_STEP_DEG, out)) continue;
+        ++solved;
+        for (int i = 0; i < 3; ++i) CHECK(out[i] == ref[i]);
+    }
+    CHECK(solved >= 190);
+    PASS();
+}
+
+// ㉔ 腕部奇异位姿上的**不变量**：**返回 true ⇒ FK(解) 必须真的等于目标**。
+//    ★★ 这条【不能】写成"奇异位姿必须拒发"。理由两条，都是实测/算术：
+//      ① 写死"必须拒发"= 让用例替实现背书（在 ref 附近腕部未必解不出）；
+//      ② 更要命的是它**结构上无法变红** —— 不收敛会被末尾自验门转成 `false`，而失败分支
+//         断言的是 `out == ref` ⇒ 删掉自验门后它照旧绿（本轮复审实测证伪，见 task-3-report.md）。
+//      ⇒ 断言的只能是【不变量】：**返回 true ⇒ 解真的到得了目标**。这也是末尾自验门存在的
+//        唯一理由（它把"没解出来"翻译成 `false`，而不是一个看起来像解的值）。
+//    ⚠ 失败分支断言"out 逐位退回参照"是**另一条**契约（与 `button2Mat3Inv` 同款），一并钉住。
+// ⚠ 2026-09-29 Task 3 复审 M-8：函数名从 `..._on_wrist_singularities` 改成现在这个 ——
+//   原名说"腕部奇异位姿：可达/不可达"，而 c2 被拒的原因是**步长预算**、**不是**奇异
+//   （实测把 `maxStepDeg` 换成 30° 它就解得出来，见下面那段注释）⇒ 名字按事实写。
+static void test_solve_wrist_invariant_holds_and_budget_refusal_is_exercised() {
+    TEST(㉔ 不变量：返回 true ⇒ FK(解) 必须真的等于目标（可达若干 + 一组因【步长预算】被拒）);
+    // 三组输入**刻意覆盖两个分支**（缺一类就有个负对照打不到，见下面 ⚠）：
+    //   c0/c1 —— 奇异位姿 + 附近可达目标（60°）⇒ 解应当出来 ⇒ 走 else 分支（把 FK 回验执行到）；
+    //   c2    —— 奇异位姿 + 极端目标（179°）⇒ **步长预算**内解不出来 ⇒ 走 fail 分支（把"退回参照"执行到）。
+    //     ★ 2026-09-29 Task 7：该案的 `maxStepDeg` 取 **1.0°**（预算 60 × 1.0 = 60° < 需求的 179°）
+    //       —— 逐案的 `steps[]` 见下面那两行；预算不再是 72°（那是 `BTN2_WRIST_MAX_ITER = 24` 时代的数）。
+    //     ⚠ c2 被拒的机制是【步长预算 = `maxStepDeg` × `BTN2_WRIST_MAX_ITER`】，**不是**腕部奇异的
+    //       几何不可达 —— 实测（2026-09-29 Task 7 在 `BTN2_WRIST_MAX_ITER = 60` 下重跑）：把 c2 的
+    //       `maxStepDeg` 换成 **30.0°** ⇒ 预算 30 × 60 = 1800° ⇒ c2 **解得出来** ⇒ `failedCount = 0`
+    //       ⇒ 本用例改红在 `FAIL: failedCount >= 1`（**是守卫在干活**，不变量本身没被破坏）。
+    //       这里只断言"返回 true ⇒ FK 到得了目标"这条不变量，**不**断言"该位姿必须被拒"
+    //       （后者会让用例替实现背书，且结构上无法变红）。
+    // ⚠ 为什么两类【必须】都在（这是本轮实测出来的，不是推的）：
+    //   · 若只有"解得出来"的位姿：删末尾自验门**不会**让本用例红 —— 收敛在循环里就发生了，
+    //     自验门**没被走到**（主对照空转）；
+    //   · 若只有"解不出来"的位姿："在 return true 前把解弄错"那个兜底对照**不会**让本用例红
+    //     —— 它走 fail 分支，够不到 return true。
+    //   两个负对照各需要一类 ⇒ 两类都要在。哪一组解出来/解不出来的探针记录见 task-3-report.md。
+    // ★★ 2026-09-29 Task 3 复审 I-1：上面那条"两类都要在"以前**只写在注释里** —— 那是**空的**：
+    //   c2 落进 fail 分支靠的是步长预算（`BTN2_WRIST_MAX_ITER × maxStepDeg`），而 `maxStepDeg`
+    //   是**明确可调的入参**、`BTN2_WRIST_MAX_ITER` 是普通常数 ⇒ 谁把任一个调大，c2 就解得出来
+    //   ⇒ fail 分支（连同对照 D 的目标）**静默失效**、对照 A 也不再能红本用例，而**没有任何东西会报**。
+    //   下面 `failedCount` / `solvedCount` 就是给这条"空转"上的守卫。
+    //   ⚠ 2026-09-29 Task 4 订正：这句以前写的是"（改 `>= 99` 会立刻红，见 report 的负对照）"——
+    //     **那条对照已被本轮复审判定为"不够"**：它只证明"这行会被执行、且能失败"，而本仓的
+    //     标准是**对照必须复现"守卫存在的那个场景"**。`>= 99` 是把门限人为抬到不可能满足，
+    //     它连"入参被调大 ⇒ 失败分支静默失效"这条真实路径都没碰到（改回去仍是原值）。
+    //   ⇒ 本守卫**真正**对应的对照是：**把 c0/c1 的 `maxStepDeg` 临时调小**（例如 0.5°/轮，
+    //     预算 = 0.5 × `BTN2_WRIST_MAX_ITER`；2026-09-29 Task 7 实测：该值在 60 下 = 30°，
+    //     仍使三组输入**全落 `!ok`**、红在 `FAIL: solvedCount >= 2`），⇒ `failedCount = 3 >= 1`
+    //     照样通过、六条 `out == ref` 也照样通过，而 `solvedCount = 0 >= 2` **必须红**。
+    //     这正是上面那段描述的"成功分支空转"场景的复现，而不是一个人造门限。
+    const double refs[3][6] = {{0,0,0,0,0,0}, {0,0,0,0,180,0}, {0,0,0,0,0,0}};
+    const double bigs[3][3] = {{0,60,0}, {0,0,60}, {0,179,0}};
+    // ★ 2026-09-29 Task 7：**逐案**的步长（原来是三案共用 `Config::ORIENT_MAX_STEP_DEG`）。
+    //   c2 用 1.0° ⇒ 预算 `1.0 × BTN2_WRIST_MAX_ITER`（= 60°）< 它的需求 179°
+    //   ⇒ 落进 fail 分支（硬上界 = 逐轴夹取循环 `// 逐轴夹到 ±maxStepDeg，再累加。`，
+    //   见 `Button2Joint.cpp`）。
+    //   ⚠ **不是"与 `BTN2_WRIST_MAX_ITER` 的取值无关"**（初稿这么写过，**是错的**）：这条能否落进
+    //     fail 分支仍取决于 `1.0 × BTN2_WRIST_MAX_ITER < 179` —— 实测把常数调到 **200**
+    //     （预算 200° ≥ 179）⇒ c2 解得出来 ⇒ **本用例红在 `FAIL: failedCount >= 1`**
+    //     （39 passed / 1 failed）。准确的说法是：**它不再挂在那个常数的"默认值"上**，
+    //     改成由**调用方传入的 `maxStepDeg` 决定**（这正是"预算"二字所指的入参）。
+    //   ⇒ **兜底的是下面那条 `CHECK(failedCount >= 1)` 守卫**，不是这一段的构造：
+    //     常数被调到足够大（或默认步长被调小）时，**由它报警**。
+    //   ⚠ 为什么不能靠"把 bigs 调大到超出预算"：误差走 `rotVecDeg` ⇒ 最短弧恒 ≤ 180°，
+    //     而预算已是 180° ⇒ 需求**永远**超不过它。见本任务 Step 5 的说明。
+    //   ⚠ c0/c1 仍用**默认**步长 ⇒ 它们量的仍是"真实生产路径"下的可解性。
+    const double steps[3] = {Config::ORIENT_MAX_STEP_DEG, Config::ORIENT_MAX_STEP_DEG, 1.0};
+    int failedCount = 0;   // ★ 抗空转：走 fail 分支的输入个数（见上面 I-1 那段）
+    int solvedCount = 0;   // ★ 抗空转：走 else 分支的输入个数 —— 与 failedCount **成对**，
+                           //   两条一起才叫"两个分支都真的走过"（见下面守卫处的 I-1 补充）
+    for (int c = 0; c < 3; ++c) {
+        double Rr[9]; fkR(refs[c], Rr);
+        double Md[9], Rt[9];
+        button2RotVecToMatDeg(bigs[c], Md);
+        button2Mat3Mul(Md, Rr, Rt);                              // 目标 = 世界系旋转 · FK(ref)
+        double out[6] = {9,9,9,9,9,9};                           // 哨兵：失败时必须被覆盖成 ref
+        const bool ok = button2SolveWrist(refs[c], Rt, steps[c], out);
+        if (!ok) {
+            ++failedCount;
+            for (int i = 0; i < 6; ++i) CHECK(out[i] == refs[c][i]);   // 失败 ⇒ 必须原样退回参照
+        } else {
+            ++solvedCount;
+            double Ro[9]; fkR(out, Ro);
+            CHECK(angBetweenDeg(Rt, Ro) < Config::BTN2_WRIST_TOL_DEG); // ★ 真的不变量（**能红**）
+            for (int i = 0; i < 3; ++i) CHECK(out[i] == refs[c][i]);   // 且 J1/J2/J3 仍不动
+        }
+    }
+    // ★ 抗空转守卫（两条，成对；缺一条就有一个静默失效方向没人管）：
+    //   · `failedCount >= 1` 防的是【失败分支空转】：它靠的是"有一组输入解不出来"，
+    //     而那取决于 maxStepDeg 与 BTN2_WRIST_MAX_ITER ⇒ 谁把它们调大，本条就红着告诉你
+    //     "失败分支死了"（对照 D 的目标随之失效），而不是静默空转。
+    //   · `solvedCount >= 2` 防的是【成功分支空转】——**本轮复审 I-1 补的那条**：
+    //     如果 c0/c1 **也不再可解**（同一条"入参可调"的路：把预算调小，或把 `bigs` 那两组
+    //     的目标调大），三组输入会**全落进 `!ok`** ⇒ `failedCount = 3 >= 1` 照样通过、
+    //     六条 `out == ref` 也照样通过；而 `else` 里那句 `angBetweenDeg(Rt, Ro) < TOL`
+    //     是本用例**唯一能红的断言**，它一次都不会被执行 ⇒ 本用例在【一条 FK 回验都没跑】
+    //     的情况下变绿，**连主对照 A（删末尾自验门）也不再能把它染红**。
+    //     要求 `>= 2`（不是 `>= 1`）是因为 c0 与 c1 是**两组不同的**输入，两组都必须真的
+    //     走到那条 FK 回验；只要求 1 会漏掉"其中一组退化成不可解"的情形。
+    CHECK(failedCount >= 1);
+    CHECK(solvedCount >= 2);
+    PASS();
+}
+
+// ============================================================================
+//  ㉕ 2026-09-29 Task 4：对外入口 `button2OrientJointTarget`（Task 2 + Task 3 拼起来）
+// ============================================================================
+// ⚠ 这三个用例**必须在 `fkR` / `angBetweenDeg` 的定义（上面 :1131/:1136）之后** ——
+//   它们定义在文件中间，㉕(a) 要用；放在更靠前的位置就得自己处理声明顺序（**不许**为了
+//   省事再写第二份实现）。放在文件末尾（㉔ 之后、main 之前）天然满足这一条。
+
+// 签名里【没有位置入参】是编译期性质，用函数指针类型钉住（与旧函数用例③同一招）。
+// ★ 2026-09-29 整支终审 I-1：返回类型从 `void` 改成 `Btn2JointResult` ⇒ 这个钉子**如设计那样
+//   先编译不过**（改动当场实测，原文存 `.superpowers/sdd/task-final-B-report.md`）：
+//     error C2440: “初始化”: 无法从“Btn2JointResult (__cdecl *)(const double [],const double
+//     [],const double [],double [])”转换为“Btn2OrientSig”
+//   ⇒ 这一行**同步**成新签名（钉子照旧只钉"没有位置入参"这件事，返回类型只是跟着走）。
+typedef Btn2JointResult (*Btn2OrientSig)(const double[6], const double[3], const double[3], double[6]);
+
+// ㉕(a) ★ 端到端：任意参照位姿 + 任意小摆动 ⇒ FK(解) 必须真的到得了目标。
+//    【它与 ㉓(a) 的分工】㉓(a) 喂的是"**直接构造的**目标矩阵"；这一条喂的是"**笔杆角度**"，
+//      中间隔着 Task 2 的整条流水线 ⇒ 它把 Task 2 与 Task 3 **串起来**验：
+//      **不依赖 任何符号常数**（它比的是"Task 2 算出来的目标"与"Task 3 解出来的朝向"，
+//      两边都走同一套常数 ⇒ 符号全翻也绿；符号的账由 Task 2 那一组与上机去结）。
+//    ⚠ 判据写法分两种，别混：三条 `out[i] == ref[i]`（J1/J2/J3 保持）**写在循环里** ——
+//      第一个不满足的样本立刻红，报出的是本质判据；而 FK 匹配那一条恰恰是**累加**的
+//      （循环里 `if (...) ++ok;`，循环外才 `CHECK(ok >= 55)`）。
+//    ⚠ `ok >= 55` 是**防空转**：若入口恒返回参照，60 组里能对上目标的只会是碰巧，多半全落。
+//      容许少数位姿真的解不出来（那正是自验门该拒的）。**实测余量：ok = 58/60（只差 3 才到限）**
+//      —— 余量薄，但种子固定 ⇒ 不 flake；若 `Config` 里步长预算/收敛门限那几个常数被调紧，
+//      这条会先红，那正是它该说的话。
+//    ⚠★ 2026-09-29 Task 4 负对照实测（简报 Step 4(a) 那条**不红**，别照抄它当证据）：
+//      把入口**第一句** `outJoints[0] = refJoints[0];` 改成 `+ 1.0` ⇒ **整套仍 36/0 全绿**。
+//      原因：`button2SolveWrist` 自己第一句写 `out[i] = ref[i]`、成功路径又再写
+//      `out[0..2] = ref[0..2]` ⇒ 入口的三条出口**每一条**都会把这三个下标重写成参照
+//      （详见 `Button2Joint.cpp` 那段 ⚠★）。⇒ **本用例"J1/J2/J3 保持"这条断言能红的对照是**：
+//      把求解失败的回退 `outJoints[i] = refJoints[i];` 改成 `= 0.0` ⇒ 立刻红在
+//      `FAIL: out[0] == ref[0]`（实测 35/1）。那条才是这条不变量在本组合里真正被执行到的路径。
+static void test_orient_joint_end_to_end_reaches_target() {
+    TEST(㉕(a) ★ 端到端：任意参照位姿 + 任意小摆动 ⇒ FK(解) 必须真的到得了目标);
+    unsigned seed = 20260929u;
+    auto rnd = [&seed]() { seed = seed*1103515245u + 12345u; return (double)((seed>>16)&0x7FFF)/32767.0; };
+    int ok = 0, ran = 0;
+    int okOk = 0;   // ★ I-1：报告 `Ok` 的组数（见循环末尾与它那三条断言）
+    for (int t = 0; t < 60; ++t) {
+        double ref[6] = { rnd()*720-360, rnd()*720-360, rnd()*310-155,
+                          rnd()*720-360, rnd()*720-360, rnd()*720-360 };
+        // 笔杆从"单位姿态"转到"绕器件某轴 ≤ ~26°"（rv 三分量各在 ±15° ⇒ 模长上限 15√3 ≈ 26°）
+        //   ——用测试侧的 matToZyRpy 造输入（别再写第二份！）。与 makeRandomReachTarget 的措辞一致。
+        double Rs[9], Rd[9], Rsc[9], cur[3];
+        TcpCalibration::rpyToMatrix(0,0,0, Rs);
+        const double rv[3] = { rnd()*30-15, rnd()*30-15, rnd()*30-15 };
+        button2RotVecToMatDeg(rv, Rd);
+        button2Mat3Mul(Rs, Rd, Rsc);
+        matToZyRpy(Rsc, cur);
+        const double refStylus[3] = {0,0,0};
+
+        double out[6];
+        const Btn2JointResult res = button2OrientJointTarget(ref, refStylus, cur, out);
+        ++ran;
+        // J1/J2/J3 必须逐位不变（**三种结局都成立**：Ok 写参照、另两档也写参照 ⇒ 无条件的）
+        CHECK(out[0] == ref[0]);
+        CHECK(out[1] == ref[1]);
+        CHECK(out[2] == ref[2]);
+        // 目标朝向（用同一套纯函数算一遍）与 FK(解) 必须一致
+        double refR[9]; fkR(ref, refR);
+        double tgtR[9];
+        button2OrientTarget(refR, refStylus, cur, Config::BTN2_TILT_PHI_DEG, tgtR);
+        double outR[9]; fkR(out, outR);
+        if (angBetweenDeg(tgtR, outR) < Config::BTN2_WRIST_TOL_DEG) ++ok;
+        // ★ 2026-09-29 整支终审 I-1：返回值必须与"FK 真的到得了目标"**逐组一致** ——
+        //   报 `Ok` 的组数必须**恰好**等于 FK 命中目标的组数。两边都会变红的方向是分开的：
+        //     · 少报（解出来了却回 `SolveFailed`）⇒ `okOk < ok`；
+        //     · 多报（没解出来却回 `Ok`）⇒ `okOk > ok`（这一条正是本条要防的"无声失败"）。
+        //   ⚠ 不写成循环里的 `CHECK(res == Ok)`：那会**取消**本用例原有的容忍度
+        //     （实测 60 组里有 2 组本来就解不出来、由自验门拒掉 —— 见上面的 `ok >= 55`）。
+        if (res == Btn2JointResult::Ok) ++okOk;
+    }
+    CHECK(ran == 60);
+    CHECK(ok >= 55);      // 容许少数位姿真的解不出来（那正是自验门该拒的）
+    CHECK(okOk >= 55);    // 同上：报告成功的组数也要够多（防空转）
+    CHECK(okOk == ok);    // ★ I-1：返回值与"真的到得了目标"必须逐组一致
+    PASS();
+}
+
+// ㉕(b) 笔杆不动 ⇒ 六关节逐位不动（含"输入退化成恒等"这一档）；NaN/Inf ⇒ 六位全回参照。
+//    【为什么"不动"这一档是本质的】笔杆不动 ⇒ rv = 0 ⇒ 目标 = 参照姿态 ⇒ 解 = 参照。
+//      它是入口的**恒等情形**，也是"手停住时臂就该停住"这条手感要求的实现路径。
+//    ⚠ 三段（不动 / NaN 在 curStylus / Inf 在 refStylus）**刻意覆盖守卫的两个入参位置**：
+//      只测一边会漏掉"另一半守卫写反了"（旧函数 ⑥ 因同一理由也分了三段）。
+static void test_orient_joint_identity_and_nan() {
+    TEST(㉕(b) 笔杆不动 ⇒ 六关节逐位不动；NaN/Inf ⇒ 六位全回参照);
+    const double ref[6] = {10, -20, 30, 40, -50, 60};
+    double out[6];
+    {   // 不动
+        const double s[3] = {0,0,0};
+        // ★ I-1：笔杆不动 ⇒ 目标就是参照 ⇒ 恒等求解**成功**，必须报 `Ok`（**不是** `SolveFailed`）。
+        //   ⚠ 这一条与本文件新增的 ㉕(d) 是一对：**两者的 `outJoints` 逐位相同**（都是参照）
+        //     ⇒ 返回值是**唯一**能分开"没动"与"没解出来"的东西（这正是 I-1 要修的那件事）。
+        CHECK(button2OrientJointTarget(ref, s, s, out) == Btn2JointResult::Ok);
+        for (int i = 0; i < 6; ++i) CHECK(out[i] == ref[i]);
+    }
+    // ⚠★ 【本段的牙齿在 I-1 之后换了来源 —— 这条历史仍值得读，别按旧结论照抄】
+    //    I-1 之前，本段的断言**只有一条**"六位逐位等于参照"，而那条**没有**牙齿：实测
+    //    （`task-4-report.md` §3.3）把守卫那个 `if (stylusBad) { … return; }` **整块删掉**，
+    //    本段**照旧全绿** —— 因为不进守卫也照样落回 `out == ref`：`rpyToMatrix(NaN,…)` ⇒
+    //    非有限 `dR` ⇒ `rotVecDeg` 落进**最后一个退化分支** ⇒ `rv = {0,0,0}` ⇒ `ω = 0` ⇒
+    //    `targetR == refR` ⇒ 求解器在恒等目标上**第 0 轮就 break** ⇒ `out == ref`。
+    //    当时给它牙齿的只能是"改守卫**写入的值**"那条对照（报告 §3.4）。
+    //  ★ 2026-09-29 整支终审 I-1 之后：本段两档**各多了一条返回值断言**
+    //    （`== StylusUntrustworthy`）⇒ **删掉守卫这一支现在会当场红**：删了之后 NaN 输入会
+    //    一路走到底、在恒等目标上**成功**（上面刚推导过）⇒ 返回 `Ok` ⇒ 本段 `FAIL`。
+    //    ⚠ 那条对照**实测过**（原文见 `.superpowers/sdd/task-final-B-report.md` §4 负对照 B：
+    //      `FAIL: … == Btn2JointResult::StylusUntrustworthy`，37 passed / 1 failed），不是推断
+    //      —— 这正是"含糊的返回值把诊断成本推给操作员"的反面：有了它，
+    //      "守卫在不在"这件事第一次有了自动化证据。
+    //    ⚠ 别把牙齿归给"求解失败回退"那条对照：它红的是**㉕(a)**（`FAIL: out[0] == ref[0]`，
+    //      报告 §3.2），而本段这两档输入在守卫在时就**已返回**；就算守卫被删也是恒等目标、
+    //      第 0 轮 break ⇒ 成功 —— **这条回退根本不在本段的路线上**（它现在只会经返回值显形）。
+    {   // NaN 在 curStylus
+        const double s0[3] = {0,0,0};
+        const double sN[3] = {0, std::numeric_limits<double>::quiet_NaN(), 0};
+        // ★ I-1：守卫那条出口必须报 `StylusUntrustworthy`（**不是** `SolveFailed`：
+        //   守卫在求解**之前**就返回了 ⇒ 报成求解失败会把操作员指到错的地方去）。
+        CHECK(button2OrientJointTarget(ref, s0, sN, out) == Btn2JointResult::StylusUntrustworthy);
+        for (int i = 0; i < 6; ++i) CHECK(out[i] == ref[i]);
+    }
+    {   // Inf 在 refStylus
+        const double sI[3] = {std::numeric_limits<double>::infinity(), 0, 0};
+        const double s0[3] = {0,0,0};
+        CHECK(button2OrientJointTarget(ref, sI, s0, out) == Btn2JointResult::StylusUntrustworthy);
+        for (int i = 0; i < 6; ++i) CHECK(out[i] == ref[i]);
+    }
+    PASS();
+}
+
+// ㉕(c) 签名里没有位置入参（编译期性质）。
+//    【为什么这条必须单独存在】"笔杆平移 ⇒ 机械臂不动"在本方案里是**结构性**保证：函数根本
+//      没有位置分量可吃。结构性质运行期测不出来 ⇒ 只能钉在类型上：谁给入口加第 5 个（位置）
+//      参数，下面这行**立刻编译不过**。`fp != nullptr` 那个断言只是让这条用例在运行期也有
+//      一个 PASS 可数（真正干活的是**这一行的编译**）。
+static void test_orient_joint_signature_has_no_position_input() {
+    TEST(㉕(c) 签名里没有位置入参（编译期性质）);
+    Btn2OrientSig fp = &button2OrientJointTarget;
+    CHECK(fp != nullptr);
+    PASS();
+}
+
+// ㉕(d) ★ 2026-09-29 Task 7：**`|rv| = 150`（入口限幅的上界）这个倾斜输入必须解得出来**。
+//    ⚠ ★ 2026-09-30 终审 Important-1：原来这里写的是"输入端上限（150° 倾斜）…（预算 ≥ 输入上限）"。
+//      **后半句是错的**：入口**只**保证 `|rv| ≤ 150`（限幅 `k = 150/th` 之后
+//      **三个分量乘同一个 k**，自转也在内）；而合成目标（tilt ∘ roll，两个不同轴）**可以超过
+//      150°**（统一但很松的上界是 `150√2 ≈ 212.1°`；见 `Config.h` 那条两步推导）
+//      ⇒ 入口**不是**一个 180° 那样的单一数字，更不是 180。
+//      本用例量的是**这一个具体输入**（`rv = {150,0,0}`，倾斜、单轴、恰在限幅上界上原样保留），
+//      不是"整个输入端上限"。判据本身（`Ok` + FK 到得了目标）**一字未改**。
+//    【为什么从"必须失败"翻成"必须成功"】本条原为 I-1 的用例，用 {150,0,0} 造"求解失败"，
+//      靠的正是 24×3 = 72° 的步长预算 < 150°。Task 7 把预算抬到 60×3 = 180° 之后，
+//      这条输入**解得出来**了（实测 `Ok`）⇒ 原判据变成**假判据**（若照抄不改，它会是
+//      "实现背书的对偶"：一条永远为真、且无法变红的断言）。
+//    【它与 ㉗ 的分工】本用例量**端到端行为**（入口 → 流水线 → 求解器）；常数之间那条
+//      "预算 ≥ 180°"的**关系**由 ㉗ 单独钉（那里才是能对常数变化报警的地方）。
+//    【负对照（实测，写进报告）】把 `BTN2_WRIST_MAX_ITER` 改回 24 ⇒ 本条**必须红**
+//      （预期红在 `FAIL: res == Btn2JointResult::Ok`）。★ 这正是本任务的主对照。
+//    ⚠ 150 用**字面量**、不用 `Config::ORIENT_MAX_OFFSET_DEG`：那个常数若被调小，目标会跟着缩、
+//      反而落回预算内 ⇒ 用例**静默**失去意义（与它原来那条 ⚠ 同一条理由）。
+//    ⚠ `refStylus`/`curStylus` 全**有限** ⇒ 本用例走的**不是** NaN 守卫那条路（那条由 ㉕(b) 钉）。
+static void test_orient_joint_reaches_max_input_offset() {
+    TEST(㉕(d) ★ `|rv| = 150` 的倾斜输入必须解得出来（见上：**不是**"输入上限"）);
+    const double s0[3]  = {0, 0, 0};
+    const double sFar[3] = {150.0, 0, 0};   // 见上：|rv| = 150 = **限幅的上界** ⇒ 原样保留、不缩比
+    // 两个参照：非正位（腕部一般位姿）+ 全零（J5 = 0 ⇒ **腕部奇异**位姿，最容易被拒的地方）
+    const double refs[2][6] = { {10, -20, 30, 40, -50, 60}, {0,0,0,0,0,0} };
+    for (int c = 0; c < 2; ++c) {
+        double out[6] = {9,9,9,9,9,9};                 // 哨兵：必须被真正改写
+        const Btn2JointResult res = button2OrientJointTarget(refs[c], s0, sFar, out);
+        CHECK(res == Btn2JointResult::Ok);
+        // ★ 真有牙齿的那一条：解得出来还不够，必须**真的到得了**入口算出来的那个目标。
+        //   目标用**入口同一套常数**重算（与 ㉕(a) 同一招）⇒ 不依赖任何符号常数的取值。
+        double Rr[9]; fkR(refs[c], Rr);
+        double targetR[9];
+        button2OrientTarget(Rr, s0, sFar, Config::BTN2_TILT_PHI_DEG, targetR);
+        double Ro[9]; fkR(out, Ro);
+        CHECK(angBetweenDeg(targetR, Ro) < Config::BTN2_WRIST_TOL_DEG);
+    }
+    PASS();
+}
+
+// ㉖ ★ 端到端：纯自转（器件 Z 转 20°）⇒ 【只动 J6】。
+//    【为什么非补不可】㉑ 只断言**目标朝向**的第三列不变、㉕(a) 只断言 `FK(解) ≈ 目标`
+//      —— 两者都**没有**断言"解出来的关节只动了 J6"。而球腕下"右乘 Rz(roll) ⇒ 只动 J6"
+//      是可离线证明的，也是用户定下的规格（"自转沿用原来的 J6 方案"）⇒ 需要一条端到端断言
+//      把它钉住：喂一个**纯自转**的笔杆输入，经 `button2OrientJointTarget` 走完整条流水线
+//      （Task 2 的目标朝向 + Task 3 的腕部求解），断言解出来的 J4/J5 几乎不动、
+//      而 J6 恰好是 `BTN2_ROLL_SIGN × 20°`。
+//    【为什么要有第二个（非正位）参照】正位上"只动 J6"最容易成立；第二个取**非正位**的参照
+//      关节姿态 + **非零**参照笔杆姿态（现场那个按下姿态）⇒ 只测正位的话，"自转随姿态散到
+//      别的关节上"这个病**测不出来**（与 ⑦ 存在的理由同一条）。
+//    【容差怎么选】实测两组的残差：J4 ≤ 1.9e-10°、J5 ≤ 2.9e-11°、J6 ≤ 5.6e-10°（度）；
+//      而真实的串扰是**度级**的（旧的逐欧拉路把自转 10° 送成 J4 +1.52 / J5 +5.48，
+//      见 ⑦ 的说明）⇒ 取 `kTolDeg = 1e-6`：比实测残差大 4 个数量级、比任何真实串扰小
+//      6 个数量级 ⇒ 能干净区分"只动 J6"与"三个都动"，且不挂在任何单个测量值上。
+//    ⚠ 期望值经 `Config::BTN2_ROLL_SIGN` 表达，【一个 ±1 都不写死】（与文件头 ② 同一条规矩）。
+static void test_roll_end_to_end_moves_only_j6() {
+    TEST(㉖ ★ 端到端：纯自转（器件 Z 转 20°）⇒ 只动 J6);
+    const double kTolDeg = 1e-6;      // 见上面【容差怎么选】
+    const double poses[2][6] = {
+        {0,0,0,0,-90,0}, {30,-60,45,20,-70,10}
+    };
+    const double stylus[2][3] = {
+        {0,0,0}, {-58.93, 11.83, -6.41}
+    };
+    const double rollDeg = 20.0;
+    for (int p = 0; p < 2; ++p) {
+        // 造输入：绕【器件 Z】转 rollDeg ⇒ curStylus = R_stylus · Rz(rollDeg)
+        //   （用测试侧既有的 bodyAxisEuler —— 它内部走 matToZyRpy，别再写第二份矩阵→欧拉）
+        double cur[3];
+        bodyAxisEuler(stylus[p], 2, rollDeg, cur);
+
+        double out[6];
+        button2OrientJointTarget(poses[p], stylus[p], cur, out);
+
+        // ★ 本用例的核心判据：J4/J5 几乎不动（容差见上），J6 恰为 ROLL_SIGN × 20°
+        CHECK(std::fabs(out[3] - poses[p][3]) < kTolDeg);
+        CHECK(std::fabs(out[4] - poses[p][4]) < kTolDeg);
+        CHECK(std::fabs((out[5] - poses[p][5]) - Config::BTN2_ROLL_SIGN * rollDeg) < kTolDeg);
+        // J1/J2/J3 逐位不变
+        CHECK(out[0] == poses[p][0]);
+        CHECK(out[1] == poses[p][1]);
+        CHECK(out[2] == poses[p][2]);
+        // 自检：解真的成立（FK(解) ≈ 目标）。若求解器被拒，out 会退回参照 ⇒ 上面 J6 那条本就会红；
+        //   这一句把"目标与 FK 的来源是同一个量"一并说清楚，并排除"坏夹具导致空转"。
+        double refR[9]; fkR(poses[p], refR);
+        double tgtR[9];
+        button2OrientTarget(refR, stylus[p], cur, Config::BTN2_TILT_PHI_DEG, tgtR);
+        double outR[9]; fkR(out, outR);
+        CHECK(angBetweenDeg(tgtR, outR) < Config::BTN2_WRIST_TOL_DEG);
+    }
+    PASS();
+}
+
+// ㉗ ★ 常数关系：**求解预算 ≥ 180° 这条【选定】的下限**（**不是**"≥ 入口上限"）。
+//    【为什么值一条独立断言】这条关系**跨两个文件、两种语义**（入口的目标限幅 vs 求解器的迭代预算）。
+//      两边各自的用例都绿、而它们之间的**关系**坏了的时候，症状是"某些输入永远解不出来 ⇒
+//      臂停在按下位姿"，**一次上机才会发现**。Task 7 之前那条 72° 就是关系坏了而全套绿灯。
+//    【它能红（实测）】把 `BTN2_WRIST_MAX_ITER` 改回 24 ⇒ `72 >= 180` 假 ⇒ 红。
+//    ★ 2026-09-30 终审 Important-1：**右端 180 的来历要改口**。本条原来写的是
+//      "入口那条限幅**只夹倾斜分量**、自转 `rv[2]` 不过它 ⇒ 入口最大目标 = 180°" ——
+//      **回源码核过，那是错的**（限幅 `k = 150/th` 之后 `for (i=0..2) rv[i] *= k`，
+//      **三个分量同一个 k**）⇒ 入口只保证 `|rv| ≤ 150`，而合成目标（tilt ∘ roll，两个不同轴）
+//      **可以超过 150°**（统一但很松的上界 `150√2 ≈ 212.1°`，见 `Config.h` 那两步推导）。
+//    ⇒ 本条钉的**实际**是：**预算 ≥ 180° 这条【选定】的下限**（用户 2026-09-29 裁决 +
+//      Task 7 Step 7 的实测定下）。**别**把它读成"预算 ≥ 入口上限" —— 那个说法没意义。
+//      ⚠ 若将来用户改主意要另一个预算值，改这个 180 与 `Config.h` 的注释即可（**两处一起改**）。
+//    ⚠ 这条是**必要**条件，**不是**充分条件 —— 非正交位姿下关节需求会大于转角
+//      （`|z4·z6| = |cos J5|`）⇒ 仍会求解失败（用例 ㉘ 与设计 §3 的零余量 ⚠ 有实测）。
+//      别把它读成"到此为止就万事大吉"。
+static void test_wrist_budget_covers_input_cap() {
+    const double budgetDeg = Config::ORIENT_MAX_STEP_DEG * (double)Config::BTN2_WRIST_MAX_ITER;
+    TEST(㉗ ★ 常数关系：求解预算 ≥ 180°（**选定**的下限，不是"入口上限"）);
+    CHECK(budgetDeg >= 180.0);
+    PASS();
+}
+
+// ㉘ ★ 2026-09-29 Task 7 Step 7 的探针产物：**入口层仍能造出 `SolveFailed`**。
+//    【为什么问】`SolveFailed` 是 I-1 那条"求解失败要出声"的**唯一**数据来源。Task 7 把预算从
+//      72° 抬到 180° 之后，很容易以为"预算 ≥ 输入上限 ⇒ 入口层再也失败不了" —— 本用例就是
+//      这条**想当然**的对照。**实测：它失败得出来。**
+//    【机制 —— 只知道"**不是预算**"，不知道是哪一种】实测（探针，见 `task-7-report.md` §5）：
+//      该样本在把 `maxStepDeg` 加倍（预算 6° × 60 = 360°）之后**仍然失败** ⇒ **不是预算受限**。
+//      ⚠ **具体成因未定**：几何退化（腕部秩亏）**或**迭代陷进局部解 —— 这两者本仓**没有分开测过**
+//        （`button2SolveWrist` 只回 `bool`，见 `task-7-report.md` §8.5）⇒ **别写成"秩亏 ⇒ 无解"**。
+//    ⚠ **"J5 = 0 ⇒ 无解"这条更是被兄弟用例当场否掉的**：本文件的 ㉕(d) 在 `ref = {0,0,0,0,0,0}`
+//      （**同样 J5 = 0**）、同样输入 `{150,0,0}` 下断言 **`Ok`** ⇒ 那个箭头不成立。
+//      本样本与它的差别在 **J4/J6**（这里 180 / −180），不在"是不是 J5 = 0"。
+//    【与 ㉕(d) 的分工】㉕(d) 举的那**两个具体位姿**（`{10,-20,30,40,-50,60}` 与全 0）都解得出来；
+//      本条是**同一个 J5 = 0 位姿族里的另一个**（差别在 J4/J6），**它**解不出来
+//      ⇒ 两条不冲突：㉕(d) 说的是那两个样本，本条说的是**另一个**样本。
+//    【负对照（实测，见报告 §3）】把 `button2SolveWrist` 末尾自验那道门临时改成**永不拒绝**
+//      （`if (err >= Config::BTN2_WRIST_TOL_DEG) return false;` ⇒ `if (false) return false;`）
+//      ⇒ 本条红在 `FAIL: button2OrientJointTarget(…) == Btn2JointResult::SolveFailed`（本样本不靠预算，
+//      所以**不能**用调预算的方式把它弄红 —— 那正是它与 ㉔ 的 c2 的分工）。
+//    ⚠ 本样本**不是**全部现象的代表：探针在 237276 个样本里扫出 8158 个 `SolveFailed`，
+//      其中绝大多数把预算抬到 18000° 就消失（**预算 / 迭代受限**）；
+//      只有 46 个（全在 `J5 ∈ {0, ±180}`）在 18000° 下**仍然失败**（= **非预算受限** ——
+//      几何退化**或**迭代陷入局部解，两者未分开测）。本条钉的是**后者**（稳健、不随常数漂）。
+static void test_orient_joint_entry_layer_can_still_fail() {
+    TEST(㉘ ★ 入口层仍能造出 SolveFailed（预算 ≥ 180°【不】足以保证解得出）);
+    const double ref[6]  = {0, 0, 0, 180, 0, -180};   // J5 = 0（**不是**"必无解"——见上）
+    const double s0[3]   = {0, 0, 0};
+    const double sFar[3] = {150.0, 0, 0};             // 与 ㉕(d) 同一个 `|rv| = 150` 的输入
+    double out[6] = {9,9,9,9,9,9};                    // 哨兵：失败时必须被覆盖成参照
+    CHECK(button2OrientJointTarget(ref, s0, sFar, out) == Btn2JointResult::SolveFailed);
+    for (int i = 0; i < 6; ++i) CHECK(out[i] == ref[i]);   // 失败 ⇒ 六位逐位退回参照
+    PASS();
+}
+
 int main() {
     std::cout << "--- Button2Joint (按钮2 关节空间映射：笔杆姿态增量 -> 关节增量) ---" << std::endl;
     test_each_stylus_axis_moves_exactly_one_joint();
@@ -735,6 +1635,29 @@ int main() {
     test_clamp_step_limits_a_large_offset_per_axis();   // ⑯
     test_accumulator_reaches_a_large_target_over_several_frames();  // ⑰ ★ 不会永久截断
     test_crossing_the_pm180_seam_is_only_two_degrees();   // ⑱ 2026-09-24 换实现后新增（跨 ±180）
+    test_rotvec_matrix_roundtrip();                        // ⑲(a) 2026-09-29 Task 1：3×3 纯算术地基
+    test_rotvec_matrix_specific_rx90();                    // ⑲(b)
+    test_rotvec_mat3_mul_and_transpose();                  // ⑲(c)
+    test_rotvec_mat3_inverse();                            // ⑲(d)
+    test_mat_to_rpy_roundtrip_on_task2_inputs();           // ⑳x 修复轮 F1：矩阵→欧拉统一后的往返自检
+    test_tilt_target_equals_world_rotation_times_ref();    // ⑳(a) 2026-09-29 Task 2：姿态目标（展开式断言）
+    test_tilt_moves_tip_toward_base_plus_y_in_any_pose();  // ⑳(b) ★ 验收判据（F2 拆开后独立失败）
+    test_deadzone_swallows_below_and_admits_exactly_at_threshold();  // ⑳b
+    test_offset_cap_scales_rotation_angle_and_keeps_the_axis();      // ⑳c
+    test_phi_is_not_a_dead_constant();                     // ⑳d ★ 专治"常数没被用上"
+    test_roll_only_spins_around_the_styluses_own_axis();   // ㉑
+    test_solve_wrist_identity_target_returns_reference();        // ㉒ 2026-09-29 Task 3：腕部求解
+    test_solve_wrist_fk_roundtrip_across_random_poses();         // ㉓(a) ★ 跨位姿 FK 回验
+    test_solve_wrist_keeps_base_joints_across_random_poses();    // ㉓(b) 只动腕
+    test_solve_wrist_invariant_holds_and_budget_refusal_is_exercised();   // ㉔ ★ 不变量（能红）
+    test_orient_joint_end_to_end_reaches_target();                 // ㉕(a) 2026-09-29 Task 4：端到端
+    test_orient_joint_identity_and_nan();                          // ㉕(b)
+    test_orient_joint_signature_has_no_position_input();           // ㉕(c) ★ 编译期钉子
+    test_orient_joint_reaches_max_input_offset();                 // ㉕(d) ★ Task 7：|rv|=150 必须解得出来
+    test_roll_end_to_end_moves_only_j6();                          // ㉖ ★ 端到端：纯自转 ⇒ 只动 J6
+    test_wrist_budget_covers_input_cap();                          // ㉗ ★ 常数关系：预算 ≥ 180°（选定下限）
+    test_orient_joint_entry_layer_can_still_fail();                // ㉘ ★ 入口层仍能造出 SolveFailed
+
     std::cout << "\nResults: " << g_passed << " passed, " << g_failed << " failed" << std::endl;
     return g_failed == 0 ? 0 : 1;
 }

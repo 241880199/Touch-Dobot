@@ -2627,6 +2627,50 @@ static void runConstraintDisableNotice() {
               << std::endl;
 }
 
+// ===== 在线零偏的时间轨迹 (2026-09-24, **只读**诊断) =====
+// 要回答的问题: 【写字时, 第 8 步的在线零偏 EMA 会不会把操作员的载荷学进 bF?】
+//   机制怀疑: `ForceCompensation.cpp` 第 8 步的守卫【只有 isStill()】(该文件里 `button`
+//   出现 0 次) ⇒ 笔画之间"手停住、笔还压着纸"的静止瞬间会把载荷吸收进 bF
+//   ⇒ 抬手后残余反向出现 ⇒ 现场报的"阻滞感"。
+//   该文件自己早就记过这一类 ("在线零偏会以 τ 把【持续施加】的外力吸收掉",
+//   见 main.cpp 的 BiasCheck 那一段), 而 τ 从 3.3 s 提到 600 s 的依据是"0.02 N/小时"
+//   —— 那是【热漂】的量级, 不是"一次载荷持续几分钟"的量级。
+// 【判据, 先写死, 免得事后圆说】(bF 是【持久值】, 与闸门状态无关, 所以拒绝时也读得到):
+//   · 【按钮=1 的时段里 bF 明显移动(任一轴 ≥0.1 N)】 ⇒ 坐实: 载荷被学成零偏。
+//   · bF 全程几乎不动(<0.03 N) 而 comp 在写完之后变大 ⇒ 不是估计器
+//     ⇒ 走【模型 / 热漂 / 姿态相关】那一条 (即计划 Task 2 要分开的两支)。
+// ⚠ 只读: 不碰任何力、不碰标定、不落盘。放在主线程, 与 runZeroDriftCheck 同一个调用点。
+static DWORD g_biasTraceLastMs = 0;
+static void runBiasTrace() {
+    const DWORD now = GetTickCount();
+    if (g_biasTraceLastMs != 0 && (now - g_biasTraceLastMs) < 60000) return;
+    g_biasTraceLastMs = now;
+
+    AppState::ForceData fd;
+    EnterCriticalSection(&appState.forceDataMutex);
+    fd = appState.forceData;
+    LeaveCriticalSection(&appState.forceDataMutex);
+
+    double bF[3] = {0, 0, 0}, bM[3] = {0, 0, 0};
+    ForceCompensation::currentBias(bF, bM);
+
+    double px, py, pz;
+    EnterCriticalSection(&appState.robotPoseMutex);
+    px = appState.robotActualPose.rx;
+    py = appState.robotActualPose.ry;
+    pz = appState.robotActualPose.rz;
+    LeaveCriticalSection(&appState.robotPoseMutex);
+
+    std::cout << "[BiasTrace] bF=(" << bF[0] << "," << bF[1] << "," << bF[2] << ")"
+              << "  comp=(" << fd.compensated[0] << "," << fd.compensated[1] << "," << fd.compensated[2] << ")"
+              << "  filtered=(" << fd.filtered[0] << "," << fd.filtered[1] << "," << fd.filtered[2] << ")"
+              << "  [闸门 " << ForceCompensation::guardStateName(ForceCompensation::guardState()) << "]"
+              << "  按钮=" << (appState.lastButtonState ? 1 : 0)
+              << "  stale=" << (fd.isStale ? 1 : 0)
+              << "  姿态=(" << px << "," << py << "," << pz << ")"
+              << "  t=" << (now / 1000) << "s" << std::endl;
+}
+
 static void runZeroDriftCheck(bool hasStoredZero) {
     if (g_zeroCheckDone) return;
 
@@ -2924,6 +2968,129 @@ void display() {
         RelayCore::instance().pollFeedback();
     }
 }
+
+// ============================================================================
+//  连续波形落盘（'w' 开 / 关）—— 2026-09-29
+// ============================================================================
+// 【要解决什么】`'n'` 每次只带走环形缓冲区里【最近 1024 帧 ≈ 8.3 s】⇒ 抓不到【偶发】工况。
+//   操作员 2026-09-29 报的三处抖动都是**一瞬间**的事：
+//     **拐弯时 · 笔压大时 · 刚提笔悬空动时** —— 靠按键时机总会有漏，所以要一段【连续】记录。
+//
+// 【为什么不放在力线程上】本项目为此栽过两次，写在这里免得下一个人重犯：
+//   · MATLAB 遥测链路阻塞触觉线程 ⇒ 看门狗 FATAL ⇒ 急停（2026-09-24）；
+//   · MATLAB 的 `S.logAllFast`（70 行/秒）**本身**就是按钮1/2 抖动的来源。
+//   ⇒ **本落盘只在 GLUT 线程（`idle`）里跑**；`RelayCore` 的力线程**一行都不改**。
+//
+// 【怎么拿到数据】复用现成的 `RelayCore::copyRecentForceFrames`（它已经在 `s_noiseLock` 下
+//   拷贝，与力线程解耦），再**按 `tickUs` 去重** ⇒ **不用给 RelayCore 加任何新接口**。
+//   ⚠ 前提：pump 的间隔必须远小于环的覆盖时间（2048 帧 ≈ 16.7 s）。GLUT idle ≈ 60 Hz
+//     ⇒ 每次只搬 ~2 帧，余量约 30 倍。**若 GLUT 线程卡住 >16.7 s 就会丢帧 —— 会报出来。**
+//
+// 【列】与 `force_wave.csv` **逐字相同**（26 列）⇒ 两边的分析脚本通用。
+// 【体量】一帧 ~208 B ⇒ **~25 KB/s ≈ 1.5 MB/min**（先攒内存，停时才落盘）。
+//
+// ★★ 2026-09-29 二版：**录制期间【完全不碰磁盘】** ★★
+//   【为什么改】一版是"每帧 `fprintf` + 每 ~2 秒 `fflush`"。当天上机时**看门狗报
+//     `GLUT appears dead (468ms since last haptic frame)` ⇒ EmergencyStop**，
+//     并且 `pollForce` 实测有过 **2.08 s** 的间隔。**我无法证明是我的仪器造成的**
+//     （唯一的新东西就是它），但本项目的规矩是"辅助链路不得对主环有阻塞权"——
+//     而那条 2.08 s 的间隔与我 `fflush` 的 ~2 s 周期**对得太巧**。
+//   ⇒ 二版把 I/O **整个移出录制过程**：只在内存里 `push_back`，**`stop()` 时一次性写盘**。
+//     录制期间唯一的开销是 `copyRecentForceFrames` 那次 memcpy（本来就有）。
+//   ⚠ 代价：**客户端若崩溃/被杀，这一段录制就丢了**（内存里的东西没落盘）。
+//   ⚠ 有上限 `kMaxFrames`；到顶会自动停并出声（别让它无声无息地吃光内存）。
+// 【回滚】删掉本 namespace + `keyboard()` 里 'w' 那一段 + `idle()` 里那一行。三处，都是纯加行。
+namespace ForceContinuous {
+    static const char* kPath = "force_wave_cont.csv";
+    static const int   kMax = 2048;          // 一次最多搬这么多帧（与 kNoiseCap 同量级）
+    static const int   kMaxFrames = 400000;  // 上限 ≈ 54 分钟 ≈ 83 MB 内存；到顶自动停
+    static std::vector<RelayCore::ForceFrameSample> s_buf;
+    static unsigned long long s_lastTick = 0;
+    static bool s_running = false;
+    static bool s_gapReported = false;
+
+    static bool running() { return s_running; }
+
+    static void start() {
+        s_buf.clear();
+        s_buf.reserve(65536);
+        s_lastTick = 0;
+        s_gapReported = false;
+        s_running = true;
+        std::cout << "[Rec] 连续落盘【已开始】（先攒内存，按 'w' 停止时才写盘）-> "
+                  << kPath << std::endl;
+    }
+
+    static void stop() {
+        if (!s_running) return;
+        s_running = false;
+        FILE* f = fopen(kPath, "a");
+        if (!f) {
+            std::cout << "[Rec] ⚠ 打不开 " << kPath << " —— 本次 " << s_buf.size()
+                      << " 帧【没写出去】，丢了。" << std::endl;
+            s_buf.clear();
+            return;
+        }
+        SYSTEMTIME st; GetLocalTime(&st);
+        fprintf(f, "# rec %04d-%02d-%02d %02d:%02d:%02d.%03d\n",
+                st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+        fprintf(f, "# t_us,raw_x,raw_y,raw_z,filt_x,filt_y,filt_z,"
+                   "tgt_x_mm,tgt_y_mm,tgt_z_mm,tgt_rx_deg,tgt_ry_deg,tgt_rz_deg,"
+                   "act_x_mm,act_y_mm,act_z_mm,act_rx_deg,act_ry_deg,act_rz_deg,"
+                   "dev_x_mm,dev_y_mm,dev_z_mm,ff,tcpV_x,tcpV_y,tcpV_z\n");
+        for (size_t i = 0; i < s_buf.size(); ++i) {
+            const RelayCore::ForceFrameSample& s = s_buf[i];
+            fprintf(f, "%llu,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,"
+                       "%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,"
+                       "%.3f,%.3f,%.3f,%d,%.3f,%.3f,%.3f\n",
+                    s.tickUs, s.f[0], s.f[1], s.f[2], s.g[0], s.g[1], s.g[2],
+                    s.tgt[0], s.tgt[1], s.tgt[2], s.tgt[3], s.tgt[4], s.tgt[5],
+                    s.act[0], s.act[1], s.act[2], s.act[3], s.act[4], s.act[5],
+                    s.dev[0], s.dev[1], s.dev[2], s.ffEnabled,
+                    s.tcpV[0], s.tcpV[1], s.tcpV[2]);
+        }
+        long long bytes = ftell(f);
+        fclose(f);
+        std::cout << "[Rec] 连续落盘【已停止】: " << s_buf.size() << " 帧, 约 "
+                  << (bytes / 1024) << " KB -> " << kPath << std::endl;
+        if (s_gapReported) {
+            std::cout << "[Rec] ⚠ 本次有丢帧窗口（GLUT 线程曾卡住 > 环覆盖时间）——"
+                      << " 上面报过，分析时按 `t_us` 的间隔查缺口。" << std::endl;
+        }
+        s_buf.clear();
+        s_buf.shrink_to_fit();
+    }
+
+    // 由 `idle()` 每帧调用。**录制期间【不做任何磁盘 I/O】**（见顶上二版那一段）。
+    static void pump() {
+        if (!s_running) return;
+        static RelayCore::ForceFrameSample tmp[kMax];   // static: 一帧 ~208 B，不进栈
+        const int n = RelayCore::instance().copyRecentForceFrames(tmp, kMax);
+        if (n <= 0) return;
+
+        int start = 0;
+        if (s_lastTick != 0) {
+            while (start < n && tmp[start].tickUs <= s_lastTick) start++;
+            if (start >= n) return;                      // 没有新帧
+            // 丢帧检测：环里【最旧】的那帧都比游标新 ⇒ 中间的被覆盖掉了。
+            if (start == 0 && !s_gapReported) {
+                s_gapReported = true;
+                std::cout << "[Rec] ⚠ 丢帧：环里最旧的帧已经比上次写入的新 —— "
+                          << "GLUT 线程曾卡住超过环的覆盖时间。这一段不连续。" << std::endl;
+            }
+        }
+        for (int i = start; i < n; ++i) {
+            s_buf.push_back(tmp[i]);
+            s_lastTick = tmp[i].tickUs;
+        }
+        if ((int)s_buf.size() >= kMaxFrames) {
+            std::cout << "[Rec] ⚠ 到达上限 " << kMaxFrames
+                      << " 帧 —— 自动停止并写盘。" << std::endl;
+            stop();
+        }
+    }
+}
+
 void idle() {
     if (!appState.isClosing) {
         glutPostRedisplay();
@@ -2948,12 +3115,19 @@ void idle() {
         if (!g_noRobot) {
             RelayCore::instance().pollForce();
 
+            // ★ 2026-09-29: 'w' 的连续落盘在这里推进（**GLUT 线程**，不在力线程上 ——
+            //   理由见 ForceContinuous 顶上那一段）。没开时它第一句就返回，成本为零。
+            ForceContinuous::pump();
+
             // 启动零偏漂移检查 (一次性, 只查零偏, 不阻断)
             runZeroDriftCheck(g_hasStoredZeroCalib);
 
             // ★ 触觉安全提示已关闭的横幅 (主线程; 理由与分工见该函数说明)。
             //   MATLAB 端那一条由 RelayCore::reportPosition 以 30Hz 重发, 不在这里。
             runConstraintDisableNotice();
+
+            // ★ 在线零偏的时间轨迹 (2026-09-24, 只读): 判"操作员的载荷有没有被学成零偏"。
+            runBiasTrace();
 
             // 启动运动检测器诊断 (一次性 30 行, 一个力帧一行 — 见定义处注释)
             runMotionProbe();
@@ -3080,6 +3254,50 @@ namespace ForceNoiseProbe {
         // ⚠ 用 steady_clock 微秒: GetTickCount 的粒度是 ~15.6 ms, 【分辨不出】8 ms 的帧间隔 ——
         //   而那正是这里要量的东西 (文档说 8 ms, 从没实测过)。
         const double spanMs = (double)(buf[n - 1].tickUs - buf[0].tickUs) / 1000.0;
+
+        // ★ 2026-09-29 恢复 + 扩列：**顺手把这段波形落盘**。
+        //   统计量答不了"抖动是甲还是乙"这个问题，波形能；而且判"目标/实际/手柄/力"四条腿的
+        //   幅度比与相位差**必须同帧**，分开两台仪器量过一整晚都对齐不上（见 09-24 那次）。
+        //   追加写 + 块头（与 `calib_poses` 那套同风格）⇒ 多次按键能攒在同一份里。
+        //   ⚠ 环里只有 1024 帧（≈8.3 s @123Hz）⇒ **每按一次只带走最近那 8 秒**。
+        //   ⚠ 相对路径（与 `FORCE_LOG_PATH` 同一约定）⇒ **从 `x64/Release` 启动就落在那边**，
+        //     两处都要看（本仓已因读错文件白找过半小时）。
+        //   列的定义与判据在 `relay/RelayCore.h` 的 `ForceFrameSample` 那一段；
+        //   前 22 列与 `2026-09-24-force-wave-loop-confirmed-dev.csv` **逐字同构**，
+        //   新的 `ff` 与 `tcpV_*` 一律**追加在最后**，老分析脚本不用改。
+        {
+            FILE* wf = fopen("force_wave.csv", "a");
+            if (wf) {
+                SYSTEMTIME st; GetLocalTime(&st);
+                fprintf(wf, "# wave %04d-%02d-%02d %02d:%02d:%02d.%03d  frames=%d\n",
+                        st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond,
+                        st.wMilliseconds, n);
+                fprintf(wf, "# t_us,raw_x,raw_y,raw_z,filt_x,filt_y,filt_z,"
+                            "tgt_x_mm,tgt_y_mm,tgt_z_mm,tgt_rx_deg,tgt_ry_deg,tgt_rz_deg,"
+                            "act_x_mm,act_y_mm,act_z_mm,act_rx_deg,act_ry_deg,act_rz_deg,"
+                            "dev_x_mm,dev_y_mm,dev_z_mm,ff,tcpV_x,tcpV_y,tcpV_z\n");
+                for (int i = 0; i < n; i++) {
+                    fprintf(wf, "%llu,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,"
+                                "%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,"
+                                "%.3f,%.3f,%.3f,%d,%.3f,%.3f,%.3f\n",
+                            buf[i].tickUs, buf[i].f[0], buf[i].f[1], buf[i].f[2],
+                            buf[i].g[0], buf[i].g[1], buf[i].g[2],
+                            buf[i].tgt[0], buf[i].tgt[1], buf[i].tgt[2],
+                            buf[i].tgt[3], buf[i].tgt[4], buf[i].tgt[5],
+                            buf[i].act[0], buf[i].act[1], buf[i].act[2],
+                            buf[i].act[3], buf[i].act[4], buf[i].act[5],
+                            buf[i].dev[0], buf[i].dev[1], buf[i].dev[2],
+                            buf[i].ffEnabled,
+                            buf[i].tcpV[0], buf[i].tcpV[1], buf[i].tcpV[2]);
+                }
+                fclose(wf);
+                std::cout << "  [ok] 波形已追加到 force_wave.csv（" << n << " 帧，26 列）"
+                          << std::endl;
+            } else {
+                std::cout << "  [warn] 波形落盘失败（force_wave.csv 打不开）" << std::endl;
+            }
+        }
+
         double maxGapMs = 0.0;
         for (int i = 1; i < n; i++) {
             const double d = (double)(buf[i].tickUs - buf[i - 1].tickUs) / 1000.0;
@@ -3305,6 +3523,16 @@ void keyboard(unsigned char key, int, int) {
     if (key == 'n' || key == 'N') {
         ForceNoiseProbe::run();
         JitterReport::run();
+        return;
+    }
+
+    // ★ 2026-09-29: 'w' = 连续落盘 开 / 关（见 ForceContinuous 那一大段）。
+    //   【为什么另开一个键而不挤进 'n'】'n' 是"最近 1024 帧"的快照（8.3 s），
+    //   而这里要的是"从按下到再按下的【连续】一段" —— 语义不同，混在一起按键状态会打架。
+    //   ⚠ 体量 ≈ 1.3 MB/分钟，别开着不管。
+    if (key == 'w' || key == 'W') {
+        if (ForceContinuous::running()) ForceContinuous::stop();
+        else                            ForceContinuous::start();
         return;
     }
 

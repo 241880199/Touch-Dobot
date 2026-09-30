@@ -48,6 +48,32 @@ public:
         unsigned long long tickUs;   // steady_clock 微秒 (不能用 GetTickCount: 15.6 ms 粒度
                                      // 分辨不出 8 ms 的帧间隔 —— 那正是要量的东西)
         double f[3];                 // @1304 的 Fx,Fy,Fz (原始值, 未补偿)
+        double g[3];                 // 本帧的 compensated 之后、映射之前的 filtered[0..2]
+        // ★★ 2026-09-24 深夜（`d8d3cf9` 加的，`ad0486f` 那次回退里丢了；2026-09-29 恢复）：
+        //   现场说的"抖动"是**机械臂在动**（不是手上的力）⇒ 必须同时看这两组：
+        //   · tgt[6] = 本帧**下发目标的位姿**（app.robotTargetPose 的 x,y,z,rx,ry,rz）
+        //   · act[6] = 本帧**机械臂实际位姿**（@624，与本帧的力/滤波同源）
+        //   判据：目标平滑而实际在跳 ⇒ 机械臂自身伺服/机械（不归软件）；
+        //         目标本身在跳 ⇒ 我们的映射/控制（能修）。
+        //   ★ 2026-09-29 离线分析（`_analyze_loop_act.py`）实测：`act(t) ≈ tgt(t − 106~203ms)`，
+        //     7 块全部复现（r=0.987~0.998）。**这批数据分不开"真伺服滞后"与"@624 是回显"**
+        //     ⇒ 上机判别实验的执行单见 `Docs/superpowers/specs/2026-09-29-*.md`。
+        double tgt[6];
+        double act[6];
+        // ★★ 2026-09-24 深夜：**器件(Touch 手柄)自己的位置**（器件系 mm）。判"闭环"的第一环要用它：
+        //   力推手柄 ⇒ 手柄动 ⇒ 位置映射读到它 ⇒ 命令臂跟着动。若手柄其实【没动】，
+        //   那目标里的抖动就出在我们自己的代码里，与"力驱位置"的环路无关。
+        //   ⚠ 读它用 app.devicePosMutex —— 那是【叶子锁】(全文件只单独取过一次、从不嵌套)
+        //     ⇒ 在 forceDataMutex 之外先取先放，不引入锁环。
+        double dev[3];
+        // ★ 2026-09-29 新增两列（与上面的"恢复"分开记账 —— 这两条是**新加的**，不是回退前就有的）：
+        //   · ffEnabled = app.forceFeedbackEnabled（原子）。判"关掉力反馈就不抖"那条对照要按帧分段，
+        //     不能靠事后回忆；它是 1 个 int，读取无锁。
+        //   · tcpV[3] = app.forceData.tcpSpeedActual 的 x,y,z（@672 TCPSpeedActual，123 Hz）。
+        //     证据报告"下次开工三步"的第 1 条（核 @672 的坐标系与质量）就是它 —— 它**已经在解析**
+        //     （`RelayCore.cpp` 的 `tcpSpeedPtr` 那一段），只是从来没跟力/位姿同时落过盘。
+        int    ffEnabled;
+        double tcpV[3];
     };
     // 取最近收到的 ≤maxN 帧, 按【从旧到新】写进 out。返回实际帧数。
     int copyRecentForceFrames(ForceFrameSample* out, int maxN);
@@ -264,12 +290,14 @@ private:
     //     不是"算过什么"。
     double m_btn2JointCmd[6] = {0, 0, 0, 0, 0, 0};
 
-    // ★★ 2026-09-23 (Task 2 修复轮 / 复审 Important#1 与 Minor 2)：两条**每次按下只报一次**的
-    //   一次性标记。两个条件都【不是瞬时的】⇒ 不设标记就是"按住多久就刷多久"，而这两处写的
+    // ★★ 2026-09-23 (Task 2 修复轮 / 复审 Important#1 与 Minor 2)：一组**每次按下只报一次**的
+    //   一次性标记。★ 2026-09-29 整支终审 I-1 之后是**五条**（原文写"两条"，而那时实际已经
+    //   被 (A) 那轮加成了四条 —— 这个数字一直是旧的，本次一并改成"数出来的"）。
+    //   这些条件都【不是瞬时的】⇒ 不设标记就是"按住多久就刷多久"，而它们写的
     //   都是 `cout`/`cerr`，落在**触觉回调线程**上 —— 而控制台阻塞（QuickEdit 选中即冻结）
     //   是本仓已记录的危险（见 `2026-09-22-watchdog-heartbeat-lied` 那条）。
     //   ⚠ 复位点在 `onButton2Press`（与 `m_btn2JointMode`/`m_jointRef` **同一个临界区**）：
-    //     "一次按下"正是本文件里那个"模式"的生命周期 ⇒ 两个标记与它同生共死，
+    //     "一次按下"正是本文件里那个"模式"的生命周期 ⇒ 这些标记与它同生共死，
     //     下一次按住自然再报一次。
     //   · `m_btn2JointBtn1Noticed` —— 按住期间按钮1 **第一次**被按下 ⇒ 打印一次"平移被忽略"。
     //       它描述的是"这次按住锁存成了关节模式"的一个**后果**，重复打印没有新信息。
@@ -287,6 +315,16 @@ private:
     bool  m_btn2JointRefRejectLogged = false;
     bool  m_btn2JointTargetRejectLogged = false;
     bool  m_btn2JointFkRejectLogged = false;
+    //   · `m_btn2JointFallbackLogged`（★ 2026-09-29 整支终审 I-1）—— 纯函数
+    //     `button2OrientJointTarget` 报回来的**两档失败**（`SolveFailed` / `StylusUntrustworthy`）
+    //     各只报**一次**。与上面三条**同款、同一个复位点**，但**必须是一个自己的旗标**：
+    //     复用任何一条都会让"两条互不相干的坏消息"互相压制（I1 判的是**关节参照**，
+    //     这里判的是**笔杆姿态/求解**）。
+    //     ⚠ 它**故意**一旗盖两档 ⇒ 一次按下里只有**先出现**的那档会被报出来；理由写在
+    //       调用点（两档在出口上是同一个效果，只有理由不同）。
+    //     ⚠ 只压**消息**，不压别的：这一档**本来就没有** `return`（被"拒"的是目标、不是整帧）
+    //        ⇒ 接线那边一个字都没改，见调用点那段。
+    bool  m_btn2JointFallbackLogged = false;
 
     CRITICAL_SECTION m_basePointLock;
     std::vector<IExtension*> m_extensions;
