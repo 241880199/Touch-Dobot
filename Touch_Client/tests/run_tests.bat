@@ -673,6 +673,51 @@ if %ERRORLEVEL% EQU 0 (
 echo.
 
 rem ============================================================
+rem Suite wired into "build then run" on 2026-09-30:
+rem   gain_readback_state -- the STATE MACHINE behind RG| readback rate limiting
+rem   (relay/GainReadback.h). The DECISION was extracted into a pure function on
+rem   2026-09-24 (relay/GainReadbackPolicy.h, covered by test_gain_readback_policy);
+rem   this suite pins the half that decision cannot reach -- WHEN the three pieces
+rem   of state advance, and WHEN the pending flag is set and cleared. That half
+rem   used to live in RelayCore::sendReflectionGain, and RelayCore.cpp is still
+rem   compiled by no test here.
+rem   WARNING -- read the boundary, do not overclaim: this suite covers the state
+rem   machine IN ISOLATION. The CALL SITE in RelayCore.cpp still has NO automated
+rem   coverage; wiring it up is Task 2 of the same plan. A green run here must NOT
+rem   be read as "the wiring is tested".
+rem   The assertion count is deliberately NOT copied here: the suite prints it on
+rem   every run, and a hand-typed copy only goes stale in the silent direction
+rem   (see the note on hand-typed numbers in the NOT RUN block at the bottom).
+rem   Adding this .cpp is what makes the runtime suite count on disk move
+rem   from 26 to 27; if this section is ever deleted while the .cpp stays,
+rem   the harness asserts at the bottom and exits 1 -- by design.
+rem   The FORM of the result check is NOT special to this suite -- every
+rem   section in this file uses it. See "HOW TEST RESULTS ARE JUDGED" at
+rem   the top of this file for the rule and the two tempting-but-wrong forms.
+rem ============================================================
+
+echo --- Building test_gain_readback_state ---
+call "%TESTDIR%\build_gain_readback_state_test.bat"
+@echo off
+if %ERRORLEVEL% EQU 0 (
+    echo   Build OK
+    echo.
+    echo === test_gain_readback_state.exe ===
+    "%TESTDIR%\test_gain_readback_state.exe"
+    if !ERRORLEVEL! EQU 0 (
+        set /a PASSED+=1
+        echo   [OK]
+    ) else (
+        set /a FAILED+=1
+        echo   [FAIL]
+    )
+) else (
+    echo   [FAIL: build error]
+    set /a FAILED+=1
+)
+echo.
+
+rem ============================================================
 rem Suite wired into "build then run" on 2026-09-24:
 rem   payload_calibration -- the offline payload/COM solver (PayloadCalibration.cpp)
 rem   plus the local-compensation acceptance case. It carries ONE case that is
