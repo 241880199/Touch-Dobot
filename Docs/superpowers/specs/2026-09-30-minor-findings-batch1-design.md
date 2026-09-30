@@ -70,7 +70,9 @@ public:
 
     // pollRelayCommands 每帧问它：有没有被限频挡下、还欠 MATLAB 一条？
     bool pending() const;
-    void clearPending();          // 补发成功后清
+    // ⚠ **【不提供】公开的 clearPending()**（2026-09-30 写计划时删掉，YAGNI）：
+    //   那个标志【只】在判决/发送分支里被改（抽取前就是这样），**没有任何外部调用方需要清它**。
+    //   加一个没人调的公开方法，正是复审会打回的形状。
 
     // 只读回显，供用例与诊断（不参与判决）。
     double lastSentGain() const;
