@@ -47,7 +47,8 @@ static void test_forced_always_sends() {
 }
 
 // ===== 格 3: Throttled 值没变 ⇒ 不发, 且【顺手清掉 pending】 =====
-// 这是抽取时最容易漏的一条 (今天写在 RelayCore.cpp:2808-2812)。
+// 这是抽取时最容易漏的一条 (抽取前在 RelayCore.cpp 的 SkipUnchanged 分支里 ——
+// ⚠ 别记行号: Task 2 会把这些行搬走, 按内容找)。
 static void test_unchanged_clears_pending() {
     TEST(unchanged_clears_pending);
     State s;
