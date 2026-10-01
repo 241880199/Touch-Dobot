@@ -23,7 +23,15 @@ I_ACT_X, I_ACT_Y = 13, 14
 I_FILT = (4, 5, 6)
 I_FF = 22
 SEG_SEC = 10.0
-SPEEDS = (0.5, 1.0, 2.0, 4.0)
+# ⚠★ 档数是**入参**（第 2 个命令行参数，默认 5）。2026-10-01 踩过：档数 4→5（8 段→10 段）时
+#   下面的锚点仍写 40 ⇒ **整轮错位一段**（每段实测频率都成了名义值的 2 倍）。
+#   ⇒ 现在全部由 NSPEED 推出来，并且**表打完之后会自检**（实测/名义若系统性对不上就出声）。
+ALL_SPEEDS = (0.5, 1.0, 2.0, 4.0, 6.0)       # SweepPlan::kSpeed（历史顺序，别改）
+NSPEED = int(sys.argv[2]) if len(sys.argv) > 2 else 5
+SPEEDS = ALL_SPEEDS[:NSPEED]
+SEG_COUNT = len(SPEEDS) * 2                  # SweepPlan::kSegCount（每档 FF 开/关各一次）
+# 锚点 = 「FF 从 1 变 0」那一刻 = 后半的第一段开始 = 前半的【总时长】。
+FF_HALF_SEC = (SEG_COUNT // 2) * SEG_SEC
 F0_HZ = 0.365          # SweepWaveform::kF0Hz（名义值，只用于对照）
 
 
@@ -113,11 +121,11 @@ def main():
     print(f"锚点（ff 1->0）: {len(anchors)} 个 ⇒ 判定为 {len(anchors)} 轮")
 
     for rd, at in enumerate(anchors, 1):
-        t0 = at - int(40e6)
+        t0 = at - int(FF_HALF_SEC * 1e6)
         segs = {}
         for t, r in moving:
             s = int((t - t0) // int(SEG_SEC * 1e6))
-            if 0 <= s < 8:
+            if 0 <= s < SEG_COUNT:
                 segs.setdefault(s, []).append(r)
         if segs:
             analyze_round(rd, t0, segs)
@@ -131,13 +139,13 @@ def analyze_round(rd, t0, segs):
     print(hdr)
     print("-" * len(hdr))
     res = []
-    for s in range(8):
+    for s in range(SEG_COUNT):
         rs = segs.get(s, [])
         if not rs:
             print(f"{s+1:>2}  (无帧)")
             continue
-        sp = SPEEDS[s % 4]
-        on = s < 4
+        sp = SPEEDS[s % len(SPEEDS)]
+        on = s < SEG_COUNT // 2
         dt = 1.0 / 122.7
         f = peak_freq([r[I_ACT_X] for r in rs], dt)
         A = math.sqrt(sd([r[I_ACT_X] for r in rs]) ** 2 +
@@ -150,11 +158,25 @@ def analyze_round(rd, t0, segs):
         print(f"{s+1:>2} {sp:>5} {'ON' if on else 'OFF':>4} {len(rs):>5} "
               f"{f:>7.3f} {F0_HZ*sp:>7.3f} {A*1000:>7.2f} {acc:>8.3f} {F:>7.4f} {norm:>9.4f}")
 
+    # ★★ 自检：实测频率应当 ≈ 名义频率。若系统性对不上（例如整体差 2 倍），
+    #    说明段的时间轴对错了（最常见的成因是【档数变了而锚点没跟着变】）⇒ 出声。
+    ratios = [p["f"] / (F0_HZ * p["sp"]) for p in res if p["f"] > 0 and p["sp"] > 0]
+    if ratios:
+        ratios.sort()
+        med = ratios[len(ratios) // 2]
+        print(f"\n自检: 实测/名义 频率比的中位数 = {med:.3f}"
+              f"（范围 {ratios[0]:.2f}~{ratios[-1]:.2f}）")
+        if not (0.7 <= med <= 1.4):
+            print("  ⛔⛔ 系统性对不上 ⇒ **段的时间轴几乎肯定对错了**（整轮错位）!")
+            print("     ⇒ 先怀疑【档数】：本脚本第 2 个参数 = 本轮的倍速档数"
+                  f"（本次按 {NSPEED} 档算）。8 段时代是 4 档, 10 段是 5 档。")
+            print("     ⚠ 下面这张表**不可用**，别照着读。")
+
     print("\n=== FF 开/关 逐段对照（同倍速的两段【动作应逐帧相同】）===")
     print("   ★ 这一段回答的是“关掉力反馈，这个力还在不在”")
-    for i in range(4):
+    for i in range(len(SPEEDS)):
         a = next((r for r in res if r["seg"] == i + 1), None)
-        b = next((r for r in res if r["seg"] == i + 5), None)
+        b = next((r for r in res if r["seg"] == i + 1 + len(SPEEDS)), None)
         if not a or not b:
             continue
         print(f"   {a['sp']:>4}x  f: {a['f']:.3f} vs {b['f']:.3f}   "
