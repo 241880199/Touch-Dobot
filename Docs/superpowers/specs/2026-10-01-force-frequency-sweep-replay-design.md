@@ -73,19 +73,31 @@ F = 0.0689 · A^(−0.18) · f^(0.80)          (A = 臂运动幅度, f = 臂运�
 > ⚠ **这一步是离线工具，不是运行时代码**：一个 `_extract_sweep_waveform.py`，输出那个头文件。
 > **它的产物必须人眼核过**（周期是否闭合、峰值是否 1、是否只剩一个频率）再提交。
 
-### 3.2 偏移加在哪
+### 3.2 偏移加在哪（**2026-10-01 已回源码核实；本节推翻了 v1 的写法**）
 
-`Touch_Client/relay/RelayCore.cpp` 的 `// ===== Compute ServoP position =====` 那一段
-（现为 `:1420-1422` 的 `servoCmdX/Y/Z = clamped.*`）**紧接其后**：
+**核实结果 —— 两个坑**：
+
+1. `SafetyPredictor::evaluate(clamped)` 在 **`:1038`**，而 `servoCmdX/Y/Z = clamped.*` 在 **`:1420`**
+   ⇒ **`:1420` 在安全闸之后**。在那儿加偏移 = **绕过安全预测器**。
+2. **也不能加在 `candidate`（`:1030-1032`）上** —— 紧随其后 `m_targetPos` 由 `clamped` 更新
+   ⇒ 偏移会被**逐帧积分进 `m_targetPos`**，臂一路漂走。
+
+**⇒ 采用"本地加、本地验"**（照抄本仓已有的 `evaluatePositionOnly` 用法，见 `:628` 与 `:1069`）：
 
 ```cpp
-servoCmdX += dx;  servoCmdY += dy;  servoCmdZ += dz;   // dx/dy/dz 来自回放
+// 位置：紧跟 `servoCmdX/Y/Z = clamped.*`（现 :1420-1422）
+const Vec3 off = SweepWaveform::lookup(phase01) * Config::SWEEP_AMPLITUDE_MM;  // 单位峰值 × 幅度
+const Vec3 withOff(servoCmdX + off.x, servoCmdY + off.y, servoCmdZ + off.z);
+const SafetyVerdict sv = SafetyPredictor::instance().evaluatePositionOnly(withOff);
+if (sv.action == SafetyVerdict::REJECT) {
+    sweepRejectOnce(sv.reason);          // 本帧【不加偏移】；节流只喊一声（照抄 :1429 那种"每次只喊一声"）
+} else {
+    servoCmdX += off.x;  servoCmdY += off.y;  servoCmdZ += off.z;
+}
 ```
 
-⇒ 偏移进入**随后所有**的安全/诊断计算，而不是绕过它们。
-⚠ **但"随后有哪些检查"我还没在源码里逐条核过**（`:1425` 那道 `orientation` 检查只在 `m_transmittingOrient` 时跑；
-按钮1 纯位置模式下**这一路到底还有什么闸**，`Config.h` 记着"工作空间钳位""虚拟约束力"**已被关掉**）。
-**⇒ 写计划前必须回源码把这一段的检查逐条读一遍再定插点** —— 本仓为此栽过多次，不许凭印象。
+⇒ 偏移**不进入 `m_targetPos`**（不积分）、**过一道与位置模式同款的安全门**。
+⚠ 行号会漂 ⇒ **实现时按内容（`evaluate(clamped)` / `servoCmdX = clamped.x`）定位，不按行号**。
 
 ### 3.3 一键跑完整轮
 
