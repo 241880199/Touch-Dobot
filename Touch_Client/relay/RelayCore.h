@@ -322,6 +322,13 @@ private:
     bool          m_sweepPrevFf   = true;
     int           m_sweepLastSeg  = -1;
     bool          m_sweepRejectNoticed = false;
+    //   · `m_sweepLastOffset` —— ★ G1（2026-10-01 复审修复轮）: 上一次【真的发出去】的偏移
+    //     （**相对**本地目标的增量, 不含 base）。相位每段归零 ⇒ 段一换, 偏移相对上一帧会
+    //     **阶跃**（8mm 幅度下实测最大约 9.7mm）⇒ 用它做**增量限幅**（每帧最多动 4.5mm）。
+    //     ⚠ 起/停（`startSweep`/`stopSweep`）都清零, 免得**旧值在首帧造出一个阶跃**。
+    //     ⚠ 只有在**真的加上了**的那一帧才更新 —— 它是"发过什么", 不是"算过什么"
+    //       （被安全门 `REJECT` 的帧不动它）。默认构造即 {0,0,0}。
+    Vec3          m_sweepLastOffset;
 
 public:
     // 'r' 键（Task 4 接）: 起 / 停整个扫描。`sweepRunning()` 供按键判"现在是起还是停"。

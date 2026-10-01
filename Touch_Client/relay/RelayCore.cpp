@@ -1451,8 +1451,11 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
     //        回代码数过：`m_targetPos` 一共有**四处**写点（按**函数名**列出；行号会漂）：
     //          · `sendPosition`   —— `m_targetPos = clamped;`（就在本块**上面**；
     //                                 `clamped` 是**未含偏移**的那个量）
-    //          · `onButtonPress`  —— `m_targetPos = SafetyBoundary::clampToBoundaryActive(rawPos);`
-    //          · `onButton2Press` —— 两条同形状的：`…clampToBoundaryActive(tcpPos)` 与 `…(rawPos)`
+    //          · `onButtonPress`    —— `m_targetPos = SafetyBoundary::clampToBoundaryActive(rawPos);`
+    //          · `onButton2Press`   —— `m_targetPos = SafetyBoundary::clampToBoundaryActive(tcpPos);`
+    //          · `onButton2Release` —— `m_targetPos = SafetyBoundary::clampToBoundaryActive(rawPos);`
+    //        ⚠ 订正（G7）: 从前把后两条都挂在 `onButton2Press` 名下 —— **错**: `(tcpPos)` 那条在
+    //          `onButton2Press`, 而 `(rawPos)` 那条在 **`onButton2Release`**。条数（4）与结论不变。
     //        ✅ 真正成立、也是真正**承重**的性质是：**四处没有一个从 `servoCmd*` 或偏移推导出来**
     //           —— 它们写进去的是 `clamped` / `rawPos` / `tcpPos`，都是**别处的量**。
     //           ⇒ 偏移进不了 `m_targetPos`，**不是**因为"没有别的写点"，
@@ -1465,6 +1468,9 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
     //
     // ⚠ 只在【按住按钮1】时叠加（`appState.lastButtonState`）: 松开即不叠加, 且 `onButtonRelease()`
     //   会把整个扫描停掉（那里有注释说明为什么"松手即停"必须写在它里面）。
+    // ⚠ 这里的"每帧" = **每伺服帧**（**不是**触觉回调线程的每帧）: `sendPosition` 自带 **30 Hz** 限频
+    //   （本函数下面 `now - m_lastServoTime < 33` 那一行）⇒ 最高档 1.46 Hz 每周期只有 ~20 个
+    //   采样点, 是**阶梯状**下发, 不是连续曲线。（段边界那道增量限幅见下面 G1。）
     // ⚠ ⚠ 本文件**不被任何测试编译** ⇒ 这一段没有自动化用例。
     //
     // ★ F2（2026-10-01 修复轮）: 本帧**是否真的**把偏移加上去了。下面 Mode 3（组合模式）会重建
@@ -1501,7 +1507,9 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
             //   ⚠ 为什么【不会】同一段打两次: 打印后立刻回写 `m_sweepLastSeg = sp.seg`;
             //     回写后, 该段余下每一帧 `sp.seg != m_sweepLastSeg` 都为假 ⇒ 本分支不再进。
             //     而段号随 el 单调不减（`sweepStateAt` 对越界的 el 钳在最后一段）⇒ 不会退回旧段再打一次。
-            //   ⚠ 本行跑在 ServoP 那条路上（触觉/GLUT 线程）—— 正因只打一次才可接受, 别改成每帧。
+            //   ⚠ 本行跑在 ServoP 那条路上（`sendPosition` **只**在**触觉回调线程**上被调用 ——
+            //     `haptic/HapticCallback.cpp` 里 `relay.sendPosition(...)` 那一处; **不是** GLUT 线程）
+            //     —— 正因只打一次才可接受, 别改成每帧。
             if (sp.seg != m_sweepLastSeg) {
                 // ★ F7（2026-10-01 修复轮）: 本趟的【第一条】标记若不在第 1 段, 就是前面几段被【跳过】了。
                 //   整个叠加块（偏移 + FF + 本标记）都被 `appState.lastButtonState` 门控; 时钟却起于 'r'。
@@ -1528,19 +1536,44 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
             if (amp < 0.0) amp = 0.0;      // 硬夹: 常数被改坏也不放大（设计 §3.5 S3）
             // ⚠ 这里构造的是**本文件自己的** `Vec3`（`CoordinateTransform.h`，有 3 参构造）;
             //   `SweepWaveform::Vec3` 是**另一个**类型 ⇒ 逐分量取出来构造, 不引入第二个 `Vec3` 用法。
-            const Vec3 withOff(servoCmdX + off.x * amp,
-                               servoCmdY + off.y * amp,
-                               servoCmdZ + off.z * amp);
+            //
+            // ★ G1（2026-10-01 复审修复轮）: 段边界处【相位归零】⇒ 每段【末尾】的相位各不相同
+            //   ⇒ 段一换, 目标偏移相对上一帧会【阶跃】—— 8mm 幅度下实测约 6.0 / 3.6 / 9.7 / 1.6 mm。
+            //   本函数上面那道 30Hz 步长限幅（`maxStep = 4.5 * effectiveSpeed`）**只管触觉 delta**,
+            //   **管不到**这条叠加的路 ⇒ 这里对**施加的偏移**再补一道【增量限幅】, 每帧最多动
+            //   `kSweepMaxStepMm`(=4.5, 与上面那道同预算)。
+            //   ⛔ **不动相位归零** —— 那个归零是**承重**的: 它保证 1–4 段与 5–8 段**从同一相位起步**
+            //      （即两半"逐帧相同"的前提; 否则后半会从 frac(10·(0.5+1+2+4)·0.365)=0.375 起步）。
+            //   ✅ 它**不扭曲波形**: 顶段最大波形斜率 = 2π·1.46·8 ≈ 73 mm/s，远小于限幅能力
+            //      4.5 × 30 = 135 mm/s ⇒ 正常段内跟随不受影响, 只在段边界"咬"一下。
+            const Vec3 desiredOff(off.x * amp, off.y * amp, off.z * amp);
+            Vec3 appliedOff = desiredOff;
+            {
+                constexpr double kSweepMaxStepMm = 4.5;   // 与触觉那道路同预算 (mm/帧)
+                const Vec3 d = desiredOff - m_sweepLastOffset;
+                const double dLen = d.length();
+                if (dLen > kSweepMaxStepMm) {
+                    const double s = kSweepMaxStepMm / dLen;
+                    appliedOff = Vec3(m_sweepLastOffset.x + d.x * s,
+                                      m_sweepLastOffset.y + d.y * s,
+                                      m_sweepLastOffset.z + d.z * s);
+                }
+            }
+            const Vec3 withOff(servoCmdX + appliedOff.x,
+                               servoCmdY + appliedOff.y,
+                               servoCmdZ + appliedOff.z);
             const SafetyVerdict sv = SafetyPredictor::instance().evaluatePositionOnly(withOff);
             if (sv.action == SafetyVerdict::REJECT) {
                 if (!m_sweepRejectNoticed) {   // 节流: 每次扫描只喊一声（复位在 startSweep）
                     m_sweepRejectNoticed = true;
                     std::cout << "[Sweep] 目标把偏移拒了, 本帧不加: " << sv.reason << std::endl;
                 }
+                // ⚠ 这一帧**没加** ⇒ 【不】推进 `m_sweepLastOffset`（它是"发过什么", 不是"算过什么"）。
             } else {
                 servoCmdX = withOff.x;
                 servoCmdY = withOff.y;
                 servoCmdZ = withOff.z;
+                m_sweepLastOffset = appliedOff;   // ★ G1: 记下本帧真的发出去的偏移（下一帧据此限幅）
                 sweepOffsetAdded = true;   // ★ F2: 真的加上了（供 Mode 3 之后那条"被丢掉"的消息用）
             }
             // ★ FF 每帧跟着段走（前四段 ON / 后四段 OFF）—— 客户端【直接设】这个原子量,
@@ -3013,6 +3046,7 @@ void RelayCore::startSweep() {
     m_sweepPrevFf        = appState.forceFeedbackEnabled;
     m_sweepLastSeg       = -1;      // Task 4 的段标记去重从"还没打过"起算
     m_sweepRejectNoticed = false;   // 允许新的一次扫描再喊一声"偏移被拒"
+    m_sweepLastOffset    = Vec3();  // ★ G1: 偏移增量限幅从 0 起算, 免得旧值在首帧造阶跃
     m_sweepStartMs       = GetTickCount();
     std::cout << "[Sweep] 开始: " << SweepPlan::kSegCount << " 段 x " << SweepPlan::kSegSec
               << "s, 幅度 +/-" << Config::SWEEP_AMPLITUDE_MM
@@ -3028,7 +3062,8 @@ void RelayCore::stopSweep() {
         std::cout << "[Sweep] 停止: FF 已还原为 " << (m_sweepPrevFf ? "ON" : "OFF") << "\n";
     }
     // ⚠ 无条件清零（即使上面那支没进）: 本函数也可能被当成"确保停住"来调。
-    m_sweepStartMs = 0;
+    m_sweepStartMs    = 0;
+    m_sweepLastOffset = Vec3();   // ★ G1: 停就清 —— 下次起时从 0 起算, 旧值不会在首帧造阶跃
 }
 
 bool RelayCore::sweepRunning() const { return m_sweepStartMs != 0; }
