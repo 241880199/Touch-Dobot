@@ -665,7 +665,9 @@ git commit -m "feat(sweep): 偏移叠加 + 本地安全门 (接线, 无自动化
 ### Task 4: 接线（二）—— 按键 `r` + 段标记打印
 
 **Files:**
-- Modify: `Touch_Client/main.cpp`（`keyboard()` 里加 `'r'`；照抄 `'w'` 那一段的形状）
+- Modify: `Touch_Client/main.cpp`（`keyboard()` 里加 `'r'`）
+- Modify: `Touch_Client/relay/RelayCore.cpp`（段标记打印）
+  ⚠ **2026-10-01 订正**：本节原只列了 `main.cpp`，而 Step 2 改的是 `RelayCore.cpp` ⇒ 两处都要列、提交时两处都要 `git add`。
 
 **Interfaces:**
 - Consumes：`RelayCore::startSweep()` / `stopSweep()` / `sweepRunning()`（Task 3）
@@ -714,8 +716,8 @@ git commit -m "feat(sweep): 偏移叠加 + 本地安全门 (接线, 无自动化
 - [ ] **Step 5: 提交**
 
 ```bash
-git add Touch_Client/main.cpp
-git commit -m "feat(sweep): 'r' 键开关 + 段标记打印" -m "照抄 'w' 那一段的形状。段标记只在该段第一次成立时打, 不是每帧。"
+git add Touch_Client/main.cpp Touch_Client/relay/RelayCore.cpp
+git commit -m "feat(sweep): 'r' 键开关 + 段标记打印" -m "'r' 放在 BiasCheck 那一块【之后】(靠位置分先后)。段标记只在该段第一次成立时打, 不是每帧。"
 ```
 
 ---
