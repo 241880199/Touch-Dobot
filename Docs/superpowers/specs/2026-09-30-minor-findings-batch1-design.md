@@ -144,14 +144,19 @@ void RelayCore::sendReflectionGain(GainReadback::SendMode mode) {
 
 ### 3.1 本批的其余 7 条（**不改可执行语义**）
 
+> ⚠ **下表的 `file:line` 是「设计时」的，可能已被本批自己的提交移动。** 本批已落地的提交：
+> `8f15048`（第 1/2/5/9/17 条）· `210168c` + `bc97e7f`（第 12 条）· `9a563dd`（第 16 条）·
+> `8baf1d4`（第 18 条）· `83f52cb`（控制方订正，不是某条的修）。**要引用行号请回核当前值，别照抄本表。**
+> 已回核订正的两处：第 1 条（`RelayCore.cpp` 的行号与 `SendMode` 写法）、第 16 条（用例名）。
+
 | # | 文件 | 做法 |
 |---|---|---|
-| **1** | `main.cpp:4145-4146` | 句子仍过宽（"重连，或一次被**接受**的增益改动"）⇒ 改为"重连，或一次增益改动（**接受与拒绝都会回读**）"（依据：拒绝分支 `RelayCore.cpp:2895` 的 `sendReflectionGain(true)`） |
+| **1** | `main.cpp:4145-4146` | 句子仍过宽（"重连，或一次被**接受**的增益改动"）⇒ 改为"重连，或一次增益改动（**接受与拒绝都会回读**）"（依据：拒绝分支 `RelayCore.cpp:2864` 的 `sendReflectionGain(GainReadback::SendMode::Forced)`） |
 | **2** | `main.cpp:2944-2954` | "三者之一"只断言结论 ⇒ 补自证："`canStart()` 的第四条失败路已在上面两个守卫里被排除"（`ForceCalibration.cpp:167-171,198`） |
 | **5** | `ForceTuning.cpp:86-87` | `fopen` 失败把"不存在"与"打不开"混为一谈 ⇒ **只改措辞**（如实写明这是"没读到"，并指出启动横幅仍会打 `未采用 <path>`，操作员并非全盲）。⚠ **不改 API 加返回值**：清单自己也把它定性为措辞问题，且 `loadFromFile` 有多个调用方，加 `enum` 属扩面 |
 | **9** | `test_force_pipeline.cpp:165-168` | 注释只说"两个字面量就是当前值" ⇒ 补上**双向**事实：**收窄**由本文件的 `CHECK(setGain(...))` 钉、**放宽**由兄弟套件 `test_force_tuning.cpp:91-94`（用字面量 `gain() == 100.0/300.0` 反向钉死两端点）钉 ⇒ 并**订正清单里"放宽仍全绿"那半句**（**控制方已亲自读该文件确认**：`GAIN_MIN` 若放宽到 50，那条 `fabs(gain() - 100.0) < 1e-9` 必红） |
 | **12** | 见 §2 | ★ |
-| **16** | `test_force_tuning.cpp` | ① 临时文件 `_tuning_test_tmp.json` 在 `CHECK` 早退时**泄漏到 `tests/`** ⇒ 加清理（用例出口无条件删；或改成 `setStorePathForTest` 指到系统临时目录下的唯一名）；② `test_missing_file_is_quietly_false` 的名字/注释声称 "quietly" 而**只断言返回 `false`** ⇒ **改名去掉 quiet（并对齐注释）**，不假装断言了 stderr |
+| **16** | `test_force_tuning.cpp` | ① 临时文件 `_tuning_test_tmp.json` 在 `CHECK` 早退时**泄漏到 `tests/`** ⇒ 加清理（用例出口无条件删；或改成 `setStorePathForTest` 指到系统临时目录下的唯一名）；② `test_missing_file_is_quiet_false`（`9a563dd` 后改名 `test_missing_file_returns_false`）的名字/注释声称 "quietly" 而**只断言返回 `false`** ⇒ **改名去掉 quiet（并对齐注释）**，不假装断言了 stderr |
 | **17** | `test_relay_command_parser.cpp:96-98` | 注释引 `ForceTuning::GAIN_MIN/GAIN_MAX` 而该文件**故意不 include** ⇒ 把它写成**显式的"非编译器强制"依赖**（点名"改 `ForceTuning` 的名字要回来改这条注释"），或改引到 `test_force_tuning` 已钉住的那条断言 |
 | **18** | `Touch_Client.vcxproj:138` | `core\JsonLite.h` 从 `<!-- force -->` 块挪到已存在的 `<!-- core -->` 块（纯分组，零构建影响 ⇒ **必须实测能编过**） |
 
@@ -192,3 +197,36 @@ void RelayCore::sendReflectionGain(GainReadback::SendMode mode) {
   见清单 §"已知的、非 Minor 但必须上机验证的"）。
 - 第 3/6/10 条的"改法"（已判接受）。
 - 第 21 条的抢救（不可恢复）。
+
+## 6. 执行后：22 条结局表
+
+收口的定义是**每条都有一个成立的归宿**，不是"全变成绿的"。
+
+| # | 归宿 | 依据 |
+|---|---|---|
+| 1 | 已修（本批） | `8f15048` —— `main.cpp` 那句改成"**接受与拒绝都会回读**" |
+| 2 | 已修（本批） | `8f15048` —— `main.cpp` 补自证：`canStart() ≡ !isRunning()`，由 `isForceCalibrating()` 守卫排除 |
+| 3 | **接受** | `ForcePipeline.cpp:238`（`shutdown()` 归零 `g_gainRamp`）；与既有 `g_filters` 复位同类，作者原判可接受 |
+| 4 | **接受**（**控制方回核后改判**） | `Config.h:407-408` 已给算式 + 自标"范围一变它就变" ⇒ 非**静默** |
+| 5 | 已修（本批） | `8f15048` —— `ForceTuning.cpp` 把 `fopen` 失败的两义性写进注释 + 指向启动横幅的 `未采用 <path>` |
+| 6 | **接受** | `GainReadback.h:64-70`（两样状态落笔在发送调用**之前**）⇒ 由重连的强制回读自愈；作者原判 |
+| 7 | **第二批**（`relay_gui.m`） | `relay_gui.m:931,936`（"当前 %.1f" 两行一警）；本机无 MATLAB，改了只能人工审读 —— 不当作"已改" |
+| 8 | **第二批**（`relay_gui.m`） | `relay_gui.m:945`（"队列里躺着的那条"）；同上（纯措辞） |
+| 9 | 已修（本批） | `8f15048` —— `test_force_pipeline.cpp:165-168` 补双向事实并订正"放宽仍全绿"那半句 |
+| 10 | **接受** | 不变式由 `test_force_tuning.cpp:108` 的 `static_initial_value_is_legal` 兜住；作者原判 |
+| 11 | **第二批**（`relay_gui.m`） | `relay_gui.m:942-960`（拒收判据依赖"C++ 只有一个拒收理由"）；同上 |
+| 12 | 已修（本批） | `210168c`（`GainReadback.h`，三样状态 + 迁移抽成可测单元）+ `bc97e7f`（调用点换 `SendMode`）。**接线那层仍无自动化覆盖**（见 §2.5） |
+| 13 | **第二批**（`relay_gui.m`，**行为项**） | `relay_gui.m:283` 的 `AllowEmpty` 无 `isprop` 回退（全文件无 `isprop`）⇒ 老 MATLAB 构造期整窗起不来 |
+| 14 | **第二批**（`relay_gui.m`） | 诊断缺口；`relay_gui.m:965-967` |
+| 15 | **第二批**（`relay_gui.m`，**行为项**） | `relay_gui.m:543`（`onGainDefault`）—— 清空后按 `[Default]` 逼不出回读 |
+| 16 | 已修（本批） | `9a563dd` —— `main()` 出口 `atexit` 兜底清理 + 用例改名（`test_missing_file_returns_false`） |
+| 17 | 已修（本批） | `8f15048` —— `test_relay_command_parser.cpp` 补"非编译器强制引用"告警 |
+| 18 | 已修（本批） | `8baf1d4` —— `core\JsonLite.h` 归到 `<!-- core -->` |
+| 19 | **第二批**（`relay_gui.m`） | 文件内自相矛盾（`relay_gui.m:272` 声称完整显示 vs 清单说被截断）⇒ **必须上机看渲染** |
+| 20 | ✅ **已关闭** | `relay_gui.m:688-689,715` 的 `notifyDropped` / `tlog('DROP')` —— 断线已出声 |
+| 21 | ⛔ **作废（不可恢复）** | 所指的 harness Task 7 报告不进 git；且现行 `Touch_Client/tests/run_tests.bat` 已有 **25** 处跟随 `call` 的 `@echo off`（`:65`–`:751`；含 `:1` 与 `:48` 散文里的字面量共 **27** 处），报告里那个计数已整体过期 |
+| 22 | ✅ **已关闭** | "运行失败分支"的负对照 2026-09-24 已刻意做过（`Docs/superpowers/specs/2026-09-22-test-harness-state.md:335-377`） |
+
+（合计：已修 **8** · 接受 **4** · 第二批 **7** · 已关闭 **2** · 作废 **1** = **22**。）
+
+⚠ 依据要么是**提交号**、要么是 **file:line**；本表不含"应该已经修了"这类话。
