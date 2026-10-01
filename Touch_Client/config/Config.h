@@ -953,8 +953,11 @@ namespace Config {
     //   （那是"一根器件轴喂一个关节"的老映射，**一个字都不许改**）。
     const bool   BTN2_ORIENT_TARGET_ENABLED = true;
     const double BTN2_TILT_PHI_DEG  = 0.0;    // M = Rx(φ)。φ=0 由用户 2026-09-29 定案（M = I）
-    const double BTN2_TILT_SIGN_X   = -1.0;   // ⚠ 器件侧约定，**【上机看方向确认】**，默认沿用 BTN2_J4_SIGN
-    const double BTN2_TILT_SIGN_Y   = -1.0;   // ⚠ 同上，默认沿用 BTN2_J5_SIGN
+    // ★ 2026-10-01 上机实测（正位 + 非正位【都朝反方向摆】，两个位姿方向一致）⇒ 判定为**符号问题**，
+    //   由 -1.0 翻成 +1.0。原值 -1.0 是"沿用 BTN2_J4_SIGN / BTN2_J5_SIGN"的默认 —— 注意那是**两套独立的常数**
+    //   （见 relay/Button2Joint.h 的 ⚠★ 那一行），新旧实现约定不同，所以必须现场看方向定。
+    const double BTN2_TILT_SIGN_X   = +1.0;
+    const double BTN2_TILT_SIGN_Y   = +1.0;
     const double BTN2_ROLL_SIGN     = -1.0;   // 沿用 BTN2_J6_SIGN 的实测结论
     const double BTN2_WRIST_TOL_DEG = 0.05;   // 牛顿迭代收敛门限（度）
     const int    BTN2_WRIST_MAX_ITER = 60;    // 每腕关节单次预算 = 本值 × ORIENT_MAX_STEP_DEG
