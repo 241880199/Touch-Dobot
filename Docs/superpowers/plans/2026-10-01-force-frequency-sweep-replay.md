@@ -424,7 +424,9 @@ static void test_phase_accumulates_with_speed() {
     CHECK(NEAR(sweepStateAt(2.5).phase01, 0.125));    // 段0: 0.5x, 2.5s/10s*0.5 = 0.125
     CHECK(NEAR(sweepStateAt(12.5).phase01, 0.25));    // 段1: 1x
     CHECK(NEAR(sweepStateAt(22.5).phase01, 0.5));     // 段2: 2x
-    CHECK(NEAR(sweepStateAt(32.5).phase01, 1.0 % 1.0)); // 段3: 4x, 2.5/10*4 = 1.0 -> 取模 0
+    CHECK(NEAR(sweepStateAt(32.5).phase01, 0.0));     // 段3: 4x, 2.5/10*4 = 1.0 -> 取模 0
+    //  ⚠ 2026-10-01 订正: 本行原写 `1.0 % 1.0` —— 【那在 C++ 里编不过】(MSVC C2296/C2297, `%` 只吃整型)。
+    //    实现者把它改成语义相同的 `0.0`(原注释自己就写着期望 0)。计划里这处是【真错】, 不是措辞问题。
     PASS();
 }
 
@@ -507,8 +509,12 @@ inline State sweepStateAt(double elapsedSec) {
 
 - [ ] **Step 6: 负对照（**必须实测**，三条）**
 
-1. 把 `if (seg >= kSegCount)` 的钳位整段删掉 ⇒ **格 6 红**（越界读 `kSpeed`）。
-2. 把段边界改成 `(int)std::ceil(t / kSegSec)` ⇒ **格 2 红**（10.0 会落到段 1... 如实记红的是哪几条）。
+1. 把 `if (seg >= kSegCount)` 的钳位整段删掉 ⇒ **格 6 红**。
+   ⚠ **2026-10-01 实测订正**：红的是 `s.seg` 那条断言 —— **不是**原文说的"越界读 `kSpeed`"。
+   `kSpeed[seg % 4]` 把下标钉在 [0,3]（探针：`t=85 ⇒ seg=8, speed=kSpeed[0]=0.5`，**没有越界**）。
+2. 把段边界改成 `(int)std::ceil(t / kSegSec)` ⇒ **实测红 3 条（格 2/4/5）**。
+   ⚠ **2026-10-01 实测订正**：红在 `t=9.999999` 处，**不是**原文说的"10.0 会落到段 1"
+   —— `ceil` 与 `floor` 在 `t=10.0` 上**一致**。
 3. 把 `const bool ffOn = (seg < 4);` 改成 `(seg < 5)` ⇒ **格 4 红**。
 
 改回后重跑全绿。
