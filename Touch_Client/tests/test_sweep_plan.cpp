@@ -52,15 +52,18 @@ static void test_speed_sequence() {
     CHECK(NEAR(sweepStateAt(10.0, kF0).speed, 1.0));
     CHECK(NEAR(sweepStateAt(20.0, kF0).speed, 2.0));
     CHECK(NEAR(sweepStateAt(30.0, kF0).speed, 4.0));
+    // ★ 2026-10-01: 新增第 5 档 6×(≈2.19 Hz, 为够到 1~3 Hz 那扇门; 不取 8× 的理由见 SweepPlan.h)。
+    CHECK(NEAR(sweepStateAt(40.0, kF0).speed, 6.0));
     PASS();
 }
 
 // 格 4: FF 在后四段关
 static void test_ff_off_in_second_half() {
     TEST(ff_off_in_second_half);
-    CHECK(sweepStateAt(39.0, kF0).ffOn);
-    CHECK(!sweepStateAt(40.0, kF0).ffOn);
-    CHECK(!sweepStateAt(79.9, kF0).ffOn);
+    // ★ 2026-10-01: 档数 4→5 ⇒ 两半的边界由 40s 挪到 50s, 总时长 80s→100s。
+    CHECK(sweepStateAt(49.0, kF0).ffOn);
+    CHECK(!sweepStateAt(50.0, kF0).ffOn);
+    CHECK(!sweepStateAt(99.9, kF0).ffOn);
     PASS();
 }
 
