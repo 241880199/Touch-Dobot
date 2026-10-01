@@ -216,7 +216,7 @@ void RelayCore::sendReflectionGain(GainReadback::SendMode mode) {
 | 10 | **接受** | 不变式由 `test_force_tuning.cpp:108` 的 `static_initial_value_is_legal` 兜住；作者原判 |
 | 11 | ✅ **已修（2026-10-01）** | `relay_gui.m` 给"**C++ 只有一个拒收理由**"这个前提**补上钉住它的断言指针** —— `Touch_Client/tests/test_force_tuning.cpp` 的 `test_set_gain_bounds`（`CHECK(!setGain(99.9))/(300.1)/(nan)/(inf)`）—— `1a48449`。★ **写之前回代码核过**：`ForceTuning.cpp:39` 确实只有 `if (!inRange(v)) return false;` 一条拒收路 |
 | 12 | 已修（本批） | `210168c`（`GainReadback.h`，三样状态 + 迁移抽成可测单元）+ `bc97e7f`（调用点换 `SendMode`）。**接线那层仍无自动化覆盖**（见 §2.5） |
-| 13 | **第二批**（`relay_gui.m`，**行为项**） | `relay_gui.m:283` 的 `AllowEmpty` 无 `isprop` 回退（全文件无 `isprop`）⇒ 老 MATLAB 构造期整窗起不来 |
+| 13 | ✅ **已修（2026-10-01）** | `relay_gui.m` 把 `AllowEmpty`/`Placeholder` **从构造参数里拿出来**、改成构造后按 `isprop` 决定（构造参数一旦不支持就是**构造期抛错 ⇒ 整窗起不来**；改后老版本上窗口照常起、只退回"框里显示默认数"那一档）—— `1a48449` 之后的那次提交。<br>★ **证据**（`../evidence/2026-10-01-scripts/probe_allowempty_fallback.m` 实测）：**同一段代码形状跑两遍**（走支持分支 / 强制走回退分支）**两条都建得出控件** ✓；外加 `checkcode` 无语法错。<br>⚠ **边界**：本机 R2025b **支持** `AllowEmpty` ⇒ **复现不出老 MATLAB 的构造期失败**，那一条只有老版本上才能证 |
 | 14 | ✅ **已修（2026-10-01）** | `relay_gui.m` 拖动/松手那一段**补注"不是保证"**（C++ 回读**按值变化门控** ⇒ 那条**可能根本不来**；是诊断缺口、不是承诺违背）—— `1a48449` |
 | 15 | **第二批**（`relay_gui.m`，**行为项**） | `relay_gui.m:543`（`onGainDefault`）—— 清空后按 `[Default]` 逼不出回读 |
 | 16 | 已修（本批） | `9a563dd` —— `main()` 出口 `atexit` 兜底清理 + 用例改名（`test_missing_file_returns_false`） |
@@ -227,9 +227,13 @@ void RelayCore::sendReflectionGain(GainReadback::SendMode mode) {
 | 21 | ⛔ **作废（不可恢复）** | 所指的 harness Task 7 报告不进 git；且现行 `Touch_Client/tests/run_tests.bat` 已有 **25** 处跟随 `call` 的 `@echo off`（`:65`–`:751`；含 `:1` 与 `:48` 散文里的字面量共 **27** 处），报告里那个计数已整体过期 |
 | 22 | ✅ **已关闭** | "运行失败分支"的负对照 2026-09-24 已刻意做过（`Docs/superpowers/specs/2026-09-22-test-harness-state.md:335-377`） |
 
-（合计：已修 **12** · 接受 **4** · 第二批 **3** · 已关闭 **2** · 作废 **1** = **22**。）
+（合计：已修 **13** · 接受 **4** · 第二批 **2** · 已关闭 **2** · 作废 **1** = **22**。）
 
-> ★ **2026-10-01 更新**：第 **7 · 8 · 11 · 14** 条已修（`1a48449`）—— **已修 8 → 12，第二批 7 → 3**（余 **13 · 15 · 19**）。
+> ★ **2026-10-01 更新**：第 **7 · 8 · 11 · 14 · 13** 条已修 —— **已修 8 → 13，第二批 7 → 2**（余 **15 · 19**）。
+> **13** 的做法：`AllowEmpty`/`Placeholder` 移出构造参数、改由 `isprop` 决定；
+> ★ 并用 `../evidence/2026-10-01-scripts/probe_allowempty_fallback.m` **把回退路径真的走了一遍**
+> （强制走"不支持"分支 ⇒ 控件照样建得出来）✓。
+> ⚠ 但**本机 R2025b 支持 `AllowEmpty`** ⇒ **老 MATLAB 的构造期失败复现不出来**，那条只有老版本能证。
 > ⚠ 这四条原先挂着的"**本机无 MATLAB ⇒ 改了只能人工审读**"是**错的**：本机装着 **R2025b (25.2.0.3177638)**、
 > `matlab -batch` 能跑，`checkcode('relay_gui.m')` 也能跑。
 > ★ 而且**第 13 条的原始描述自己就引用了本机 `VersionInfo.xml`** ⇒ **那句假前提是后来在设计文档里长出来的**，

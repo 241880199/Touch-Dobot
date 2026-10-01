@@ -280,10 +280,23 @@ function relay_gui()
         'ValueChangedFcn',  @(s,e) onGainChanged(e.Value));
     sldGain.Layout.Row = 1;  sldGain.Layout.Column = 1;
 
-    edGain = uieditfield(pnlGainCtl, 'numeric', 'Value', [], 'AllowEmpty', true, ...
-        'Placeholder', '— 等待 C++ —', 'Enable', 'off', ...
+    % ★★ 2026-10-01（Minor 第 13 条）：**`AllowEmpty` / `Placeholder` 从【构造参数】里拿出来**。
+    %   【为什么】它们都是**较新**的编辑框属性。写成构造参数时, 在**不支持它们的 MATLAB** 上
+    %     抛的是**构造期**的错 ⇒ `relay_gui()` 直接报错、**整个窗口起不来**（硬依赖, 不是降级)。
+    %   ⇒ 改成"先按老属性构造, 再**问一句 `isprop`**、支持才打开"。这样老版本上**窗口照常起来**,
+    %     只是退回"框里显示 0"那一档（占位那句话没有）。
+    %   ⚠ **赋值的先后不能反**: 必须先 `AllowEmpty = true` 才允许 `Value = []`
+    %     （`Value=[]` 在 AllowEmpty 为 false 时会被拒)。
+    edGain = uieditfield(pnlGainCtl, 'numeric', 'Enable', 'off', ...
         'FontName', 'Consolas', 'FontSize', 10, ...
         'ValueChangedFcn', @(s,e) onGainChanged(e.Value));
+    if isprop(edGain, 'AllowEmpty')
+        edGain.AllowEmpty = true;
+        if isprop(edGain, 'Placeholder')
+            edGain.Placeholder = '— 等待 C++ —';
+        end
+        edGain.Value = [];      % 见上: 必须在 AllowEmpty 之后
+    end
     edGain.Layout.Row = 1;  edGain.Layout.Column = 2;
 
     btnGainDefault = uibutton(pnlGainCtl, 'Text', 'Default', 'FontSize', 9, ...
