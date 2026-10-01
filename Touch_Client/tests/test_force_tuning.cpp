@@ -126,10 +126,13 @@ static void test_save_load_roundtrip() {
     PASS();
 }
 
-static void test_missing_file_is_quiet_false() {
-    TEST(missing_file_is_quiet_false);
+static void test_missing_file_returns_false() {
+    TEST(missing_file_returns_false);
     double v = 0.0;
-    // 文件不存在 = 还没调过, 正常路径 ⇒ 返回 false 但不出声 (出声的是"文件在、内容不合规")
+    // 文件不存在 = 还没调过, 正常路径 ⇒ 返回 false。
+    // ⚠ 2026-09-30 (Minor 第 16 条): 本用例【只断言返回值】。从前它叫 ..._is_quiet_false,
+    //   而"不出声"那半**没有任何断言** —— 断言它要捕获 stderr, 本测试床没有那个机制。
+    //   ⇒ 名字改成它真正断言的东西。要真断言"不出声", 得先给测试床加捕获。
     CHECK(!ForceTuning::loadFromFile("_definitely_not_here_12345.json", &v));
     PASS();
 }
@@ -230,6 +233,9 @@ static void test_tick_at_does_not_rewrite_when_clean() {
 }
 
 int main() {
+    // ★ 2026-09-30 (Minor 第 16 条): 任何一条 CHECK 早退都会跳过它那一格的 remove(kTmp)
+    //   ⇒ 临时文件会留在 tests/ 里。main() 出口兜一次, 这样【失败的那一次运行】也不留垃圾。
+    std::atexit([] { remove(kTmp); });
     std::cout << "=== ForceTuning Tests ===" << std::endl;
     test_parse_ok();
     test_parse_wrong_version();
@@ -240,7 +246,7 @@ int main() {
     test_set_gain_bounds();
     test_static_initial_value_is_legal();
     test_save_load_roundtrip();
-    test_missing_file_is_quiet_false();
+    test_missing_file_returns_false();
     test_corrupt_file_rejected();
     test_tick_at_debounces_persistence();
     test_tick_at_does_not_rewrite_when_clean();
