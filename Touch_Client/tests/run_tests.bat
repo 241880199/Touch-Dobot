@@ -683,8 +683,8 @@ rem   used to live in RelayCore::sendReflectionGain, and RelayCore.cpp is still
 rem   compiled by no test here.
 rem   WARNING -- read the boundary, do not overclaim: this suite covers the state
 rem   machine IN ISOLATION. The CALL SITE in RelayCore.cpp still has NO automated
-rem   coverage; wiring it up is Task 2 of the same plan. A green run here must NOT
-rem   be read as "the wiring is tested".
+rem   coverage (the SendMode wiring was Task 2 of the same plan; it remains uncovered).
+rem   A green run here must NOT be read as "the wiring is tested".
 rem   The assertion count is deliberately NOT copied here: the suite prints it on
 rem   every run, and a hand-typed copy only goes stale in the silent direction
 rem   (see the note on hand-typed numbers in the NOT RUN block at the bottom).

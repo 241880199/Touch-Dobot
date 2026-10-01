@@ -2952,6 +2952,8 @@ static void requestForceZero(const char* src) {
         //   ② ForceCalibration::startZero() 的 !canStart()。而 canStart() ≡ !isRunning()
         //   ≡ !relay.isForceCalibrating(), 上面那条守卫【已经把它排除】⇒ 走到本 else
         //   只可能是那三个条件之一。
+        //   ⚠ 这个 ≡ 是【手工维护】的两个实现: canStart() 逐个列举 IDLE/DONE/ABORTED,
+        //     isRunning() 写的是 "!= 这三个" ⇒ 将来加一个 State 只改一边, 上面这句自证就静默失真。
         //   ⚠ 所以别把本 else 读成"原因未知": 它是一个【防御性】分支。
         // 文本【不含逗号】: 与 reportWarning 的自律一致 (C| 虽只拼一个 %s, 但保持同一套习惯)。
         snprintf(msg, sizeof(msg),

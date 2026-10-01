@@ -9,7 +9,10 @@
 //     · 三样状态的迁移 (什么时候推进"上次发送"那两样、pending 什么时候置与清);
 //     · 调用点传的【实参】—— 判决用例只看形参, 某个调用点把 force 传错, 5 格一个都不会红。
 //   代价已经付过一次 (2026-09-22): 限频被传成 force=true ⇒ 静默死掉, 测试床一声不响。
-//   ⇒ 本单元把这两样都变成可测的; 调用点改用【枚举】而不是裸 bool ⇒ 传错的形状被编译器挡住。
+//   ⇒ 本单元把这两样都变成可测的; 调用点改用【枚举】而不是裸 bool ⇒ 传错的【形状】(裸 bool /
+//     隐式转换) 被编译器挡住。
+//   ⚠ 但它只挡【形状】, 挡不住【选错枚举量】: Forced 与 Throttled 传反仍是同一个逻辑错误
+//     (2026-09-22 那类), 照样编译通过 ⇒ 别把这条读成"接线不可能再错"。
 //
 // 【与 GainReadbackPolicy.h 的分工 —— 别把两者合并】
 //   判决在那边 (纯函数、无状态、"给定这些数该不该发", 可以单独证伪);
@@ -74,7 +77,7 @@ public:
     // pollRelayCommands 每帧问它: 有没有被限频挡下、还欠 MATLAB 一条?
     bool pending() const { return m_pending.load(); }
 
-    // 只读回显, 供用例与诊断 —— 【不参与判决】。
+    // 只读回显, 供【用例】—— 【不参与判决】。(今天只有用例调用它们, 没有诊断路径。)
     double lastSentGain() const { return m_lastSentGain.load(); }
     unsigned long lastReportMs() const { return m_lastReportMs.load(); }
 

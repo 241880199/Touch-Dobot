@@ -59,7 +59,7 @@ static void test_window_boundary() {
 }
 
 // ===== 第 5 格: 32 位时钟环绕 =====
-// s_lastGainReportMs 是 DWORD ⇒ 开机 49.7 天后会绕回来。无符号相减天然正确,
+// 发送时刻是 32 位 (DWORD) ⇒ 开机 49.7 天后会绕回来。无符号相减天然正确,
 // 这一格把那个语义钉住 (换成有符号比较就是另一回事了)。
 static void test_clock_wraparound() {
     TEST(clock_wraparound);
