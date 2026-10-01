@@ -92,3 +92,10 @@ Touch_Client/x64/Release/force_wave_cont.csv
 #     （上面那两条 x64 点名列是历史遗留, 留着无害但确实多余 —— `git check-ignore` 会告诉你真凶是第 5 行）。
 Touch_Client/force_wave_through_*.csv
 Touch_Client/force_wave_cont_through_*.csv
+
+# ===== 2026-10-01: MSBuild 的【嵌套】中间目录漏了两个日志 =====
+#   `Touch_Client/Touch_Client/x64/Release/` 是一套【多余的】中间目录(45 个 .obj 已被 `*.obj` 盖住,
+#   但 `Touch_Client.Build.CppClean.log` 与 `Touch_Client.vcxproj.FileListAbsolute.txt` 没有)
+#   ⇒ 整棵子树都是构建产物, 点名目录即可。
+#   ⚠ 与第 5 行的 `Touch_Client/x64/` 【不是同一条】: 带斜杠的模式锚在仓库根, 盖不住这个【嵌套的】。
+Touch_Client/Touch_Client/

@@ -536,7 +536,9 @@ git commit -m "feat(sweep): 段调度单元 SweepPlan.h" -m "8 段(4 倍速 x FF
 **Files:**
 - Modify: `Touch_Client/relay/RelayCore.h`（新增 `m_sweepStartMs` 与两个方法声明）
 - Modify: `Touch_Client/relay/RelayCore.cpp`（`startSweep` / `stopSweep` / `sweepRunning` + ServoP 路径里那段）
-- Modify: `Touch_Client/config/Config.h`（三个常数 + 一行开关）
+- Modify: `Touch_Client/config/Config.h`（**两个**常数：`SWEEP_REPLAY_ENABLED` 开关 + `SWEEP_AMPLITUDE_MM` 幅度）
+  ⚠ **2026-10-01 订正**：原文写"三个常数 + 一行开关"，但 Step 1 的代码只给了**两个** —— 倍速表与段长在 `SweepPlan.h` 里。
+  实现者按代码给了两个（没有为凑数去造第三个），如实记。
 
 **Interfaces:**
 - Consumes：`SweepWaveform::lookup` / `SweepWaveform::kF0Hz`（Task 1）· `SweepPlan::sweepStateAt` 等（Task 2）
