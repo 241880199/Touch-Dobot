@@ -165,6 +165,12 @@ static void test_gain_ramp_is_gradual() {
     // ⚠ 100 / 300 是 ForceTuning::GAIN_MIN / GAIN_MAX 的当前值 (范围的唯一定义在 ForceTuning.h)。
     //   前置条件必须【被命名】: 范围若收窄, setGain 返回 false 且【什么都不改】, 那么下面那些
     //   数值断言会红成"斜坡错了/映射错了", 病因指错地方。这两条 CHECK 红了就是"量程对不上"。
+    // ★ 2026-09-30 补【双向】事实 (Minor 第 9 条): 上面这句从前只说了一半。
+    //   · 【收窄】由本文件下面那两条 CHECK(setGain(...)) 钉住 —— 它们红了就是"量程对不上";
+    //   · 【放宽】不在本文件, 而在兄弟套件 test_force_tuning.cpp 的 `set_gain_bounds`:
+    //     它用字面量断言 `fabs(ForceTuning::gain() - 100.0) < 1e-9`(下限) 与 `300.0`(上限),
+    //     所以 GAIN_MIN 若放宽到 50, 那条当场红。
+    //   ⇒ 清单里"放宽范围两句话就假了却全绿"这半句【已不成立】(2026-09-30 回核)。
     CHECK(ForceTuning::setGain(100.0));
     ForcePipeline::init();                       // 斜坡就位在 100
     for (int i = 0; i < 300; i++) ForcePipeline::step(fd);   // 先让滤波器收敛

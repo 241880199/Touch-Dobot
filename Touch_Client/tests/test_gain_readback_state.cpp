@@ -93,7 +93,7 @@ static void test_forced_bypasses_unchanged() {
     TEST(forced_bypasses_unchanged);
     State s;
     CHECK(s.beginSend(SendMode::Forced, 120.0, 1000));
-    CHECK(s.beginSend(SendMode::Forced, 120.0, 1010));      // 同值同刻, 仍发
+    CHECK(s.beginSend(SendMode::Forced, 120.0, 1010));      // 同值、【不同刻】(1010 ≠ 1000), 仍发
     CHECK(s.lastReportMs() == 1010);
     PASS();
 }

@@ -84,7 +84,10 @@ bool saveToFile(const char* path, double g) {
 
 bool loadFromFile(const char* path, double* outGain) {
     FILE* f = fopen(path, "r");
-    if (!f) return false;   // 文件不存在 = 还没调过, 正常路径, 不吵
+    // ⚠ 这一行把【不存在】与【打不开】当成同一件事 (权限 / 被占用 / 路径是目录…)。
+    //   对"没见过这份文件"来说这是正常的; 对"打不开"来说它安静得过分 —— 但操作员并非全盲:
+    //   loadOnStartup 那行仍会打 "未采用 <path>", 而它就在启动横幅上。
+    if (!f) return false;
     char buf[1024];
     const size_t n = fread(buf, 1, sizeof(buf) - 1, f);
     fclose(f);

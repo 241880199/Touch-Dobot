@@ -2947,6 +2947,12 @@ static void requestForceZero(const char* src) {
         // ⚠ 【这里故意不重复判那三个条件】(仍在传输 / 机械臂未连 / 报警中): 那会把守卫链复制成
         //   第二份, 而本功能的设计就是"守卫链只有一份"(见本函数顶上那段)。所以只报"未启动",
         //   并让操作员知道去查哪三处。
+        // ★ 2026-09-30: 上面那句"原因就是那三个条件"现在【有自证】了 ——
+        //   startForceZeroing() 只有两条失败路: ① forceCalibPreconditions (就是这三个条件)
+        //   ② ForceCalibration::startZero() 的 !canStart()。而 canStart() ≡ !isRunning()
+        //   ≡ !relay.isForceCalibrating(), 上面那条守卫【已经把它排除】⇒ 走到本 else
+        //   只可能是那三个条件之一。
+        //   ⚠ 所以别把本 else 读成"原因未知": 它是一个【防御性】分支。
         // 文本【不含逗号】: 与 reportWarning 的自律一致 (C| 虽只拼一个 %s, 但保持同一套习惯)。
         snprintf(msg, sizeof(msg),
                  "[Force] 调零【未启动】—— 机械臂状态不允许 (仍在传输 / 未连接 / 报警中 三者之一)"
@@ -4142,8 +4148,9 @@ int main(int argc, char* argv[]) {
     //   ⚠ 后来者别把本调用"整理"到后面去 —— 机制 (触觉线程上那一次回读) 见 RelayCore.cpp
     //   的 sendReflectionGain 文档块, 此处不重复。
     // ★ 晚了会怎样: 回读报的是旧值而实际生效的是文件里的值 ⇒ 界面一个数、手上另一个数,
-    //   无声地不一致; 这个不一致要等到下一次回读 —— 重连, 或一次被接受的增益改动 —— 才会
-    //   被纠正, 没有别的事件会自己纠正它。这正是本设计要消灭的状态。
+    //   无声地不一致; 这个不一致要等到下一次回读 —— 重连, 或一次增益改动 (【接受与拒绝
+    //   都会回读】, 见 RelayCore.cpp 的 dispatchRelayCommand) —— 才会被纠正,
+    //   没有别的事件会自己纠正它。这正是本设计要消灭的状态。
     // ★ 也必须在 initForceReader 之前 —— 那里的 ForcePipeline::init() 会把增益斜坡就位;
     //   晚了那 0.25 秒里增益是错的 (不会失控, 总夹还在, 但没必要)。
     ForceTuning::loadOnStartup();

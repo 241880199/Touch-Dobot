@@ -96,6 +96,9 @@ static void test_rg_range_not_checked_here() {
     // 这里钉住这条分工, 免得将来有人把增益范围 (ForceTuning::GAIN_MIN/GAIN_MAX) 塞进解析器、
     // 于是范围有了第二份实现 (数值也不抄进来, 抄了会过期 —— 只用符号名)。
     // 注意这条用例【不引用 ForceTuning.h】: 解析器与它无依赖, 引用反而把两者绑在一起。
+    // ⚠ 2026-09-30 补: 上面提到的 `ForceTuning::GAIN_MIN/GAIN_MAX` 是一处
+    //   【非编译器强制】的引用 —— 这个文件不 include 它, 所以那两个符号改名时,
+    //   编译器【不会】在这里报错, 只能靠人回来改这一行。改 ForceTuning 的公开名字时请搜这里。
     double v = 0.0;
     CHECK(RelayCommandParser::parse("RG|5000", &v) == R::SetReflectionGain);
     CHECK(fabs(v - 5000.0) < 1e-9);
