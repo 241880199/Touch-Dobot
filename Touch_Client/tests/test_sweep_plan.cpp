@@ -84,6 +84,19 @@ static void test_negative_elapsed_is_zero() {
     PASS();
 }
 
+// 格 8: elapsed = NaN 当作 0 —— 与格 7 同一条守卫 `if (!(t > 0.0))`。
+//   ⚠ 为什么必须单列一格: NaN 与任何数比较【恒假】, 所以 `t > 0.0` 为假 ⇒ 走守卫；
+//     若守卫被删, `(int)std::floor(NaN/10)` 是 UB ⇒ 格 7/8 是这条守卫唯一的红对照。
+static void test_nan_elapsed_is_zero() {
+    TEST(nan_elapsed_is_zero);
+    auto s = sweepStateAt(std::nan(""));
+    CHECK(s.seg == 0);
+    CHECK(NEAR(s.speed, 0.5));
+    CHECK(s.ffOn);
+    CHECK(NEAR(s.phase01, 0.0));
+    PASS();
+}
+
 int main() {
     std::cout << "=== SweepPlan Tests ===" << std::endl;
     test_start_segment();
@@ -93,6 +106,7 @@ int main() {
     test_phase_accumulates_with_speed();
     test_after_end_clamps_to_last_segment();
     test_negative_elapsed_is_zero();
+    test_nan_elapsed_is_zero();
     std::cout << std::endl << g_passed << " passed, " << g_failed << " failed" << std::endl;
     return g_failed > 0 ? 1 : 0;
 }
