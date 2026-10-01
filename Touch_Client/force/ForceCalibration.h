@@ -60,6 +60,13 @@ namespace ForceCalibration {
     //     注入值必须 ≤ 上限 (如 0.033)。(ForceCompensation 那个钩子没有这道守卫。)
     void setUpdateDtForTest(double sec);
 
+    // ★★ 2026-10-01：SOLVE 相拟合出来的那个【标量质量】(kg) 的只读回显，供用例断言。
+    //   ⚠ 它**不写进任何东西** —— 全量模型的参数表里没有标量质量（见 .cpp 里 SOLVE 那段），
+    //     它只有【诊断价值】。正因为它是诊断值，出 NaN 时没人会发现 ⇒ 才需要用例钉住。
+    //   加这个口子的理由与 `setUpdateDtForTest` 同：那个值是**只打印**的，而本测试床
+    //   **没有 stdout 捕获**（见 `test_force_tuning.cpp` 里那条注记）⇒ 想断言它只能开只读口。
+    double testMassKg();
+
     // Persistence —— 全量模型的参数表 (version 3)。
     //   A:          3×3 row-major (kg)          c_s: 质心 (【米】, 传感器测量系)
     //   biasForce:  N                           biasTorque: N·m

@@ -1312,6 +1312,58 @@ static void test_sweep_still_enters_motion() {
     PASS();
 }
 
+// ★★ 2026-10-01：`dt == 0` 时 SOLVE 相不许出 NaN。
+//   【为什么会有这一条】SOLVE 的三点模板要除以 `dt * dt`，而 `updateIntervalSec()` **有三条路径返回 0**：
+//     ① 进程内第一次调用（`lastMs == 0`）② **gap 守卫**（两次轮询间隔 > 上限）③ 用例注入。
+//   除以 0 ⇒ inf/NaN ⇒ `if (aMag < 0.05) continue;` 对 **NaN 为假、拦不住** ⇒ NaN 进 `sumFa/sumA2`
+//     ⇒ 最后那行 `[Force] SOLVE: motion-fit mass=…` 打出 NaN。
+//   【为什么它不影响补偿】那个标量质量**只被打印与自检用，不写进任何东西**（见 .cpp 里 SOLVE 那段）
+//     —— 正因为它是诊断值，坏了也没人发现 ⇒ 才需要用例钉住。
+//   【判据】驱动到 SOLVE、注入 `dt = 0` ⇒ 拟合应当走【既有的"样本不足 ⇒ m = 0"】那条路
+//     ⇒ `testMassKg()` 必须**有限且为 0**（不是 NaN）。
+//   【负对照】**删掉** `ForceCalibration.cpp` SOLVE 那段开头的 `if (!(dt > 0.0)) continue;` ⇒ 本格必红。
+static void test_solve_with_zero_dt_is_finite() {
+    TEST(solve_with_zero_dt_is_finite);
+    ForceCompensation::init();
+    ForceCalibration::setDragModeCallback(countDrag);
+    CHECK(ForceCalibration::start());
+    ForceCalibration::setUpdateDtForTest(0.5);
+
+    double raw[6]  = {1.0, 0.5, 0.2, 0.1, 0.05, 0.02};
+    double pose[6] = {0, 0, 0, 0, 0, 0};
+    for (int i = 0; i < 5 && ForceCalibration::currentState() == ForceCalibration::State::TARE; i++) {
+        ForceCalibration::update(raw, pose);
+    }
+    CHECK(ForceCalibration::currentState() == ForceCalibration::State::MOTION);
+
+    // ⚠★ 样本数必须是 【20】 而不是 6 —— 这不是随手取的:
+    //   SOLVE 里有一条 `if (used < 10 || sumA2 < 0.01) ⇒ g_massKg = 0;` 的**前置短路**。
+    //   5 点窗 ⇒ 20 个样本给出 16 个 `used` ⇒ **越过 10** ⇒ 才会真的去算 `sumFa/sumA2`;
+    //   若只给 6 个样本 (`used` = 2 < 10), 那条短路会**先把结果压成 0**, NaN 根本到不了 `g_massKg`
+    //   ⇒ 用例会**假绿**（这一点是负对照实测出来的：6 个样本时删掉守卫本格【不红】）。
+    //   ⇒ **加大到 20 是让这条用例真的有判别力的前提**, 别改小。
+    //   (同时 g_phaseTimer 攒到 10.0 ≥ 2.0 ✓)
+    for (int i = 0; i < 20; i++) {
+        pose[0] = 1.0 * i;
+        pose[1] = 0.5 * i;
+        ForceCalibration::update(raw, pose);
+    }
+    ForceCalibration::confirmPose();                     // = 按 SPACE
+    CHECK(ForceCalibration::currentState() == ForceCalibration::State::SOLVE);
+
+    ForceCalibration::setUpdateDtForTest(0.0);           // ★ 注入 dt = 0
+    ForceCalibration::update(raw, pose);                 // SOLVE 相在这里做拟合
+
+    const double m = ForceCalibration::testMassKg();
+    CHECK(std::isfinite(m));                             // ★ 核心：不许 NaN / inf
+    CHECK(m == 0.0);                                     // 走"样本不足 ⇒ m = 0"那条既有路
+
+    ForceCalibration::abort();
+    ForceCalibration::setUpdateDtForTest(-1.0);
+    ForceCalibration::setDragModeCallback(nullptr);
+    PASS();
+}
+
 // 可重复调零: 上一次结束后能再次启动 (不做进程重启)
 static void test_zero_restartable() {
     TEST(zero_restartable);
@@ -1951,6 +2003,7 @@ int main() {
     test_zero_only_no_motion();
     test_zero_abort_not_applied();
     test_sweep_still_enters_motion();
+    test_solve_with_zero_dt_is_finite();
     test_zero_restartable();
     test_calib_tare_timing_follows_injected_dt();
     test_calib_tare_gap_guard_no_finalize();

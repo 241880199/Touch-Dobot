@@ -132,6 +132,11 @@ void setUpdateDtForTest(double sec) {
     g_updateDtForTest = sec;
 }
 
+// ★ 2026-10-01：SOLVE 相那个标量质量的只读回显（见头文件里那段说明）。
+double testMassKg() {
+    return g_massKg;
+}
+
 static void finalizeBias() {
     int n = (g_tareCount > 0) ? g_tareCount : 1;
     for (int i = 0; i < 6; i++) g_tareAccum[i] /= n;
@@ -382,7 +387,20 @@ bool update(const double raw[6], const double pose[6]) {
         double rx[5] = {0}, ry[5] = {0}, rz[5] = {0};
         int pi = 0, pn = 0;
 
+        // ★★ 2026-10-01：`dt == 0` 的守卫。
+        //   【为什么需要】下面那个三点模板要除以 `dt * dt`，而 `updateIntervalSec()` **有三条路径返回 0**：
+        //     ① 进程内第一次调用（`lastMs == 0`）；
+        //     ② **gap 守卫**：两次轮询间隔 > `FORCE_CALIB_MAX_INTERVAL_S`（轮询停过一段）；
+        //     ③ 用例注入（`setUpdateDtForTest(0)`）。
+        //   ⇒ 除以 0 得 inf/NaN ⇒ `aMag` 为 NaN ⇒ **`if (aMag < 0.05)` 对 NaN 为假、不会被跳过**
+        //     ⇒ NaN 进 `sumFa/sumA2` ⇒ 最后打出的 `motion-fit mass=` 是 NaN。
+        //   【影响面】`g_massKg` **只被打印与自检用，不写进任何东西**（见下面那段说明）⇒
+        //     后果**只是那一行诊断值变成 NaN**，不影响补偿。
+        //   【为什么是 continue 而不是夹一个下限】dt 为 0 时加速度**本来就无法算**（信息缺失，不是"很小"）；
+        //     跳过它 ⇒ `used` 上不去 ⇒ **自然走下面那条既有的"样本不足 ⇒ m=0"告警**，语义是对的。
+        //   ⚠ 别改成"给 dt 一个下限"——那会**编出一个假的加速度**，比 NaN 更坏。
         for (int k = 0; k < g_motionCount; k++) {
+            if (!(dt > 0.0)) continue;   // 见上：dt 缺失时本帧的加速度无法算 ⇒ 跳过（`used` 会因此上不去）
             px[pi] = g_motionPos[k][0];
             py[pi] = g_motionPos[k][1];
             pz[pi] = g_motionPos[k][2];
