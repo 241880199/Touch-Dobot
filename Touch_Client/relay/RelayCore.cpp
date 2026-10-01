@@ -1011,7 +1011,23 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
         m_nanFrameCount = 0;  // 正常帧清零
 
         // 跳过微小增量 (Touch 噪声)
-        if (fabs(dx) < 0.05 && fabs(dy) < 0.05 && fabs(dz) < 0.05) {
+        //
+        // ★ F4（2026-10-01 修复轮）: 【扫描在跑的时候这一支不许走】。
+        //   本行是**在叠加之前** `return` 的（叠加在下面的 `// ===== Compute ServoP position =====` 之后）
+        //   ⇒ 操作员**按住不动**（= 扫描时本来就该有的姿态）时 `dx/dy/dz` 三个都 < 0.05mm
+        //   ⇒ 帧帧从这里返回 ⇒ 两个后果：
+        //     ① **整趟没有任何扫描动作** —— 手臂只跟着微动，偏移永远不叠加；
+        //     ② `forceFeedbackEnabled` 也**停止更新** ⇒ t=40 s 那次 FF 开→关的台阶**不会发生或时刻乱漂**。
+        //   ⛔ 为什么不能靠"反正 Touch 有抖动，闸不会命中"：那等于让本功能的正确性挂在
+        //      **另一个子系统的噪声**上（而这个闸当初正是为滤掉它而设的）。
+        //   ✅ 判据：这一帧**真的会**由叠加改变目标（`Config` 开 + 扫描在跑 + 按钮1 按着 ——
+        //      与下面叠加块那个守卫**逐字相同**）⇒ 它**不是**一次"重发"，必须放行。
+        //   ⚠ 只放行、不改这个闸本身的语义：扫描没在跑时它**逐字**还是原来那三行。
+        const bool sweepWouldOffset = Config::SWEEP_REPLAY_ENABLED
+                                      && m_sweepStartMs
+                                      && appState.lastButtonState;
+        if (!sweepWouldOffset
+            && fabs(dx) < 0.05 && fabs(dy) < 0.05 && fabs(dz) < 0.05) {
             LeaveCriticalSection(&m_basePointLock);
             return;
         }
@@ -1429,7 +1445,18 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
     //   ① 偏移**只加在本地 `servoCmdX/Y/Z` 上**，**绝不写回 `m_targetPos`**。
     //      上面 `if (!m_transmittingOrient) { m_targetPos = clamped; }` 每帧都用 `clamped` 重设它;
     //      偏移若混进那条路，就会**逐帧积分**（每帧在上一帧的偏移之上再加一次）⇒ 臂一路漂走。
-    //      ⇒ 这里是【本地变量】上的叠加，程序里没有第二条写 `m_targetPos` 的路。
+    //      ⇒ 这里是【本地变量】上的叠加。
+    //      ⚠ 订正（2026-10-01 修复轮 F6）：原文写的是"程序里**没有第二条**写 `m_targetPos` 的路"
+    //        —— **那句话是假的**（这正是本仓记过的"断言行为却不引它读到的那几行"）。
+    //        回代码数过：`m_targetPos` 一共有**四处**写点（按**函数名**列出；行号会漂）：
+    //          · `sendPosition`   —— `m_targetPos = clamped;`（就在本块**上面**；
+    //                                 `clamped` 是**未含偏移**的那个量）
+    //          · `onButtonPress`  —— `m_targetPos = SafetyBoundary::clampToBoundaryActive(rawPos);`
+    //          · `onButton2Press` —— 两条同形状的：`…clampToBoundaryActive(tcpPos)` 与 `…(rawPos)`
+    //        ✅ 真正成立、也是真正**承重**的性质是：**四处没有一个从 `servoCmd*` 或偏移推导出来**
+    //           —— 它们写进去的是 `clamped` / `rawPos` / `tcpPos`，都是**别处的量**。
+    //           ⇒ 偏移进不了 `m_targetPos`，**不是**因为"没有别的写点"，
+    //             而是因为"**别的写点都不读这个量**"。
     //   ② 偏移目标**必过一道安全门**。本函数上面的总闸 `evaluate(clamped)`
     //      （`if (appState.lastButtonState)` 那一段里）在本行【之前】就跑完了
     //      ⇒ 在这里直接加就**绕过了安全预测器**。故就地补一道 `evaluatePositionOnly`
@@ -1464,7 +1491,9 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
                       << std::endl;
             stopSweep();   // 还原 FF + 打印"停止: FF 已还原为 …"
         } else {
-            const SweepPlan::State sp = SweepPlan::sweepStateAt(el);
+            // ★ F3（2026-10-01 修复轮）：把【源主频】传进去 —— 段内实际频率 = speed × f0。
+            //   没这一步的话 `sweepStateAt` 会退化成"一圈恒占 10s/speed"，扫的是 0.05~0.4 Hz。
+            const SweepPlan::State sp = SweepPlan::sweepStateAt(el, SweepWaveform::kF0Hz);
             const SweepWaveform::Vec3 off = SweepWaveform::lookup(sp.phase01);
             double amp = Config::SWEEP_AMPLITUDE_MM;
             if (amp < 0.0) amp = 0.0;      // 硬夹: 常数被改坏也不放大（设计 §3.5 S3）
@@ -2930,6 +2959,23 @@ void RelayCore::sendReflectionGain(GainReadback::SendMode mode) {
 void RelayCore::startSweep() {
     if (!Config::SWEEP_REPLAY_ENABLED) {
         std::cout << "[Sweep] 已关闭(SWEEP_REPLAY_ENABLED=false)\n";
+        return;
+    }
+    // ★ F5（2026-10-01 修复轮）: 已在跑 ⇒ **忽略**本次起（不是"重新开始"）。
+    //
+    // 【为什么必须有】下面第一行要把【当前】FF 记进 `m_sweepPrevFf`，而"当前"在
+    //   `t >= 40s`（后四段）时**已经是本趟自己设的 false** ⇒ 覆盖掉它之后，将来 `stopSweep()`
+    //   会把 FF 还原成 **OFF** 并**永久留在那儿** —— 正是 F1 要消灭的那个失效模式的另一条来路。
+    // 【为什么选"忽略"而不是"干净重来"】重来要么(a)沿用旧的 `m_sweepPrevFf`（那就得区分
+    //   "首次起"与"重起"，状态机凭空多一档），要么(b)重记一次（就是上面那个 bug）。
+    //   而"忽略"还顺带保住一条现场可预期的性质：**按 'r' 一次起、一次停**，
+    //   不会因为多按一下就偷偷把时钟清零、把相位跳掉。
+    //   ⚠ 与 `Task 4` 的按键处理一致：那里判 `sweepRunning()` 决定这次 'r' 是起还是停 ⇒
+    //     正常情况下根本不会带着"已在跑"进到这里；本守卫是**兜底**（例如
+    //     `Config::SWEEP_REPLAY_ENABLED` 被改过、或将来多一条调用点）。
+    // ⚠ 只**忽略**、不报错、不改任何状态：什么都不做就是安全的。
+    if (m_sweepStartMs) {
+        std::cout << "[Sweep] 已在运行中, 忽略本次起 (按 'r' 停, 或松开按钮1)\n";
         return;
     }
     // ★ 记下扫描【前】的 FF 状态 —— 后四段会把它关掉, 停止时按这个还原。
