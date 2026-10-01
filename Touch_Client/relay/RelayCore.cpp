@@ -1503,11 +1503,24 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
             //     而段号随 el 单调不减（`sweepStateAt` 对越界的 el 钳在最后一段）⇒ 不会退回旧段再打一次。
             //   ⚠ 本行跑在 ServoP 那条路上（触觉/GLUT 线程）—— 正因只打一次才可接受, 别改成每帧。
             if (sp.seg != m_sweepLastSeg) {
+                // ★ F7（2026-10-01 修复轮）: 本趟的【第一条】标记若不在第 1 段, 就是前面几段被【跳过】了。
+                //   整个叠加块（偏移 + FF + 本标记）都被 `appState.lastButtonState` 门控; 时钟却起于 'r'。
+                //   ⇒ 先按 'r' 再按住按钮1: 从 'r' 到"按住"之间流走的那几段【毫无痕迹】;
+                //     若首次按住时 el 已 ≥ kTotalSec, 还会当场走自动停、**一条标记都不剩**。
+                //   ⚠ 这里【只出声】—— **不动时钟**: 时钟起于 'r' 是 Task 3 的性质、且无覆盖, 不在此重构。
+                if (m_sweepLastSeg == -1 && sp.seg != 0) {
+                    std::cout << "[Sweep] ⚠ 第 1 条标记就是段 " << (sp.seg + 1) << " —— 前面 "
+                              << sp.seg << " 段没跑（按 'r' 时按钮1 没按住）。"
+                              << "下次：先按住按钮1，再按 'r'。" << std::endl;
+                }
                 m_sweepLastSeg = sp.seg;
+                // ★ F8（2026-10-01 修复轮）: 收尾用 `std::endl`（不是 "\n"）—— stdout 被重定向时
+                //   （`_run_captured.bat`）是【全缓冲】, "\n" 不冲缓冲 ⇒ 进程被杀时这几行可能丢,
+                //   而它们正是离线切段要用的键。8 次/趟, 冲一次代价可忽略。
                 std::cout << "[Sweep] 段 " << (sp.seg + 1) << "/" << SweepPlan::kSegCount
                           << "  speed=" << sp.speed << "x  ff=" << (sp.ffOn ? "ON" : "OFF")
                           << "  (源主频 " << SweepWaveform::kF0Hz << "Hz -> 约 "
-                          << (SweepWaveform::kF0Hz * sp.speed) << "Hz)\n";
+                          << (SweepWaveform::kF0Hz * sp.speed) << "Hz)" << std::endl;
             }
 
             const SweepWaveform::Vec3 off = SweepWaveform::lookup(sp.phase01);

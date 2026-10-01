@@ -3758,7 +3758,7 @@ void keyboard(unsigned char key, int, int) {
 
     // ★ 2026-10-01: 'r' = 扫描回放 开 / 关（见 RelayCore::startSweep 与 SweepPlan.h）。
     //   ⚠ 只在【按住按钮1】时才会真的叠加偏移；松开按钮1 即不叠加（偏移那一处自己判 lastButtonState）。
-    //   ⚠⚠ 'r' 是【与 BiasCheck 模式共用】的键（就是上面 3754 那一块）。
+    //   ⚠⚠ 'r' 是【与 BiasCheck 模式共用】的键（就是上面 `BiasCheck::mode` 里那一块 `'r'`）。
     //      ⇒ 这里【不】加 `&& !BiasCheck::mode` 守卫 —— 消歧靠的是【本块排在它之后】:
     //         模式【内】上面那块先 return（'r' 仍是 recordRepeat, 扫描在那种模式下到不了）,
     //         模式【外】它条件为假、自然落到本块。
