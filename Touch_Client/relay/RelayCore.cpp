@@ -1494,6 +1494,22 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
             // ★ F3（2026-10-01 修复轮）：把【源主频】传进去 —— 段内实际频率 = speed × f0。
             //   没这一步的话 `sweepStateAt` 会退化成"一圈恒占 10s/speed"，扫的是 0.05~0.4 Hz。
             const SweepPlan::State sp = SweepPlan::sweepStateAt(el, SweepWaveform::kF0Hz);
+
+            // ★ 段标记（每段【只在第一次】成立时打一行）—— 离线分析按它切 `force_wave.csv`。
+            //   去重靠成员 `m_sweepLastSeg`（声明 `relay/RelayCore.h`；`startSweep()` 里复位为 -1）
+            //   ⇒ 每趟从"还没打过任何段"起算, 第一个命中段的 `sp.seg` 必然 != -1 ⇒ 一定会打。
+            //   ⚠ 为什么【不会】同一段打两次: 打印后立刻回写 `m_sweepLastSeg = sp.seg`;
+            //     回写后, 该段余下每一帧 `sp.seg != m_sweepLastSeg` 都为假 ⇒ 本分支不再进。
+            //     而段号随 el 单调不减（`sweepStateAt` 对越界的 el 钳在最后一段）⇒ 不会退回旧段再打一次。
+            //   ⚠ 本行跑在 ServoP 那条路上（触觉/GLUT 线程）—— 正因只打一次才可接受, 别改成每帧。
+            if (sp.seg != m_sweepLastSeg) {
+                m_sweepLastSeg = sp.seg;
+                std::cout << "[Sweep] 段 " << (sp.seg + 1) << "/" << SweepPlan::kSegCount
+                          << "  speed=" << sp.speed << "x  ff=" << (sp.ffOn ? "ON" : "OFF")
+                          << "  (源主频 " << SweepWaveform::kF0Hz << "Hz -> 约 "
+                          << (SweepWaveform::kF0Hz * sp.speed) << "Hz)\n";
+            }
+
             const SweepWaveform::Vec3 off = SweepWaveform::lookup(sp.phase01);
             double amp = Config::SWEEP_AMPLITUDE_MM;
             if (amp < 0.0) amp = 0.0;      // 硬夹: 常数被改坏也不放大（设计 §3.5 S3）
