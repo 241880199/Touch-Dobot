@@ -765,6 +765,52 @@ if %ERRORLEVEL% EQU 0 (
 echo.
 
 rem ============================================================
+rem Suite wired into "build then run" on 2026-10-01:
+rem   sweep_plan -- the SEGMENT SCHEDULER half of the force-frequency sweep
+rem   replay source (relay/SweepPlan.h). sweepStateAt() is a PURE function with no
+rem   clock and no state, the same shape as GainReadbackPolicy.h: given seconds
+rem   since the operator pressed the key it returns which of the 8 segments is
+rem   active, that segment's speed factor (0.5/1/2/4), whether force feedback is
+rem   on, and the phase into the waveform ring. The WIRING half (RelayCore.cpp,
+rem   which will read the clock and call this each frame) is compiled by NO test
+rem   here.
+rem   WARNING -- read the boundary, do not overclaim: this suite pins the SCHEDULER
+rem   ONLY. The CALL SITE in RelayCore.cpp still has NO automated coverage (that is
+rem   Task 3/4 of the same plan; it remains uncovered).
+rem   A green run here must NOT be read as "the sweep replay is tested".
+rem   The assertion count is deliberately NOT copied here: the suite prints it on
+rem   every run, and a hand-typed copy only goes stale in the silent direction
+rem   (see the note on hand-typed numbers in the NOT RUN block at the bottom).
+rem   Adding this .cpp is what makes the runtime suite count on disk move
+rem   from 28 to 29; if this section is ever deleted while the .cpp stays,
+rem   the harness asserts at the bottom and exits 1 -- by design.
+rem   The FORM of the result check is NOT special to this suite -- every
+rem   section in this file uses it. See "HOW TEST RESULTS ARE JUDGED" at
+rem   the top of this file for the rule and the two tempting-but-wrong forms.
+rem ============================================================
+
+echo --- Building test_sweep_plan ---
+call "%TESTDIR%\build_sweep_plan_test.bat"
+@echo off
+if %ERRORLEVEL% EQU 0 (
+    echo   Build OK
+    echo.
+    echo === test_sweep_plan.exe ===
+    "%TESTDIR%\test_sweep_plan.exe"
+    if !ERRORLEVEL! EQU 0 (
+        set /a PASSED+=1
+        echo   [OK]
+    ) else (
+        set /a FAILED+=1
+        echo   [FAIL]
+    )
+) else (
+    echo   [FAIL: build error]
+    set /a FAILED+=1
+)
+echo.
+
+rem ============================================================
 rem Suite wired into "build then run" on 2026-09-24:
 rem   payload_calibration -- the offline payload/COM solver (PayloadCalibration.cpp)
 rem   plus the local-compensation acceptance case. It carries ONE case that is
