@@ -81,3 +81,14 @@ Touch_Client/x64/Release/force_wave.csv
 #   体量 ≈ 1.3 MB/分钟 ⇒ 更不该进仓库。
 Touch_Client/force_wave_cont.csv
 Touch_Client/x64/Release/force_wave_cont.csv
+
+# ===== 2026-10-01: 上机前把旧波形【改名归档】—— 上面那五条点名列【盖不住新名字】=====
+#   每次上机前会把旧的改名成 `..._through_YYYYMMDD.csv`（避免今天的块和旧数据混在一个文件里）。
+#   改名之后那五条精确路径立刻失效 ⇒ `git status` 当场把 ~11 MB 标成未跟踪
+#   —— 这正是 47cb454 那次的形状, 所以这里补上。
+#   ⚠ 用【带路径前缀的通配】而不是裸 `*.csv`: `Touch_Client/` 这个前缀保证它【够不到】
+#     `Docs/superpowers/evidence/` 下刻意入库的波形证据 —— 那正是上面那条规矩要防的。
+#   ⚠ 不需要为 `x64/Release/` 再点一次名: `.gitignore:5` 已经整目录忽略 `Touch_Client/x64/`
+#     （上面那两条 x64 点名列是历史遗留, 留着无害但确实多余 —— `git check-ignore` 会告诉你真凶是第 5 行）。
+Touch_Client/force_wave_through_*.csv
+Touch_Client/force_wave_cont_through_*.csv
