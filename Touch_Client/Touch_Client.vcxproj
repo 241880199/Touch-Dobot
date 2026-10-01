@@ -82,6 +82,7 @@
     <ClCompile Include="core\CalibStore.cpp" />
     <ClInclude Include="core\SessionReport.h" />
     <ClInclude Include="core\MathUtils.h" />
+    <ClInclude Include="core\JsonLite.h" />
     <!-- robot -->
     <ClInclude Include="robot\RobotConnection.h" />
     <ClCompile Include="robot\RobotConnection.cpp" />
@@ -135,7 +136,6 @@
     <ClCompile Include="haptic\HapticCallback.cpp" />
     <!-- force -->
     <ClInclude Include="force\ForcePipeline.h" />
-    <ClInclude Include="core\JsonLite.h" />
     <ClInclude Include="force\ForceTuning.h" />
     <ClCompile Include="force\ForcePipeline.cpp" />
     <ClCompile Include="force\ForceTuning.cpp" />
