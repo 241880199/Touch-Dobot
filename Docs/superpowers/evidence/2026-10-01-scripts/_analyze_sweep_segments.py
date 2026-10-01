@@ -98,25 +98,34 @@ def main():
     span = (moving[-1][0] - moving[0][0]) / 1e6
     print(f"\n运动帧 {len(moving)}，跨度 {span:.1f}s")
 
-    t0 = None
+    # 找【所有】ff 1->0 翻转 —— 每个 = 那一轮的「第 5 段开始」= T0+40s。
+    # ⚠ 两轮之间至少隔 60s，避免把同一轮里的抖动当成新轮。
+    anchors = []
     for i in range(1, len(moving)):
         if moving[i - 1][1][I_FF] == 1.0 and moving[i][1][I_FF] == 0.0:
-            t0 = moving[i][0] - int(40e6)
-            print(f"锚点: ff 1->0 在 t_us={moving[i][0]:.0f}  ⇒ T0={t0:.0f}"
-                  f"（= 第 5 段开始 - 40s）")
-            break
-    if t0 is None:
+            t = moving[i][0]
+            if not anchors or t - anchors[-1] > int(60e6):
+                anchors.append(t)
+    if not anchors:
         print("!! 没找到 ff 的 1->0 翻转 —— 无法定出段的时间轴。")
         print("   可能原因: 扫描没跑完 / 只跑了前四段 / FF 没被切换。如实记，别猜。")
         return
+    print(f"锚点（ff 1->0）: {len(anchors)} 个 ⇒ 判定为 {len(anchors)} 轮")
 
-    segs = {}
-    for t, r in moving:
-        s = int((t - t0) // int(SEG_SEC * 1e6))
-        if 0 <= s < 8:
-            segs.setdefault(s, []).append(r)
+    for rd, at in enumerate(anchors, 1):
+        t0 = at - int(40e6)
+        segs = {}
+        for t, r in moving:
+            s = int((t - t0) // int(SEG_SEC * 1e6))
+            if 0 <= s < 8:
+                segs.setdefault(s, []).append(r)
+        if segs:
+            analyze_round(rd, t0, segs)
 
+
+def analyze_round(rd, t0, segs):
     print()
+    print(f"########## 第 {rd} 轮（T0={t0:.0f}）##########")
     hdr = (f"{'段':>2} {'倍速':>5} {'FF':>4} {'n':>5} {'实测f':>7} {'名义f':>7} "
            f"{'A(mm)':>7} {'a(m/s2)':>8} {'sd|F|':>7} {'归一化':>9}")
     print(hdr)
