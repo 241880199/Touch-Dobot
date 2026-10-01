@@ -3045,17 +3045,22 @@ namespace ForceContinuous {
         fprintf(f, "# t_us,raw_x,raw_y,raw_z,filt_x,filt_y,filt_z,"
                    "tgt_x_mm,tgt_y_mm,tgt_z_mm,tgt_rx_deg,tgt_ry_deg,tgt_rz_deg,"
                    "act_x_mm,act_y_mm,act_z_mm,act_rx_deg,act_ry_deg,act_rz_deg,"
-                   "dev_x_mm,dev_y_mm,dev_z_mm,ff,tcpV_x,tcpV_y,tcpV_z\n");
+                   "dev_x_mm,dev_y_mm,dev_z_mm,ff,tcpV_x,tcpV_y,tcpV_z,"
+                   // ★ 2026-10-01 追加 6 列关节角（**追加在末尾** ⇒ 前 26 列的列号不变, 老脚本照样能用）。
+                   //   ⚠ 它是 5 Hz 刷新的阶梯（见 RelayCore.h 的 ForceFrameSample 那段）。
+                   "j1_deg,j2_deg,j3_deg,j4_deg,j5_deg,j6_deg\n");
         for (size_t i = 0; i < s_buf.size(); ++i) {
             const RelayCore::ForceFrameSample& s = s_buf[i];
             fprintf(f, "%llu,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,"
                        "%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,"
-                       "%.3f,%.3f,%.3f,%d,%.3f,%.3f,%.3f\n",
+                       "%.3f,%.3f,%.3f,%d,%.3f,%.3f,%.3f,"
+                       "%.3f,%.3f,%.3f,%.3f,%.3f,%.3f\n",
                     s.tickUs, s.f[0], s.f[1], s.f[2], s.g[0], s.g[1], s.g[2],
                     s.tgt[0], s.tgt[1], s.tgt[2], s.tgt[3], s.tgt[4], s.tgt[5],
                     s.act[0], s.act[1], s.act[2], s.act[3], s.act[4], s.act[5],
                     s.dev[0], s.dev[1], s.dev[2], s.ffEnabled,
-                    s.tcpV[0], s.tcpV[1], s.tcpV[2]);
+                    s.tcpV[0], s.tcpV[1], s.tcpV[2],
+                    s.joint[0], s.joint[1], s.joint[2], s.joint[3], s.joint[4], s.joint[5]);
         }
         long long bytes = ftell(f);
         fclose(f);
@@ -3283,11 +3288,14 @@ namespace ForceNoiseProbe {
                 fprintf(wf, "# t_us,raw_x,raw_y,raw_z,filt_x,filt_y,filt_z,"
                             "tgt_x_mm,tgt_y_mm,tgt_z_mm,tgt_rx_deg,tgt_ry_deg,tgt_rz_deg,"
                             "act_x_mm,act_y_mm,act_z_mm,act_rx_deg,act_ry_deg,act_rz_deg,"
-                            "dev_x_mm,dev_y_mm,dev_z_mm,ff,tcpV_x,tcpV_y,tcpV_z\n");
+                            "dev_x_mm,dev_y_mm,dev_z_mm,ff,tcpV_x,tcpV_y,tcpV_z,"
+                            // ★ 2026-10-01 追加 6 列关节角（追加在末尾 ⇒ 前 26 列列号不变）。
+                            "j1_deg,j2_deg,j3_deg,j4_deg,j5_deg,j6_deg\n");
                 for (int i = 0; i < n; i++) {
                     fprintf(wf, "%llu,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,"
                                 "%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,"
-                                "%.3f,%.3f,%.3f,%d,%.3f,%.3f,%.3f\n",
+                                "%.3f,%.3f,%.3f,%d,%.3f,%.3f,%.3f,"
+                                "%.3f,%.3f,%.3f,%.3f,%.3f,%.3f\n",
                             buf[i].tickUs, buf[i].f[0], buf[i].f[1], buf[i].f[2],
                             buf[i].g[0], buf[i].g[1], buf[i].g[2],
                             buf[i].tgt[0], buf[i].tgt[1], buf[i].tgt[2],
@@ -3296,10 +3304,12 @@ namespace ForceNoiseProbe {
                             buf[i].act[3], buf[i].act[4], buf[i].act[5],
                             buf[i].dev[0], buf[i].dev[1], buf[i].dev[2],
                             buf[i].ffEnabled,
-                            buf[i].tcpV[0], buf[i].tcpV[1], buf[i].tcpV[2]);
+                            buf[i].tcpV[0], buf[i].tcpV[1], buf[i].tcpV[2],
+                            buf[i].joint[0], buf[i].joint[1], buf[i].joint[2],
+                            buf[i].joint[3], buf[i].joint[4], buf[i].joint[5]);
                 }
                 fclose(wf);
-                std::cout << "  [ok] 波形已追加到 force_wave.csv（" << n << " 帧，26 列）"
+                std::cout << "  [ok] 波形已追加到 force_wave.csv（" << n << " 帧，32 列）"
                           << std::endl;
             } else {
                 std::cout << "  [warn] 波形落盘失败（force_wave.csv 打不开）" << std::endl;

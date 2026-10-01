@@ -144,6 +144,7 @@ static void pushForceFrame(double fx, double fy, double fz,
                           double gx, double gy, double gz,
                           const double tgt[6], const double act[6],
                           const double tcpV[3], const double dev[3],
+                          const double joint[6],
                           int ffEnabled) {
     if (!s_noiseLockInit) return;   // 初始化竞态里的最早期帧, 丢掉即可 (不改变任何判决)
     const unsigned long long us =
@@ -164,6 +165,10 @@ static void pushForceFrame(double fx, double fy, double fz,
     for (int i = 0; i < 3; i++) {
         s_noiseBuf[s_noiseWrite].dev[i]  = dev[i];
         s_noiseBuf[s_noiseWrite].tcpV[i] = tcpV[i];
+    }
+    // ★ 2026-10-01：关节角（5 Hz 刷新 ⇒ 本列是阶梯；见 ForceFrameSample 那段说明）
+    for (int i = 0; i < 6; i++) {
+        s_noiseBuf[s_noiseWrite].joint[i] = joint[i];
     }
     s_noiseBuf[s_noiseWrite].ffEnabled = ffEnabled;
     s_noiseWrite = (s_noiseWrite + 1) % kNoiseCap;
@@ -395,11 +400,15 @@ static DWORD WINAPI forceReaderThread(LPVOID) {
                 LeaveCriticalSection(&app.devicePosMutex);
             }
             double tgtPoseBuf[6];
+            double jointBuf[6];   // ★ 2026-10-01: 关节角，与 tgt 在【同一个临界区】里读（同一个 mutex）
             {
                 EnterCriticalSection(&app.robotPoseMutex);
                 tgtPoseBuf[0] = app.robotTargetPose.x;  tgtPoseBuf[1] = app.robotTargetPose.y;
                 tgtPoseBuf[2] = app.robotTargetPose.z;  tgtPoseBuf[3] = app.robotTargetPose.rx;
                 tgtPoseBuf[4] = app.robotTargetPose.ry; tgtPoseBuf[5] = app.robotTargetPose.rz;
+                jointBuf[0] = app.robotActualPose.j1;  jointBuf[1] = app.robotActualPose.j2;
+                jointBuf[2] = app.robotActualPose.j3;  jointBuf[3] = app.robotActualPose.j4;
+                jointBuf[4] = app.robotActualPose.j5;  jointBuf[5] = app.robotActualPose.j6;
                 LeaveCriticalSection(&app.robotPoseMutex);
             }
             pushForceFrame(sixForcePtr[0], sixForcePtr[1], sixForcePtr[2],
@@ -407,6 +416,7 @@ static DWORD WINAPI forceReaderThread(LPVOID) {
                            app.forceData.filtered[2],
                            tgtPoseBuf, app.forceData.tcpPoseActual,
                            app.forceData.tcpSpeedActual, devPosBuf,
+                           jointBuf,
                            app.forceFeedbackEnabled ? 1 : 0);
 
             // 看门狗兜底: 每 300ms 检查一次 (GLUT 可能已死)

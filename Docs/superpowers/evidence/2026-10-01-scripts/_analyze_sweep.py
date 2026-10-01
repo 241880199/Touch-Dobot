@@ -108,7 +108,9 @@ def main():
         rows = b["rows"]
         if not rows:
             continue
-        colok = b["cols"] and len(b["cols"]) == len(COLS)
+        # ⚠ 2026-10-01：落盘由 26 列扩到 32 列（末尾追加 6 个关节角）
+        #   ⇒ 用 >=（前 26 列的列号没变），别写成 ==。
+        colok = b["cols"] and len(b["cols"]) >= len(COLS)
         if not colok:
             print(f"  !! 块 {k} 列数 {len(b['cols']) if b['cols'] else '?'} != {len(COLS)}")
             continue

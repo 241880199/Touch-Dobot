@@ -75,6 +75,20 @@ public:
         //     （`RelayCore.cpp` 的 `tcpSpeedPtr` 那一段），只是从来没跟力/位姿同时落过盘。
         int    ffEnabled;
         double tcpV[3];
+        // ★★ 2026-10-01 新增：**机械臂当前的关节角**（`app.robotActualPose.j1..j6`）。
+        //
+        //   【为什么要它】离线分析发现：**TCP 的 `act` 是纯净正弦（基频 98%），而力是以 2/3 次谐波为主的**
+        //     （`Docs/superpowers/evidence/2026-10-01-sweep.md` §15）。一个**没被排除**的解释是：
+        //     **TCP 干净不等于关节干净** —— IK 是非线性的，X 向的一小段直线在关节空间里不是正弦；
+        //     而**力传感器在腕部**，它感受的是**腕自己的运动（J4/J5/J6）**。
+        //     若关节轨迹是谐波丰富的 ⇒ 非线性在**关节/IK/servo**那一侧；若关节也干净 ⇒ 在**腕之后的力通道**。
+        //   ⇒ 这一列就是用来**把范围劈成两半**的。
+        //
+        //   ⚠ **采样率**：它由 `jointAngleTimer` 的 `glutTimerFunc(200,…)` 刷新 ⇒ **只有 5 Hz**
+        //     （`queryJointAngles()` 里还带 `Sleep(50)`）⇒ 本列在 123 Hz 落盘里是**阶梯**。
+        //     对低频段（0.18~0.37 Hz 的基频与其前几次谐波）够用；**0.73 Hz 段只可信到 3 次谐波**
+        //     （Nyquist 2.5 Hz）。**分析时别把它当 123 Hz 的连续量用。**
+        double joint[6];
     };
     // 取最近收到的 ≤maxN 帧, 按【从旧到新】写进 out。返回实际帧数。
     int copyRecentForceFrames(ForceFrameSample* out, int maxN);
