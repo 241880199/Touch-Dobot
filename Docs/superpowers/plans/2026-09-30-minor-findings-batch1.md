@@ -682,7 +682,7 @@ git commit -m "chore(minor-18): core\\JsonLite.h 归到 vcxproj 的 core 组"
 | 4 | **接受**（**控制方回核后改判**） | `Config.h:407-408` 已给算式 + 自标"范围一变它就变" ⇒ 非**静默** |
 | 5 | 已修（本批） | `fopen` 失败的两义性写进注释 + 指向启动横幅的 `未采用 <path>`（Task 3 的提交） |
 | 6 | **接受** | 由重连的强制回读自愈；作者原判 |
-| 7 | **第二批**（`relay_gui.m`） | 本机无 MATLAB，改了只能人工审读 —— 不当作"已改" |
+| 7 | **第二批**（`relay_gui.m`） | ⛔ **2026-10-01 订正：「本机无 MATLAB」是【错的】**（实测 `D:\Software\Matlab` 是 R2025b、`matlab -batch` 能跑）⇒ 本组**有验证路径**，只是还没做；仍按"未改"记账 |
 | 8 | **第二批**（`relay_gui.m`） | 同上（纯措辞） |
 | 9 | 已修（本批） | 补双向事实并订正"放宽仍全绿"那半句（Task 3 的提交） |
 | 10 | **接受** | 不变式由 `test_force_tuning` 的 `static_initial_value_is_legal` 兜住；作者原判 |
