@@ -3,7 +3,7 @@
 #include "Button2Joint.h"     // ★ Task 2: 按钮2 关节空间纯函数 (笔杆偏移 ⇒ J4/J5/J6 增量)
 #include "Button2Mapping.h"
 #include "FeedbackParser.h"
-#include "GainReadbackPolicy.h"
+#include "GainReadback.h"      // ★ Task 2: 状态机 + SendMode (它自己 include GainReadbackPolicy.h)
 #include "RelayCommandParser.h"
 #include "SafetyBoundary.h"
 #include "../robot/RobotConnection.h"
@@ -2524,7 +2524,7 @@ void RelayCore::initRelayReporting() {
         // ★ 2026-09-22: 连上就回读一次增益。必须有 —— 否则 MATLAB 在 C++ 启动时看到的
         //   是滑条的初值 (它自己猜的), 而实际生效值可能来自 force_tuning.json。
         //   那正是本设计要消灭的"GUI 显示的值 ≠ 实际生效的值"。
-        sendReflectionGain(true);
+        sendReflectionGain(GainReadback::SendMode::Forced);
         return;
     }
     // ★ 失败必须出声 (2026-09-21)。从前这里是【静默 return】, 而整个程序里唯一会提到
@@ -2607,7 +2607,7 @@ bool RelayCore::ensureRelayConnected() {
               << Config::RELAY_PORT << std::endl;
     // ★ 重连后同样要回读增益: MATLAB 可能是在 C++ 之后才起来的, 那条 RG| 从没送到过。
     //   sendRelayUpdate 不调本函数 (它在 socket 无效时只返回 -1), 所以这里【不会递归】。
-    sendReflectionGain(true);
+    sendReflectionGain(GainReadback::SendMode::Forced);
     return true;
 }
 
@@ -2749,78 +2749,47 @@ void RelayCore::reportFeedback(const char* fbText) {
 
 // 回读限频 (见 RelayCore.h 里的说明; 规格 §4 "回读限频")。
 //
-// ⚠ 【线程】(2026-09-22 修正): 从前这里写的是"只由 GLUT idle 线程调 ⇒ 不需要原子"。那句是
-//   错的, 而且与本文件上方 reportPosition 那一段 (那里明写"本函数跑在触觉实时线程上") 直接
-//   矛盾 —— 同一份文件里相隔三十来行, 两说的不是一回事。实际有【两个】线程调进来:
-//     · GLUT idle 线程 —— 派发与补发: idle() → pollRelayCommands() → dispatchRelayCommand()
-//       的【接受】/【拒绝】两个分支, 以及每帧那次 `if (s_gainReportPending)` 补发;
-//     · 【触觉实时线程】—— 重连那一条: HapticCallback 的 reportPosition() →
-//       ensureRelayConnected() → 重连成功时 sendReflectionGain(true)。
-//   ★ 启动那一次【也不例外】(2026-09-22 再修正): 这里从前写的是"initRelayReporting() 由
-//     main() 在 GLUT 主循环【之前】调, 那时还没有并发"—— 那句是【错的】, 而且错法与上面那句
-//     "只由 GLUT 线程调"同源: 把"启动时"当成了"单线程"。实际次序是 initHapticDevice() →
+// ⚠ 【状态与迁移不在本文件】—— 三样状态 (上次发送的时刻 / 上次发送的值 / 待发标志) 的初值、
+//   推进时机, 以及"为什么必须是 atomic"的论证, 都在 relay/GainReadback.h (Task 1, 2026-09-30),
+//   由 test_gain_readback_state 钉住。本文件只负责: 取值 / 传参 / 组包 / 发送。
+//   ⇒ 别再在这里写第二份 (两处会漂)。
+//
+// 本函数被【两个】线程调进来 (这是抽取前就写在这里的事实; 它说的是【谁调它】, 不是状态):
+//   · GLUT idle 线程 —— 派发与补发: idle() → pollRelayCommands() → dispatchRelayCommand()
+//     的【接受】/【拒绝】两个分支, 以及每帧那次 `if (s_gainReadback.pending())` 补发;
+//   · 【触觉实时线程】—— 重连那一条: HapticCallback 的 reportPosition() →
+//     ensureRelayConnected() → 重连成功时 sendReflectionGain(SendMode::Forced)。
+//   ★ 启动那一次【也不例外】(2026-09-22 再修正): 实际次序是 initHapticDevice() →
 //     hdStartScheduler() 【先把触觉线程起了起来】, initRelayReporting() 是之后才调的 ⇒
-//     这中间 reportPosition() 已按 Config::RELAY_UPDATE_INTERVAL 在跑, 而那一刻 socket 还是
-//     INVALID_SOCKET ⇒ ensureRelayConnected() 里 lastTryMs 初值为 0, 守卫
-//     (lastTryMs != 0 && …) 对【首次】调用必然放行 ⇒ 连上就在【触觉线程上】调
-//     sendReflectionGain(true), 与 main() 自己在 initRelayReporting() 里的那一次重叠。
-//     ⇒ 这个调用点新加的状态同样要并发保护, 不能按"启动时是单线程"推断。
+//     那一刻 socket 还是 INVALID_SOCKET, 而 ensureRelayConnected() 里 lastTryMs 初值为 0 的
+//     守卫 (lastTryMs != 0 && …) 对【首次】调用必然放行 ⇒ 连上就在【触觉线程上】调
+//     sendReflectionGain(SendMode::Forced), 与 main() 在 initRelayReporting() 里那一次重叠。
 //     （前提: 触觉设备已启用。`--no-touch` 下 initHapticDevice() 不跑 ⇒ 那条启动路径确实是
 //       单线程的; 上面的保守结论不受影响 —— 多一层原子没有代价。）
-//   ⇒ 下面三个状态必须是 atomic: 两个线程不同步地读写同一个非原子对象就是数据竞争 (UB)。
-//   残留的只是【次序】上的竞争, 而且无害 —— 这三个状态【不参与强制发送的决策】:
-//     · force=true 一个判断都不从它们取 (只写) ⇒ 交错最坏 = 多回一条、或晚回一条;
-//     · s_gainReportPending 丢一次更新是【自愈】的 —— 那条强制发送本身已经带上了当前值。
 //
-// force=false 时【两条都成立才发】(规格原文: "只在目标值真的变了、且距上次回读 ≥100ms"):
+// SendMode::Throttled 时【两条都成立才发】(规格原文: "只在目标值真的变了、且距上次回读 ≥100ms"):
 //   ① 目标值相对【上次真的发出去的那一条】变了 —— 没变就没有可报的东西
 //   ② 距上次【发送】≥100ms —— 拖动滑条几十条/秒, 逐条回读会堆在 MATLAB 侧
-// 被挡下的那一条在这里只置标志, 由 pollRelayCommands 每帧补发 ⇒ 最后一条一定到。
+// 被挡下的那一条只置【待发标志】, 由 pollRelayCommands 每帧补发 ⇒ 最后一条一定到。
 //
 // ⚠ 【调用点不是随便挑的】(2026-09-22 修正): 上面条件①是一道【过滤被拒回读】的闸 ——
-//   force=false 只能用于【接受】(拖动洪水) 与 pollRelayCommands 的补发;
-//   dispatchRelayCommand 的【拒绝】分支必须走 force=true。理由:
+//   SendMode::Throttled 只能用于【接受】(拖动洪水) 与 pollRelayCommands 的补发;
+//   dispatchRelayCommand 的【拒绝】分支必须走 SendMode::Forced。理由:
 //   被拒 = setGain 在 store 之前就返回 = 值按构造没变 ⇒ 条件①必然命中 ⇒ 一个字节都发不出去。
 //   按调用点逐个说明见 RelayCore.h 的 sendReflectionGain 文档块。
 //
-// ⚠ ①②里的"上次真的发出去" = 【发送这一步】, 不是"确认送达": s_lastGainReportMs 与
-//   s_lastSentGain 都落笔在 sendRelayUpdate 调用【之前】(见下面的赋值), 所以 socket 恰在那一
-//   瞬间失效时, 这次算"发过了" —— 同一个值的重试会被条件①挡下。这是【已知且能收敛】的:
-//   重连成功时的强制回读 (force=true) 不看这两条闸, 会把当前值原样再送一条 ⇒ 值最终一定到
-//   MATLAB。⇒ 按这个定义读这两个名字, 别按"确认送达"读。
+// ⚠ ①②里的"上次真的发出去" = 【发送这一步】, 不是"确认送达" (两个状态都落笔在 send 调用
+//   【之前】, socket 恰在那时失效就按"发过了"算; 重连时的 Forced 不看这两条闸, 会把当前值原样
+//   再送一条 ⇒ 值最终一定到 MATLAB)。那个定义与状态的初值一起移到了 relay/GainReadback.h。
 //
-// s_lastSentGain 初值刻意选 0 —— 那是 setGain 不会接受的值 ⇒ 在第一次 force=true 之前
-//   若有人用 force=false 进来, 它一定发得出去 (保守方向)。
-static std::atomic<DWORD>  s_lastGainReportMs{0};
-static std::atomic<double> s_lastSentGain{0.0};
-static std::atomic<bool>   s_gainReportPending{false};
+// 三样状态与它们的迁移【不在本文件】—— 在 relay/GainReadback.h, 由 test_gain_readback_state 钉住。
+//   本文件只负责: 取值、传参、按判决组包发送。线程约定与抽取前逐字相同 (见那个头文件)。
+static GainReadback::State s_gainReadback;
 
-void RelayCore::sendReflectionGain(bool force) {
+void RelayCore::sendReflectionGain(GainReadback::SendMode mode) {
     const DWORD now = GetTickCount();
     const double g = ForceTuning::gain();
-    // 判决【不在本文件里】—— 抽成了纯函数 (relay/GainReadbackPolicy.h), 理由与
-    //   force 必须第一道的说明都写在那里, 并由 test_gain_readback_policy 钉住。
-    //   本文件只负责: 取值、传参、按判决改这三样状态 (sent 值 / 上次发送时刻 / 待发标志)。
-    switch (GainReadbackPolicy::gainReportDecision(
-                force, g, s_lastSentGain.load(), now,
-                s_lastGainReportMs.load(), GainReadbackPolicy::GAIN_REPORT_MIN_INTERVAL_MS)) {
-    case GainReadbackPolicy::GainReport::SkipUnchanged:
-        // ⚠ 必须【顺手清掉待发标志】: 一条被限频挡下的 A→B 之后值又变回 A, 此时"待发"已
-        //   无事可做; 留着标志会让 pollRelayCommands 每帧都调进来、每帧都从这里返回 ⇒
-        //   标志卡在 true 再也不动 (无害, 但那个标志从此失去意义)。
-        s_gainReportPending.store(false);
-        return;
-    case GainReadbackPolicy::GainReport::SkipTooSoon:
-        // 记下待发, 由 pollRelayCommands 补 —— 最后一条不丢。
-        // ⚠ 这里【不】更新 s_lastGainReportMs: 它记的是"上次真的发出去"的时刻 (见头文件)。
-        s_gainReportPending.store(true);
-        return;
-    case GainReadbackPolicy::GainReport::Send:
-        break;   // 落到下面发送
-    }
-    s_gainReportPending.store(false);
-    s_lastGainReportMs.store(now);
-    s_lastSentGain.store(g);
+    if (!s_gainReadback.beginSend(mode, g, now)) return;   // 被挡下 ⇒ pending 已由 beginSend 管好
 
     // ⚠ 载荷的 7 个字段【按位置】解析: RG| 是逗号分隔的定长字段 (C++→MATLAB 的其它线路
     //   都是这个形状), 规格 §4 只定义了【顺序】, 字段没有名字。顺序必须与 §4 的字段表
@@ -2867,32 +2836,32 @@ void RelayCore::dispatchRelayCommand(const char* line) {
         // 但两条路的形态【不同】, 而且必须不同 (2026-09-22 修正):
         if (ForceTuning::setGain(value)) {
             std::cout << "[Tuning] 力反射增益 → " << value << " (MATLAB command)" << std::endl;
-            // 【接受】⇒ 目标值真的变了 ⇒ 限频形态 (force=false)。
+            // 【接受】⇒ 目标值真的变了 ⇒ 限频形态 (SendMode::Throttled)。
             // 规格 §4 那两条条件 ("只在目标值真的变了、且距上次回读 ≥100ms") 写的正是
             // 这条拖动路径: 拖动滑条每秒几十条 RG|, 逐条回读会堆在 MATLAB 侧。
             // 被时间挡下的那条由 pollRelayCommands 补发, 最后一条一定到。
-            sendReflectionGain(false);
+            sendReflectionGain(GainReadback::SendMode::Throttled);
         } else {
             // 拒收必须出声, 而且要说清范围 —— 范围取自 ForceTuning 那一份定义, 不另写数字。
             std::cout << "[Tuning] 增益 " << value << " 【被拒】: 可取范围 ["
                       << ForceTuning::GAIN_MIN << ", " << ForceTuning::GAIN_MAX
                       << "], 仍是 " << ForceTuning::gain() << std::endl;
-            // 【拒绝】【必须无条件发】—— force=true。这就是 true 在本设计里的第三个用途
+            // 【拒绝】【必须无条件发】—— SendMode::Forced。这就是 Forced 在本设计里的第三个用途
             // (连接、重连之外的第三个):
             //   · 被拒 ⇒ ForceTuning::setGain 在【任何 store 之前】就 return false
             //     ⇒ 生效值【按构造】没有变。
-            //   · 而 force=false 的第一道闸就是 "g == s_lastSentGain ⇒ 不发"
+            //   · 而 SendMode::Throttled 的第一道闸就是 "g == 上次真的发出去的那条的值 ⇒ 不发"
             //     ⇒ 那道闸在拒绝路径上【必然】命中 ⇒ 一个字节都发不出去。
             //   · 偏偏这条恰恰是 MATLAB 最需要的一条: 它自己的滑条【已经动了】(到那个被拒的值),
             //     正等着被纠正回真值 —— 规格 §4 的中心例子就是它:
             //     "若它发了 500 被拒, 回读仍是 120, 滑条自己弹回 120"。
-            //   ⚠ 【不要把它"优化"成 false】。值没变对"拖动洪水"是对的判据 (那是为了限频),
+            //   ⚠ 【不要把它"优化"成 Throttled】。值没变对"拖动洪水"是对的判据 (那是为了限频),
             //     但对"拒绝"是【反的】: 拒绝的定义就是值没变 ⇒ 拿值变没变当闸门, 恰好滤掉了
             //     唯一一条必须发出去的回读 ⇒ MATLAB 会永远显示一个假数 (规格 §4 末尾那段:
             //     滑条上限来自回读, GAIN_MAX 在 C++ 侧调低后 MATLAB 会一直发一个已被拒的值)。
             //     合上这条闸只省下一次 160 字节的发送, 代价是那个不变量失效。
             //   （判决本身已抽到 relay/GainReadbackPolicy.h, 由 test_gain_readback_policy 钉住。）
-            sendReflectionGain(true);
+            sendReflectionGain(GainReadback::SendMode::Forced);
         }
         break;
     case R::ForceZero:
@@ -2925,7 +2894,7 @@ void RelayCore::pollRelayCommands() {
     // ⚠ 放在 socket 有效性检查【之前】: 这两件事与 relay socket 在不在无关 (tick 只管落盘),
     //   放在后面会在 GUI 没连上时整个停掉。
     ForceTuning::tick();
-    if (s_gainReportPending.load()) sendReflectionGain(false);
+    if (s_gainReadback.pending()) sendReflectionGain(GainReadback::SendMode::Throttled);
 
     EnterCriticalSection(&m_relaySocketMutex);
     SOCKET sock = m_relaySocket;

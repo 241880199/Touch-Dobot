@@ -8,6 +8,7 @@
 #include <HDU/hduVector.h>
 #include "CoordinateTransform.h"
 #include "IExtension.h"
+#include "GainReadback.h"        // ★ 2026-09-30: sendReflectionGain 的参数类型 GainReadback::SendMode
 #include "../safety/RobotStateMachine.h"
 
 class RelayCore {
@@ -174,24 +175,29 @@ public:
     //   ⇒"GUI 显示的值 ≠ 实际生效的值"这个状态【在结构上无法存在】。
     // 报的是【目标值】, 不是斜坡的瞬时值 (见 ForceTuning.h 顶上那段)。
     //
-    // ⚠ force 的含义【按调用点分两种】。从前这里只写了"连接 / 重连", 而【拒绝路径也是
-    //   force=true】—— 按那句旧注释去"统一"成 false, 会让被拒的 RG| 彻底静默 (说明见下)。
-    //   · force=true —— 无条件发, 不看下面那两条闸。三个调用点:
+    // ⚠ mode 的含义【按调用点分两种】。从前这里只写了"连接 / 重连", 而【拒绝路径也是
+    //   SendMode::Forced】—— 按那句旧注释去"统一"成 Throttled, 会让被拒的 RG| 彻底静默 (说明见下)。
+    //   · SendMode::Forced —— 无条件发, 不看下面那两条闸。三个调用点:
     //       ① initRelayReporting() 连上时
     //       ② ensureRelayConnected() 重连成功时
     //          (这两处 MATLAB 手里什么都没有, "值没变"没有意义)
     //       ③ dispatchRelayCommand() 的【拒绝】分支 —— 见 RelayCore.cpp 那一处的完整说明:
     //          被拒 ⇒ 生效值【按构造】没变 ⇒ 条件①【必然】命中 ⇒ 非无条件则一个字节都发不
     //          出去, 而 MATLAB 的滑条此刻【已经动了】、正等着被纠正回真值。
-    //   · force=false —— 限频形态 (规格 §4): 两条【同时成立才发】:
+    //   · SendMode::Throttled —— 限频形态 (规格 §4): 两条【同时成立才发】:
     //       ① 目标值相对上次真的走进 send 的那一条变了 (没变就没可报的), 且 ② 距上次发送 ≥100ms。
     //       ⚠ 这里的"发出去 / 发送"指的是【走到 sendRelayUpdate 那一步】, 不是"确认送达" ——
-    //         两个状态都落笔在 send 调用之前, 精确说法见 RelayCore.cpp 里那三个状态的定义。
+    //         两个状态都落笔在 send 调用之前, 精确说法见 relay/GainReadback.h 里那三个状态的定义。
     //     两个调用点: dispatchRelayCommand() 的【接受】分支 (拖动洪水, 防刷屏),
     //     以及 pollRelayCommands() 每帧的补发 (把被时间挡下的最后一条送出去)。
     //     任一条件不满足就只记下待发 (值没变则把待发也清掉), 由补发兜底 ——
     //     拖动滑条几十条/秒不会堆在 MATLAB 侧, 而"最后一条一定到"由补发保证。
-    void sendReflectionGain(bool force);
+    //
+    //   ⚠ 参数是【枚举】不是 bool (2026-09-30): 从前这里收 `bool force`, 调用点读作
+    //     `sendReflectionGain(true)` —— 一个看不出语义、编译器也管不着的字面量。
+    //     2026-09-22 的事故正是某个调用点把它传错。状态与迁移现在在 relay/GainReadback.h,
+    //     由 test_gain_readback_state 钉住; 本函数只剩"取值 / 组包 / 发送"。
+    void sendReflectionGain(GainReadback::SendMode mode);
 
     // 调零请求 (Z| 协议)。只置标志 —— 真正的处置在 main.cpp 的 requestForceZero(),
     // 因为 g_noRobot / cancelOtherCaptureModes 都是那个文件的 file-static, 这里拿不到。
