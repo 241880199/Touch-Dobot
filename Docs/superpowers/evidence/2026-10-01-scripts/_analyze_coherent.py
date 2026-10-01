@@ -23,7 +23,9 @@ ALL_SPEEDS = (0.5, 1.0, 2.0, 4.0, 6.0)      # SweepPlan::kSpeed（历史顺序�
 NSPEED = int(sys.argv[2]) if len(sys.argv) > 2 else 5
 SPEEDS = ALL_SPEEDS[:NSPEED]
 
-SEG_SEC = 10.0                               # SweepPlan::kSegSec
+# ⚠★ 必须与 `SweepPlan::kSegSec` 【一致】。2026-10-01 由 10 改成 30（为把 0.18Hz 的谐波间隔分开）。
+#   这是一个只能靠人记住的耦合 —— 改了档数/段长，脚本这边也要改。
+SEG_SEC = 30.0                               # SweepPlan::kSegSec
 SEG_COUNT = len(SPEEDS) * 2                  # SweepPlan::kSegCount
 FF_HALF_SEC = (SEG_COUNT // 2) * SEG_SEC     # 锚点：FF 由 1 变 0 = 后半开始 = 前半总时长
 F0_HZ = 0.365                                # SweepWaveform::kF0Hz
@@ -38,7 +40,8 @@ def read_blocks(path):
     out, cur = [], None
     for line in open(path, "r", encoding="utf-8", errors="replace"):
         line = line.rstrip("\r\n")
-        if line.startswith("# wave"):
+        # ⚠ 2026-10-01：连续录制（`'w'`）的块头是 `# rec`，不是 `# wave` —— 两种都要认。
+        if line.startswith("# wave") or line.startswith("# rec"):
             cur = []
             out.append(cur)
         elif line.startswith("#") or not line or cur is None:

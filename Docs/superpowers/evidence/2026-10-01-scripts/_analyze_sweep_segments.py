@@ -22,7 +22,9 @@ CSV = sys.argv[1] if len(sys.argv) > 1 else \
 I_ACT_X, I_ACT_Y = 13, 14
 I_FILT = (4, 5, 6)
 I_FF = 22
-SEG_SEC = 10.0
+# ⚠★ 必须与 `SweepPlan::kSegSec` 【一致】。2026-10-01 由 10 改成 30。
+#   这是一个只能靠人记住的耦合 —— 改了段长, 脚本这边也要改。
+SEG_SEC = 30.0
 # ⚠★ 档数是**入参**（第 2 个命令行参数，默认 5）。2026-10-01 踩过：档数 4→5（8 段→10 段）时
 #   下面的锚点仍写 40 ⇒ **整轮错位一段**（每段实测频率都成了名义值的 2 倍）。
 #   ⇒ 现在全部由 NSPEED 推出来，并且**表打完之后会自检**（实测/名义若系统性对不上就出声）。
@@ -39,7 +41,8 @@ def read_blocks(path):
     out, cur = [], None
     for line in open(path, "r", encoding="utf-8", errors="replace"):
         line = line.rstrip("\r\n")
-        if line.startswith("# wave"):
+        # ⚠ 2026-10-01：连续录制（`'w'`）的块头是 `# rec`，不是 `# wave` —— 两种都要认。
+        if line.startswith("# wave") or line.startswith("# rec"):
             cur = []
             out.append((line, cur))
         elif line.startswith("#") or not line or cur is None:

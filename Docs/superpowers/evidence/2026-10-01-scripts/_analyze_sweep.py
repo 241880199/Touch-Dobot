@@ -36,7 +36,8 @@ def read_blocks(path):
             line = line.rstrip("\r\n")
             if not line:
                 continue
-            if line.startswith("# wave"):
+            # ⚠ 2026-10-01：连续录制（`'w'`）的块头是 `# rec`，不是 `# wave` —— 两种都要认。
+            if line.startswith("# wave") or line.startswith("# rec"):
                 cur = {"head": line, "rows": [], "cols": None}
                 blocks.append(cur)
                 continue
