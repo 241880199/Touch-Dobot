@@ -670,7 +670,16 @@ git commit -m "feat(sweep): 偏移叠加 + 本地安全门 (接线, 无自动化
 **Interfaces:**
 - Consumes：`RelayCore::startSweep()` / `stopSweep()` / `sweepRunning()`（Task 3）
 
-- [ ] **Step 1: 在 `keyboard()` 里 `'w'` 那一段之后加**（照抄它的形状）
+- [ ] **Step 1: 在 `keyboard()` 里加 `'r'`** —— ⛔ **不是**加在 `'w'` 那段之后！
+
+  ⚠⚠ **2026-10-01 实测订正：`'r'` 已被占用**。`main.cpp` 里有
+  `if ((key == 'r' || key == 'R') && BiasCheck::mode) { BiasCheck::recordRepeat(); return; }`
+  （BiasCheck 模式由 `'m'` 开关，那里的 `'r'` 是"把下一次采样登记为上一次的重复访问"，**它自带 `return`**）。
+  ⇒ **本块必须加在那一段【之后】**：靠**位置**分先后，BiasCheck 模式下 `'r'` 仍是 `recordRepeat`、
+  扫描在那里不可达；不开那个模式则落到本块。
+  ⛔ **不要**加 `&& !BiasCheck::mode`（放在后面之后那条件是多余的）。
+  ★ **教训：选键位前先 grep 它有没有被绑定** —— 设计 §3.3 与本节都直接写了 `'r'` 而没查，
+  是实现者按流程停下来问的。**该检查要保留在同一份计划里。**
 
 ```cpp
     // ★ 2026-10-01: 'r' = 扫描回放 开 / 关（见 RelayCore::startSweep 与 SweepPlan.h）。
