@@ -109,6 +109,19 @@ if (sv.action == SafetyVerdict::REJECT) {
 | 1–4 | 0.5× / 1× / 2× / 4× | **ON** |
 | 5–8 | 0.5× / 1× / 2× / 4× | **OFF** |
 
+★★ **相位公式（必须写死，别只写"约多少 Hz"）**：
+
+```
+phase01 = frac( 段内秒数 × 倍速 × f0 )        f0 = SweepWaveform::kF0Hz = 0.365 Hz
+```
+
+⇒ 实际频率 = **倍速 × f0**：0.5×→**0.18 Hz** · 1×→**0.37** · 2×→**0.73** · 4×→**1.46**。
+
+⛔ **不是** `frac(段内秒数 / 段长 × 倍速)` —— 那个给的是 **`f = 倍速 / 10`**（0.05 / 0.10 / 0.20 / 0.40 Hz），
+**恰好在 1–3 Hz 之外**，也就是**整个设计要查的那股抖根本扫不到**。
+⚠ **2026-10-01 实现时就是这么写错的**（`kF0Hz` 只出现在启动打印里、没进计时），由 Task 3 评审抓到。
+⇒ 教训：**"约 X Hz"这种说法挡不住这类错；把公式连同单位写出来才挡得住。**
+
 - 全程 **80 s**。再按 `r` 或**松开按钮1** ⇒ 立即停。
 - 段标记形如：`[Sweep] 段 3/8  speed=2.00x  ff=ON  (频≈1.30 Hz)` —— **分析时按它切段**（不必只靠 `ff` 列）。
 
@@ -137,8 +150,11 @@ if (sv.action == SafetyVerdict::REJECT) {
 
 按本仓的做法（`GainReadbackPolicy.h` / `GainReadback.h`），把两块**无状态**的逻辑抽出来，各自配用例：
 
-1. **`relay/SweepPlan.h`** —— `sweepStateAt(double elapsedSec)`
+1. **`relay/SweepPlan.h`** —— `sweepStateAt(double elapsedSec, double f0Hz)`
    → `{ int segIndex; double speed; bool ffOn; double phase01; }`
+   ⚠ **2026-10-01 订正**：原写单参数 `sweepStateAt(double elapsedSec)` —— 那正是 F3 那个 3.65 倍频错的来源
+   （公式 `(inSeg/kSegSec)*speed` 里**没有源频率**）。改成**把 f0 当入参**：调用方传 `SweepWaveform::kF0Hz`，
+   于是 `SweepPlan` 仍然只依赖 `<cmath>`、不必 include 波形单元。
    用例钉：段边界（正好 10.0 s 落在哪一段）、总时长之后、elapsed<0、倍速序列与 ff 序列。
 2. **`relay/SweepWaveform.h`** —— `lookup(double phase01)` → `{dx,dy,dz}`（单位峰值）
    用例钉：`phase=0` 与 `phase=1` **闭合**、峰值恰为 1、三点线性插值的端点与中点。
