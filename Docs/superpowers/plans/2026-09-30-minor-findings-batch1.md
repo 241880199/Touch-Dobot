@@ -696,7 +696,7 @@ git commit -m "chore(minor-18): core\\JsonLite.h 归到 vcxproj 的 core 组"
 | 18 | 已修（本批） | `core\JsonLite.h` 归到 `<!-- core -->`（Task 5 的提交） |
 | 19 | **第二批**（`relay_gui.m`） | 文件内自相矛盾（`:272` 声称完整显示 vs 清单说被截断）⇒ **必须上机看渲染** |
 | 20 | ✅ **已关闭** | `sendToClient` 断线已出声（`relay_gui.m` 的 `notifyDropped`/`tlog('DROP')`） |
-| 21 | ⛔ **作废（不可恢复）** | 所指的 harness Task 7 报告不进 git；且现行 `run_tests.bat` 的 `@echo off` 已是 26 行 |
+| 21 | ⛔ **作废（不可恢复）** | 所指的 harness Task 7 报告不进 git；且现行 `run_tests.bat` 里 `call` 之后的 `@echo off` 已是 **25** 行（全文 27 处：另两处是文件头与 `:48` 的说明行）。⚠ **2026-10-01 实测订正**：本行原写 "26" —— 那是**本批自己加套件前**的值，本批又加了一个套件 |
 | 22 | ✅ **已关闭** | "运行失败分支"的负对照 2026-09-24 已刻意做过（`Docs/superpowers/specs/2026-09-22-test-harness-state.md:335-377`） |
 
 （合计：已修 **8** · 接受 **4** · 第二批 **7** · 已关闭 **2** · 作废 **1** = **22**。）
