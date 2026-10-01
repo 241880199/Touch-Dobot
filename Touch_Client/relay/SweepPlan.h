@@ -19,7 +19,14 @@
 //   · 相位 = 段内秒 × speed × f0Hz, 取模到 [0,1)（一个表周期 = 源轨迹的一个周期）。
 namespace SweepPlan {
 
-constexpr double kSegSec     = 10.0;
+// ★ 2026-10-01（第 5 轮）：段长 10 → 30 秒。
+//   【为什么】低频段要回答"驱动带外那些能量是【谐波】还是【宽带】"，需要把 0.18 Hz 的谐波间隔分开。
+//   窗长 T 的 Hann 主瓣宽 ≈ 4/T ⇒ 要 4/T < 0.18 就得 **T ≳ 22 秒**。
+//   ⚠ 而段长就是窗长的【硬上限】：`'n'` 每次只取最近 1024 帧(8.3s)，多次按键的并集
+//     最多到"该段的起止" —— **段只有 10 秒，并集就永远 ≤10 秒**（同段连按 4 次只多覆盖 ~1.7s）。
+//     ⇒ 想加长窗，**只能加长段**。这是本条的由来。
+//   ⚠ 代价：一轮 8 段×10s=80s → **10 段×30s = 300 秒（5 分钟）**。
+constexpr double kSegSec     = 30.0;
 constexpr int    kSpeedCount = 5;                 // 倍速档数
 constexpr int    kSegCount   = kSpeedCount * 2;   // 每档两次: 前一半 FF 开、后一半 FF 关
 constexpr double kTotalSec   = kSegSec * kSegCount;

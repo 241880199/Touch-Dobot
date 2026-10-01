@@ -35,50 +35,54 @@ static void test_start_segment() {
     PASS();
 }
 
-// 格 2: 段边界 —— t=10.0 恰好进入第 1 段（不是第 0 段）
+// 格 2: 段边界 —— t = kSegSec 恰好进入第 1 段（不是第 0 段）
+//   ⚠ 2026-10-01 订正: 原写死 9.999999 / 10.0。**段长是个设计选择, 会变**
+//     （已由 10 s 改成 30 s）⇒ 改成由 `SweepPlan::kSegSec` 推出, 下次改段长不必再动用例。
 static void test_boundary_is_half_open() {
     TEST(boundary_is_half_open);
-    auto a = sweepStateAt(9.999999, kF0);
-    auto b = sweepStateAt(10.0, kF0);
+    const double S = SweepPlan::kSegSec;
+    auto a = sweepStateAt(S - 1e-6, kF0);
+    auto b = sweepStateAt(S, kF0);
     CHECK(a.seg == 0);
     CHECK(b.seg == 1);
     PASS();
 }
 
-// 格 3: 倍速序列 = 0.5 / 1 / 2 / 4（四段一轮）
+// 格 3: 倍速序列 —— 第 k 段（k=0..）的倍速 = kSpeed[k]
 static void test_speed_sequence() {
     TEST(speed_sequence);
-    CHECK(NEAR(sweepStateAt(0.0, kF0).speed, 0.5));
-    CHECK(NEAR(sweepStateAt(10.0, kF0).speed, 1.0));
-    CHECK(NEAR(sweepStateAt(20.0, kF0).speed, 2.0));
-    CHECK(NEAR(sweepStateAt(30.0, kF0).speed, 4.0));
-    // ★ 2026-10-01: 新增第 5 档 6×(≈2.19 Hz, 为够到 1~3 Hz 那扇门; 不取 8× 的理由见 SweepPlan.h)。
-    CHECK(NEAR(sweepStateAt(40.0, kF0).speed, 6.0));
+    const double S = SweepPlan::kSegSec;
+    // 逐档用【字面量】断言（不是拿 kSpeed 跟自己对）—— 这样表里写错一个数会被抓住。
+    const double expect[5] = { 0.5, 1.0, 2.0, 4.0, 6.0 };
+    for (int k = 0; k < SweepPlan::kSpeedCount; k++) {
+        CHECK(NEAR(sweepStateAt(k * S, kF0).speed, expect[k]));
+    }
     PASS();
 }
 
-// 格 4: FF 在后四段关
+// 格 4: FF 在【后半】关（前半开）—— 边界由 kSegCount 推出
 static void test_ff_off_in_second_half() {
     TEST(ff_off_in_second_half);
-    // ★ 2026-10-01: 档数 4→5 ⇒ 两半的边界由 40s 挪到 50s, 总时长 80s→100s。
-    CHECK(sweepStateAt(49.0, kF0).ffOn);
-    CHECK(!sweepStateAt(50.0, kF0).ffOn);
-    CHECK(!sweepStateAt(99.9, kF0).ffOn);
+    const double half = SweepPlan::kSegSec * SweepPlan::kSegCount / 2.0;
+    CHECK(sweepStateAt(half - 1.0, kF0).ffOn);
+    CHECK(!sweepStateAt(half, kF0).ffOn);
+    CHECK(!sweepStateAt(SweepPlan::kTotalSec - 0.1, kF0).ffOn);
     PASS();
 }
 
 // 格 5: 相位 = 【段内秒 × 倍速 × f0】, 取模到 [0,1)。
-//   四段都取"段内 0.25 s" ⇒ 相位 = 0.25 × speed × 0.5 = 0.125 × speed，逐倍速翻倍。
+//   每段都取"段内 0.25 s" ⇒ 相位 = 0.25 × speed × 0.5 = 0.125 × speed，逐倍速翻倍。
 static void test_phase_accumulates_with_speed() {
     TEST(phase_accumulates_with_speed);
-    CHECK(NEAR(sweepStateAt(0.25,  kF0).phase01, 0.0625));   // 段0: 0.25×0.5×0.5
-    CHECK(NEAR(sweepStateAt(10.25, kF0).phase01, 0.125));    // 段1: 0.25×1.0×0.5
-    CHECK(NEAR(sweepStateAt(20.25, kF0).phase01, 0.25));     // 段2: 0.25×2.0×0.5
-    CHECK(NEAR(sweepStateAt(30.25, kF0).phase01, 0.5));      // 段3: 0.25×4.0×0.5
+    const double S = SweepPlan::kSegSec;
+    CHECK(NEAR(sweepStateAt(0 * S + 0.25, kF0).phase01, 0.0625));   // 0.25×0.5×0.5
+    CHECK(NEAR(sweepStateAt(1 * S + 0.25, kF0).phase01, 0.125));    // 0.25×1.0×0.5
+    CHECK(NEAR(sweepStateAt(2 * S + 0.25, kF0).phase01, 0.25));     // 0.25×2.0×0.5
+    CHECK(NEAR(sweepStateAt(3 * S + 0.25, kF0).phase01, 0.5));      // 0.25×4.0×0.5
     // ★ 取模这一条单独钉一格值: 段3(4x) 的段内 0.75 s ⇒ 0.75×4×0.5 = 1.5 圈 ⇒ 0.5
     //   ⚠ 简报原文此处写作 `1.0 % 1.0`, 那不是合法 C++（`%` 只对整型有定义, MSVC C2296/C2297）
     //     ⇒ 实现用的是 `phase -= std::floor(phase)`, 这里按它的语义钉。
-    CHECK(NEAR(sweepStateAt(30.75, kF0).phase01, 0.5));
+    CHECK(NEAR(sweepStateAt(3 * S + 0.75, kF0).phase01, 0.5));
     PASS();
 }
 
