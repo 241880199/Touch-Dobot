@@ -103,6 +103,18 @@ def main():
         print("!! 没有找到运动块 —— 是不是没跑扫描？")
         return
     moving.sort(key=lambda x: x[0])
+    # ⚠★ 按 t_us 去重：同一段里按两次 'n' 时，两个窗口【会重叠】⇒ 同一帧出现两次
+    #   ⇒ 重复计数会把 n、sd、主频全都带偏。帧带绝对微秒时间戳，按它去重是可靠的。
+    _seen = set()
+    _dedup = []
+    for t, r in moving:
+        if t in _seen:
+            continue
+        _seen.add(t)
+        _dedup.append((t, r))
+    if len(_dedup) != len(moving):
+        print(f"（按 t_us 去重: {len(moving)} → {len(_dedup)} 帧，丢掉了 {len(moving)-len(_dedup)} 个重复）")
+    moving = _dedup
     span = (moving[-1][0] - moving[0][0]) / 1e6
     print(f"\n运动帧 {len(moving)}，跨度 {span:.1f}s")
 
@@ -155,6 +167,8 @@ def analyze_round(rd, t0, segs):
         F = sd([math.sqrt(sum(r[i] ** 2 for i in I_FILT)) for r in rs])
         norm = F / acc if acc > 1e-9 else float("nan")
         res.append(dict(seg=s + 1, sp=sp, on=on, f=f, A=A * 1000, acc=acc, F=F, norm=norm))
+        # 机器可读的一行（供跨轮合并拟合用；不同轮可以有不同的幅度）
+        print(f"POINT,{rd},{s+1},{sp},{'ON' if on else 'OFF'},{f:.4f},{A*1000:.3f},{F:.5f}")
         print(f"{s+1:>2} {sp:>5} {'ON' if on else 'OFF':>4} {len(rs):>5} "
               f"{f:>7.3f} {F0_HZ*sp:>7.3f} {A*1000:>7.2f} {acc:>8.3f} {F:>7.4f} {norm:>9.4f}")
 
