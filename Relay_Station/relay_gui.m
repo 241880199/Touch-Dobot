@@ -926,27 +926,43 @@ function relay_gui()
                             %   断言"的坑。值改记在它真正落定的地方, 标签是 SET。
                             tlog('CTL', sprintf('enabled limits=[%.1f,%.1f] wasKnown=%d', ...
                                   sldGain.Limits(1), sldGain.Limits(2), wasKnown));
+                            % ★ 2026-10-01（Minor 第 7 条）：**这两行都去掉了尾部的"当前 %.1f"**。
+                            %   原因：它打的是 `S.tuning.gain`（回读值），而**同一拍下面**那两段
+                            %   （"拒收"判定 / 范围守卫）可能把同一个数 **⚠ 撤回** ⇒
+                            %   屏幕上会出现**两行互相打脸**（"当前 120.0" 紧跟一条 ⚠）。
+                            %   ⇒ 这两行只说**确定的事**（控件启用了 / 范围变成了多少）；
+                            %     **"值到底是多少"只由下面那条【落定】的日志说**（那里的才是权威）。
                             if ~wasKnown
-                                fprintf(['[Relay] 增益控件已启用: 范围 [%.0f, %.0f], ' ...
-                                         '当前 %.1f\n'], ...
-                                    S.tuning.min, S.tuning.max, S.tuning.gain);
+                                fprintf('[Relay] 增益控件已启用: 范围 [%.0f, %.0f]\n', ...
+                                    S.tuning.min, S.tuning.max);
                             else
                                 % 不静默: 范围变了必须看得见, 否则操作员不知道滑条被重贴过
                                 fprintf(['[Relay] 增益范围已跟随 C++: [%.0f, %.0f] → ' ...
-                                         '[%.0f, %.0f], 当前 %.1f\n'], ...
-                                    prevMin, prevMax, S.tuning.min, S.tuning.max, ...
-                                    S.tuning.gain);
+                                         '[%.0f, %.0f]\n'], ...
+                                    prevMin, prevMax, S.tuning.min, S.tuning.max);
                             end
                         end
 
                         % 拒收: 回读与我们刚发的不符 ⇒ 说清原因。
                         % 数字全部来自这条回读, 本文件不写 100/300。
                         % ⚠ 只有"不符"【还不够】—— 回读是 C++ 限频发出来的 (≥100ms 一条),
-                        %   所以拖动中/刚松手时队列里躺着的那条报的是【几步之前】的值,
+                        %   所以拖动中/刚松手时收到的那条报的可能是【几步之前】的值,
                         %   它与"被拒"长得一模一样。再加两个前置条件:
+                        % ★ 2026-10-01 措辞订正（Minor 第 8 条）：原文写"队列里躺着的那条"——
+                        %   那暗示 C++ 侧有个【陈旧值队列】, 而实际机制不是队列：
+                        %   C++ 侧是 **`GainReadbackPolicy::SkipTooSoon` 把这一条【压制】掉,
+                        %   只记一个 `pending` 标志**（`relay/GainReadback.h` 的 `pending()`）,
+                        %   由下一次轮询**用当时的当前值**补发 —— 补发的是新值, 不是排队的那条旧值。
+                        %   实质结论不变（这里收到的确实可能滞后）, 只是"队列"这个词不准。
                         %     · 正在拖动 ⇒ 一律不判 (手指还在动, 回读必然滞后);
                         %     · 我们发的那个值得【落在回读给出的范围之外】才可能被拒
                         %       —— C++ 只按范围拒 (ForceTuning::setGain 校验 [min,max])。
+                        % ★ 2026-10-01（Minor 第 11 条）：上面那句"**C++ 只有一个拒收理由**"是**本判据的前提**,
+                        %   而它此前**没有任何东西钉住** —— 未来若 C++ 多一条拒收路（例如改成钳位而不拒收）,
+                        %   这段日志会**静默哑掉**。⇒ 钉住它的断言在
+                        %   **`Touch_Client/tests/test_force_tuning.cpp` 的 `test_set_gain_bounds`**
+                        %   （`CHECK(!setGain(99.9))` / `(!setGain(300.1))` / `(!setGain(nan))` / `(!setGain(inf))`
+                        %   四条 —— 越界与非有限都被拒、界内被接受）。**改拒收逻辑时请先改那条用例。**
                         if ~S.tuningDragging && ~isnan(S.tuningLastSent) && ...
                            (S.tuningLastSent < S.tuning.min || ...
                             S.tuningLastSent > S.tuning.max) && ...
@@ -964,6 +980,10 @@ function relay_gui()
 
                         if ~S.tuningDragging
                             % 拖动中不动滑块 —— 否则回读会和手指打架
+                            % ★ 2026-10-01（Minor 第 14 条）：**"拖动中收到矛盾回读、松手后下一条才显示"
+                            %   不是【保证】** —— C++ 的回读是**按值变化门控**的 ⇒ 那条**可能根本不来**
+                            %   （值没再变就不会发）。窗口内显示本身不撒谎（拖动中滑块是操作员自己的值），
+                            %   所以这是**诊断缺口、不是承诺被违背**；但**别把"松手后一定会刷一下"当前提用**。
                             % ⚠ 范围守卫 (Fix 1 之后才需要): 回读自相矛盾时 (gain 在它自己声明的
                             %   范围之外) 这一句会【抛错】而不是把值夹紧 (实测: 只有 Limits 赋值
                             %   才夹紧) ⇒ 那是收包循环里的一声炸, 会把那一拍的所有消息一起带走。
