@@ -296,6 +296,36 @@ private:
     //     不是"算过什么"。
     double m_btn2JointCmd[6] = {0, 0, 0, 0, 0, 0};
 
+    // ★★★ 2026-10-01 力-频率扫描回放（接线; 叠加本身在 `sendPosition` 的 ServoP 路径上）。
+    //   ⚠ `RelayCore.cpp` **不被任何测试编译** ⇒ 这三个函数**没有自动化用例**。有单测的是
+    //     它们消费的纯函数那半（`relay/SweepPlan.h` / `relay/SweepWaveform.h`）。
+    //   ⚠ 回滚 = `Config::SWEEP_REPLAY_ENABLED = false`（一行; 叠加与 'r' 键一起消失）。
+    //   · `m_sweepStartMs` —— 0 = 没在跑; 否则 = 按下 'r' 那一刻的 `GetTickCount()`。
+    //     存的是【起始时刻】而不是"已经跑了多少秒": 相位每帧由 `(now − start)` 现算,
+    //     掉帧/丢帧不会累积误差（本仓在"逐帧累加"上栽过 —— 见下面那条不许写回 `m_targetPos`）。
+    //   · `m_sweepPrevFf` —— 扫描【前】的 FF 状态, 停止时还原。★ 必须还原: 后四段把 FF 关了,
+    //     不还原的话扫完手上是【没有力反馈】的, 而操作员不知道（这是"最后一帧的状态"陷阱）。
+    //   · `m_sweepLastSeg` —— 段标记去重。**本任务只声明**; 打印它的那一行在 Task 4
+    //     （`sp.seg != m_sweepLastSeg` 时打一次，复位在 `startSweep`）。
+    //   · `m_sweepRejectNoticed` —— "目标把偏移拒了"每次扫描只喊**一声**（复位在 `startSweep`）。
+    //     理由与上面 `m_btn2Joint*Noticed` 那五条**逐字相同**：条件非瞬时、而 `cout` 写在
+    //     触觉回调线程上（控制台阻塞是本仓已记录的危险）。
+    //     ⚠ 只压**消息**, **不压动作**: 被拒的帧每一帧照样不加偏移, 变的只是"喊几次"。
+    unsigned long m_sweepStartMs = 0;
+    bool          m_sweepPrevFf   = true;
+    int           m_sweepLastSeg  = -1;
+    bool          m_sweepRejectNoticed = false;
+
+public:
+    // 'r' 键（Task 4 接）: 起 / 停整个扫描。`sweepRunning()` 供按键判"现在是起还是停"。
+    // ⚠ 只在【按住按钮1】时才会真的叠加偏移（叠加那一处自己判 `appState.lastButtonState`）;
+    //   松开按钮1 ⇒ `onButtonRelease()` 整个停掉（不是"暂停"）。
+    void startSweep();
+    void stopSweep();
+    bool sweepRunning() const;
+
+private:
+
     // ★★ 2026-09-23 (Task 2 修复轮 / 复审 Important#1 与 Minor 2)：一组**每次按下只报一次**的
     //   一次性标记。★ 2026-09-29 整支终审 I-1 之后是**五条**（原文写"两条"，而那时实际已经
     //   被 (A) 那轮加成了四条 —— 这个数字一直是旧的，本次一并改成"数出来的"）。

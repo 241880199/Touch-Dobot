@@ -2,6 +2,8 @@
 #include "RelayCore.h"
 #include "Button2Joint.h"     // ★ Task 2: 按钮2 关节空间纯函数 (笔杆偏移 ⇒ J4/J5/J6 增量)
 #include "Button2Mapping.h"
+#include "SweepPlan.h"        // ★ 2026-10-01: 扫描段调度纯函数 (段/倍速/FF/相位) — 有单测
+#include "SweepWaveform.h"    // ★ 2026-10-01: 单位峰值位移轨迹查表 — 有单测 (它自己 include SweepWaveformData.h)
 #include "FeedbackParser.h"
 #include "GainReadback.h"      // ★ Task 2: 状态机 + SendMode (它自己 include GainReadbackPolicy.h)
 #include "RelayCommandParser.h"
@@ -1421,6 +1423,50 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
     double servoCmdY = clamped.y;
     double servoCmdZ = clamped.z;
 
+    // ★★★ 2026-10-01 力-频率扫描回放: 把 `SweepWaveform` 的偏移叠加到【本帧要下发的】ServoP 目标上。
+    //
+    // ⛔ 两条【不许动】的性质 —— 本任务存在的理由，两条都是从源码里读出来的、不是推的:
+    //   ① 偏移**只加在本地 `servoCmdX/Y/Z` 上**，**绝不写回 `m_targetPos`**。
+    //      上面 `if (!m_transmittingOrient) { m_targetPos = clamped; }` 每帧都用 `clamped` 重设它;
+    //      偏移若混进那条路，就会**逐帧积分**（每帧在上一帧的偏移之上再加一次）⇒ 臂一路漂走。
+    //      ⇒ 这里是【本地变量】上的叠加，程序里没有第二条写 `m_targetPos` 的路。
+    //   ② 偏移目标**必过一道安全门**。本函数上面的总闸 `evaluate(clamped)`
+    //      （`if (appState.lastButtonState)` 那一段里）在本行【之前】就跑完了
+    //      ⇒ 在这里直接加就**绕过了安全预测器**。故就地补一道 `evaluatePositionOnly`
+    //      （本文件姿态模式那一段已在用同一个调用）。
+    //      ⚠ 被拒时**本帧不加偏移**（不是"整帧不发"）—— 臂仍按无偏移的目标走。
+    //
+    // ⚠ 只在【按住按钮1】时叠加（`appState.lastButtonState`）: 松开即不叠加, 且 `onButtonRelease()`
+    //   会把整个扫描停掉（那里有注释说明为什么"松手即停"必须写在它里面）。
+    // ⚠ ⚠ 本文件**不被任何测试编译** ⇒ 这一段没有自动化用例。
+    if (Config::SWEEP_REPLAY_ENABLED && m_sweepStartMs && appState.lastButtonState) {
+        // 相位由【现算的实耗秒】导出（不逐帧累加）⇒ 掉帧不累积误差。
+        const double el = (double)(GetTickCount() - m_sweepStartMs) / 1000.0;
+        const SweepPlan::State sp = SweepPlan::sweepStateAt(el);
+        const SweepWaveform::Vec3 off = SweepWaveform::lookup(sp.phase01);
+        double amp = Config::SWEEP_AMPLITUDE_MM;
+        if (amp < 0.0) amp = 0.0;          // 硬夹: 常数被改坏也不放大（设计 §3.5 S3）
+        // ⚠ 这里构造的是**本文件自己的** `Vec3`（`CoordinateTransform.h`，有 3 参构造）;
+        //   `SweepWaveform::Vec3` 是**另一个**类型 ⇒ 逐分量取出来构造, 不引入第二个 `Vec3` 用法。
+        const Vec3 withOff(servoCmdX + off.x * amp,
+                           servoCmdY + off.y * amp,
+                           servoCmdZ + off.z * amp);
+        const SafetyVerdict sv = SafetyPredictor::instance().evaluatePositionOnly(withOff);
+        if (sv.action == SafetyVerdict::REJECT) {
+            if (!m_sweepRejectNoticed) {   // 节流: 每次扫描只喊一声（复位在 startSweep）
+                m_sweepRejectNoticed = true;
+                std::cout << "[Sweep] 目标把偏移拒了, 本帧不加: " << sv.reason << std::endl;
+            }
+        } else {
+            servoCmdX = withOff.x;
+            servoCmdY = withOff.y;
+            servoCmdZ = withOff.z;
+        }
+        // ★ FF 每帧跟着段走（前四段 ON / 后四段 OFF）—— 客户端【直接设】这个原子量,
+        //   不经过 MATLAB（见设计 §3.4）。⚠ 已知副作用: MATLAB 的 swFF 勾选框会显示成旧状态。
+        appState.forceFeedbackEnabled = sp.ffOn;
+    }
+
     // During orientation mode, validate the TCP position (no IK — position-only checks)
     if (m_transmittingOrient && m_orientValid) {
         Vec3 tcpCheck(servoCmdX, servoCmdY, servoCmdZ);
@@ -2000,6 +2046,17 @@ void RelayCore::onButtonPress(const Vec3& robotPos) {
 }
 
 void RelayCore::onButtonRelease() {
+    // ★ 2026-10-01 力-频率扫描: 松开按钮1 ⇒ 扫描**整个停掉**（不是"暂停" ——
+    //   免得手一松一按就跳到后面的段）。
+    //
+    // ⚠ 【为什么必须写在这里，不能写在 sendPosition 的那个偏移块里】那个块被本函数对象
+    //   顶上的 `if (!m_transmitting || !m_basePointSet || !isRobotConnected()) return;` 挡在门外
+    //   ⇒ 按钮1 一松开，那段代码**根本不跑** ⇒ 在它里面判"松手"永远判不到。
+    //
+    // ⚠ 本函数是【边沿触发】的（`HapticCallback.cpp` 里只在 `button1 != app.lastButtonState`
+    //   的那一帧调一次）⇒ 这里不会每帧重复调用；且 `stopSweep()` 自带非零判断，是空操作也安全。
+    if (m_sweepStartMs) stopSweep();
+
     // If orientation mode is still active (button2 held), keep transmitting
     // for orientation control. Only fully stop when both modes are done.
     if (!m_transmittingOrient) {
@@ -2814,6 +2871,48 @@ void RelayCore::sendReflectionGain(GainReadback::SendMode mode) {
              ForceTuning::defaultGain());                // defGain
     sendRelayUpdate(buf);
 }
+
+// ★★★ 2026-10-01 力-频率扫描回放 —— 起 / 停 / 状态查询（设计见
+//   `Docs/superpowers/specs/2026-10-01-force-frequency-sweep-replay-design.md` §3.3）。
+//
+// 【这三个函数只管"开关"】叠加本身不在本函数里 —— 在 `sendPosition()` 的 ServoP 路径上
+//   （紧跟 `servoCmdX/Y/Z = clamped.*` 那三行）。分工是刻意的：起停是按键线程的事，
+//   叠加必须发生在**每帧**、且必须紧挨着那个"本地目标"，所以两者不在同一处。
+//
+// ⚠ `RelayCore.cpp` **不被任何测试编译** ⇒ 这一段【没有自动化证据】。有单测的是它消费的
+//   纯函数：`SweepPlan::sweepStateAt`（段调度）与 `SweepWaveform::lookup`（轨迹查表）。
+//   ⇒ 能守这里的只有三样：MSBuild 零 error、整床仍绿（证明没碰坏别处）、人读 diff。
+// ⚠ 回滚 = `Config::SWEEP_REPLAY_ENABLED = false`（一行）。
+void RelayCore::startSweep() {
+    if (!Config::SWEEP_REPLAY_ENABLED) {
+        std::cout << "[Sweep] 已关闭(SWEEP_REPLAY_ENABLED=false)\n";
+        return;
+    }
+    // ★ 记下扫描【前】的 FF 状态 —— 后四段会把它关掉, 停止时按这个还原。
+    //   不还原的话扫完手上是【没有力反馈】的, 而操作员不知道（见 RelayCore.h 那一段）。
+    //   ⚠ 读的是 `std::atomic<bool>` ⇒ 无锁读, 与 dispatchRelayCommand 那两行同一写法。
+    m_sweepPrevFf        = appState.forceFeedbackEnabled;
+    m_sweepLastSeg       = -1;      // Task 4 的段标记去重从"还没打过"起算
+    m_sweepRejectNoticed = false;   // 允许新的一次扫描再喊一声"偏移被拒"
+    m_sweepStartMs       = GetTickCount();
+    std::cout << "[Sweep] 开始: " << SweepPlan::kSegCount << " 段 x " << SweepPlan::kSegSec
+              << "s, 幅度 +/-" << Config::SWEEP_AMPLITUDE_MM
+              << "mm, 源主频 " << SweepWaveform::kF0Hz << "Hz\n";
+    // ⚠ 提醒: 偏移只在【按住按钮1】时叠加（叠加那一处自判 `appState.lastButtonState`）。
+    std::cout << "[Sweep] 叠加只在按住按钮1 时生效; 松开按钮1 即整个停止\n";
+}
+
+void RelayCore::stopSweep() {
+    if (m_sweepStartMs) {
+        // ★ 后四段把 FF 关了 ⇒ 不还原的话扫完手上是【没有力反馈】的, 而操作员不知道。
+        appState.forceFeedbackEnabled = m_sweepPrevFf;
+        std::cout << "[Sweep] 停止: FF 已还原为 " << (m_sweepPrevFf ? "ON" : "OFF") << "\n";
+    }
+    // ⚠ 无条件清零（即使上面那支没进）: 本函数也可能被当成"确保停住"来调。
+    m_sweepStartMs = 0;
+}
+
+bool RelayCore::sweepRunning() const { return m_sweepStartMs != 0; }
 
 bool RelayCore::consumeForceZeroRequest() {
     return m_forceZeroRequested.exchange(false);
