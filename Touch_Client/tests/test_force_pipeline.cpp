@@ -170,7 +170,7 @@ static void test_gain_ramp_is_gradual() {
     //   · 【放宽】不在本文件, 而在兄弟套件 test_force_tuning.cpp 的 `set_gain_bounds`:
     //     它用字面量断言 `fabs(ForceTuning::gain() - 100.0) < 1e-9`(下限) 与 `300.0`(上限),
     //     所以 GAIN_MIN 若放宽到 50, 那条当场红。
-    //   ⇒ 清单里"放宽范围两句话就假了却全绿"这半句【已不成立】(2026-09-30 回核)。
+    //   ⇒ 清单里"放宽范围（如 GAIN_MIN 100→50）两句话就假了却全绿"这半句【已不成立】(2026-09-30 回核)。
     CHECK(ForceTuning::setGain(100.0));
     ForcePipeline::init();                       // 斜坡就位在 100
     for (int i = 0; i < 300; i++) ForcePipeline::step(fd);   // 先让滤波器收敛

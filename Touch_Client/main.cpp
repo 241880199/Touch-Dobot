@@ -2947,7 +2947,7 @@ static void requestForceZero(const char* src) {
         // ⚠ 【这里故意不重复判那三个条件】(仍在传输 / 机械臂未连 / 报警中): 那会把守卫链复制成
         //   第二份, 而本功能的设计就是"守卫链只有一份"(见本函数顶上那段)。所以只报"未启动",
         //   并让操作员知道去查哪三处。
-        // ★ 2026-09-30: 上面那句"原因就是那三个条件"现在【有自证】了 ——
+        // ★ 2026-09-30: 上面把失败原因归给那三个条件, 现在【有自证】了 ——
         //   startForceZeroing() 只有两条失败路: ① forceCalibPreconditions (就是这三个条件)
         //   ② ForceCalibration::startZero() 的 !canStart()。而 canStart() ≡ !isRunning()
         //   ≡ !relay.isForceCalibrating(), 上面那条守卫【已经把它排除】⇒ 走到本 else

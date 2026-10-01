@@ -9,6 +9,7 @@
 
 #include <iostream>
 #include <cstdio>
+#include <cstdlib>                // std::atexit —— main() 出口那条兜底清理 (Minor 第 16 条)
 #include <cmath>
 #include <string>
 #include <windows.h>              // GetTickCount: tick() 那两条用例拿它当【基准时刻 t0】

@@ -411,8 +411,22 @@ void RelayCore::sendReflectionGain(GainReadback::SendMode mode) {
 
 - [ ] **Step 4: 编译整个客户端（这是本任务唯一的机械证据）**
 
-Run: `Touch_Client\tests\_build_comp.bat`（或仓库既有的客户端构建入口）
-Expected: 编译 + 链接通过。
+> ⛔ **2026-10-01 订正（实现者顶回、控制方回仓库核实）：原计划点的是 `Touch_Client\tests\_build_comp.bat`，
+> 而那条只编 `test_force_compensation.cpp` + 四个 force/calibration 源文件（`_build_comp.bat:13-18`），
+> 【不编客户端】⇒ 它的"编译通过"与本任务毫无关系，是一条**假绿**。**
+> 本任务真正要证明的是 **`RelayCore.cpp` 编得过、链得过**。
+
+Run（**直调 MSBuild** —— 客户端项目文件是这件事的唯一入口）:
+
+```
+"D:\Program Files\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\MSBuild.exe" D:\Projects\Touch\Touch_Client\Touch_Client.vcxproj /p:Configuration=Release /p:Platform=x64 /v:minimal
+```
+
+⚠ **在 Git Bash 里跑要在前面加** `MSYS2_ARG_CONV_EXCL='*' MSYS_NO_PATHCONV=1` —— MSYS 会改写 `/p:...` 这类参数，
+不加会报 `MSB1008`（2026-10-01 实现者实测）。
+
+Expected: 编译 + 链接通过（退出码 0），**且日志里出现过 `RelayCore.cpp`** —— 没出现就等于没编到它。
+⚠ **不要直接调 `Touch_Client\build.bat`** —— 它失败分支里有 `pause`，会把代理挂住。
 ⚠ **若报 LNK1168**：`Touch_Client.exe` 正在跑 ⇒ 按 PID **优雅关闭**（`taskkill /PID <pid>`，**不加 `/F`**），
 且**别在操作员正做动作时关**（会停掉 `ServoP/ServoJ` 命令流）。
 
@@ -619,7 +633,19 @@ git commit -m "test(minor-16): 临时文件不再泄漏 + 去掉用例名里没�
 
 - [ ] **Step 2: 实测能编过（这是本条唯一的证据）**
 
-Run: `Touch_Client\tests\_build_comp.bat` ⇒ Expected: 编译 + 链接通过。
+> ⛔ **2026-10-01 订正：原计划点的 `_build_comp.bat` 既不编客户端、也【不读 `.vcxproj`】**，
+> 而本 Step 改的正是 `.vcxproj` 里的一条 ⇒ 照它验必是**假绿**（"编译通过"与本次改动无关）。
+> ⚠ **这是同一个错误在本计划里的第二处**（第一处见 Task 2 Step 4）。
+
+Run（直调 MSBuild —— 仓库里只有它读 `.vcxproj`）:
+
+```
+"D:\Program Files\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\MSBuild.exe" D:\Projects\Touch\Touch_Client\Touch_Client.vcxproj /p:Configuration=Release /p:Platform=x64 /v:minimal
+```
+
+⇒ Expected: `Build succeeded`、退出码 0。
+⚠ **在 Git Bash 里跑要在前面加** `MSYS2_ARG_CONV_EXCL='*' MSYS_NO_PATHCONV=1`（MSYS 会改写 `/p:...`，不加报 `MSB1008`）。
+⚠ **不要调 `Touch_Client\build.bat`** —— 失败分支里有 `pause`，会把代理挂住。
 ⚠ LNK1168 ⇒ 按 Task 2 Step 4 同款处理（优雅关闭、别在操作员动作时关）。
 
 - [ ] **Step 3: 跑整床**
