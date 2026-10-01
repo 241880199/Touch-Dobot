@@ -1439,32 +1439,56 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
     // ⚠ 只在【按住按钮1】时叠加（`appState.lastButtonState`）: 松开即不叠加, 且 `onButtonRelease()`
     //   会把整个扫描停掉（那里有注释说明为什么"松手即停"必须写在它里面）。
     // ⚠ ⚠ 本文件**不被任何测试编译** ⇒ 这一段没有自动化用例。
+    //
+    // ★ F2（2026-10-01 修复轮）: 本帧**是否真的**把偏移加上去了。下面 Mode 3（组合模式）会重建
+    //   `servoCmd*` ⇒ 把这里的叠加**整个丢掉**（静默）。这个标记就是给它报的（见 Mode 3 之后那段）。
+    bool sweepOffsetAdded = false;
+
     if (Config::SWEEP_REPLAY_ENABLED && m_sweepStartMs && appState.lastButtonState) {
         // 相位由【现算的实耗秒】导出（不逐帧累加）⇒ 掉帧不累积误差。
         const double el = (double)(GetTickCount() - m_sweepStartMs) / 1000.0;
-        const SweepPlan::State sp = SweepPlan::sweepStateAt(el);
-        const SweepWaveform::Vec3 off = SweepWaveform::lookup(sp.phase01);
-        double amp = Config::SWEEP_AMPLITUDE_MM;
-        if (amp < 0.0) amp = 0.0;          // 硬夹: 常数被改坏也不放大（设计 §3.5 S3）
-        // ⚠ 这里构造的是**本文件自己的** `Vec3`（`CoordinateTransform.h`，有 3 参构造）;
-        //   `SweepWaveform::Vec3` 是**另一个**类型 ⇒ 逐分量取出来构造, 不引入第二个 `Vec3` 用法。
-        const Vec3 withOff(servoCmdX + off.x * amp,
-                           servoCmdY + off.y * amp,
-                           servoCmdZ + off.z * amp);
-        const SafetyVerdict sv = SafetyPredictor::instance().evaluatePositionOnly(withOff);
-        if (sv.action == SafetyVerdict::REJECT) {
-            if (!m_sweepRejectNoticed) {   // 节流: 每次扫描只喊一声（复位在 startSweep）
-                m_sweepRejectNoticed = true;
-                std::cout << "[Sweep] 目标把偏移拒了, 本帧不加: " << sv.reason << std::endl;
-            }
+
+        // ★★★ F1（2026-10-01 修复轮）: 整轮跑完 ⇒ **自己停**。
+        //
+        // 【为什么必须有】`sweepStateAt()` 对 `el >= kTotalSec` 是**钳在最后一段**（不是报错）
+        //   ⇒ 没有这一段的话：跑完之后 `m_sweepStartMs` 仍非零、`sp.ffOn` 恒为 false
+        //   ⇒ 操作员手上是"**一个永久的静态偏移 + 力反馈被静默留在 OFF**"，而且控制台一声不响
+        //   （执行单写着"全程 80 s"，那就该自己结束）。
+        // 【为什么判在这里】本块是唯一同时知道"实耗秒"与"扫描在跑"的地方；而 `stopSweep()` 会
+        //   复位 `m_sweepStartMs` ⇒ 下一帧本条件不再成立 ⇒ **本分支每趟只走一次，不需要旗标**。
+        // ⚠ 本帧**不加偏移**、也**不**把 FF 设成段值 —— 直接交给 `stopSweep()` 还原
+        //   （它会把还原后的 FF 值打出来）。
+        if (el >= SweepPlan::kTotalSec) {
+            std::cout << "[Sweep] 整轮 " << SweepPlan::kTotalSec
+                      << "s 跑完 ⇒ 自动停止（这一条 = 它【自己】停的, 不是按 'r' 或松开按钮1 停的）"
+                      << std::endl;
+            stopSweep();   // 还原 FF + 打印"停止: FF 已还原为 …"
         } else {
-            servoCmdX = withOff.x;
-            servoCmdY = withOff.y;
-            servoCmdZ = withOff.z;
+            const SweepPlan::State sp = SweepPlan::sweepStateAt(el);
+            const SweepWaveform::Vec3 off = SweepWaveform::lookup(sp.phase01);
+            double amp = Config::SWEEP_AMPLITUDE_MM;
+            if (amp < 0.0) amp = 0.0;      // 硬夹: 常数被改坏也不放大（设计 §3.5 S3）
+            // ⚠ 这里构造的是**本文件自己的** `Vec3`（`CoordinateTransform.h`，有 3 参构造）;
+            //   `SweepWaveform::Vec3` 是**另一个**类型 ⇒ 逐分量取出来构造, 不引入第二个 `Vec3` 用法。
+            const Vec3 withOff(servoCmdX + off.x * amp,
+                               servoCmdY + off.y * amp,
+                               servoCmdZ + off.z * amp);
+            const SafetyVerdict sv = SafetyPredictor::instance().evaluatePositionOnly(withOff);
+            if (sv.action == SafetyVerdict::REJECT) {
+                if (!m_sweepRejectNoticed) {   // 节流: 每次扫描只喊一声（复位在 startSweep）
+                    m_sweepRejectNoticed = true;
+                    std::cout << "[Sweep] 目标把偏移拒了, 本帧不加: " << sv.reason << std::endl;
+                }
+            } else {
+                servoCmdX = withOff.x;
+                servoCmdY = withOff.y;
+                servoCmdZ = withOff.z;
+                sweepOffsetAdded = true;   // ★ F2: 真的加上了（供 Mode 3 之后那条"被丢掉"的消息用）
+            }
+            // ★ FF 每帧跟着段走（前四段 ON / 后四段 OFF）—— 客户端【直接设】这个原子量,
+            //   不经过 MATLAB（见设计 §3.4）。⚠ 已知副作用: MATLAB 的 swFF 勾选框会显示成旧状态。
+            appState.forceFeedbackEnabled = sp.ffOn;
         }
-        // ★ FF 每帧跟着段走（前四段 ON / 后四段 OFF）—— 客户端【直接设】这个原子量,
-        //   不经过 MATLAB（见设计 §3.4）。⚠ 已知副作用: MATLAB 的 swFF 勾选框会显示成旧状态。
-        appState.forceFeedbackEnabled = sp.ffOn;
     }
 
     // During orientation mode, validate the TCP position (no IK — position-only checks)
@@ -1534,6 +1558,26 @@ void RelayCore::sendPosition(const hduVector3Dd& devicePos) {
         targetRx = targetRx - damped.x + dampedOrient.x;
         targetRy = targetRy - damped.y + dampedOrient.y;
         targetRz = targetRz - damped.z + dampedOrient.z;
+    }
+
+    // ★★★ F2（2026-10-01 修复轮）: 组合模式(按钮1+2)下【偏移被静默丢掉】—— 必须出声。
+    //
+    // 【为什么会丢】上一段 Mode 3（守卫 = `appState.lastButtonState && m_transmittingOrient && m_orientValid`）
+    //   在偏移块**之后**执行，并在"Update servoCmd after Mode 3 modifies clamped"那三行
+    //   **整个重建**了 `servoCmdX/Y/Z` ⇒ 本帧的叠加被**覆盖**。
+    // 【为什么必须出声】不出声的话，操作员的观感是：按了 'r'、看到 `[Sweep] 开始…`、
+    //   而**手上什么都没发生** —— 正是本仓反复栽的"显示 ≠ 实际"（`servoCmd*` 还在动、
+    //   日志里 `target=` 也在动，只有臂不动）。
+    // 【为什么不直接改行为】**把偏移块挪到 Mode 3 之后**能修掉它，但那等于把偏移/抖动
+    //   **顺带引进组合模式**，而设计 §2 明确把姿态/组合通道列为【非目标】⇒ 只让它出声，不动行为。
+    // ⚠ 判据用 `sweepOffsetAdded`（= 本帧**真的**加上了偏移）而不是重述 Mode 3 的守卫：
+    //   这样"被安全门拒掉"的帧不会被误报成"被组合模式丢了"（那是另一条消息，各说各的）。
+    //   ⚠ `sweepOffsetAdded` 为真时 `appState.lastButtonState` 必然为真 ⇒ 本条件与 Mode 3 的守卫等价。
+    if (sweepOffsetAdded && m_transmittingOrient && m_orientValid) {
+        if (!m_sweepRejectNoticed) {   // 与"偏移被拒"共用同一个"每趟只喊一声"的旗标（复位在 startSweep）
+            m_sweepRejectNoticed = true;
+            std::cout << "[Sweep] 组合模式(按钮1+2)下【不】叠加偏移 —— 本趟只支持纯按钮1\n";
+        }
     }
 
     // ===== 构造并发送 ServoP =====
